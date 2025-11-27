@@ -1,0 +1,135 @@
+@page "/logs"
+@using Keryhe.Telemetry.Core.Models
+
+<MudCard>
+    @if (_pageLoading)
+    {
+        <MudCardContent Style="height: 200px">
+            <div class="d-flex align-center justify-center mud-height-full">
+                <MudProgressCircular Color="Color.Primary" Indeterminate="true" Size="Size.Large" />
+            </div>
+        </MudCardContent>
+    }
+    else
+    {
+        <MudCardHeader>
+            <CardHeaderContent>
+                <div class="d-flex gap-4 align-center">
+                    <MudTextField @bind-Value="_searchText"
+                                  Placeholder="Search logs..."
+                                  Adornment="Adornment.Start"
+                                  AdornmentIcon="@Icons.Material.Filled.Search"
+                                  Variant="Variant.Outlined"
+                                  Margin="Margin.Dense"
+                                  Style="flex: 1; min-width: 400px;"/>
+
+                    <MudDateRangePicker @bind-DateRange="_dateRange"
+                                        Label="Date Range"
+                                        Variant="Variant.Outlined"
+                                        Margin="Margin.Dense"
+                                        Style="min-width: 300px;"/>
+
+                    <MudButton Variant="Variant.Filled"
+                               Color="Color.Primary"
+                               OnClick="SearchLogs"
+                               StartIcon="@Icons.Material.Filled.Search">
+                        Search
+                    </MudButton>
+                </div>
+            </CardHeaderContent>
+        </MudCardHeader>
+        <MudCardContent>
+            <MudDataGrid T="LogRecordModel"
+                         Items="@_logs"
+                         Loading="@_dataLoading"
+                         RowClick="@OnRowClick"
+                         Height="calc(100vh - 17rem);"
+                         FixedHeader="true"
+                         Virtualize="true"
+                         Dense="true"
+                         ColumnResizeMode="ResizeMode.Container">
+                <Columns>
+                    <HierarchyColumn T="LogRecordModel"/>
+                    <TemplateColumn Title="Timestamp">
+                        <CellTemplate>
+                            @if (context.Item.TimeUnixNano.HasValue)
+                            {
+                                @FormatUnixNanoToDateTime(context.Item.TimeUnixNano.Value)
+                            }
+                        </CellTemplate>
+                    </TemplateColumn>
+                    <TemplateColumn Title="Level">
+                        <CellTemplate>
+                            <MudChip Size="Size.Small" Color="@GetSeverityColor(context.Item.SeverityText)" Variant="Variant.Text">
+                                @context.Item.SeverityText
+                            </MudChip>
+                        </CellTemplate>
+                    </TemplateColumn>
+                    <PropertyColumn Property="x => x.BodyValue" Title="Message" Sortable="false"/>
+                </Columns>
+                <ChildRowContent>
+                    <MudCard>
+                        <MudCardHeader>
+                            <MudGrid>
+                                <MudItem>
+                                    <MudText Typo="Typo.body2">Trace Id:</MudText>
+                                    <MudText Typo="Typo.body2">Span Id</MudText>
+                                    <MudText Typo="Typo.body2">Severity Number:</MudText>
+                                    <MudText Typo="Typo.body2">Severity Text:</MudText>
+                                    <MudText Typo="Typo.body2">Body Type:</MudText>
+                                    <MudText Typo="Typo.body2">Scope:</MudText>
+                                </MudItem>
+                                <MudItem>
+                                    <MudText Typo="Typo.body2">@context.Item.TraceIdHex</MudText>
+                                    <MudText Typo="Typo.body2">@context.Item.SpanIdHex</MudText>
+                                    <MudText Typo="Typo.body2">@context.Item.SeverityNumber</MudText>
+                                    <MudText Typo="Typo.body2">@context.Item.SeverityText</MudText>
+                                    <MudText Typo="Typo.body2">@context.Item.BodyType</MudText>
+                                    <MudText Typo="Typo.body2">@context.Item.InstrumentationScope?.Name</MudText>
+                                </MudItem>
+                                <MudItem>
+                                    <MudItem>
+                                        <MudDataGrid Items="@context.Item.Resource?.Attributes" TItem="object">
+                                            <Columns>
+                                                <PropertyColumn Property="x => x.Key" Title="Key"/>
+                                                <PropertyColumn Property="x => x.Value" Title="Value"/>
+                                            </Columns>
+                                        </MudDataGrid>
+                                    </MudItem>
+                                </MudItem>
+                            </MudGrid>
+                        </MudCardHeader>
+                        <MudCardContent>
+                            <MudGrid>
+                                <MudItem>
+                                    <MudDataGrid Items="@context.Item.Attributes" TItem="object">
+                                        <Columns>
+                                            <PropertyColumn Property="x => x.Key" Title="Key"/>
+                                            <PropertyColumn Property="x => x.Value" Title="Value"/>
+                                        </Columns>
+                                    </MudDataGrid>
+                                </MudItem>
+                                <MudItem>
+                                    @if (context.Item.InstrumentationScope?.Attributes.Count > 0)
+                                    {
+                                        <MudDataGrid Items="@context.Item.InstrumentationScope.Attributes" TItem="object">
+                                            <Columns>
+                                                <PropertyColumn Property="x => x.Key" Title="Key"/>
+                                                <PropertyColumn Property="x => x.Value" Title="Value"/>
+                                            </Columns>
+                                        </MudDataGrid>
+                                    }
+                                </MudItem>
+                            </MudGrid>
+                        </MudCardContent>
+                    </MudCard>
+                </ChildRowContent>
+
+                <PagerContent>
+                    <MudDataGridPager T="LogRecordModel"
+                                      PageSizeOptions="new int[] { 10, 25, 50, 100 }"/>
+                </PagerContent>
+            </MudDataGrid>
+        </MudCardContent>
+    }
+</MudCard>

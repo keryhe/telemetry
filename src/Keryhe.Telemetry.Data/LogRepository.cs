@@ -176,8 +176,8 @@ public class LogRepository : ILogRepository
             var logRecord = await _context.LogRecords
                 .Include(lr => lr.Resource)
                 .Include(lr => lr.Scope)
-                    .ThenInclude(s => s.Attributes)
-                .Include(lr => lr.Attributes)
+                    //.ThenInclude(s => s.Attributes)
+                //.Include(lr => lr.Attributes)
                 .FirstOrDefaultAsync(lr => lr.Id == id, cancellationToken);
             
             return ConvertToLogRecordModel(logRecord);
@@ -204,8 +204,8 @@ public class LogRepository : ILogRepository
             var logRecords = await _context.LogRecords
                 .Include(lr => lr.Resource)
                 .Include(lr => lr.Scope)
-                    .ThenInclude(s => s.Attributes)
-                .Include(lr => lr.Attributes)
+                    //.ThenInclude(s => s.Attributes)
+                //.Include(lr => lr.Attributes)
                 .Where(lr => lr.TraceId == traceId)
                 .OrderBy(lr => lr.TimeUnixNano)
                 .ToListAsync(cancellationToken);
@@ -235,10 +235,10 @@ public class LogRepository : ILogRepository
             var logRecordModels = await _context.LogRecords
                 .Include(lr => lr.Resource)
                 .Include(lr => lr.Scope)
-                    .ThenInclude(s => s.Attributes)
-                .Include(lr => lr.Attributes)
+                    //.ThenInclude(s => s.Attributes)
+                //.Include(lr => lr.Attributes)
                 .Where(lr => lr.TimeUnixNano >= startTimeNano && lr.TimeUnixNano <= endTimeNano)
-                .OrderBy(lr => lr.TimeUnixNano)
+                .OrderByDescending(lr => lr.TimeUnixNano)
                 .ToListAsync(cancellationToken);
 
             return ConvertToLogRecordModels(logRecordModels);
@@ -260,8 +260,8 @@ public class LogRepository : ILogRepository
             var query = _context.LogRecords
                 .Include(lr => lr.Resource)
                 .Include(lr => lr.Scope)
-                    .ThenInclude(s => s.Attributes)
-                .Include(lr => lr.Attributes)
+                    //.ThenInclude(s => s.Attributes)
+                //.Include(lr => lr.Attributes)
                 .Where(lr => lr.SeverityNumber >= minSeverity);
 
             if (startTime.HasValue)
@@ -354,21 +354,32 @@ public class LogRepository : ILogRepository
         }
         
         var model = new LogRecordModel();
+        model.Resource = new ResourceModel();
+        model.Resource.SchemaUrl = logRecord.Resource.SchemaUrl;
+        model.Resource.Attributes = logRecord.Resource.Attributes ?? new Dictionary<string, object>();
+        model.InstrumentationScope = new InstrumentationScopeModel();
+        model.InstrumentationScope.SchemaUrl = logRecord.Scope.SchemaUrl;
+        model.InstrumentationScope.Attributes = logRecord.Scope.Attributes ?? new Dictionary<string, object>();
+        model.InstrumentationScope.Name = logRecord.Scope.Name;
+        model.InstrumentationScope.Version = logRecord.Scope.Version;
+        model.SeverityText = logRecord.SeverityText;
+        model.SeverityNumber = logRecord.SeverityNumber;
+        model.Attributes = logRecord.Attributes ?? new Dictionary<string, object>();
+        model.TraceIdHex = logRecord.TraceId;
+        model.BodyType = logRecord.BodyType;
+        model.BodyValue = logRecord.BodyValue;
+        model.DroppedAttributesCount = logRecord.DroppedAttributesCount;
+        model.Flags = logRecord.Flags;
+        model.ObservedTimeUnixNano = logRecord.ObservedTimeUnixNano;
+        model.SpanIdHex = logRecord.SpanId;
+        model.TimeUnixNano = logRecord.TimeUnixNano;
         
         return model;
     }
     
     private IEnumerable<LogRecordModel> ConvertToLogRecordModels(IEnumerable<LogRecord> logRecords)
     {
-        var result = new List<LogRecordModel>();
-        
-        foreach (var logRecord in logRecords)
-        {
-            
-        }
-        
-        
-        return result;
+        return logRecords.Select(ConvertToLogRecordModel).OfType<LogRecordModel>().ToList();
     }
 
     // =============================================================================
