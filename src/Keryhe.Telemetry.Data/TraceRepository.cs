@@ -441,7 +441,7 @@ public class TraceRepository : ITraceRepository
         try
         {
             var query = _context.Spans
-                .Where(s => s.Resource.Attributes == null ? false : s.Resource.Attributes.Any(a => a.Key == "service.name" && a.Value.ToString() == serviceName));
+                .Where(s => s.Resource.Attributes != null && s.Resource.Attributes.Any(a => a.Key == "service.name" && a.Value.ToString() == serviceName));
 
             if (startTime.HasValue)
             {
