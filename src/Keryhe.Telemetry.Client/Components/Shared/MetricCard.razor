@@ -1,0 +1,60 @@
+@using Keryhe.Telemetry.Core.Models
+@using Keryhe.Telemetry.Client.Components.Shared
+
+<MudCard Elevation="2" Style="cursor: pointer; height: 100%;" @onclick="NavigateToDetail">
+    <MudCardContent>
+        <MudStack Spacing="2">
+            <!-- Metric Name and Type -->
+            <MudStack Row="true" AlignItems="AlignItems.Center" Justify="Justify.SpaceBetween">
+                <MudText Typo="Typo.body1" Style="font-weight: 500;">@MetricName</MudText>
+                <MudChip T="string" Size="Size.Small" Color="@TypeColor" Variant="Variant.Filled">
+                    @MetricType
+                </MudChip>
+            </MudStack>
+
+            <!-- Current Value and Trend -->
+            <MudStack Row="true" AlignItems="AlignItems.End" Justify="Justify.SpaceBetween">
+                <div>
+                    <MudText Typo="Typo.h5">@FormatValue(CurrentValue)</MudText>
+                    @if (!string.IsNullOrEmpty(Unit))
+                    {
+                        <MudText Typo="Typo.caption" Color="Color.Secondary">@Unit</MudText>
+                    }
+                </div>
+                @if (TrendDirection.HasValue)
+                {
+                    <MudIcon Icon="@GetTrendIcon()"
+                             Color="@GetTrendColor()"
+                             Size="Size.Medium"/>
+                }
+            </MudStack>
+
+            <!-- Sparkline -->
+            @if (DataPoints != null && DataPoints.Any())
+            {
+                <MetricSparkline DataPoints="@DataPoints" Height="50" Color="@TypeColor"/>
+            }
+
+            <!-- Stats -->
+            @if (ShowStats)
+            {
+                <MudStack Row="true" Spacing="2" Style="font-size: 0.75rem;">
+                    <MudText Typo="Typo.caption" Color="Color.Secondary">
+                        Min: @FormatValue(MinValue)
+                    </MudText>
+                    <MudText Typo="Typo.caption" Color="Color.Secondary">•</MudText>
+                    <MudText Typo="Typo.caption" Color="Color.Secondary">
+                        Max: @FormatValue(MaxValue)
+                    </MudText>
+                    <MudText Typo="Typo.caption" Color="Color.Secondary">•</MudText>
+                    <MudText Typo="Typo.caption" Color="Color.Secondary">
+                        Avg: @FormatValue(AvgValue)
+                    </MudText>
+                </MudStack>
+            }
+        </MudStack>
+    </MudCardContent>
+</MudCard>
+
+@code {
+}

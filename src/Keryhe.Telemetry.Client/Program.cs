@@ -12,6 +12,7 @@ var builder = WebApplication.CreateBuilder(args);
 builder.Services.AddDbContext<OpenTelemetryDbContext>(options =>
 {
     var connectionString = builder.Configuration.GetConnectionString("Default");
+    //options.UseSqlServer(connectionString, dbOptions =>
     options.UseMySql(connectionString, ServerVersion.AutoDetect(connectionString), mySqlOptions =>
     {
                 
@@ -33,7 +34,9 @@ builder.Services
     .AddScoped<ILogRepository, LogRepository>()
     .AddScoped<IMetricRepository, MetricRepository>()
     .AddScoped<ITraceRepository, TraceRepository>()
-    .AddScoped<ILogService, LogService>();
+    .AddScoped<ILogService, LogService>()
+    .AddScoped<IMetricService, MetricService>()
+    .AddScoped<ITraceService, TraceService>();
 
 var app = builder.Build();
 

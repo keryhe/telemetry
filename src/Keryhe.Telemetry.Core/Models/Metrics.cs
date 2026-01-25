@@ -148,6 +148,7 @@ public class MetricDataPoint
     public List<double>? QuantileValues { get; set; }
     public List<long>? BucketCounts { get; set; }
     public List<double>? BucketBounds { get; set; }
+    public Dictionary<string, object>? Attributes { get; set; }
 }
 
 public class ServiceMetricSummary

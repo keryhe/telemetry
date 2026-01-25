@@ -1,0 +1,25 @@
+@using ApexCharts
+@using Keryhe.Telemetry.Core.Models
+
+@if (_bucketData != null && _bucketData.Any())
+{
+    <ApexChart TItem="BucketData"
+               Title="Histogram Distribution"
+               Height="@Height">
+        <ApexPointSeries TItem="BucketData"
+                         Items="@_bucketData"
+                         Name="Count"
+                         SeriesType="SeriesType.Bar"
+                         XValue="@(e => e.BucketLabel)"
+                         YValue="@(e => (decimal)e.Count)" />
+    </ApexChart>
+}
+else
+{
+    <MudPaper Class="pa-4 d-flex align-center justify-center" Style="@($"height: {Height}px;")">
+        <MudText Typo="Typo.body2" Color="MudBlazor.Color.Secondary">No histogram data available</MudText>
+    </MudPaper>
+}
+
+@code {
+}

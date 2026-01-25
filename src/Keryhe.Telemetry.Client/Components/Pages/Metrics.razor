@@ -1,6 +1,247 @@
-@page "/Metrics"
-<h3>Metrics</h3>
+@page "/metrics"
+@using Keryhe.Telemetry.Core.Models
+
+<PageTitle>Metrics</PageTitle>
+
+<MudContainer MaxWidth="MaxWidth.ExtraLarge" Class="mt-4">
+    <MudStack Row="true" AlignItems="AlignItems.Center" Justify="Justify.SpaceBetween" Class="mb-4">
+        <MudText Typo="Typo.h4">Metrics</MudText>
+        <MudButtonGroup Variant="Variant.Outlined" Color="Color.Primary">
+            <MudButton OnClick="@(() => { _showUniqueNamesView = false; })"
+                       Variant="@(_showUniqueNamesView ? Variant.Outlined : Variant.Filled)">
+                All Metrics
+            </MudButton>
+            <MudButton OnClick="@(() => { _showUniqueNamesView = true; })"
+                       Variant="@(_showUniqueNamesView ? Variant.Filled : Variant.Outlined)">
+                Unique Names
+            </MudButton>
+        </MudButtonGroup>
+    </MudStack>
+
+    <!-- Filter Bar -->
+    <MudPaper Class="pa-4 mb-4" Elevation="2">
+        <MudGrid>
+            <MudItem xs="12" md="3">
+                <MudTextField @bind-Value="_searchText"
+                              Placeholder="Search metric name..."
+                              Adornment="Adornment.Start"
+                              AdornmentIcon="@Icons.Material.Filled.Search"
+                              Variant="Variant.Outlined"
+                              Margin="Margin.Dense"/>
+            </MudItem>
+            <MudItem xs="12" md="3">
+                <MudSelect @bind-Value="_selectedService"
+                           Label="Service"
+                           Variant="Variant.Outlined"
+                           Margin="Margin.Dense"
+                           Clearable="true"
+                           T="string">
+                    @foreach (var service in _availableServices)
+                    {
+                        <MudSelectItem Value="@service">@service</MudSelectItem>
+                    }
+                </MudSelect>
+            </MudItem>
+            <MudItem xs="12" md="3">
+                <MudSelect @bind-Value="_selectedType"
+                           Label="Metric Type"
+                           Variant="Variant.Outlined"
+                           Margin="Margin.Dense"
+                           Clearable="true"
+                           T="MetricType?">
+                    @foreach (MetricType type in Enum.GetValues(typeof(MetricType)))
+                    {
+                        <MudSelectItem Value="@((MetricType?)type)">@type</MudSelectItem>
+                    }
+                </MudSelect>
+            </MudItem>
+            <MudItem xs="12" md="3">
+                <MudButton Variant="Variant.Filled"
+                           Color="Color.Primary"
+                           OnClick="LoadMetricsAsync"
+                           FullWidth="true"
+                           StartIcon="@Icons.Material.Filled.Refresh">
+                    Apply Filters
+                </MudButton>
+            </MudItem>
+        </MudGrid>
+    </MudPaper>
+
+    <!-- Stats Cards -->
+    <MudGrid Class="mb-4">
+        <MudItem xs="12" sm="6" md="3">
+            <MudCard Elevation="2">
+                <MudCardContent>
+                    <MudStack Row="true" AlignItems="AlignItems.Center" Justify="Justify.SpaceBetween">
+                        <div>
+                            <MudText Typo="Typo.body2" Color="Color.Secondary">Total Metrics</MudText>
+                            <MudText Typo="Typo.h5">@_totalMetrics</MudText>
+                        </div>
+                        <MudIcon Icon="@Icons.Material.Filled.ShowChart" Size="Size.Large" Color="Color.Primary"/>
+                    </MudStack>
+                </MudCardContent>
+            </MudCard>
+        </MudItem>
+        <MudItem xs="12" sm="6" md="3">
+            <MudCard Elevation="2">
+                <MudCardContent>
+                    <MudStack Row="true" AlignItems="AlignItems.Center" Justify="Justify.SpaceBetween">
+                        <div>
+                            <MudText Typo="Typo.body2" Color="Color.Secondary">Gauges</MudText>
+                            <MudText Typo="Typo.h5">@_gaugeCount</MudText>
+                        </div>
+                        <MudIcon Icon="@Icons.Material.Filled.Speed" Size="Size.Large" Color="Color.Info"/>
+                    </MudStack>
+                </MudCardContent>
+            </MudCard>
+        </MudItem>
+        <MudItem xs="12" sm="6" md="3">
+            <MudCard Elevation="2">
+                <MudCardContent>
+                    <MudStack Row="true" AlignItems="AlignItems.Center" Justify="Justify.SpaceBetween">
+                        <div>
+                            <MudText Typo="Typo.body2" Color="Color.Secondary">Counters</MudText>
+                            <MudText Typo="Typo.h5">@_counterCount</MudText>
+                        </div>
+                        <MudIcon Icon="@Icons.Material.Filled.Equalizer" Size="Size.Large" Color="Color.Success"/>
+                    </MudStack>
+                </MudCardContent>
+            </MudCard>
+        </MudItem>
+        <MudItem xs="12" sm="6" md="3">
+            <MudCard Elevation="2">
+                <MudCardContent>
+                    <MudStack Row="true" AlignItems="AlignItems.Center" Justify="Justify.SpaceBetween">
+                        <div>
+                            <MudText Typo="Typo.body2" Color="Color.Secondary">Services</MudText>
+                            <MudText Typo="Typo.h5">@_servicesCount</MudText>
+                        </div>
+                        <MudIcon Icon="@Icons.Material.Filled.Cloud" Size="Size.Large" Color="Color.Warning"/>
+                    </MudStack>
+                </MudCardContent>
+            </MudCard>
+        </MudItem>
+    </MudGrid>
+
+    <!-- Metrics Table -->
+    @if (_showUniqueNamesView)
+    {
+        <!-- Unique Names View -->
+        <MudDataGrid T="string"
+                     Items="@_uniqueMetricNames"
+                     Loading="@_loading"
+                     Height="calc(100vh - 32rem)"
+                     FixedHeader="true"
+                     Virtualize="true"
+                     Dense="true"
+                     Hover="true"
+                     ColumnResizeMode="ResizeMode.Container">
+            <Columns>
+                <TemplateColumn Title="Metric Name" HeaderClass="mud-theme-secondary">
+                    <CellTemplate>
+                        <MudLink Href="@($"/metrics/detail/{Uri.EscapeDataString(context.Item)}")" Typo="Typo.body2">
+                            @context.Item
+                        </MudLink>
+                    </CellTemplate>
+                </TemplateColumn>
+                <TemplateColumn Title="Instances" HeaderClass="mud-theme-secondary">
+                    <CellTemplate>
+                        <MudChip Size="Size.Small" Color="Color.Info">
+                            @GetMetricInstanceCount(context.Item)
+                        </MudChip>
+                    </CellTemplate>
+                </TemplateColumn>
+                <TemplateColumn Title="Services" HeaderClass="mud-theme-secondary">
+                    <CellTemplate>
+                        <MudStack Row="true" Spacing="1">
+                            @foreach (var service in GetServicesForMetric(context.Item))
+                            {
+                                <MudChip Size="Size.Small" Variant="Variant.Text">@service</MudChip>
+                            }
+                        </MudStack>
+                    </CellTemplate>
+                </TemplateColumn>
+            </Columns>
+        </MudDataGrid>
+    }
+    else
+    {
+        <!-- All Metrics View (Existing) -->
+        <MudDataGrid T="MetricInfo"
+                     Items="@_filteredMetrics"
+                     Loading="@_loading"
+                     Height="calc(100vh - 32rem)"
+                     FixedHeader="true"
+                     Virtualize="true"
+                     Dense="true"
+                     Hover="true"
+                     ColumnResizeMode="ResizeMode.Container">
+            <Columns>
+                <HierarchyColumn T="MetricInfo" HeaderClass="mud-theme-secondary"/>
+                <TemplateColumn Title="Name" HeaderClass="mud-theme-secondary">
+                    <CellTemplate>
+                        <MudLink Href="@($"/metrics/detail/{Uri.EscapeDataString(context.Item.Name)}")" Typo="Typo.body2">
+                            @context.Item.Name
+                        </MudLink>
+                    </CellTemplate>
+                </TemplateColumn>
+                <TemplateColumn Title="Service" HeaderClass="mud-theme-secondary">
+                    <CellTemplate>
+                        <MudChip Size="Size.Small" Color="Color.Primary" Variant="Variant.Text">
+                            @(context.Item.ServiceName ?? "unknown")
+                        </MudChip>
+                    </CellTemplate>
+                </TemplateColumn>
+                <TemplateColumn Title="Type" HeaderClass="mud-theme-secondary">
+                    <CellTemplate>
+                        <MudChip Size="Size.Small"
+                                 Color="@GetMetricTypeColor(context.Item.Type)"
+                                 Variant="Variant.Filled">
+                            @context.Item.Type
+                        </MudChip>
+                    </CellTemplate>
+                </TemplateColumn>
+                <PropertyColumn Property="x => x.Unit" Title="Unit" HeaderClass="mud-theme-secondary"/>
+                <PropertyColumn Property="x => x.Description" Title="Description" HeaderClass="mud-theme-secondary"/>
+                <TemplateColumn Title="Last Seen" HeaderClass="mud-theme-secondary">
+                    <CellTemplate>
+                        @FormatDateTime(context.Item.LastSeen)
+                    </CellTemplate>
+                </TemplateColumn>
+            </Columns>
+            <ChildRowContent>
+                <MudCard Elevation="0">
+                    <MudCardContent>
+                        <MudSimpleTable Dense="true" Hover="true" Style="background-color: transparent;">
+                            <tbody>
+                            <tr>
+                                <td><strong>Name:</strong></td>
+                                <td>@context.Item.Name</td>
+                            </tr>
+                            <tr>
+                                <td><strong>Description:</strong></td>
+                                <td>@(context.Item.Description ?? "N/A")</td>
+                            </tr>
+                            <tr>
+                                <td><strong>Unit:</strong></td>
+                                <td>@(context.Item.Unit ?? "N/A")</td>
+                            </tr>
+                            <tr>
+                                <td><strong>First Seen:</strong></td>
+                                <td>@FormatDateTime(context.Item.FirstSeen)</td>
+                            </tr>
+                            <tr>
+                                <td><strong>Last Seen:</strong></td>
+                                <td>@FormatDateTime(context.Item.LastSeen)</td>
+                            </tr>
+                            </tbody>
+                        </MudSimpleTable>
+                    </MudCardContent>
+                </MudCard>
+            </ChildRowContent>
+        </MudDataGrid>
+    }
+</MudContainer>
 
 @code {
-    
 }

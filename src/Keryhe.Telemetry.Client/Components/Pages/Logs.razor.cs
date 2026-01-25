@@ -12,6 +12,15 @@ public partial class Logs : ComponentBase
     private LogRecordModel? _expandedItem;
     private string _searchText = "";
     private DateRange? _dateRange = new DateRange(DateTime.Today.AddDays(-6), DateTime.Today);
+    
+    // Filter dropdowns
+    private string? _selectedService = null;
+    private string? _selectedSeverity = null;
+    private List<string> _availableServices = new();
+    
+    // Search help dialog
+    private bool _showSearchHelp = false;
+    
     // Chart data
     private List<ChartSeries> _chartSeries = new();
     private string[] _chartXAxisLabels = Array.Empty<string>();
@@ -23,17 +32,88 @@ public partial class Logs : ComponentBase
     [Inject]
     private ILogService LogService { get; set; }
 
+    [SupplyParameterFromQuery(Name = "traceId")]
+    public string? TraceIdFilter { get; set; }
+
+    // Computed property to determine if current search is a trace ID search
+    // Trace IDs in OpenTelemetry are always exactly 32 hex characters (128 bits)
+    private bool IsTraceIdSearch => !string.IsNullOrWhiteSpace(_searchText) && 
+                                     _searchText.Length == 32 && 
+                                     !_searchText.Contains(' ') &&
+                                     !_searchText.Contains('=') &&
+                                     !_searchText.Contains(':') &&
+                                     !_searchText.Contains('"');
+
     protected override async Task OnInitializedAsync()
     {
         _dataLoading = true;
         
+        // If traceId is provided in query string, use dedicated trace ID search
+        if (!string.IsNullOrEmpty(TraceIdFilter))
+        {
+            _searchText = TraceIdFilter;
+            
+            // Use dedicated method that doesn't require date range
+            var traceLogs = await LogService.GetLogRecordsByTraceIdAsync(TraceIdFilter);
+            
+            // Extract available services from logs
+            _availableServices = traceLogs
+                .Where(l => l.Resource?.Attributes != null && l.Resource.Attributes.ContainsKey("service.name"))
+                .Select(l => l.Resource.Attributes["service.name"]?.ToString())
+                .Where(s => !string.IsNullOrEmpty(s))
+                .Distinct()
+                .OrderBy(s => s)
+                .ToList()!;
+            
+            _logs = traceLogs;
+            
+            // Set date range to null to indicate it's not being used
+            _dateRange = null;
+            
+            // Update chart with logs' actual time range
+            if (_logs.Any() && _logs.Any(l => l.TimeUnixNano.HasValue))
+            {
+                var minTime = _logs.Where(l => l.TimeUnixNano.HasValue)
+                    .Min(l => UnixNanoToDateTime(l.TimeUnixNano!.Value));
+                var maxTime = _logs.Where(l => l.TimeUnixNano.HasValue)
+                    .Max(l => UnixNanoToDateTime(l.TimeUnixNano!.Value));
+                UpdateChartData(minTime, maxTime.AddDays(1));
+            }
+            
+            _dataLoading = false;
+            return;
+        }
+        
+        // Normal flow: require date range for time-based search
         if (_dateRange?.Start == null || _dateRange?.End == null)
         {
+            _dataLoading = false;
             return;
         }
         var start = _dateRange.Start.Value;
-        var end =_dateRange.End.Value.AddDays(1);
-        _logs = GetMockLogRecords(start, end); //await LogService.GetLogRecordsByTimeRangeAsync(start, end);
+        var end = _dateRange.End.Value.AddDays(1);
+        
+        // Load all logs first
+        var allLogs = await LogService.GetLogRecordsByTimeRangeAsync(start, end);
+        
+        // Extract available services from logs
+        _availableServices = allLogs
+            .Where(l => l.Resource?.Attributes != null && l.Resource.Attributes.ContainsKey("service.name"))
+            .Select(l => l.Resource.Attributes["service.name"]?.ToString())
+            .Where(s => !string.IsNullOrEmpty(s))
+            .Distinct()
+            .OrderBy(s => s)
+            .ToList()!;
+        
+        // Apply search filter if traceId is provided
+        if (!string.IsNullOrEmpty(_searchText))
+        {
+            allLogs = allLogs.Where(l => 
+                l.TraceIdHex?.Contains(_searchText, StringComparison.OrdinalIgnoreCase) == true
+            ).ToList();
+        }
+        
+        _logs = allLogs;
         UpdateChartData(start, end);
         _dataLoading = false;
     }
@@ -57,7 +137,7 @@ public partial class Logs : ComponentBase
         {
             "TRACE" => Colors.Purple.Default,
             "DEBUG" => Colors.Blue.Default,
-            "INFORMATION" => Colors.BlueGray.Lighten2,
+            "INFORMATION" => Colors.Green.Default,
             "WARNING" => Colors.Orange.Default,
             "ERROR" => Colors.Red.Default,
             "FATAL" => Colors.Red.Darken4,
@@ -70,48 +150,174 @@ public partial class Logs : ComponentBase
         _dataLoading = true;
         StateHasChanged();
 
+        // Check if searching by trace ID (exactly 32 hex chars per OpenTelemetry spec)
+        bool isTraceIdSearch = !string.IsNullOrWhiteSpace(_searchText) && 
+                               _searchText.Length == 32 && 
+                               !_searchText.Contains(' ') &&
+                               !_searchText.Contains('=') &&
+                               !_searchText.Contains(':') &&
+                               !_searchText.Contains('"');
+
+        // If searching by trace ID, use dedicated method
+        if (isTraceIdSearch)
+        {
+            var traceLogs = await LogService.GetLogRecordsByTraceIdAsync(_searchText);
+            
+            // Apply service filter if selected
+            if (!string.IsNullOrEmpty(_selectedService))
+            {
+                traceLogs = traceLogs.Where(l => 
+                    l.Resource?.Attributes != null &&
+                    l.Resource.Attributes.ContainsKey("service.name") &&
+                    l.Resource.Attributes["service.name"]?.ToString() == _selectedService
+                ).ToList();
+            }
+            
+            // Apply severity filter if selected
+            if (!string.IsNullOrEmpty(_selectedSeverity))
+            {
+                traceLogs = traceLogs.Where(l => 
+                    string.Equals(l.SeverityText, _selectedSeverity, StringComparison.OrdinalIgnoreCase)
+                ).ToList();
+            }
+            
+            _logs = traceLogs;
+            
+            // Update chart with logs' actual time range
+            if (_logs.Any() && _logs.Any(l => l.TimeUnixNano.HasValue))
+            {
+                var minTime = _logs.Where(l => l.TimeUnixNano.HasValue)
+                    .Min(l => UnixNanoToDateTime(l.TimeUnixNano!.Value));
+                var maxTime = _logs.Where(l => l.TimeUnixNano.HasValue)
+                    .Max(l => UnixNanoToDateTime(l.TimeUnixNano!.Value));
+                UpdateChartData(minTime, maxTime.AddDays(1));
+            }
+            
+            _dataLoading = false;
+            return;
+        }
+
+        // Normal search: require date range
         if (_dateRange?.Start == null || _dateRange?.End == null)
         {
+            _dataLoading = false;
             return;
         }
         var start = _dateRange.Start.Value;
-        var end =_dateRange.End.Value.AddDays(1);
-        _logs = GetMockLogRecords(start, end); //await LogService.GetLogRecordsByTimeRangeAsync(start, end);
+        var end = _dateRange.End.Value.AddDays(1);
+        
+        // Load all logs
+        var allLogs = await LogService.GetLogRecordsByTimeRangeAsync(start, end);
+        
+        // Apply service filter
+        if (!string.IsNullOrEmpty(_selectedService))
+        {
+            allLogs = allLogs.Where(l => 
+                l.Resource?.Attributes != null &&
+                l.Resource.Attributes.ContainsKey("service.name") &&
+                l.Resource.Attributes["service.name"]?.ToString() == _selectedService
+            ).ToList();
+        }
+        
+        // Apply severity filter
+        if (!string.IsNullOrEmpty(_selectedSeverity))
+        {
+            allLogs = allLogs.Where(l => 
+                string.Equals(l.SeverityText, _selectedSeverity, StringComparison.OrdinalIgnoreCase)
+            ).ToList();
+        }
+        
+        // Apply text search filter (body + attributes)
+        if (!string.IsNullOrWhiteSpace(_searchText))
+        {
+            allLogs = ApplyTextSearch(allLogs, _searchText);
+        }
+        
+        _logs = allLogs;
         UpdateChartData(start, end);
         _dataLoading = false;
     }
 
-    private Dictionary<string, object> GetDetails(LogRecordModel? expandedItem)
+    private List<LogRecordModel> ApplyTextSearch(List<LogRecordModel> logs, string searchText)
     {
-        Dictionary<string, object> details = new();
+        if (string.IsNullOrWhiteSpace(searchText))
+            return logs;
 
-        if (expandedItem == null)
+        var terms = searchText.Split(new[] { " AND " }, StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        
+        foreach (var term in terms)
         {
-            return details;
-        }
-
-        if (expandedItem.Resource != null )
-        {
-            foreach (var item in expandedItem.Resource.Attributes)
+            var cleanTerm = term.Trim();
+            
+            // Attribute search: key=value or key:value
+            if (cleanTerm.Contains('=') || cleanTerm.Contains(':'))
             {
-                details.Add(item.Key, item.Value);
+                logs = ApplyAttributeFilter(logs, cleanTerm);
+            }
+            // Free text search in body
+            else
+            {
+                logs = logs.Where(l => 
+                    l.BodyValue?.Contains(cleanTerm, StringComparison.OrdinalIgnoreCase) ?? false
+                ).ToList();
             }
         }
+        
+        return logs;
+    }
 
-        if (expandedItem.InstrumentationScope != null)
+    private List<LogRecordModel> ApplyAttributeFilter(List<LogRecordModel> logs, string filter)
+    {
+        var separator = filter.Contains('=') ? '=' : ':';
+        var parts = filter.Split(separator, 2);
+        
+        if (parts.Length != 2) return logs;
+        
+        var key = parts[0].Trim();
+        var value = parts[1].Trim().Trim('"', '\''); // Remove quotes if present
+        var isExactMatch = separator == '=';
+        
+        return logs.Where(l =>
         {
-            foreach (var item in expandedItem.InstrumentationScope.Attributes)
+            // Search in log attributes
+            if (l.Attributes?.ContainsKey(key) == true)
             {
-                details.Add(item.Key, item.Value);
+                var attrValue = l.Attributes[key]?.ToString() ?? "";
+                return isExactMatch 
+                    ? attrValue.Equals(value, StringComparison.OrdinalIgnoreCase)
+                    : attrValue.Contains(value, StringComparison.OrdinalIgnoreCase);
             }
-        }
-
-        foreach (var item in expandedItem.Attributes)
-        {
-            details.Add(item.Key, item.Value);
-        }
-
-        return details;
+            
+            // Search in resource attributes
+            if (l.Resource?.Attributes?.ContainsKey(key) == true)
+            {
+                var attrValue = l.Resource.Attributes[key]?.ToString() ?? "";
+                return isExactMatch 
+                    ? attrValue.Equals(value, StringComparison.OrdinalIgnoreCase)
+                    : attrValue.Contains(value, StringComparison.OrdinalIgnoreCase);
+            }
+            
+            // Search in scope attributes
+            if (l.InstrumentationScope?.Attributes?.ContainsKey(key) == true)
+            {
+                var attrValue = l.InstrumentationScope.Attributes[key]?.ToString() ?? "";
+                return isExactMatch 
+                    ? attrValue.Equals(value, StringComparison.OrdinalIgnoreCase)
+                    : attrValue.Contains(value, StringComparison.OrdinalIgnoreCase);
+            }
+            
+            return false;
+        }).ToList();
+    }
+    
+    private string FormatAttributeValue(object? value)
+    {
+        if (value == null) return "null";
+        if (value is string s) return s;
+        if (value is bool b) return b.ToString().ToLower();
+        if (value is int || value is long || value is double || value is decimal) return value.ToString()!;
+        if (value is DateTime dt) return dt.ToString("yyyy-MM-dd HH:mm:ss.fff");
+        return value.ToString() ?? "N/A";
     }
     
     // Configuration class for bucket and label settings
@@ -361,149 +567,4 @@ public partial class Logs : ComponentBase
         var epoch = new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc);
         return epoch.AddTicks(ticks).ToLocalTime();
     }
-    
-    private List<LogRecordModel> GetMockLogRecords(DateTime? start, DateTime? end)
-{
-    var logs = new List<LogRecordModel>();
-    var random = new Random(42); // Fixed seed for consistent results
-    
-    if (start == null || end == null)
-    {
-        start = DateTime.Today.AddDays(-7);
-        end = DateTime.Today;
-    }
-    
-    var severities = new[] { "Debug", "Information", "Warning", "Error", "FATAL" };
-    var severityWeights = new[] { 30, 50, 15, 4, 1 }; // Percentage distribution
-    
-    var messages = new Dictionary<string, string[]>
-    {
-        ["Debug"] = new[] 
-        { 
-            "Processing request started",
-            "Cache lookup performed",
-            "Query execution began",
-            "Validation step completed"
-        },
-        ["Information"] = new[] 
-        { 
-            "User logged in successfully",
-            "Data saved to database",
-            "Request completed successfully",
-            "Configuration loaded",
-            "Service started"
-        },
-        ["Warning"] = new[] 
-        { 
-            "Response time exceeded threshold",
-            "Cache miss occurred",
-            "Retry attempt initiated",
-            "Deprecated API used"
-        },
-        ["Error"] = new[] 
-        { 
-            "Database connection failed",
-            "Null reference exception caught",
-            "API call timeout",
-            "Authentication failed"
-        },
-        ["FATAL"] = new[] 
-        { 
-            "Critical system failure",
-            "Unable to connect to required service",
-            "Data corruption detected"
-        }
-    };
-    
-    // Generate logs for each day in the range
-    var currentDay = start.Value.Date;
-    
-    while (currentDay <= end.Value.Date)
-    {
-        // Random number of logs for this day (between 50-200 per day)
-        var logsForDay = random.Next(50, 200);
-        
-        for (int i = 0; i < logsForDay; i++)
-        {
-            // Random time within this specific day
-            var randomHour = random.Next(0, 24);
-            var randomMinute = random.Next(0, 60);
-            var randomSecond = random.Next(0, 60);
-            var randomMillisecond = random.Next(0, 1000);
-            
-            var logTime = currentDay
-                .AddHours(randomHour)
-                .AddMinutes(randomMinute)
-                .AddSeconds(randomSecond)
-                .AddMilliseconds(randomMillisecond);
-            
-            // Don't create logs beyond the end date/time
-            if (logTime > end.Value)
-                continue;
-            
-            // Select severity based on weighted distribution
-            var severityRoll = random.Next(0, 100);
-            var cumulativeWeight = 0;
-            var selectedSeverity = "Information";
-            
-            for (int j = 0; j < severities.Length; j++)
-            {
-                cumulativeWeight += severityWeights[j];
-                if (severityRoll < cumulativeWeight)
-                {
-                    selectedSeverity = severities[j];
-                    break;
-                }
-            }
-            
-            // Select random message for this severity
-            var messageArray = messages[selectedSeverity];
-            var message = messageArray[random.Next(messageArray.Length)];
-            
-            // Convert DateTime to Unix nanoseconds
-            var unixEpoch = new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc);
-            var timeSpan = logTime.ToUniversalTime() - unixEpoch;
-            var unixNano = (long)(timeSpan.TotalSeconds * 1_000_000_000);
-            
-            var log = new LogRecordModel
-            {
-                TimeUnixNano = unixNano,
-                SeverityText = selectedSeverity,
-                BodyValue = message,
-                TraceIdHex = Guid.NewGuid().ToString("N").Substring(0, 32),
-                SpanIdHex = Guid.NewGuid().ToString("N").Substring(0, 16),
-                Attributes = new Dictionary<string, object>
-                {
-                    ["thread.id"] = random.Next(1, 20),
-                    ["http.status_code"] = random.Next(200, 505),
-                    ["user.id"] = $"user_{random.Next(1, 100)}"
-                },
-                InstrumentationScope = new InstrumentationScopeModel
-                {
-                    Name = "Keryhe.Telemetry.MockService",
-                    Attributes = new Dictionary<string, object>
-                    {
-                        ["version"] = "1.0.0"
-                    }
-                },
-                Resource = new ResourceModel
-                {
-                    Attributes = new Dictionary<string, object>
-                    {
-                        ["service.name"] = "telemetry-service",
-                        ["host.name"] = $"server-{random.Next(1, 5)}"
-                    }
-                }
-            };
-            
-            logs.Add(log);
-        }
-        
-        // Move to next day
-        currentDay = currentDay.AddDays(1);
-    }
-    
-    // Sort by time
-    return logs.OrderBy(l => l.TimeUnixNano).ToList();
-}
 }

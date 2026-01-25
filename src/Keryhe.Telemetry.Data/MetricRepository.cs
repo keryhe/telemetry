@@ -186,21 +186,36 @@ public class MetricRepository : IMetricRepository
 
         try
         {
-            return await _context.Metrics
+            // First, get raw data from database with Resource.Attributes
+            var rawData = await _context.Metrics
+                .Include(m => m.Resource)
                 .Where(m => m.Name == name)
-                .Select(m => new MetricInfo
+                .Select(m => new
                 {
-                    Id = m.Id,
-                    Name = m.Name,
-                    Description = m.Description,
-                    Unit = m.Unit,
-                    Type = m.Type,
-                    ServiceName = m.Resource.Attributes == null ? "" : m.Resource.Attributes
-                        .FirstOrDefault(a => a.Key == "service.name").Value.ToString(),
-                    FirstSeen = m.CreatedAt,
-                    LastSeen = m.CreatedAt
+                    m.Id,
+                    m.Name,
+                    m.Description,
+                    m.Unit,
+                    m.Type,
+                    m.CreatedAt,
+                    ResourceAttributes = m.Resource.Attributes
                 })
                 .ToListAsync(cancellationToken);
+
+            // Then extract service name in memory
+            var result = rawData.Select(m => new MetricInfo
+            {
+                Id = m.Id,
+                Name = m.Name,
+                Description = m.Description,
+                Unit = m.Unit,
+                Type = m.Type,
+                ServiceName = ExtractServiceName(m.ResourceAttributes) ?? "",
+                FirstSeen = m.CreatedAt,
+                LastSeen = m.CreatedAt
+            }).ToList();
+
+            return result;
         }
         catch (Exception ex)
         {
@@ -219,8 +234,26 @@ public class MetricRepository : IMetricRepository
 
         try
         {
-            return await _context.Metrics
-                .Where(m => m.Resource.Attributes == null ? false : m.Resource.Attributes.Any(a => a.Key == "service.name" && a.Value.ToString() == serviceName))
+            // First, get raw data from database with Resource.Attributes
+            var rawData = await _context.Metrics
+                .Include(m => m.Resource)
+                .Select(m => new
+                {
+                    m.Id,
+                    m.Name,
+                    m.Description,
+                    m.Unit,
+                    m.Type,
+                    m.CreatedAt,
+                    ResourceAttributes = m.Resource.Attributes
+                })
+                .ToListAsync(cancellationToken);
+
+            // Then filter by service name in memory
+            var result = rawData
+                .Where(m => m.ResourceAttributes != null &&
+                           m.ResourceAttributes.ContainsKey("service.name") &&
+                           m.ResourceAttributes["service.name"]?.ToString() == serviceName)
                 .Select(m => new MetricInfo
                 {
                     Id = m.Id,
@@ -232,7 +265,9 @@ public class MetricRepository : IMetricRepository
                     FirstSeen = m.CreatedAt,
                     LastSeen = m.CreatedAt
                 })
-                .ToListAsync(cancellationToken);
+                .ToList();
+
+            return result;
         }
         catch (Exception ex)
         {
@@ -248,21 +283,36 @@ public class MetricRepository : IMetricRepository
     {
         try
         {
-            return await _context.Metrics
+            // First, get raw data from database with Resource.Attributes
+            var rawData = await _context.Metrics
+                .Include(m => m.Resource)
                 .Where(m => m.Type == type)
-                .Select(m => new MetricInfo
+                .Select(m => new
                 {
-                    Id = m.Id,
-                    Name = m.Name,
-                    Description = m.Description,
-                    Unit = m.Unit,
-                    Type = m.Type,
-                    ServiceName = m.Resource.Attributes == null ? "" : m.Resource.Attributes
-                        .FirstOrDefault(a => a.Key == "service.name")!.Value.ToString(),
-                    FirstSeen = m.CreatedAt,
-                    LastSeen = m.CreatedAt
+                    m.Id,
+                    m.Name,
+                    m.Description,
+                    m.Unit,
+                    m.Type,
+                    m.CreatedAt,
+                    ResourceAttributes = m.Resource.Attributes
                 })
                 .ToListAsync(cancellationToken);
+
+            // Then extract service name in memory
+            var result = rawData.Select(m => new MetricInfo
+            {
+                Id = m.Id,
+                Name = m.Name,
+                Description = m.Description,
+                Unit = m.Unit,
+                Type = m.Type,
+                ServiceName = ExtractServiceName(m.ResourceAttributes) ?? "",
+                FirstSeen = m.CreatedAt,
+                LastSeen = m.CreatedAt
+            }).ToList();
+
+            return result;
         }
         catch (Exception ex)
         {
@@ -278,22 +328,37 @@ public class MetricRepository : IMetricRepository
     {
         try
         {
-            return await _context.Metrics
+            // First, get raw data from database with Resource.Attributes
+            var rawData = await _context.Metrics
+                .Include(m => m.Resource)
                 .OrderByDescending(m => m.CreatedAt)
                 .Take(limit)
-                .Select(m => new MetricInfo
+                .Select(m => new
                 {
-                    Id = m.Id,
-                    Name = m.Name,
-                    Description = m.Description,
-                    Unit = m.Unit,
-                    Type = m.Type,
-                    ServiceName = m.Resource.Attributes == null ? "" : m.Resource.Attributes
-                        .FirstOrDefault(a => a.Key == "service.name")!.Value.ToString(),
-                    FirstSeen = m.CreatedAt,
-                    LastSeen = m.CreatedAt
+                    m.Id,
+                    m.Name,
+                    m.Description,
+                    m.Unit,
+                    m.Type,
+                    m.CreatedAt,
+                    ResourceAttributes = m.Resource.Attributes
                 })
                 .ToListAsync(cancellationToken);
+
+            // Then extract service name in memory and create MetricInfo objects
+            var result = rawData.Select(m => new MetricInfo
+            {
+                Id = m.Id,
+                Name = m.Name,
+                Description = m.Description,
+                Unit = m.Unit,
+                Type = m.Type,
+                ServiceName = ExtractServiceName(m.ResourceAttributes),
+                FirstSeen = m.CreatedAt,
+                LastSeen = m.CreatedAt
+            }).ToList();
+
+            return result;
         }
         catch (Exception ex)
         {
@@ -388,36 +453,62 @@ public class MetricRepository : IMetricRepository
         {
             var result = new Dictionary<string, double>();
 
-            // Get latest gauge values
-            var gaugeValues = await _context.GaugeDataPoints
-                .Where(gdp => gdp.Metric.Resource.Attributes == null ? false : gdp.Metric.Resource.Attributes.Any(a => a.Key == "service.name" && a.Value.ToString() == serviceName))
-                .GroupBy(gdp => gdp.Metric.Name)
-                .Select(g => new 
-                { 
-                    MetricName = g.Key, 
-                    LatestValue = g.OrderByDescending(gdp => gdp.TimeUnixNano)
-                                   .Select(gdp => gdp.ValueDouble ?? gdp.ValueInt ?? 0)
-                                   .First()
+            // Get latest gauge values - retrieve raw data first
+            var gaugeRawData = await _context.GaugeDataPoints
+                .Include(gdp => gdp.Metric)
+                    .ThenInclude(m => m.Resource)
+                .Select(gdp => new
+                {
+                    MetricName = gdp.Metric.Name,
+                    gdp.TimeUnixNano,
+                    Value = gdp.ValueDouble ?? gdp.ValueInt ?? 0,
+                    ResourceAttributes = gdp.Metric.Resource.Attributes
                 })
                 .ToListAsync(cancellationToken);
+
+            // Filter by service name in memory
+            var gaugeValues = gaugeRawData
+                .Where(g => g.ResourceAttributes != null &&
+                           g.ResourceAttributes.ContainsKey("service.name") &&
+                           g.ResourceAttributes["service.name"]?.ToString() == serviceName)
+                .GroupBy(g => g.MetricName)
+                .Select(g => new
+                {
+                    MetricName = g.Key,
+                    LatestValue = g.OrderByDescending(x => x.TimeUnixNano).First().Value
+                })
+                .ToList();
 
             foreach (var gauge in gaugeValues)
             {
                 result[gauge.MetricName] = gauge.LatestValue;
             }
 
-            // Get latest sum values
-            var sumValues = await _context.SumDataPoints
-                .Where(sdp => sdp.Metric.Resource.Attributes == null ? false : sdp.Metric.Resource.Attributes.Any(a => a.Key == "service.name" && a.Value.ToString() == serviceName))
-                .GroupBy(sdp => sdp.Metric.Name)
-                .Select(g => new 
-                { 
-                    MetricName = g.Key, 
-                    LatestValue = g.OrderByDescending(sdp => sdp.TimeUnixNano)
-                                   .Select(sdp => sdp.ValueDouble ?? sdp.ValueInt ?? 0)
-                                   .First()
+            // Get latest sum values - retrieve raw data first
+            var sumRawData = await _context.SumDataPoints
+                .Include(sdp => sdp.Metric)
+                    .ThenInclude(m => m.Resource)
+                .Select(sdp => new
+                {
+                    MetricName = sdp.Metric.Name,
+                    sdp.TimeUnixNano,
+                    Value = sdp.ValueDouble ?? sdp.ValueInt ?? 0,
+                    ResourceAttributes = sdp.Metric.Resource.Attributes
                 })
                 .ToListAsync(cancellationToken);
+
+            // Filter by service name in memory
+            var sumValues = sumRawData
+                .Where(s => s.ResourceAttributes != null &&
+                           s.ResourceAttributes.ContainsKey("service.name") &&
+                           s.ResourceAttributes["service.name"]?.ToString() == serviceName)
+                .GroupBy(s => s.MetricName)
+                .Select(g => new
+                {
+                    MetricName = g.Key,
+                    LatestValue = g.OrderByDescending(x => x.TimeUnixNano).First().Value
+                })
+                .ToList();
 
             foreach (var sum in sumValues)
             {
@@ -440,11 +531,23 @@ public class MetricRepository : IMetricRepository
     {
         try
         {
-            return await _context.Metrics
-                .GroupBy(m => m.Resource.Attributes == null ? "" : m.Resource.Attributes.FirstOrDefault(a => a.Key == "service.name")!.Value.ToString())
+            // First, get raw data from database with Resource.Attributes
+            var rawData = await _context.Metrics
+                .Include(m => m.Resource)
+                .Select(m => new
+                {
+                    m.Type,
+                    m.CreatedAt,
+                    ResourceAttributes = m.Resource.Attributes
+                })
+                .ToListAsync(cancellationToken);
+
+            // Then group by service name in memory
+            var result = rawData
+                .GroupBy(m => ExtractServiceName(m.ResourceAttributes) ?? "unknown")
                 .Select(g => new ServiceMetricSummary
                 {
-                    ServiceName = g.Key ?? "unknown",
+                    ServiceName = g.Key,
                     MetricCount = g.Count(),
                     GaugeCount = g.Count(m => m.Type == MetricType.GAUGE),
                     CounterCount = g.Count(m => m.Type == MetricType.SUM),
@@ -453,7 +556,9 @@ public class MetricRepository : IMetricRepository
                     LastUpdated = g.Max(m => m.CreatedAt)
                 })
                 .OrderBy(s => s.ServiceName)
-                .ToListAsync(cancellationToken);
+                .ToList();
+
+            return result;
         }
         catch (Exception ex)
         {
@@ -469,16 +574,32 @@ public class MetricRepository : IMetricRepository
     {
         try
         {
-            var query = _context.Metrics.AsQueryable();
+            // First, get raw data from database with Resource.Attributes
+            var rawData = await _context.Metrics
+                .Include(m => m.Resource)
+                .Select(m => new
+                {
+                    m.Type,
+                    ResourceAttributes = m.Resource.Attributes
+                })
+                .ToListAsync(cancellationToken);
 
+            // Filter by service name in memory if provided
             if (!string.IsNullOrEmpty(serviceName))
             {
-                query = query.Where(m => m.Resource.Attributes == null ? false : m.Resource.Attributes.Any(a => a.Key == "service.name" && a.Value.ToString() == serviceName));
+                rawData = rawData
+                    .Where(m => m.ResourceAttributes != null &&
+                               m.ResourceAttributes.ContainsKey("service.name") &&
+                               m.ResourceAttributes["service.name"]?.ToString() == serviceName)
+                    .ToList();
             }
 
-            return await query
+            // Group by type in memory
+            var result = rawData
                 .GroupBy(m => m.Type)
-                .ToDictionaryAsync(g => g.Key.ToString(), g => g.Count(), cancellationToken);
+                .ToDictionary(g => g.Key.ToString(), g => g.Count());
+
+            return result;
         }
         catch (Exception ex)
         {
@@ -494,18 +615,34 @@ public class MetricRepository : IMetricRepository
     {
         try
         {
-            var query = _context.Metrics.AsQueryable();
+            // First, get raw data from database with Resource.Attributes
+            var rawData = await _context.Metrics
+                .Include(m => m.Resource)
+                .Select(m => new
+                {
+                    m.Name,
+                    ResourceAttributes = m.Resource.Attributes
+                })
+                .ToListAsync(cancellationToken);
 
+            // Filter by service name in memory if provided
             if (!string.IsNullOrEmpty(serviceName))
             {
-                query = query.Where(m => m.Resource.Attributes == null ? false : m.Resource.Attributes.Any(a => a.Key == "service.name" && a.Value.ToString() == serviceName));
+                rawData = rawData
+                    .Where(m => m.ResourceAttributes != null &&
+                               m.ResourceAttributes.ContainsKey("service.name") &&
+                               m.ResourceAttributes["service.name"]?.ToString() == serviceName)
+                    .ToList();
             }
 
-            return await query
+            // Get distinct names and sort in memory
+            var result = rawData
                 .Select(m => m.Name)
                 .Distinct()
                 .OrderBy(name => name)
-                .ToListAsync(cancellationToken);
+                .ToList();
+
+            return result;
         }
         catch (Exception ex)
         {
@@ -1009,7 +1146,8 @@ public class MetricRepository : IMetricRepository
             {
                 Timestamp = OpenTelemetryDbContextExtensions.UnixNanoToDateTime(gdp.TimeUnixNano),
                 DoubleValue = gdp.ValueDouble,
-                IntValue = gdp.ValueInt
+                IntValue = gdp.ValueInt,
+                Attributes = gdp.Attributes
             })
             .ToListAsync(cancellationToken);
 
@@ -1039,7 +1177,8 @@ public class MetricRepository : IMetricRepository
             {
                 Timestamp = OpenTelemetryDbContextExtensions.UnixNanoToDateTime(sdp.TimeUnixNano),
                 DoubleValue = sdp.ValueDouble,
-                IntValue = sdp.ValueInt
+                IntValue = sdp.ValueInt,
+                Attributes = sdp.Attributes
             })
             .ToListAsync(cancellationToken);
 
@@ -1073,7 +1212,8 @@ public class MetricRepository : IMetricRepository
                 Min = hdp.MinValue,
                 Max = hdp.MaxValue,
                 BucketCounts = (hdp.BucketCountsArray != null) ? hdp.BucketCountsArray.ToList() : new List<long>(),
-                BucketBounds = (hdp.ExplicitBoundsArray != null) ? hdp.ExplicitBoundsArray.ToList() : new List<double>()
+                BucketBounds = (hdp.ExplicitBoundsArray != null) ? hdp.ExplicitBoundsArray.ToList() : new List<double>(),
+                Attributes = hdp.Attributes
             })
             .ToListAsync(cancellationToken);
 
@@ -1105,7 +1245,8 @@ public class MetricRepository : IMetricRepository
                 Count = ehdp.Count,
                 Sum = ehdp.SumValue,
                 Min = ehdp.MinValue,
-                Max = ehdp.MaxValue
+                Max = ehdp.MaxValue,
+                Attributes = ehdp.Attributes
             })
             .ToListAsync(cancellationToken);
 
@@ -1137,7 +1278,8 @@ public class MetricRepository : IMetricRepository
                 Count = sdp.Count,
                 Sum = sdp.SumValue,
                 Quantiles = sdp.QuantileValuesArray != null ? sdp.QuantileValuesArray.Select(qv => qv.Quantile).ToList() : null,
-                QuantileValues = sdp.QuantileValuesArray != null ? sdp.QuantileValuesArray.Select(qv => qv.Value).ToList() : null
+                QuantileValues = sdp.QuantileValuesArray != null ? sdp.QuantileValuesArray.Select(qv => qv.Value).ToList() : null,
+                Attributes = sdp.Attributes
             })
             .ToListAsync(cancellationToken);
 
@@ -1229,6 +1371,17 @@ public class MetricRepository : IMetricRepository
     private static string GenerateScopeKey(InstrumentationScopeModel? scopeModel)
     {
         return GenerateScopeHash(scopeModel ?? new InstrumentationScopeModel { Name = "unknown" });
+    }
+    
+    /// <summary>
+    /// Extracts the service name from Resource attributes
+    /// </summary>
+    private static string? ExtractServiceName(Dictionary<string, object>? attributes)
+    {
+        if (attributes == null || !attributes.ContainsKey("service.name"))
+            return null;
+        
+        return attributes["service.name"]?.ToString();
     }
     
     /// <summary>

@@ -1,28 +1,170 @@
 @page "/logs"
 @using Keryhe.Telemetry.Core.Models
 
-<MudStack StretchItems="@StretchItems.Start" Row>
-    <MudTextField @bind-Value="_searchText"
-                  Placeholder="Search logs..."
-                  Adornment="Adornment.Start"
-                  AdornmentIcon="@Icons.Material.Filled.Search"
-                  Variant="Variant.Outlined"
-                  Margin="Margin.Dense"/>
-    <div>
-        <MudDateRangePicker @bind-DateRange="_dateRange" Clearable="true"
+<!-- Row 1: Dropdowns, Date Range, and Search Button -->
+<MudStack Spacing="2" Class="mb-2">
+    <MudStack Row="true" Spacing="2" AlignItems="AlignItems.Center">
+        <MudSelect @bind-Value="_selectedService"
+                   Label="Service"
+                   Variant="Variant.Outlined"
+                   Margin="Margin.Dense"
+                   Clearable="true"
+                   Style="min-width: 250px;"
+                   T="string">
+            @foreach (var service in _availableServices)
+            {
+                <MudSelectItem Value="@service">@service</MudSelectItem>
+            }
+        </MudSelect>
+        
+        <MudSelect @bind-Value="_selectedSeverity"
+                   Label="Log Level"
+                   Variant="Variant.Outlined"
+                   Margin="Margin.Dense"
+                   Clearable="true"
+                   Style="min-width: 200px;"
+                   T="string">
+            @foreach (var severity in _severityLevels)
+            {
+                <MudSelectItem Value="@severity">
+                    <MudChip T="string" 
+                             Size="Size.Small" 
+                             Style="@($"background-color: {GetSeverityColor(severity)}; color: white;")" 
+                             Text="@severity" />
+                </MudSelectItem>
+            }
+        </MudSelect>
+        
+        <MudDateRangePicker @bind-DateRange="_dateRange" 
+                            Clearable="true"
+                            Disabled="@IsTraceIdSearch"
                             Variant="Variant.Outlined"
                             PickerVariant="PickerVariant.Dialog"
                             Margin="Margin.Dense"
-                            PlaceholderStart="Start Date"
-                            PlaceholderEnd="End Date"/>
-    </div>
-    <MudButton Variant="Variant.Filled"
-               Color="Color.Primary"
-               OnClick="SearchLogs"
-               StartIcon="@Icons.Material.Filled.Search">
-        Search
-    </MudButton>
+                            PlaceholderStart="Start Date (Optional for Trace ID)"
+                            PlaceholderEnd="End Date (Optional for Trace ID)"/>
+        
+        <MudButton Variant="Variant.Filled"
+                   Color="Color.Primary"
+                   OnClick="SearchLogs"
+                   StartIcon="@Icons.Material.Filled.Search">
+            Search
+        </MudButton>
+    </MudStack>
+    
+    <!-- Row 2: Text Search Field -->
+    <MudStack Row="true" Spacing="1" AlignItems="AlignItems.Center">
+        <MudTextField @bind-Value="_searchText"
+                      Placeholder='Search: Trace ID OR "error text" OR key=value OR key:value'
+                      Adornment="Adornment.Start"
+                      AdornmentIcon="@Icons.Material.Filled.Search"
+                      Variant="Variant.Outlined"
+                      Margin="Margin.Dense"
+                      HelperText="Examples: abc123def456... (Trace ID) | 'database error' | http.status_code=500"
+                      Style="flex: 1;"/>
+        @if (IsTraceIdSearch)
+        {
+            <MudChip T="string"
+                     Size="Size.Small" 
+                     Color="Color.Info" 
+                     Icon="@Icons.Material.Filled.Link"
+                     Text="Trace ID Search"
+                     Style="margin-bottom: 20px;"/>
+        }
+        <MudIconButton Icon="@Icons.Material.Filled.HelpOutline"
+                       Color="Color.Info"
+                       Size="Size.Small"
+                       OnClick="@(() => _showSearchHelp = true)"
+                       Style="margin-top: 4px;"/>
+    </MudStack>
 </MudStack>
+
+<!-- Search Help Dialog -->
+<MudDialog @bind-IsVisible="_showSearchHelp" Options="new DialogOptions { MaxWidth = MaxWidth.Medium }">
+    <TitleContent>
+        <MudText Typo="Typo.h6">
+            <MudIcon Icon="@Icons.Material.Filled.Help" Class="mr-2"/> Search Syntax Guide
+        </MudText>
+    </TitleContent>
+    <DialogContent>
+        <MudText Typo="Typo.subtitle2" Class="mb-2">Search Types</MudText>
+        <MudSimpleTable Dense="true" Style="margin-bottom: 16px;">
+            <thead>
+                <tr>
+                    <th>Type</th>
+                    <th>Example</th>
+                    <th>Description</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td><strong>Trace ID</strong></td>
+                    <td><code>abc123def456...</code></td>
+                    <td>Search by trace ID (32 hex chars, date range not required)</td>
+                </tr>
+                <tr>
+                    <td><strong>Free Text</strong></td>
+                    <td><code>"database error"</code></td>
+                    <td>Searches in log message body</td>
+                </tr>
+                <tr>
+                    <td><strong>Exact Match</strong></td>
+                    <td><code>http.status_code=500</code></td>
+                    <td>Exact attribute value match</td>
+                </tr>
+                <tr>
+                    <td><strong>Contains</strong></td>
+                    <td><code>url:'/api/users'</code></td>
+                    <td>Attribute value contains text</td>
+                </tr>
+                <tr>
+                    <td><strong>Multiple (AND)</strong></td>
+                    <td><code>"error" AND status_code=500</code></td>
+                    <td>All conditions must match</td>
+                </tr>
+            </tbody>
+        </MudSimpleTable>
+        
+        <MudText Typo="Typo.subtitle2" Class="mb-2">Examples</MudText>
+        <div style="padding-left: 16px;">
+            <MudStack Spacing="2">
+                <MudStack Row="true" Spacing="1">
+                    <MudIcon Icon="@Icons.Material.Filled.Search" Size="Size.Small" Color="Color.Primary"/>
+                    <code>a1b2c3d4e5f6...</code> - Find all logs for a specific trace ID
+                </MudStack>
+                <MudStack Row="true" Spacing="1">
+                    <MudIcon Icon="@Icons.Material.Filled.Search" Size="Size.Small" Color="Color.Primary"/>
+                    <code>database timeout</code> - Find logs with "database timeout" in message
+                </MudStack>
+                <MudStack Row="true" Spacing="1">
+                    <MudIcon Icon="@Icons.Material.Filled.Search" Size="Size.Small" Color="Color.Primary"/>
+                    <code>http.status_code=500</code> - Find logs with status code exactly 500
+                </MudStack>
+                <MudStack Row="true" Spacing="1">
+                    <MudIcon Icon="@Icons.Material.Filled.Search" Size="Size.Small" Color="Color.Primary"/>
+                    <code>thread.id:5</code> - Find logs where thread.id contains "5"
+                </MudStack>
+                <MudStack Row="true" Spacing="1">
+                    <MudIcon Icon="@Icons.Material.Filled.Search" Size="Size.Small" Color="Color.Primary"/>
+                    <code>"connection failed" AND service.name=api-gateway</code> - Combine conditions
+                </MudStack>
+            </MudStack>
+        </div>
+        
+        <MudAlert Severity="Severity.Info" Class="mt-3">
+            <strong>Tip:</strong> Attribute searches look in Log Attributes, Resource Attributes, and Scope Attributes.
+        </MudAlert>
+        
+        <MudAlert Severity="Severity.Success" Class="mt-2">
+            <strong>Trace ID Search:</strong> When searching by trace ID (exactly 32 hex characters), 
+            the date range is optional and will be ignored. This allows you to find logs across any time period.
+        </MudAlert>
+    </DialogContent>
+    <DialogActions>
+        <MudButton Color="Color.Primary" Variant="Variant.Filled" OnClick="@(() => _showSearchHelp = false)">Got it!</MudButton>
+    </DialogActions>
+</MudDialog>
+
 <MudChart ChartType="ChartType.StackedBar"
           ChartSeries="@_chartSeries"
           XAxisLabels="@_chartXAxisLabels"
@@ -35,11 +177,12 @@
 <MudDataGrid T="LogRecordModel"
              Items="@_logs"
              Loading="@_dataLoading"
-             Height="calc(100vh - 24rem);"
+             Height="calc(100vh - 28rem);"
              FixedHeader="true"
              Virtualize="true"
              Dense="true"
-             ColumnResizeMode="ResizeMode.Container">
+             ColumnResizeMode="ResizeMode.Container"
+             Class="compact-logs-grid">
     <Columns>
         <HierarchyColumn T="LogRecordModel" HeaderClass="mud-theme-secondary" />
         <TemplateColumn Title="Timestamp" HeaderClass="mud-theme-secondary">
@@ -60,33 +203,209 @@
         <PropertyColumn Property="x => x.BodyValue" Title="Message" Sortable="false" HeaderClass="mud-theme-secondary"/>
     </Columns>
     <ChildRowContent>
-        <MudCard>
-            <MudCardHeader Style="@($"background-color: {Colors.BlueGray.Lighten5};")" >
-                <MudGrid>
-                    <MudItem>
-                        <MudText Typo="Typo.body2">Trace Id:</MudText>
-                        <MudText Typo="Typo.body2">Span Id</MudText>
-                        <MudText Typo="Typo.body2">Scope:</MudText>
-                    </MudItem>
-                    <MudItem>
-                        <MudText Typo="Typo.body2">@context.Item.TraceIdHex</MudText>
-                        <MudText Typo="Typo.body2">@context.Item.SpanIdHex</MudText>
-                        <MudText Typo="Typo.body2">@context.Item.InstrumentationScope?.Name</MudText>
-                    </MudItem>
-                </MudGrid>
-            </MudCardHeader>
-            <MudCardContent>
-                <MudDataGrid Items="@GetDetails(context.Item)" TItem="object" HeaderClass="mud-theme-tertiary">
-                    <Columns>
-                        <PropertyColumn Property="x => x.Key" Title="Key" HeaderClass="mud-theme-tertiary" />
-                        <PropertyColumn Property="x => x.Value" Title="Value" HeaderClass="mud-theme-tertiary"/>
-                    </Columns>
-                </MudDataGrid>
+        <MudCard Elevation="0">
+            <MudCardContent Style="@($"background-color: #f9f9f9; border-left: 3px solid {GetSeverityColor(context.Item.SeverityText)}; padding: 16px;")">
+                
+                <!-- Log Context Section -->
+                <MudText Typo="Typo.subtitle2" Class="mb-2" Style="font-weight: 600;">
+                    Log Context
+                </MudText>
+                <div style="display: flex; gap: 40px; margin-bottom: 16px;">
+                    <MudStack Spacing="1">
+                        @if (!string.IsNullOrEmpty(context.Item.TraceIdHex))
+                        {
+                            <div>
+                                <MudText Typo="Typo.caption" Style="color: #666; display: inline;">Trace ID:</MudText>
+                                <MudLink Href="@($"/traces?traceId={context.Item.TraceIdHex}")" 
+                                         Typo="Typo.body2" 
+                                         Style="font-family: monospace; font-size: 0.85rem; margin-left: 8px;">
+                                    @context.Item.TraceIdHex
+                                </MudLink>
+                            </div>
+                        }
+                        @if (!string.IsNullOrEmpty(context.Item.SpanIdHex))
+                        {
+                            <div>
+                                <MudText Typo="Typo.caption" Style="color: #666; display: inline;">Span ID:</MudText>
+                                <MudText Typo="Typo.body2" Style="font-family: monospace; font-size: 0.85rem; display: inline; margin-left: 8px;">
+                                    @context.Item.SpanIdHex
+                                </MudText>
+                            </div>
+                        }
+                        @if (context.Item.TimeUnixNano.HasValue)
+                        {
+                            <div>
+                                <MudText Typo="Typo.caption" Style="color: #666; display: inline;">Timestamp:</MudText>
+                                <MudText Typo="Typo.body2" Style="font-family: monospace; display: inline; margin-left: 8px;">
+                                    @FormatUnixNanoToDateTime(context.Item.TimeUnixNano.Value)
+                                </MudText>
+                            </div>
+                        }
+                    </MudStack>
+                    
+                    @if (context.Item.InstrumentationScope != null)
+                    {
+                        <MudStack Spacing="1">
+                            <div>
+                                <MudText Typo="Typo.caption" Style="color: #666; display: inline;">Service:</MudText>
+                                <MudText Typo="Typo.body2" Style="display: inline; margin-left: 8px;">
+                                    @context.Item.Resource?.Attributes["service.name"]
+                                </MudText>
+                            </div>
+                            <div>
+                                <MudText Typo="Typo.caption" Style="color: #666; display: inline;">Scope:</MudText>
+                                <MudText Typo="Typo.body2" Style="display: inline; margin-left: 8px;">
+                                    @context.Item.InstrumentationScope.Name
+                                </MudText>
+                            </div>
+                            @if (!string.IsNullOrEmpty(context.Item.InstrumentationScope.Version))
+                            {
+                                <div>
+                                    <MudText Typo="Typo.caption" Style="color: #666; display: inline;">Version:</MudText>
+                                    <MudText Typo="Typo.body2" Style="display: inline; margin-left: 8px;">
+                                        @context.Item.InstrumentationScope.Version
+                                    </MudText>
+                                </div>
+                            }
+                        </MudStack>
+                    }
+                </div>
+
+                <!-- Log Attributes Section -->
+                @if (context.Item.Attributes != null && context.Item.Attributes.Any())
+                {
+                    <MudDivider Class="my-3" />
+                    <MudText Typo="Typo.subtitle2" Class="mb-2" Style="font-weight: 600;">
+                        Attributes
+                    </MudText>
+                    <MudSimpleTable Dense="true" Style="font-size: 0.85rem; background-color: white;">
+                        <tbody>
+                            @foreach (var attr in context.Item.Attributes.OrderBy(a => a.Key))
+                            {
+                                <tr>
+                                    <td style="font-family: monospace; color: #666; font-weight: 500; padding: 6px 12px;">
+                                        @attr.Key
+                                    </td>
+                                    <td style="padding: 6px 12px;">
+                                        @FormatAttributeValue(attr.Value)
+                                    </td>
+                                </tr>
+                            }
+                        </tbody>
+                    </MudSimpleTable>
+                }
+
             </MudCardContent>
         </MudCard>
     </ChildRowContent>
     <PagerContent>
         <MudDataGridPager T="LogRecordModel"
-                          PageSizeOptions="new int[] { 10, 25, 50, 100 }"/>
+                          PageSizeOptions="new int[] { 100, 250, 500, 1000 }"/>
     </PagerContent>
 </MudDataGrid>
+
+<style>
+    /* CRITICAL FIX: Force fixed table layout ONLY on the main data grid, not child tables */
+    .compact-logs-grid > .mud-table-container > .mud-table-root {
+        table-layout: fixed !important;
+        width: 100% !important;
+    }
+    
+    /* Set explicit widths for main grid columns */
+    .compact-logs-grid > .mud-table-container > .mud-table-root > thead > tr > th:nth-child(1) {
+        width: 50px !important; /* Hierarchy expand/collapse button */
+    }
+    
+    .compact-logs-grid > .mud-table-container > .mud-table-root > thead > tr > th:nth-child(2) {
+        width: 200px !important; /* Timestamp */
+    }
+    
+    .compact-logs-grid > .mud-table-container > .mud-table-root > thead > tr > th:nth-child(3) {
+        width: 130px !important; /* Level */
+    }
+    
+    .compact-logs-grid > .mud-table-container > .mud-table-root > thead > tr > th:nth-child(4) {
+        width: auto !important; /* Message - takes remaining space */
+    }
+    
+    /* Reduce cell padding to make rows more compact */
+    .mud-table-cell {
+        padding-top: 4px !important;
+        padding-bottom: 4px !important;
+        line-height: 1.3 !important;
+    }
+    
+    /* Truncate long message text with ellipsis in the main grid ONLY */
+    .compact-logs-grid > .mud-table-container > .mud-table-root > tbody > tr:not(.mud-table-row-group-footer) > td:nth-child(4) {
+        overflow: hidden !important;
+        text-overflow: ellipsis !important;
+        white-space: nowrap !important;
+    }
+    
+    /* Make severity chips smaller */
+    .mud-chip.mud-chip-size-small {
+        height: 22px !important;
+        font-size: 0.75rem !important;
+    }
+    
+    /* Ensure expanded child content row displays properly */
+    .compact-logs-grid .mud-table-row-group-footer td {
+        padding: 8px !important;
+    }
+    
+    /* Constrain child content card to grid width */
+    .compact-logs-grid .mud-table-row-group-footer .mud-card {
+        max-width: 100% !important;
+        box-sizing: border-box !important;
+    }
+    
+    /* IMPORTANT: Child attribute tables use AUTO layout for proper column sizing */
+    .compact-logs-grid .mud-simple-table table {
+        table-layout: auto !important;
+        width: 100% !important;
+    }
+    
+    /* Key column: Let it size based on content, prevent wrapping */
+    .compact-logs-grid .mud-simple-table td:first-child {
+        width: 1% !important; /* Trick: makes it as narrow as possible while fitting content */
+        white-space: nowrap !important; /* Prevent wrapping */
+        font-family: monospace !important;
+        color: #666 !important;
+        font-weight: 500 !important;
+        padding: 6px 12px !important;
+    }
+    
+    /* Value column takes remaining space and wraps long content */
+    .compact-logs-grid .mud-simple-table td:last-child {
+        width: 99% !important; /* Takes all remaining space */
+        word-wrap: break-word !important;
+        word-break: break-word !important;
+        white-space: pre-wrap !important;
+        overflow-wrap: break-word !important;
+        font-family: 'Courier New', monospace !important;
+        font-size: 0.85rem !important;
+        padding: 6px 12px !important;
+    }
+
+    /* Prevent attribute tables from expanding card width */
+    .compact-logs-grid .mud-simple-table {
+        max-width: 100% !important;
+        overflow-x: auto !important;
+    }
+
+    /* Constrain the entire card content to prevent horizontal expansion */
+    .compact-logs-grid .mud-card-content {
+        max-width: 100% !important;
+        overflow-x: auto !important;
+    }
+
+    /* Remove default grid spacing that might push content */
+    .compact-logs-grid .mud-grid {
+        margin: 0 !important;
+    }
+
+    /* Ensure MudItems don't have extra padding */
+    .compact-logs-grid .mud-grid .mud-grid-item {
+        padding: 0 !important;
+    }
+</style>

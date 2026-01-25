@@ -291,14 +291,9 @@ public class TraceRepository : ITraceRepository
 
             var spans = await _context.Spans
                 .Include(s => s.Resource)
-                    .ThenInclude(r => r.Attributes)
                 .Include(s => s.Scope)
-                    .ThenInclude(sc => sc.Attributes)
-                .Include(s => s.Attributes)
                 .Include(s => s.Events)
-                    .ThenInclude(e => e.Attributes)
                 .Include(s => s.Links)
-                    .ThenInclude(l => l.Attributes)
                 .Where(s => s.TraceId == traceId)
                 .OrderBy(s => s.StartTimeUnixNano)
                 .ToListAsync(cancellationToken);
@@ -329,14 +324,9 @@ public class TraceRepository : ITraceRepository
 
             var span = await _context.Spans
                 .Include(s => s.Resource)
-                    .ThenInclude(r => r.Attributes)
                 .Include(s => s.Scope)
-                    .ThenInclude(sc => sc.Attributes)
-                .Include(s => s.Attributes)
                 .Include(s => s.Events)
-                    .ThenInclude(e => e.Attributes)
                 .Include(s => s.Links)
-                    .ThenInclude(l => l.Attributes)
                 .FirstOrDefaultAsync(s => s.TraceId == traceId && s.SpanId == spanId, cancellationToken);
             
             return ConvertToSpanModel(span);
@@ -365,14 +355,9 @@ public class TraceRepository : ITraceRepository
 
             var spans = await _context.Spans
                 .Include(s => s.Resource)
-                    .ThenInclude(r => r.Attributes)
                 .Include(s => s.Scope)
-                    .ThenInclude(sc => sc.Attributes)
-                .Include(s => s.Attributes)
                 .Include(s => s.Events)
-                    .ThenInclude(e => e.Attributes)
                 .Include(s => s.Links)
-                    .ThenInclude(l => l.Attributes)
                 .Where(s => s.TraceId == traceId && s.ParentSpanId == parentSpanId)
                 .OrderBy(s => s.StartTimeUnixNano)
                 .ToListAsync(cancellationToken);
@@ -400,26 +385,49 @@ public class TraceRepository : ITraceRepository
             var startTimeNano = OpenTelemetryDbContextExtensions.DateTimeToUnixNano(startTime);
             var endTimeNano = OpenTelemetryDbContextExtensions.DateTimeToUnixNano(endTime);
 
-            var traces = await _context.Spans
+            // First, get raw data from database including Resource.Attributes
+            var rawData = await _context.Spans
+                .Include(s => s.Resource)
                 .Where(s => s.StartTimeUnixNano >= startTimeNano && s.StartTimeUnixNano <= endTimeNano)
+                .Select(s => new
+                {
+                    s.TraceId,
+                    s.StartTimeUnixNano,
+                    s.EndTimeUnixNano,
+                    s.StatusCode,
+                    ResourceAttributes = s.Resource.Attributes
+                })
+                .ToListAsync(cancellationToken);
+
+            // Group and extract service name from the earliest span (root span)
+            var rawTraces = rawData
                 .GroupBy(s => s.TraceId)
-                .Select(g => new TraceInfo
+                .Select(g => new
                 {
                     TraceIdHex = g.Key,
                     SpanCount = g.Count(),
-                    TraceStartTime = OpenTelemetryDbContextExtensions.UnixNanoToDateTime(g.Min(s => s.StartTimeUnixNano)),
-                    TraceEndTime = OpenTelemetryDbContextExtensions.UnixNanoToDateTime(g.Max(s => s.EndTimeUnixNano)),
-                    HasErrors = g.Any(s => s.StatusCode == SpanStatusCode.ERROR)
+                    MinStartTimeNano = g.Min(s => s.StartTimeUnixNano),
+                    MaxEndTimeNano = g.Max(s => s.EndTimeUnixNano),
+                    HasErrors = g.Any(s => s.StatusCode == SpanStatusCode.ERROR),
+                    ServiceName = ExtractServiceName(g.OrderBy(s => s.StartTimeUnixNano)
+                                                      .FirstOrDefault()?.ResourceAttributes)
                 })
-                .OrderByDescending(t => t.TraceStartTime)
+                .OrderByDescending(t => t.MinStartTimeNano)
                 .Take(limit)
-                .ToListAsync(cancellationToken);
+                .ToList();
 
-            // Calculate duration for each trace
-            foreach (var trace in traces)
+            // Then convert in memory
+            var traces = rawTraces.Select(t => new TraceInfo
             {
-                trace.TraceDuration = trace.TraceEndTime - trace.TraceStartTime;
-            }
+                TraceIdHex = t.TraceIdHex,
+                SpanCount = t.SpanCount,
+                TraceStartTime = OpenTelemetryDbContextExtensions.UnixNanoToDateTime(t.MinStartTimeNano),
+                TraceEndTime = OpenTelemetryDbContextExtensions.UnixNanoToDateTime(t.MaxEndTimeNano),
+                HasErrors = t.HasErrors,
+                ServiceName = t.ServiceName,
+                TraceDuration = OpenTelemetryDbContextExtensions.UnixNanoToDateTime(t.MaxEndTimeNano) 
+                              - OpenTelemetryDbContextExtensions.UnixNanoToDateTime(t.MinStartTimeNano)
+            }).ToList();
 
             return traces;
         }
@@ -440,8 +448,10 @@ public class TraceRepository : ITraceRepository
 
         try
         {
+            // Start with base query and include Resource
             var query = _context.Spans
-                .Where(s => s.Resource.Attributes != null && s.Resource.Attributes.Any(a => a.Key == "service.name" && a.Value.ToString() == serviceName));
+                .Include(s => s.Resource)
+                .AsQueryable();
 
             if (startTime.HasValue)
             {
@@ -455,25 +465,52 @@ public class TraceRepository : ITraceRepository
                 query = query.Where(s => s.StartTimeUnixNano <= endTimeNano);
             }
 
-            var traces = await query
+            // First, get raw data from database with Resource.Attributes
+            var rawData = await query
+                .Select(s => new
+                {
+                    s.TraceId,
+                    s.StartTimeUnixNano,
+                    s.EndTimeUnixNano,
+                    s.StatusCode,
+                    ResourceAttributes = s.Resource.Attributes
+                })
+                .ToListAsync(cancellationToken);
+
+            // Then filter by service name in memory
+            var filteredSpans = rawData
+                .Where(s => s.ResourceAttributes != null && 
+                           s.ResourceAttributes.ContainsKey("service.name") && 
+                           s.ResourceAttributes["service.name"]?.ToString() == serviceName)
+                .ToList();
+
+            // Group by TraceId
+            var rawTraces = filteredSpans
                 .GroupBy(s => s.TraceId)
-                .Select(g => new TraceInfo
+                .Select(g => new
                 {
                     TraceIdHex = g.Key,
                     SpanCount = g.Count(),
-                    TraceStartTime = OpenTelemetryDbContextExtensions.UnixNanoToDateTime(g.Min(s => s.StartTimeUnixNano)),
-                    TraceEndTime = OpenTelemetryDbContextExtensions.UnixNanoToDateTime(g.Max(s => s.EndTimeUnixNano)),
-                    HasErrors = g.Any(s => s.StatusCode == SpanStatusCode.ERROR),
-                    ServiceName = serviceName
+                    MinStartTimeNano = g.Min(s => s.StartTimeUnixNano),
+                    MaxEndTimeNano = g.Max(s => s.EndTimeUnixNano),
+                    HasErrors = g.Any(s => s.StatusCode == SpanStatusCode.ERROR)
                 })
-                .OrderByDescending(t => t.TraceStartTime)
+                .OrderByDescending(t => t.MinStartTimeNano)
                 .Take(limit)
-                .ToListAsync(cancellationToken);
+                .ToList();
 
-            foreach (var trace in traces)
+            // Then convert in memory
+            var traces = rawTraces.Select(t => new TraceInfo
             {
-                trace.TraceDuration = trace.TraceEndTime - trace.TraceStartTime;
-            }
+                TraceIdHex = t.TraceIdHex,
+                SpanCount = t.SpanCount,
+                TraceStartTime = OpenTelemetryDbContextExtensions.UnixNanoToDateTime(t.MinStartTimeNano),
+                TraceEndTime = OpenTelemetryDbContextExtensions.UnixNanoToDateTime(t.MaxEndTimeNano),
+                HasErrors = t.HasErrors,
+                ServiceName = serviceName,
+                TraceDuration = OpenTelemetryDbContextExtensions.UnixNanoToDateTime(t.MaxEndTimeNano) 
+                              - OpenTelemetryDbContextExtensions.UnixNanoToDateTime(t.MinStartTimeNano)
+            }).ToList();
 
             return traces;
         }
@@ -491,7 +528,9 @@ public class TraceRepository : ITraceRepository
     {
         try
         {
-            var query = _context.Spans.Where(s => s.StatusCode == SpanStatusCode.ERROR);
+            var query = _context.Spans
+                .Include(s => s.Resource)
+                .Where(s => s.StatusCode == SpanStatusCode.ERROR);
 
             if (startTime.HasValue)
             {
@@ -505,24 +544,45 @@ public class TraceRepository : ITraceRepository
                 query = query.Where(s => s.StartTimeUnixNano <= endTimeNano);
             }
 
-            var traces = await query
+            // First, get raw data from database
+            var rawData = await query
+                .Select(s => new
+                {
+                    s.TraceId,
+                    s.StartTimeUnixNano,
+                    s.EndTimeUnixNano,
+                    ResourceAttributes = s.Resource.Attributes
+                })
+                .ToListAsync(cancellationToken);
+
+            // Group and extract service name from the earliest span (root span)
+            var rawTraces = rawData
                 .GroupBy(s => s.TraceId)
-                .Select(g => new TraceInfo
+                .Select(g => new
                 {
                     TraceIdHex = g.Key,
                     SpanCount = g.Count(),
-                    TraceStartTime = OpenTelemetryDbContextExtensions.UnixNanoToDateTime(g.Min(s => s.StartTimeUnixNano)),
-                    TraceEndTime = OpenTelemetryDbContextExtensions.UnixNanoToDateTime(g.Max(s => s.EndTimeUnixNano)),
-                    HasErrors = true
+                    MinStartTimeNano = g.Min(s => s.StartTimeUnixNano),
+                    MaxEndTimeNano = g.Max(s => s.EndTimeUnixNano),
+                    ServiceName = ExtractServiceName(g.OrderBy(s => s.StartTimeUnixNano)
+                                                      .FirstOrDefault()?.ResourceAttributes)
                 })
-                .OrderByDescending(t => t.TraceStartTime)
+                .OrderByDescending(t => t.MinStartTimeNano)
                 .Take(limit)
-                .ToListAsync(cancellationToken);
+                .ToList();
 
-            foreach (var trace in traces)
+            // Then convert in memory
+            var traces = rawTraces.Select(t => new TraceInfo
             {
-                trace.TraceDuration = trace.TraceEndTime - trace.TraceStartTime;
-            }
+                TraceIdHex = t.TraceIdHex,
+                SpanCount = t.SpanCount,
+                TraceStartTime = OpenTelemetryDbContextExtensions.UnixNanoToDateTime(t.MinStartTimeNano),
+                TraceEndTime = OpenTelemetryDbContextExtensions.UnixNanoToDateTime(t.MaxEndTimeNano),
+                HasErrors = true,
+                ServiceName = t.ServiceName,
+                TraceDuration = OpenTelemetryDbContextExtensions.UnixNanoToDateTime(t.MaxEndTimeNano) 
+                              - OpenTelemetryDbContextExtensions.UnixNanoToDateTime(t.MinStartTimeNano)
+            }).ToList();
 
             return traces;
         }
@@ -542,7 +602,9 @@ public class TraceRepository : ITraceRepository
         {
             var minDurationNano = (long)(minDuration.TotalMilliseconds * 1_000_000);
             
-            var query = _context.Spans.AsQueryable();
+            var query = _context.Spans
+                .Include(s => s.Resource)
+                .AsQueryable();
 
             if (startTime.HasValue)
             {
@@ -556,25 +618,49 @@ public class TraceRepository : ITraceRepository
                 query = query.Where(s => s.StartTimeUnixNano <= endTimeNano);
             }
 
-            var traces = await query
+            // First, get raw data from database
+            var rawData = await query
+                .Select(s => new
+                {
+                    s.TraceId,
+                    s.StartTimeUnixNano,
+                    s.EndTimeUnixNano,
+                    s.StatusCode,
+                    ResourceAttributes = s.Resource.Attributes
+                })
+                .ToListAsync(cancellationToken);
+
+            // Group and extract service name from the earliest span (root span)
+            var rawTraces = rawData
                 .GroupBy(s => s.TraceId)
-                .Where(g => g.Max(s => s.EndTimeUnixNano) - g.Min(s => s.StartTimeUnixNano) >= minDurationNano)
-                .Select(g => new TraceInfo
+                .Select(g => new
                 {
                     TraceIdHex = g.Key,
                     SpanCount = g.Count(),
-                    TraceStartTime = OpenTelemetryDbContextExtensions.UnixNanoToDateTime(g.Min(s => s.StartTimeUnixNano)),
-                    TraceEndTime = OpenTelemetryDbContextExtensions.UnixNanoToDateTime(g.Max(s => s.EndTimeUnixNano)),
-                    HasErrors = g.Any(s => s.StatusCode == SpanStatusCode.ERROR)
+                    MinStartTimeNano = g.Min(s => s.StartTimeUnixNano),
+                    MaxEndTimeNano = g.Max(s => s.EndTimeUnixNano),
+                    HasErrors = g.Any(s => s.StatusCode == SpanStatusCode.ERROR),
+                    DurationNano = g.Max(s => s.EndTimeUnixNano) - g.Min(s => s.StartTimeUnixNano),
+                    ServiceName = ExtractServiceName(g.OrderBy(s => s.StartTimeUnixNano)
+                                                      .FirstOrDefault()?.ResourceAttributes)
                 })
-                .OrderByDescending(t => t.TraceDuration)
+                .Where(t => t.DurationNano >= minDurationNano)
+                .OrderByDescending(t => t.DurationNano)
                 .Take(limit)
-                .ToListAsync(cancellationToken);
+                .ToList();
 
-            foreach (var trace in traces)
+            // Then convert in memory
+            var traces = rawTraces.Select(t => new TraceInfo
             {
-                trace.TraceDuration = trace.TraceEndTime - trace.TraceStartTime;
-            }
+                TraceIdHex = t.TraceIdHex,
+                SpanCount = t.SpanCount,
+                TraceStartTime = OpenTelemetryDbContextExtensions.UnixNanoToDateTime(t.MinStartTimeNano),
+                TraceEndTime = OpenTelemetryDbContextExtensions.UnixNanoToDateTime(t.MaxEndTimeNano),
+                HasErrors = t.HasErrors,
+                ServiceName = t.ServiceName,
+                TraceDuration = OpenTelemetryDbContextExtensions.UnixNanoToDateTime(t.MaxEndTimeNano) 
+                              - OpenTelemetryDbContextExtensions.UnixNanoToDateTime(t.MinStartTimeNano)
+            }).ToList();
 
             return traces;
         }
@@ -615,24 +701,36 @@ public async Task<List<ServiceDependency>> GetServiceDependenciesAsync(DateTime?
             query = query.Where(x => x.child.StartTimeUnixNano <= endTimeNano);
         }
 
-        // Extract service names and filter for cross-service calls
-        var dependencies = await query
+        // First, get raw data from database (without accessing Attributes dictionary)
+        var rawDependencies = await query
             .Select(x => new
             {
-                ParentService = x.parentRes.Attributes != null && x.parentRes.Attributes.ContainsKey("service.name")
-                    ? x.parentRes.Attributes["service.name"].ToString()
-                    : null,
-                ChildService = x.childRes.Attributes != null && x.childRes.Attributes.ContainsKey("service.name")
-                    ? x.childRes.Attributes["service.name"].ToString()
-                    : null,
+                ParentResourceAttributes = x.parentRes.Attributes,
+                ChildResourceAttributes = x.childRes.Attributes,
                 x.child.Kind,
                 x.child.StatusCode,
                 DurationNano = x.child.EndTimeUnixNano - x.child.StartTimeUnixNano
             })
+            .ToListAsync(cancellationToken);
+
+        // Then extract service names and filter in memory
+        var dependencies = rawDependencies
+            .Select(x => new
+            {
+                ParentService = x.ParentResourceAttributes != null && x.ParentResourceAttributes.ContainsKey("service.name")
+                    ? x.ParentResourceAttributes["service.name"]?.ToString()
+                    : null,
+                ChildService = x.ChildResourceAttributes != null && x.ChildResourceAttributes.ContainsKey("service.name")
+                    ? x.ChildResourceAttributes["service.name"]?.ToString()
+                    : null,
+                x.Kind,
+                x.StatusCode,
+                x.DurationNano
+            })
             .Where(x => x.ParentService != null && 
                        x.ChildService != null && 
                        x.ParentService != x.ChildService) // Only cross-service calls
-            .ToListAsync(cancellationToken);
+            .ToList();
 
         // Group and aggregate the results
         var serviceDependencies = dependencies
@@ -674,7 +772,8 @@ public async Task<List<ServiceDependency>> GetServiceDependenciesAsync(DateTime?
         try
         {
             var query = _context.Spans
-                .Where(s => s.Resource.Attributes == null ? false : s.Resource.Attributes.Any(a => a.Key == "service.name" && a.Value.ToString() == serviceName));
+                .Include(s => s.Resource)
+                .AsQueryable();
 
             if (startTime.HasValue)
             {
@@ -688,10 +787,22 @@ public async Task<List<ServiceDependency>> GetServiceDependenciesAsync(DateTime?
                 query = query.Where(s => s.StartTimeUnixNano <= endTimeNano);
             }
 
-            var counts = await query
+            // First, get raw data from database
+            var rawData = await query
+                .Select(s => new
+                {
+                    s.Name,
+                    ResourceAttributes = s.Resource.Attributes
+                })
+                .ToListAsync(cancellationToken);
+
+            // Then filter by service name in memory and count operations
+            var counts = rawData
+                .Where(s => s.ResourceAttributes != null && 
+                           s.ResourceAttributes.ContainsKey("service.name") && 
+                           s.ResourceAttributes["service.name"]?.ToString() == serviceName)
                 .GroupBy(s => s.Name)
-                .Select(g => new { Operation = g.Key, Count = g.Count() })
-                .ToDictionaryAsync(x => x.Operation, x => x.Count, cancellationToken);
+                .ToDictionary(g => g.Key, g => g.Count());
 
             return counts;
         }
@@ -713,7 +824,8 @@ public async Task<List<ServiceDependency>> GetServiceDependenciesAsync(DateTime?
         try
         {
             var query = _context.Spans
-                .Where(s => s.Resource.Attributes == null ? false : s.Resource.Attributes.Any(a => a.Key == "service.name" && a.Value.ToString() == serviceName));
+                .Include(s => s.Resource)
+                .AsQueryable();
 
             if (startTime.HasValue)
             {
@@ -727,14 +839,27 @@ public async Task<List<ServiceDependency>> GetServiceDependenciesAsync(DateTime?
                 query = query.Where(s => s.StartTimeUnixNano <= endTimeNano);
             }
 
-            var latencies = await query
-                .GroupBy(s => s.Name)
-                .Select(g => new 
-                { 
-                    Operation = g.Key, 
-                    AvgLatencyMs = g.Average(s => s.EndTimeUnixNano - s.StartTimeUnixNano) / 1_000_000.0 
+            // First, get raw data from database
+            var rawData = await query
+                .Select(s => new
+                {
+                    s.Name,
+                    s.StartTimeUnixNano,
+                    s.EndTimeUnixNano,
+                    ResourceAttributes = s.Resource.Attributes
                 })
-                .ToDictionaryAsync(x => x.Operation, x => x.AvgLatencyMs, cancellationToken);
+                .ToListAsync(cancellationToken);
+
+            // Then filter by service name in memory and calculate average latencies
+            var latencies = rawData
+                .Where(s => s.ResourceAttributes != null && 
+                           s.ResourceAttributes.ContainsKey("service.name") && 
+                           s.ResourceAttributes["service.name"]?.ToString() == serviceName)
+                .GroupBy(s => s.Name)
+                .ToDictionary(
+                    g => g.Key, 
+                    g => g.Average(s => s.EndTimeUnixNano - s.StartTimeUnixNano) / 1_000_000.0
+                );
 
             return latencies;
         }
@@ -853,7 +978,60 @@ public async Task<List<ServiceDependency>> GetServiceDependenciesAsync(DateTime?
             return null;
         }
         
-        var model = new SpanModel();
+        var model = new SpanModel
+        {
+            TraceIdHex = span.TraceId,
+            SpanIdHex = span.SpanId,
+            ParentSpanIdHex = span.ParentSpanId,
+            Name = span.Name,
+            Kind = span.Kind,
+            StartTimeUnixNano = span.StartTimeUnixNano,
+            EndTimeUnixNano = span.EndTimeUnixNano,
+            DroppedAttributesCount = span.DroppedAttributesCount,
+            DroppedEventsCount = span.DroppedEventsCount,
+            DroppedLinksCount = span.DroppedLinksCount,
+            TraceState = span.TraceState,
+            StatusCode = span.StatusCode,
+            StatusMessage = span.StatusMessage,
+            Attributes = span.Attributes,
+            Events = span.Events?.Select(e => new SpanEventModel
+            {
+                Name = e.Name,
+                TimeUnixNano = e.TimeUnixNano,
+                DroppedAttributesCount = e.DroppedAttributesCount,
+                Attributes = e.Attributes
+            }).ToList() ?? new List<SpanEventModel>(),
+            Links = span.Links?.Select(l => new SpanLinkModel
+            {
+                LinkedTraceIdHex = l.LinkedTraceId,
+                LinkedSpanIdHex = l.LinkedSpanId,
+                TraceState = l.TraceState,
+                DroppedAttributesCount = l.DroppedAttributesCount,
+                Attributes = l.Attributes
+            }).ToList() ?? new List<SpanLinkModel>()
+        };
+
+        // Map resource if available
+        if (span.Resource != null)
+        {
+            model.Resource = new ResourceModel
+            {
+                SchemaUrl = span.Resource.SchemaUrl,
+                Attributes = span.Resource.Attributes ?? new Dictionary<string, object>()
+            };
+        }
+
+        // Map instrumentation scope if available
+        if (span.Scope != null)
+        {
+            model.InstrumentationScope = new InstrumentationScopeModel
+            {
+                Name = span.Scope.Name,
+                Version = span.Scope.Version,
+                SchemaUrl = span.Scope.SchemaUrl,
+                Attributes = span.Scope.Attributes ?? new Dictionary<string, object>()
+            };
+        }
         
         return model;
     }
@@ -864,9 +1042,12 @@ public async Task<List<ServiceDependency>> GetServiceDependenciesAsync(DateTime?
         
         foreach (var span in spans)
         {
-            
+            var model = ConvertToSpanModel(span);
+            if (model != null)
+            {
+                result.Add(model);
+            }
         }
-        
         
         return result;
     }
@@ -1025,6 +1206,17 @@ public async Task<List<ServiceDependency>> GetServiceDependenciesAsync(DateTime?
     private static string GenerateScopeKey(InstrumentationScopeModel? scopeModel)
     {
         return GenerateScopeHash(scopeModel ?? new InstrumentationScopeModel { Name = "unknown" });
+    }
+
+    /// <summary>
+    /// Extracts the service name from Resource attributes
+    /// </summary>
+    private static string? ExtractServiceName(Dictionary<string, object>? attributes)
+    {
+        if (attributes == null || !attributes.ContainsKey("service.name"))
+            return null;
+        
+        return attributes["service.name"]?.ToString();
     }
 
     private static string ConvertAttributeValue(object value)

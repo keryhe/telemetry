@@ -1,0 +1,20 @@
+@using Keryhe.Telemetry.Core.Models
+
+@if (_chartSeries.Any())
+{
+    <MudChart ChartType="ChartType.Line"
+              ChartSeries="@_chartSeries"
+              XAxisLabels="@_xAxisLabels"
+              Width="100%"
+              Height="@($"{Height}px")"
+              ChartOptions="@_chartOptions"/>
+}
+else
+{
+    <div style="@($"height: {Height}px; display: flex; align-items: center; justify-content: center;")">
+        <MudText Typo="Typo.caption" Color="Color.Secondary">No data</MudText>
+    </div>
+}
+
+@code {
+}

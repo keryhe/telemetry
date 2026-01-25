@@ -20,9 +20,8 @@ public class Program
         builder.Services.AddDbContext<OpenTelemetryDbContext>(options =>
         {
             var connectionString = builder.Configuration.GetConnectionString("Default");
-            options.UseMySql(connectionString, ServerVersion.AutoDetect(connectionString), mySqlOptions =>
+            options.UseSqlServer(connectionString, dbOptions =>
             {
-                
             });
             
             // Enable sensitive data logging in development
