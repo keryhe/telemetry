@@ -1,7 +1,237 @@
-﻿@page "/"
+@page "/"
+@using Color = MudBlazor.Color
+@using Size = MudBlazor.Size
+@using Keryhe.Telemetry.Client.Models
+@using Keryhe.Telemetry.Client.Services
+@using Keryhe.Telemetry.Client.Services.State
+@using Keryhe.Telemetry.Client.Components.Shared
+@using Keryhe.Telemetry.Core.Models
 
 <PageTitle>Dashboard</PageTitle>
 
-<h1>Hello, world!</h1>
+<MudContainer MaxWidth="MaxWidth.ExtraLarge" Class="mt-4">
 
-Welcome to your new app.
+    <!-- Header bar -->
+    <MudStack Row="true" AlignItems="AlignItems.Center" Spacing="2" Class="mb-4">
+        <MudText Typo="Typo.h4">Dashboard</MudText>
+        <MudSpacer />
+        <MudSelect Value="SelectedServiceValue" ValueChanged="OnServiceChanged" T="string"
+                   Label="Service" Variant="Variant.Outlined" Dense="true" Style="min-width:180px"
+                   Clearable="false">
+            <MudSelectItem Value="@string.Empty">All Services</MudSelectItem>
+            @foreach (var svc in _availableServices)
+            {
+                <MudSelectItem Value="@svc">@svc</MudSelectItem>
+            }
+        </MudSelect>
+        <MudSwitch Value="_autoRefresh" ValueChanged="OnAutoRefreshChanged" T="bool"
+                   Label="Auto" Color="Color.Primary" />
+        <MudIconButton Icon="@Icons.Material.Filled.Refresh" OnClick="LoadDataAsync"
+                       Disabled="_loading" title="Refresh" />
+    </MudStack>
+
+    @if (_loading)
+    {
+        <MudProgressLinear Indeterminate="true" Color="Color.Primary" Class="mb-4" />
+    }
+
+    <!-- Stats strip -->
+    <MudGrid Spacing="3" Class="mb-4">
+        <MudItem xs="12" sm="6" md="3">
+            <MudCard Elevation="2">
+                <MudCardContent>
+                    <MudStack Row="true" AlignItems="AlignItems.Center" Justify="Justify.SpaceBetween">
+                        <div>
+                            <MudText Typo="Typo.h4">@_servicesCount</MudText>
+                            <MudText Typo="Typo.body2" Color="Color.Secondary">Services</MudText>
+                        </div>
+                        <MudIcon Icon="@Icons.Material.Filled.Storage" Color="Color.Primary" Size="Size.Large" />
+                    </MudStack>
+                </MudCardContent>
+            </MudCard>
+        </MudItem>
+        <MudItem xs="12" sm="6" md="3">
+            <MudCard Elevation="2">
+                <MudCardContent>
+                    <MudStack Row="true" AlignItems="AlignItems.Center" Justify="Justify.SpaceBetween">
+                        <div>
+                            <MudText Typo="Typo.h4">@_totalTraces</MudText>
+                            <MudText Typo="Typo.body2" Color="Color.Secondary">Traces</MudText>
+                        </div>
+                        <MudIcon Icon="@Icons.Material.Filled.AccountTree" Color="Color.Info" Size="Size.Large" />
+                    </MudStack>
+                </MudCardContent>
+            </MudCard>
+        </MudItem>
+        <MudItem xs="12" sm="6" md="3">
+            <MudCard Elevation="2">
+                <MudCardContent>
+                    <MudStack Row="true" AlignItems="AlignItems.Center" Justify="Justify.SpaceBetween">
+                        <div>
+                            <MudText Typo="Typo.h4" Color="@(_errorTraceCount > 0 ? Color.Error : Color.Success)">
+                                @_errorRate.ToString("F1")%
+                            </MudText>
+                            <MudText Typo="Typo.body2" Color="Color.Secondary">Error Rate (@_errorTraceCount errors)</MudText>
+                        </div>
+                        <MudIcon Icon="@Icons.Material.Filled.Error"
+                                 Color="@(_errorTraceCount > 0 ? Color.Error : Color.Success)"
+                                 Size="Size.Large" />
+                    </MudStack>
+                </MudCardContent>
+            </MudCard>
+        </MudItem>
+        <MudItem xs="12" sm="6" md="3">
+            <MudCard Elevation="2">
+                <MudCardContent>
+                    <MudStack Row="true" AlignItems="AlignItems.Center" Justify="Justify.SpaceBetween">
+                        <div>
+                            <MudText Typo="Typo.h4">@_logEventCount</MudText>
+                            <MudText Typo="Typo.body2" Color="Color.Secondary">Log Events</MudText>
+                        </div>
+                        <MudIcon Icon="@Icons.Material.Filled.Article" Color="Color.Secondary" Size="Size.Large" />
+                    </MudStack>
+                </MudCardContent>
+            </MudCard>
+        </MudItem>
+    </MudGrid>
+
+    <!-- Charts row -->
+    <MudGrid Spacing="3" Class="mb-4">
+        <MudItem xs="12" md="6">
+            <MudPaper Elevation="2" Class="pa-4">
+                <MudText Typo="Typo.h6" Class="mb-3">Trace Volume</MudText>
+                @if (_hasTraceData)
+                {
+                    <MudChart ChartType="ChartType.Line"
+                              ChartSeries="@_traceChartSeries"
+                              XAxisLabels="@_traceXAxisLabels"
+                              Width="100%" Height="250px"
+                              LegendPosition="Position.Right"
+                              AxisChartOptions="new AxisChartOptions { MatchBoundsToSize = true }"
+                              ChartOptions="@_traceChartOptions" />
+                }
+                else
+                {
+                    <MudText Color="Color.Secondary" Class="pa-4">No trace data in this window.</MudText>
+                }
+            </MudPaper>
+        </MudItem>
+        <MudItem xs="12" md="6">
+            <MudPaper Elevation="2" Class="pa-4">
+                <MudText Typo="Typo.h6" Class="mb-3">Log Volume by Severity</MudText>
+                @if (_hasLogData)
+                {
+                    <MudChart ChartType="ChartType.StackedBar"
+                              ChartSeries="@_logChartSeries"
+                              XAxisLabels="@_logXAxisLabels"
+                              Width="100%" Height="250px"
+                              LegendPosition="Position.Right"
+                              AxisChartOptions="new AxisChartOptions { MatchBoundsToSize = true }"
+                              ChartOptions="@_logChartOptions" />
+                }
+                else
+                {
+                    <MudText Color="Color.Secondary" Class="pa-4">No log data in this window.</MudText>
+                }
+            </MudPaper>
+        </MudItem>
+    </MudGrid>
+
+    <!-- Tables row -->
+    <MudGrid Spacing="3" Class="mb-4">
+        <MudItem xs="12" md="6">
+            <MudPaper Elevation="2" Class="pa-4">
+                <MudText Typo="Typo.h6" Class="mb-3">Recent Error Traces</MudText>
+                @if (!_recentErrorTraces.Any())
+                {
+                    <MudText Color="Color.Success">No errors in this window.</MudText>
+                }
+                else
+                {
+                    <MudSimpleTable Hover="true" Dense="true">
+                        <thead>
+                            <tr>
+                                <th>Trace ID</th>
+                                <th>Service</th>
+                                <th>Duration</th>
+                                <th>Time</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            @foreach (var t in _recentErrorTraces)
+                            {
+                                <tr style="cursor:pointer" @onclick="() => NavigateToTrace(t.TraceIdHex)">
+                                    <td style="font-family:monospace">@TruncateId(t.TraceIdHex)</td>
+                                    <td>@(t.ServiceName ?? "-")</td>
+                                    <td>@FormatDuration(t.TraceDuration)</td>
+                                    <td>@t.TraceStartTime.ToLocalTime().ToString("HH:mm:ss")</td>
+                                </tr>
+                            }
+                        </tbody>
+                    </MudSimpleTable>
+                }
+            </MudPaper>
+        </MudItem>
+        <MudItem xs="12" md="6">
+            <MudPaper Elevation="2" Class="pa-4">
+                <MudText Typo="Typo.h6" Class="mb-3">Slowest Traces (&gt;500ms)</MudText>
+                @if (!_slowTraces.Any())
+                {
+                    <MudText Color="Color.Secondary">No slow traces in this window.</MudText>
+                }
+                else
+                {
+                    <MudSimpleTable Hover="true" Dense="true">
+                        <thead>
+                            <tr>
+                                <th>Trace ID</th>
+                                <th>Service</th>
+                                <th>Duration</th>
+                                <th>Time</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            @foreach (var t in _slowTraces)
+                            {
+                                <tr style="cursor:pointer" @onclick="() => NavigateToTrace(t.TraceIdHex)">
+                                    <td style="font-family:monospace">@TruncateId(t.TraceIdHex)</td>
+                                    <td>@(t.ServiceName ?? "-")</td>
+                                    <td>@FormatDuration(t.TraceDuration)</td>
+                                    <td>@t.TraceStartTime.ToLocalTime().ToString("HH:mm:ss")</td>
+                                </tr>
+                            }
+                        </tbody>
+                    </MudSimpleTable>
+                }
+            </MudPaper>
+        </MudItem>
+    </MudGrid>
+
+    <!-- Service summary strip -->
+    @if (_serviceSummaries.Any())
+    {
+        <MudPaper Elevation="2" Class="pa-4 mb-4">
+            <MudText Typo="Typo.h6" Class="mb-3">Services</MudText>
+            <MudGrid Spacing="2">
+                @foreach (var svc in _serviceSummaries)
+                {
+                    <MudItem xs="12" sm="6" md="4" lg="3">
+                        <MudPaper Elevation="1" Class="pa-3" Style="cursor:pointer"
+                                  @onclick="() => NavigateToServiceMetrics(svc.Name)">
+                            <MudStack Row="true" AlignItems="AlignItems.Center" Justify="Justify.SpaceBetween">
+                                <MudText Typo="Typo.subtitle2">@svc.Name</MudText>
+                                <MudChip T="string" Size="Size.Small"
+                                         Color="@(svc.ErrorCount > 0 ? Color.Error : Color.Success)"
+                                         Text="@($"{svc.ErrorCount} err")" />
+                            </MudStack>
+                            <MudText Typo="Typo.caption" Color="Color.Secondary">
+                                @svc.TraceCount traces &middot; @svc.MetricCount metrics
+                            </MudText>
+                        </MudPaper>
+                    </MudItem>
+                }
+            </MudGrid>
+        </MudPaper>
+    }
+
+</MudContainer>

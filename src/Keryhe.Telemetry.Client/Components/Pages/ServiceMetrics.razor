@@ -1,7 +1,6 @@
 @page "/service-metrics"
 @using Keryhe.Telemetry.Core.Models
 @using Keryhe.Telemetry.Client.Components.Shared
-@using Keryhe.Telemetry.Client.Models
 
 <PageTitle>Service Metrics Dashboard</PageTitle>
 
@@ -23,7 +22,8 @@
                 }
             </MudSelect>
 
-            <MudSwitch @bind-Value="_autoRefresh"
+            <MudSwitch Value="_autoRefresh"
+                       ValueChanged="OnAutoRefreshChanged"
                        Color="Color.Primary"
                        Label="Auto-refresh"
                        T="bool"/>
@@ -31,7 +31,7 @@
             @if (_autoRefresh)
             {
                 <MudText Typo="Typo.body2" Color="Color.Secondary">
-                    (every 30s)
+                    (every @_refreshIntervalSeconds s)
                 </MudText>
             }
 
@@ -170,7 +170,7 @@
                                     AvgValue="@metric.AvgValue"
                                     PreviousValue="@metric.PreviousValue"
                                     DataPoints="@metric.DataPoints"
-                                    ShowStats="true"/>
+                                    ShowStats="false"/>
                     </MudItem>
                 }
             </MudGrid>

@@ -88,11 +88,10 @@ public partial class MetricCard : ComponentBase
         if (!value.HasValue)
             return "N/A";
 
-        // Format based on magnitude
-        if (Math.Abs(value.Value) >= 1_000_000_000)
-            return $"{value.Value / 1_000_000_000:F1}B";
         if (Math.Abs(value.Value) >= 1_000_000)
-            return $"{value.Value / 1_000_000:F1}M";
+            return $"{value.Value / 1_000_000:F2}M";
+        if (Math.Abs(value.Value) >= 1_000_000)
+            return $"{value.Value / 1_000:F2}K";
         if (Math.Abs(value.Value) >= 1_000)
             return $"{value.Value / 1_000:F1}K";
 

@@ -1,0 +1,59 @@
+@using Keryhe.Telemetry.Client.Models
+@using Keryhe.Telemetry.Client.Services.State
+
+@if (_panelOpen)
+{
+    <div style="position: fixed; inset: 0; z-index: 1000;" @onclick="ClosePanel"></div>
+}
+
+<div style="position: relative; display: inline-flex; align-items: center; z-index: 1001;">
+    <MudButton Variant="Variant.Outlined"
+               Color="Color.Inherit"
+               EndIcon="@Icons.Material.Filled.ArrowDropDown"
+               OnClick="TogglePanel"
+               Size="Size.Small"
+               Style="text-transform: none; min-width: 155px; border-color: rgba(255,255,255,0.5); color: inherit;">
+        @GetButtonLabel()
+    </MudButton>
+
+    @if (_panelOpen)
+    {
+        <MudPaper Elevation="8"
+                  Style="position: absolute; top: calc(100% + 4px); right: 0; min-width: 230px;">
+            <div class="pa-3">
+                <MudText Typo="Typo.overline" Class="mb-1">Quick Ranges</MudText>
+                @foreach (TimeRange range in Enum.GetValues<TimeRange>().Where(r => r != TimeRange.Custom))
+                {
+                    <MudButton FullWidth="true"
+                               Variant="@(TimeRangeState.SelectedTimeRange == range ? Variant.Filled : Variant.Text)"
+                               Color="Color.Primary"
+                               Size="Size.Small"
+                               Class="mb-1"
+                               OnClick="@(() => SelectPreset(range))">
+                        @range.GetDisplayName()
+                    </MudButton>
+                }
+                <MudDivider Class="my-2" />
+                <MudText Typo="Typo.overline" Class="mb-1">Custom Range</MudText>
+                <MudDatePicker @bind-Date="_customStart"
+                               Label="Start Date"
+                               Variant="Variant.Outlined"
+                               Margin="Margin.Dense"
+                               Class="mb-2" />
+                <MudDatePicker @bind-Date="_customEnd"
+                               Label="End Date"
+                               Variant="Variant.Outlined"
+                               Margin="Margin.Dense"
+                               Class="mb-2" />
+                <MudButton Variant="Variant.Filled"
+                           Color="Color.Primary"
+                           FullWidth="true"
+                           Size="Size.Small"
+                           Disabled="@(!_customStart.HasValue || !_customEnd.HasValue)"
+                           OnClick="ApplyCustomRange">
+                    Apply
+                </MudButton>
+            </div>
+        </MudPaper>
+    }
+</div>

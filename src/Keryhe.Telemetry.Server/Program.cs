@@ -16,11 +16,11 @@ public class Program
         builder.Services.AddGrpc();
         builder.Services.AddLogging();
         
-        // Add Entity Framework
-        builder.Services.AddDbContext<OpenTelemetryDbContext>(options =>
+        // Add write DbContext — the Server only writes telemetry data
+        builder.Services.AddDbContext<TelemetryWriteDbContext>(options =>
         {
-            var connectionString = builder.Configuration.GetConnectionString("Default");
-            options.UseSqlServer(connectionString, dbOptions =>
+            var connectionString = builder.Configuration.GetConnectionString("Write");
+            options.UseNpgsql(connectionString, dbOptions =>
             {
             });
             
@@ -33,9 +33,9 @@ public class Program
         });
 
         builder.Services
-            .AddScoped<ILogRepository, LogRepository>()
-            .AddScoped<IMetricRepository, MetricRepository>()
-            .AddScoped<ITraceRepository, TraceRepository>();
+            .AddScoped<ILogWriteRepository, LogWriteRepository>()
+            .AddScoped<IMetricWriteRepository, MetricWriteRepository>()
+            .AddScoped<ITraceWriteRepository, TraceWriteRepository>();
         
         // Add CORS for web clients if needed
         builder.Services.AddCors(o => o.AddPolicy("AllowAll", builder =>

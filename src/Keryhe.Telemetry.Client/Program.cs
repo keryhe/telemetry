@@ -1,5 +1,6 @@
 using Keryhe.Telemetry.Client.Components;
 using Keryhe.Telemetry.Client.Services;
+using Keryhe.Telemetry.Client.Services.State;
 using Keryhe.Telemetry.Core;
 using Keryhe.Telemetry.Data;
 using Keryhe.Telemetry.Data.Access;
@@ -8,15 +9,15 @@ using MudBlazor.Services;
 
 var builder = WebApplication.CreateBuilder(args);
 
-// Add services to the container.
-builder.Services.AddDbContext<OpenTelemetryDbContext>(options =>
+// Add read DbContext — the Client only reads telemetry data
+builder.Services.AddDbContext<TelemetryReadDbContext>(options =>
 {
-    var connectionString = builder.Configuration.GetConnectionString("Default");
-    //options.UseSqlServer(connectionString, dbOptions =>
-    options.UseMySql(connectionString, ServerVersion.AutoDetect(connectionString), mySqlOptions =>
+    var connectionString = builder.Configuration.GetConnectionString("Read");
+    options.UseNpgsql(connectionString, dbOptions =>
     {
                 
     });
+    options.UseQueryTrackingBehavior(QueryTrackingBehavior.NoTracking);
             
     // Enable sensitive data logging in development
     if (builder.Environment.IsDevelopment())
@@ -31,12 +32,19 @@ builder.Services.AddRazorComponents()
     .AddInteractiveServerComponents();
 
 builder.Services
-    .AddScoped<ILogRepository, LogRepository>()
-    .AddScoped<IMetricRepository, MetricRepository>()
-    .AddScoped<ITraceRepository, TraceRepository>()
+    .AddScoped<ILogReadRepository, LogReadRepository>()
+    .AddScoped<IMetricReadRepository, MetricReadRepository>()
+    .AddScoped<ITraceReadRepository, TraceReadRepository>()
     .AddScoped<ILogService, LogService>()
     .AddScoped<IMetricService, MetricService>()
-    .AddScoped<ITraceService, TraceService>();
+    .AddScoped<ITraceService, TraceService>()
+    .AddScoped<TimeRangeState>()
+    .AddScoped<MetricsPageState>()
+    .AddScoped<MetricDetailPageState>()
+    .AddScoped<ServiceMetricsPageState>()
+    .AddScoped<LogsPageState>()
+    .AddScoped<TracesPageState>()
+    .AddScoped<DashboardPageState>();
 
 var app = builder.Build();
 

@@ -9,6 +9,7 @@ public enum TimeRange
     Last6Hours,
     Last24Hours,
     Last7Days,
+    Last30Days,
     Custom
 }
 
@@ -29,6 +30,7 @@ public static class TimeRangeExtensions
             TimeRange.Last6Hours => end.AddHours(-6),
             TimeRange.Last24Hours => end.AddHours(-24),
             TimeRange.Last7Days => end.AddDays(-7),
+            TimeRange.Last30Days => end.AddDays(-30),
             TimeRange.Custom => end.AddHours(-1), // Default to 1 hour for custom
             _ => end.AddHours(-1)
         };
@@ -47,6 +49,7 @@ public static class TimeRangeExtensions
             TimeRange.Last6Hours => "Last 6 Hours",
             TimeRange.Last24Hours => "Last 24 Hours",
             TimeRange.Last7Days => "Last 7 Days",
+            TimeRange.Last30Days => "Last 30 Days",
             TimeRange.Custom => "Custom Range",
             _ => "Unknown"
         };
@@ -63,6 +66,7 @@ public static class TimeRangeExtensions
             TimeRange.Last6Hours => 60,     // 1 minute
             TimeRange.Last24Hours => 300,   // 5 minutes
             TimeRange.Last7Days => 900,     // 15 minutes
+            TimeRange.Last30Days => 1800,   // 30 minutes
             TimeRange.Custom => 60,         // 1 minute
             _ => 60
         };

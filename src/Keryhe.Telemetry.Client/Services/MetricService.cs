@@ -5,16 +5,16 @@ namespace Keryhe.Telemetry.Client.Services;
 
 public class MetricService : IMetricService
 {
-    private readonly IMetricRepository _metricRepository;
+    private readonly IMetricReadRepository _metricRepository;
 
-    public MetricService(IMetricRepository metricRepository)
+    public MetricService(IMetricReadRepository metricRepository)
     {
         _metricRepository = metricRepository ?? throw new ArgumentNullException(nameof(metricRepository));
     }
 
-    public async Task<List<MetricInfo>> GetAllMetricsAsync(int limit = 100)
+    public async Task<List<MetricInfo>> GetAllMetricsAsync(int limit = 100, DateTime? startTime = null, DateTime? endTime = null)
     {
-        return await _metricRepository.GetAllMetricsAsync(limit);
+        return await _metricRepository.GetAllMetricsAsync(limit, startTime, endTime);
     }
 
     public async Task<List<MetricInfo>> GetMetricsByNameAsync(string name)
@@ -22,9 +22,9 @@ public class MetricService : IMetricService
         return await _metricRepository.GetMetricsByNameAsync(name);
     }
 
-    public async Task<List<MetricInfo>> GetMetricsByServiceAsync(string serviceName)
+    public async Task<List<MetricInfo>> GetMetricsByServiceAsync(string serviceName, DateTime? startTime = null, DateTime? endTime = null)
     {
-        return await _metricRepository.GetMetricsByServiceAsync(serviceName);
+        return await _metricRepository.GetMetricsByServiceAsync(serviceName, startTime, endTime);
     }
 
     public async Task<List<MetricInfo>> GetMetricsByTypeAsync(MetricType type)
@@ -47,9 +47,9 @@ public class MetricService : IMetricService
         return await _metricRepository.GetServiceMetricSummariesAsync();
     }
 
-    public async Task<MetricSeries?> GetMetricSeriesAsync(string metricName, DateTime? startTime = null, DateTime? endTime = null)
+    public async Task<MetricSeries?> GetMetricSeriesAsync(string metricName, Dictionary<string, string>? labelFilters = null, DateTime? startTime = null, DateTime? endTime = null, long? metricId = null)
     {
-        return await _metricRepository.GetMetricSeriesAsync(metricName, null, startTime, endTime);
+        return await _metricRepository.GetMetricSeriesAsync(metricName, labelFilters, startTime, endTime, metricId);
     }
 
     public async Task<Dictionary<string, List<string>>> GetMetricLabelsAsync(string metricName)
@@ -60,5 +60,10 @@ public class MetricService : IMetricService
     public async Task<Dictionary<string, double>> GetLatestMetricValuesAsync(string serviceName)
     {
         return await _metricRepository.GetLatestMetricValuesAsync(serviceName);
+    }
+
+    public async Task<MultiSeriesMetricData?> GetMetricSeriesByServiceAsync(string metricName, DateTime? startTime = null, DateTime? endTime = null)
+    {
+        return await _metricRepository.GetMetricSeriesByServiceAsync(metricName, startTime, endTime);
     }
 }

@@ -15,10 +15,10 @@ namespace Keryhe.Telemetry.Server.Services;
 /// </summary>
 public class TraceService : OpenTelemetry.Proto.Collector.Trace.V1.TraceService.TraceServiceBase
 {
-    private readonly ITraceRepository _traceRepository;
+    private readonly ITraceWriteRepository _traceRepository;
     private readonly ILogger<TraceService> _logger;
 
-    public TraceService(ITraceRepository traceRepository, ILogger<TraceService> logger)
+    public TraceService(ITraceWriteRepository traceRepository, ILogger<TraceService> logger)
     {
         _traceRepository = traceRepository ?? throw new ArgumentNullException(nameof(traceRepository));
         _logger = logger ?? throw new ArgumentNullException(nameof(logger));

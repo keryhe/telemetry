@@ -1,0 +1,444 @@
+using Keryhe.Telemetry.Client.Models;
+using Keryhe.Telemetry.Client.Services;
+using Keryhe.Telemetry.Client.Services.State;
+using Keryhe.Telemetry.Core.Models;
+using Microsoft.AspNetCore.Components;
+using MudBlazor;
+
+namespace Keryhe.Telemetry.Client.Components.Pages;
+
+public partial class Dashboard : ComponentBase, IDisposable
+{
+    [Inject] private ILogService LogService { get; set; } = null!;
+    [Inject] private IMetricService MetricService { get; set; } = null!;
+    [Inject] private ITraceService TraceService { get; set; } = null!;
+    [Inject] private NavigationManager NavigationManager { get; set; } = null!;
+    [Inject] private DashboardPageState State { get; set; } = null!;
+    [Inject] private ServiceMetricsPageState ServiceMetricsState { get; set; } = null!;
+    [Inject] private TimeRangeState TimeRangeState { get; set; } = null!;
+
+    private string? _selectedService = null;
+    private bool _autoRefresh = false;
+    private Timer? _refreshTimer;
+    private bool _loading = false;
+
+    private List<string> _availableServices = new();
+    private string SelectedServiceValue => _selectedService ?? string.Empty;
+
+    // Stats
+    private int _servicesCount = 0;
+    private int _totalTraces = 0;
+    private double _errorRate = 0;
+    private int _errorTraceCount = 0;
+    private int _logEventCount = 0;
+
+    // Trace chart
+    private List<ChartSeries> _traceChartSeries = new();
+    private string[] _traceXAxisLabels = Array.Empty<string>();
+    private bool _hasTraceData = false;
+    private ChartOptions _traceChartOptions = new();
+
+    // Log chart
+    private List<ChartSeries> _logChartSeries = new();
+    private string[] _logXAxisLabels = Array.Empty<string>();
+    private bool _hasLogData = false;
+    private ChartOptions _logChartOptions = new();
+
+
+    // Tables
+    private List<TraceInfo> _recentErrorTraces = new();
+    private List<TraceInfo> _slowTraces = new();
+
+    // Service strip
+    private List<ServiceSummary> _serviceSummaries = new();
+
+    private readonly string[] _severityLevels = { "Trace", "Debug", "Information", "Warning", "Error", "Fatal" };
+
+    private record ServiceSummary(string Name, int TraceCount, int ErrorCount, int MetricCount);
+
+    private record BucketConfig(
+        TimeSpan BucketSize,
+        string LabelFormat,
+        Func<DateTime, bool> ShowLabel
+    );
+
+    private static readonly BucketConfig[] BucketConfigs =
+    [
+        new(TimeSpan.FromMinutes(1),  "HH:mm",  dt => dt.Minute % 15 == 0),
+        new(TimeSpan.FromMinutes(5),  "HH:mm",  dt => dt.Minute == 0),
+        new(TimeSpan.FromMinutes(10), "HH:mm",  dt => dt.Minute == 0),
+        new(TimeSpan.FromMinutes(30), "HH:mm",  dt => dt.Hour % 6 == 0 && dt.Minute == 0),
+        new(TimeSpan.FromHours(1),    "HH:mm",  dt => dt.Hour % 6 == 0 && dt.Minute == 0),
+        new(TimeSpan.FromHours(3),    "MM/dd",  dt => dt.Hour == 0),
+        new(TimeSpan.FromHours(6),    "MM/dd",  dt => dt.Hour == 0),
+        new(TimeSpan.FromHours(12),   "MM/dd",  dt => dt.Day % 2 == 1 && dt.Hour == 0),
+        new(TimeSpan.FromDays(1),     "MM/dd",  dt => dt.Day % 7 == 1 || dt.Day == 1),
+        new(TimeSpan.FromDays(2),     "MM/dd",  dt => dt.Day <= 2 || (dt.Day >= 15 && dt.Day <= 16)),
+        new(TimeSpan.FromDays(7),     "MMM",    dt => dt.Day <= 7),
+        new(TimeSpan.FromDays(30),    "MMM yy", dt => true),
+    ];
+
+    private const int MaxBucketCount = 50;
+
+    private static BucketConfig SelectBucketConfig(TimeSpan duration)
+    {
+        foreach (var config in BucketConfigs)
+        {
+            if ((long)(duration / config.BucketSize) <= MaxBucketCount)
+                return config;
+        }
+        return BucketConfigs[^1];
+    }
+
+    private static DateTime FloorToBucketBoundary(DateTime dt, TimeSpan bucketSize)
+    {
+        if (bucketSize >= TimeSpan.FromDays(1))
+            return new DateTime(dt.Year, dt.Month, dt.Day, 0, 0, 0, dt.Kind);
+
+        return new DateTime(dt.Ticks / bucketSize.Ticks * bucketSize.Ticks, dt.Kind);
+    }
+
+    protected override async Task OnInitializedAsync()
+    {
+        TimeRangeState.OnChange += OnTimeRangeChanged;
+
+        _selectedService = State.SelectedService;
+        _autoRefresh = State.AutoRefresh;
+
+        // Seed available services from 24h window for full dropdown coverage
+        var (init24Start, init24End) = TimeRange.Last24Hours.ToDateTimeRange();
+        _availableServices = await TraceService.GetDistinctServicesAsync(init24Start, init24End);
+
+        await LoadDataAsync();
+
+        if (_autoRefresh)
+            RestartRefreshTimer();
+    }
+
+    private void OnTimeRangeChanged()
+    {
+        _ = InvokeAsync(async () =>
+        {
+            RestartRefreshTimer();
+            await LoadDataAsync();
+        });
+    }
+
+    private async Task LoadDataAsync()
+    {
+        State.SelectedService = _selectedService;
+        State.AutoRefresh = _autoRefresh;
+
+        _loading = true;
+        StateHasChanged();
+
+        try
+        {
+            var (start, end) = TimeRangeState.GetDateTimeRange();
+
+            // Sequential loads — EF Core scoped DbContext cannot run concurrently
+
+            // 1. Traces
+            List<TraceInfo> traces;
+            if (!string.IsNullOrEmpty(_selectedService))
+                traces = await TraceService.GetTracesByServiceAsync(_selectedService, start, end, limit: 500);
+            else
+                traces = await TraceService.GetTracesByTimeRangeAsync(start, end, limit: 500);
+
+            _totalTraces = traces.Count;
+            _errorTraceCount = traces.Count(t => t.HasErrors);
+            _errorRate = _totalTraces > 0 ? _errorTraceCount / (double)_totalTraces * 100 : 0;
+
+            _recentErrorTraces = traces
+                .Where(t => t.HasErrors)
+                .OrderByDescending(t => t.TraceStartTime)
+                .Take(10)
+                .ToList();
+
+            _slowTraces = traces
+                .Where(t => t.TraceDuration > TimeSpan.FromMilliseconds(500))
+                .OrderByDescending(t => t.TraceDuration)
+                .Take(5)
+                .ToList();
+
+            BuildTraceChartData(traces, start, end);
+
+            // 2. Logs
+            var logs = await LogService.GetLogRecordsByTimeRangeAsync(start, end);
+            if (!string.IsNullOrEmpty(_selectedService))
+            {
+                logs = logs.Where(l =>
+                    l.Resource?.Attributes != null &&
+                    l.Resource.Attributes.ContainsKey("service.name") &&
+                    l.Resource.Attributes["service.name"]?.ToString() == _selectedService
+                ).ToList();
+            }
+            _logEventCount = logs.Count;
+            BuildLogChartData(logs, start, end);
+
+            // 3. Services in this time window
+            var services = await TraceService.GetDistinctServicesAsync(start, end);
+            _servicesCount = services.Count;
+            if (services.Count > 0)
+                _availableServices = services;
+
+            // 4. Metric summaries
+            var metricSummaries = await MetricService.GetServiceMetricSummariesAsync();
+            var metricDict = metricSummaries.ToDictionary(m => m.ServiceName, m => m.MetricCount);
+
+            // 5. Build service summaries from already-loaded traces
+            var tracesByService = traces.GroupBy(t => t.ServiceName ?? "unknown").ToList();
+            _serviceSummaries = services.Select(svc =>
+            {
+                var group = tracesByService.FirstOrDefault(g => g.Key == svc);
+                return new ServiceSummary(
+                    Name: svc,
+                    TraceCount: group?.Count() ?? 0,
+                    ErrorCount: group?.Count(t => t.HasErrors) ?? 0,
+                    MetricCount: metricDict.TryGetValue(svc, out var mc) ? mc : 0
+                );
+            }).ToList();
+        }
+        finally
+        {
+            _loading = false;
+            StateHasChanged();
+        }
+    }
+
+    private void BuildTraceChartData(List<TraceInfo> traces, DateTime start, DateTime end)
+    {
+        if (traces.Count == 0)
+        {
+            _traceChartSeries = new();
+            _traceXAxisLabels = Array.Empty<string>();
+            _hasTraceData = false;
+            return;
+        }
+
+        start = start.ToLocalTime();
+        end   = end.ToLocalTime();
+
+        var duration = end - start;
+        var config = SelectBucketConfig(duration);
+        var alignedStart = FloorToBucketBoundary(start, config.BucketSize);
+
+        var buckets = new Dictionary<DateTime, (int Total, int Errors)>();
+        var current = alignedStart;
+        while (current <= end)
+        {
+            buckets[current] = (0, 0);
+            current = current.Add(config.BucketSize);
+        }
+
+        foreach (var trace in traces)
+        {
+            var offset = (long)((trace.TraceStartTime.ToLocalTime() - alignedStart).Ticks / config.BucketSize.Ticks);
+            var bucketKey = alignedStart + TimeSpan.FromTicks(offset * config.BucketSize.Ticks);
+            if (buckets.ContainsKey(bucketKey))
+            {
+                var cur = buckets[bucketKey];
+                buckets[bucketKey] = (cur.Total + 1, cur.Errors + (trace.HasErrors ? 1 : 0));
+            }
+        }
+
+        var sorted = buckets.OrderBy(b => b.Key).ToList();
+
+        _traceXAxisLabels = sorted.Select(b =>
+            config.ShowLabel(b.Key) ? b.Key.ToString(config.LabelFormat) : ""
+        ).ToArray();
+
+        var maxValue = sorted.Max(b => b.Value.Total);
+        int yAxisTicks;
+        if (maxValue < 10) yAxisTicks = 1;
+        else if (maxValue < 50) yAxisTicks = 5;
+        else if (maxValue < 100) yAxisTicks = 10;
+        else if (maxValue < 500) yAxisTicks = 50;
+        else if (maxValue < 1000) yAxisTicks = 100;
+        else if (maxValue < 5000) yAxisTicks = 500;
+        else if (maxValue < 10000) yAxisTicks = 1000;
+        else if (maxValue < 50000) yAxisTicks = 5000;
+        else if (maxValue < 100000) yAxisTicks = 10000;
+        else yAxisTicks = 50000;
+
+        _traceChartOptions = new ChartOptions
+        {
+            YAxisTicks = yAxisTicks,
+            ChartPalette = new[] { "#2196F3", "#F44336" }
+        };
+
+        _traceChartSeries = new List<ChartSeries>
+        {
+            new() { Name = "Total",  Data = sorted.Select(b => (double)b.Value.Total).ToArray() },
+            new() { Name = "Errors", Data = sorted.Select(b => (double)b.Value.Errors).ToArray() },
+        };
+
+        _hasTraceData = true;
+    }
+
+    private void BuildLogChartData(List<LogRecordModel> logs, DateTime start, DateTime end)
+    {
+        if (logs.Count == 0)
+        {
+            _logChartSeries = new();
+            _logXAxisLabels = Array.Empty<string>();
+            _hasLogData = false;
+            return;
+        }
+
+        start = start.ToLocalTime();
+        end   = end.ToLocalTime();
+
+        var duration = end - start;
+        var config = SelectBucketConfig(duration);
+        var alignedStart = FloorToBucketBoundary(start, config.BucketSize);
+
+        var buckets = new Dictionary<DateTime, Dictionary<string, int>>();
+        var current = alignedStart;
+        while (current <= end)
+        {
+            var counts = new Dictionary<string, int>();
+            foreach (var sev in _severityLevels) counts[sev] = 0;
+            buckets[current] = counts;
+            current = current.Add(config.BucketSize);
+        }
+
+        foreach (var log in logs.Where(l => l.TimeUnixNano.HasValue))
+        {
+            var logTime = UnixNanoToDateTime(log.TimeUnixNano!.Value).ToLocalTime();
+            var severity = NormalizeSeverity(log.SeverityText);
+
+            var offset = (long)((logTime - alignedStart).Ticks / config.BucketSize.Ticks);
+            var bucketKey = alignedStart + TimeSpan.FromTicks(offset * config.BucketSize.Ticks);
+
+            if (buckets.ContainsKey(bucketKey))
+            {
+                if (buckets[bucketKey].ContainsKey(severity))
+                    buckets[bucketKey][severity]++;
+                else
+                    buckets[bucketKey]["Debug"]++;
+            }
+        }
+
+        var sorted = buckets.OrderBy(b => b.Key).ToList();
+
+        _logXAxisLabels = sorted.Select(b =>
+            config.ShowLabel(b.Key) ? b.Key.ToString(config.LabelFormat) : ""
+        ).ToArray();
+
+        var maxValue = sorted.Max(b => b.Value.Values.Sum());
+        int yAxisTicks;
+        if (maxValue < 10) yAxisTicks = 1;
+        else if (maxValue < 50) yAxisTicks = 5;
+        else if (maxValue < 100) yAxisTicks = 10;
+        else if (maxValue < 500) yAxisTicks = 50;
+        else if (maxValue < 1000) yAxisTicks = 100;
+        else if (maxValue < 5000) yAxisTicks = 500;
+        else if (maxValue < 10000) yAxisTicks = 1000;
+        else if (maxValue < 50000) yAxisTicks = 5000;
+        else if (maxValue < 100000) yAxisTicks = 10000;
+        else yAxisTicks = 50000;
+
+        var colors = _severityLevels.Select(GetSeverityColor).ToArray();
+
+        _logChartOptions = new ChartOptions
+        {
+            YAxisTicks = yAxisTicks,
+            ChartPalette = colors
+        };
+
+        _logChartSeries = _severityLevels.Select(sev => new ChartSeries
+        {
+            Name = sev,
+            Data = sorted.Select(b => (double)b.Value[sev]).ToArray()
+        }).ToList();
+
+        _hasLogData = true;
+    }
+
+    private string GetSeverityColor(string severity) => severity.ToUpper() switch
+    {
+        "TRACE"       => Colors.Purple.Default,
+        "DEBUG"       => Colors.Blue.Default,
+        "INFORMATION" => Colors.Green.Default,
+        "WARNING"     => Colors.Orange.Default,
+        "ERROR"       => Colors.Red.Default,
+        "FATAL"       => Colors.Red.Darken4,
+        _             => Colors.Gray.Default
+    };
+
+    private string NormalizeSeverity(string? severityText)
+    {
+        if (string.IsNullOrEmpty(severityText)) return "Debug";
+        foreach (var level in _severityLevels)
+        {
+            if (string.Equals(severityText, level, StringComparison.OrdinalIgnoreCase))
+                return level;
+        }
+        return "Debug";
+    }
+
+    private static DateTime UnixNanoToDateTime(long unixNano)
+    {
+        long ticks = unixNano / 100;
+        var epoch = new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc);
+        return epoch.AddTicks(ticks);
+    }
+
+    private async Task OnServiceChanged(string value)
+    {
+        _selectedService = string.IsNullOrEmpty(value) ? null : value;
+        await LoadDataAsync();
+    }
+
+    private void OnAutoRefreshChanged(bool value)
+    {
+        _autoRefresh = value;
+        State.AutoRefresh = value;
+        RestartRefreshTimer();
+    }
+
+    private void RestartRefreshTimer()
+    {
+        _refreshTimer?.Dispose();
+        _refreshTimer = null;
+
+        if (_autoRefresh)
+        {
+            var interval = TimeRangeState.SelectedTimeRange.GetRecommendedRefreshInterval();
+            _refreshTimer = new Timer(
+                async _ => await InvokeAsync(LoadDataAsync),
+                null,
+                TimeSpan.FromSeconds(interval),
+                TimeSpan.FromSeconds(interval)
+            );
+        }
+    }
+
+    private void NavigateToTrace(string traceId) =>
+        NavigationManager.NavigateTo($"/traces?traceId={traceId}");
+
+    private void NavigateToServiceMetrics(string service)
+    {
+        ServiceMetricsState.SelectedService = service;
+        NavigationManager.NavigateTo("/service-metrics");
+    }
+
+    private string TruncateId(string id, int maxLength = 16) =>
+        id.Length > maxLength ? id[..maxLength] + "..." : id;
+
+    private string FormatDuration(TimeSpan duration)
+    {
+        if (duration.TotalSeconds < 1)
+            return $"{duration.TotalMilliseconds:F0}ms";
+        if (duration.TotalMinutes < 1)
+            return $"{duration.TotalSeconds:F2}s";
+        return $"{duration.TotalMinutes:F2}m";
+    }
+
+    public void Dispose()
+    {
+        TimeRangeState.OnChange -= OnTimeRangeChanged;
+        _refreshTimer?.Dispose();
+    }
+}

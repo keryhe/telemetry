@@ -16,10 +16,10 @@ namespace Keryhe.Telemetry.Server.Services;
 /// </summary>
 public class MetricService : MetricsService.MetricsServiceBase
 {
-    private readonly IMetricRepository _metricRepository;
+    private readonly IMetricWriteRepository _metricRepository;
     private readonly ILogger<MetricService> _logger;
 
-    public MetricService(IMetricRepository metricRepository, ILogger<MetricService> logger)
+    public MetricService(IMetricWriteRepository metricRepository, ILogger<MetricService> logger)
     {
         _metricRepository = metricRepository ?? throw new ArgumentNullException(nameof(metricRepository));
         _logger = logger ?? throw new ArgumentNullException(nameof(logger));

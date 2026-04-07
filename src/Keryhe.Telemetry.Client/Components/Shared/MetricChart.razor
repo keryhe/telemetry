@@ -2,54 +2,55 @@
 
 @if (_canShowChart && _chartSeries.Any())
 {
-    <MudChart ChartType="ChartType.Line"
-              ChartSeries="@_chartSeries"
-              XAxisLabels="@_xAxisLabels"
-              Width="100%"
-              Height="@($"{Height}px")"
-              ChartOptions="@_chartOptions"/>
-}
-else if (Data?.Type == MetricType.HISTOGRAM || Data?.Type == MetricType.EXPONENTIAL_HISTOGRAM)
-{
-    <HistogramChart Data="@Data" Height="@Height" />
-}
-else if (Data?.Type == MetricType.SUMMARY)
-{
-    <MudPaper Class="pa-4">
-        <MudText Typo="Typo.body2" Color="Color.Secondary" Class="mb-3">
-            Summary metric - showing quantile data:
-        </MudText>
-        @if (Data?.Points != null && Data.Points.Any() && Data.Points.First().Quantiles != null)
+    <MudStack Spacing="3">
+        <MudChart ChartType="ChartType.Line"
+                  ChartSeries="@_chartSeries"
+                  XAxisLabels="@_xAxisLabels"
+                  Width="100%"
+                  Height="@($"{Height}px")"
+                  ChartOptions="@_chartOptions"/>
+
+        @if (Data?.Type == MetricType.HISTOGRAM || Data?.Type == MetricType.EXPONENTIAL_HISTOGRAM)
         {
-            <MudSimpleTable Dense="true" Hover="true">
-                <thead>
-                <tr>
-                    <th>Quantile</th>
-                    <th>Value</th>
-                </tr>
-                </thead>
-                <tbody>
+            <HistogramChart Data="@Data" Height="320" />
+        }
+
+        @if (Data?.Type == MetricType.SUMMARY && Data?.Points != null && Data.Points.Any())
+        {
+            <MudPaper Class="pa-4">
+                <MudText Typo="Typo.body2" Color="Color.Secondary" Class="mb-3">
+                    Latest quantile snapshot:
+                </MudText>
                 @{
-                    var firstPoint = Data.Points.First();
-                    if (firstPoint.Quantiles != null && firstPoint.QuantileValues != null)
-                    {
-                        for (int i = 0; i < firstPoint.Quantiles.Count; i++)
+                    var latestPoint = Data.Points.OrderByDescending(p => p.Timestamp).FirstOrDefault();
+                }
+                @if (latestPoint?.Quantiles != null && latestPoint.QuantileValues != null)
+                {
+                    <MudSimpleTable Dense="true" Hover="true">
+                        <thead>
+                        <tr>
+                            <th>Quantile</th>
+                            <th>Value</th>
+                        </tr>
+                        </thead>
+                        <tbody>
+                        @for (int i = 0; i < latestPoint.Quantiles.Count && i < latestPoint.QuantileValues.Count; i++)
                         {
                             <tr>
-                                <td>P@((firstPoint.Quantiles[i] * 100).ToString("F0"))</td>
-                                <td>@firstPoint.QuantileValues[i].ToString("F2")</td>
+                                <td>P@((latestPoint.Quantiles[i] * 100).ToString("F0"))</td>
+                                <td>@latestPoint.QuantileValues[i].ToString("F2")</td>
                             </tr>
                         }
-                    }
+                        </tbody>
+                    </MudSimpleTable>
                 }
-                </tbody>
-            </MudSimpleTable>
+                else
+                {
+                    <MudText Typo="Typo.body2" Color="Color.Secondary">No quantile data available</MudText>
+                }
+            </MudPaper>
         }
-        else
-        {
-            <MudText Typo="Typo.body2" Color="Color.Secondary">No quantile data available</MudText>
-        }
-    </MudPaper>
+    </MudStack>
 }
 else
 {

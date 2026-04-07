@@ -137,11 +137,21 @@ public class MetricSeries
 
 public class MetricDataPoint
 {
+    public DateTime? StartTimestamp { get; set; }
     public DateTime Timestamp { get; set; }
     public double? DoubleValue { get; set; }
     public long? IntValue { get; set; }
     public long? Count { get; set; }
     public double? Sum { get; set; }
+    public int? Scale { get; set; }
+    public long? ZeroCount { get; set; }
+    public int? PositiveOffset { get; set; }
+    public List<long>? PositiveBucketCounts { get; set; }
+    public int? NegativeOffset { get; set; }
+    public List<long>? NegativeBucketCounts { get; set; }
+    public AggregationTemporality? AggregationTemporality { get; set; }
+    public bool? IsMonotonic { get; set; }
+    public int Flags { get; set; }
     public double? Min { get; set; }
     public double? Max { get; set; }
     public List<double>? Quantiles { get; set; }
@@ -149,6 +159,18 @@ public class MetricDataPoint
     public List<long>? BucketCounts { get; set; }
     public List<double>? BucketBounds { get; set; }
     public Dictionary<string, object>? Attributes { get; set; }
+    public List<ExemplarModel>? Exemplars { get; set; }
+}
+
+public class UniqueMetricSummary
+{
+    public string Name { get; set; } = "";
+    public MetricType Type { get; set; }
+    public string? Unit { get; set; }
+    public string? Description { get; set; }
+    public int InstanceCount { get; set; }
+    public List<string> Services { get; set; } = new();
+    public DateTime LastSeen { get; set; }
 }
 
 public class ServiceMetricSummary
@@ -160,4 +182,18 @@ public class ServiceMetricSummary
     public int HistogramCount { get; set; }
     public int SummaryCount { get; set; }
     public DateTime LastUpdated { get; set; }
+}
+
+public class MultiSeriesMetricData
+{
+    public string Name { get; set; } = "";
+    public MetricType Type { get; set; }
+    public List<NamedMetricSeries> Series { get; set; } = new();
+}
+
+public class NamedMetricSeries
+{
+    public string SeriesName { get; set; } = "";
+    public long MetricId { get; set; }
+    public List<MetricDataPoint> Points { get; set; } = new();
 }

@@ -15,10 +15,10 @@ namespace Keryhe.Telemetry.Server.Services;
 /// </summary>
 public class LogService : OpenTelemetry.Proto.Collector.Logs.V1.LogsService.LogsServiceBase
 {
-    private readonly ILogRepository _logRepository;
+    private readonly ILogWriteRepository _logRepository;
     private readonly ILogger<LogService> _logger;
 
-    public LogService(ILogRepository logRepository, ILogger<LogService> logger)
+    public LogService(ILogWriteRepository logRepository, ILogger<LogService> logger)
     {
         _logRepository = logRepository ?? throw new ArgumentNullException(nameof(logRepository));
         _logger = logger ?? throw new ArgumentNullException(nameof(logger));

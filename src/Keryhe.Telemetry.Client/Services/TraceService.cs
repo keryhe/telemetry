@@ -5,9 +5,9 @@ namespace Keryhe.Telemetry.Client.Services;
 
 public class TraceService : ITraceService
 {
-    private readonly ITraceRepository _traceRepository;
+    private readonly ITraceReadRepository _traceRepository;
 
-    public TraceService(ITraceRepository traceRepository)
+    public TraceService(ITraceReadRepository traceRepository)
     {
         _traceRepository = traceRepository ?? throw new ArgumentNullException(nameof(traceRepository));
     }

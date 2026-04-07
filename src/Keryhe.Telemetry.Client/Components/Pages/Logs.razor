@@ -27,23 +27,14 @@
             @foreach (var severity in _severityLevels)
             {
                 <MudSelectItem Value="@severity">
-                    <MudChip T="string" 
-                             Size="Size.Small" 
-                             Style="@($"background-color: {GetSeverityColor(severity)}; color: white;")" 
+                    <MudChip T="string"
+                             Size="Size.Small"
+                             Style="@($"background-color: {GetSeverityColor(severity)}; color: white;")"
                              Text="@severity" />
                 </MudSelectItem>
             }
         </MudSelect>
-        
-        <MudDateRangePicker @bind-DateRange="_dateRange" 
-                            Clearable="true"
-                            Disabled="@IsTraceIdSearch"
-                            Variant="Variant.Outlined"
-                            PickerVariant="PickerVariant.Dialog"
-                            Margin="Margin.Dense"
-                            PlaceholderStart="Start Date (Optional for Trace ID)"
-                            PlaceholderEnd="End Date (Optional for Trace ID)"/>
-        
+
         <MudButton Variant="Variant.Filled"
                    Color="Color.Primary"
                    OnClick="SearchLogs"
@@ -80,7 +71,7 @@
 </MudStack>
 
 <!-- Search Help Dialog -->
-<MudDialog @bind-IsVisible="_showSearchHelp" Options="new DialogOptions { MaxWidth = MaxWidth.Medium }">
+<MudDialog @bind-Visible="_showSearchHelp" Options="new DialogOptions { MaxWidth = MaxWidth.Medium }">
     <TitleContent>
         <MudText Typo="Typo.h6">
             <MudIcon Icon="@Icons.Material.Filled.Help" Class="mr-2"/> Search Syntax Guide
@@ -165,24 +156,50 @@
     </DialogActions>
 </MudDialog>
 
-<MudChart ChartType="ChartType.StackedBar"
-          ChartSeries="@_chartSeries"
-          XAxisLabels="@_chartXAxisLabels"
-          Width="100%"
-          Height="150px"
-          LegendPosition="Position.Right" 
-          AxisChartOptions="new AxisChartOptions { MatchBoundsToSize = true }"
-          ChartOptions="@_chartOptions">
-</MudChart>
+<div @ref="_chartContainer" style="position: relative; user-select: none;">
+    <MudChart ChartType="ChartType.StackedBar"
+              ChartSeries="@_chartSeries"
+              XAxisLabels="@_chartXAxisLabels"
+              Width="100%"
+              Height="150px"
+              LegendPosition="Position.Right"
+              AxisChartOptions="new AxisChartOptions { MatchBoundsToSize = true }"
+              ChartOptions="@_chartOptions">
+    </MudChart>
+
+    <!-- Pointer-capture overlay for click and drag-to-select -->
+    <div style="position: absolute; top: 0; left: 0; right: 0; bottom: 0;
+                cursor: crosshair; z-index: 10;"
+         @onpointerdown="OnOverlayPointerDown"
+         @onpointerdown:preventDefault="true"
+         @onpointermove="OnOverlayPointerMove"
+         @onpointerup="OnOverlayPointerUp"
+         @onpointercancel="OnOverlayPointerCancel">
+
+        @if (_isDragging && _highlightWidth > 2)
+        {
+            <div style="position: absolute; top: 0; bottom: 0;
+                        left: @(_highlightLeft.ToString("F0", System.Globalization.CultureInfo.InvariantCulture))px;
+                        width: @(_highlightWidth.ToString("F0", System.Globalization.CultureInfo.InvariantCulture))px;
+                        background-color: rgba(25, 118, 210, 0.25);
+                        border-left: 2px solid rgba(25, 118, 210, 0.7);
+                        border-right: 2px solid rgba(25, 118, 210, 0.7);
+                        pointer-events: none;">
+            </div>
+        }
+    </div>
+</div>
+
+<div @ref="_logGridContainer">
 <MudDataGrid T="LogRecordModel"
              Items="@_logs"
              Loading="@_dataLoading"
              Height="calc(100vh - 28rem);"
              FixedHeader="true"
-             Virtualize="true"
              Dense="true"
-             ColumnResizeMode="ResizeMode.Container"
-             Class="compact-logs-grid">
+             ColumnResizeMode="ResizeMode.Column"
+             Class="compact-logs-grid"
+             RowStyleFunc='@((item, index) => $"background-color: {GetSeverityLightColor(item.SeverityText)};")'>
     <Columns>
         <HierarchyColumn T="LogRecordModel" HeaderClass="mud-theme-secondary" />
         <TemplateColumn Title="Timestamp" HeaderClass="mud-theme-secondary">
@@ -193,18 +210,22 @@
                 }
             </CellTemplate>
         </TemplateColumn>
-        <TemplateColumn Title="Level" HeaderClass="mud-theme-secondary">
+            <TemplateColumn Title="Service" HeaderClass="mud-theme-secondary">
+                <CellTemplate>
+                    @context.Item.Resource?.Attributes["service.name"]
+                </CellTemplate>
+            </TemplateColumn>
+        <TemplateColumn Title="Level" HeaderClass="mud-theme-secondary"
+                        CellStyleFunc='@(item => GetLevelCellStyle(item.SeverityText))'>
             <CellTemplate>
-                <MudChip Size="Size.Small" Style="@($"background-color: {GetSeverityColor(context.Item.SeverityText)}; color: {Colors.Shades.White}")" Variant="Variant.Text">
-                    @context.Item.SeverityText
-                </MudChip>
+                <span style="font-weight: 600;">@context.Item.SeverityText</span>
             </CellTemplate>
         </TemplateColumn>
         <PropertyColumn Property="x => x.BodyValue" Title="Message" Sortable="false" HeaderClass="mud-theme-secondary"/>
     </Columns>
     <ChildRowContent>
         <MudCard Elevation="0">
-            <MudCardContent Style="@($"background-color: #f9f9f9; border-left: 3px solid {GetSeverityColor(context.Item.SeverityText)}; padding: 16px;")">
+            <MudCardContent Style="@($"background-color: color-mix(in srgb, #808080 8%, var(--mud-palette-surface)); border-left: 3px solid {GetSeverityColor(context.Item.SeverityText)}; padding: 16px;")">
                 
                 <!-- Log Context Section -->
                 <MudText Typo="Typo.subtitle2" Class="mb-2" Style="font-weight: 600;">
@@ -215,7 +236,7 @@
                         @if (!string.IsNullOrEmpty(context.Item.TraceIdHex))
                         {
                             <div>
-                                <MudText Typo="Typo.caption" Style="color: #666; display: inline;">Trace ID:</MudText>
+                                <MudText Typo="Typo.caption" Style="color: var(--mud-palette-text-secondary); display: inline;">Trace ID:</MudText>
                                 <MudLink Href="@($"/traces?traceId={context.Item.TraceIdHex}")" 
                                          Typo="Typo.body2" 
                                          Style="font-family: monospace; font-size: 0.85rem; margin-left: 8px;">
@@ -226,7 +247,7 @@
                         @if (!string.IsNullOrEmpty(context.Item.SpanIdHex))
                         {
                             <div>
-                                <MudText Typo="Typo.caption" Style="color: #666; display: inline;">Span ID:</MudText>
+                                <MudText Typo="Typo.caption" Style="color: var(--mud-palette-text-secondary); display: inline;">Span ID:</MudText>
                                 <MudText Typo="Typo.body2" Style="font-family: monospace; font-size: 0.85rem; display: inline; margin-left: 8px;">
                                     @context.Item.SpanIdHex
                                 </MudText>
@@ -235,7 +256,7 @@
                         @if (context.Item.TimeUnixNano.HasValue)
                         {
                             <div>
-                                <MudText Typo="Typo.caption" Style="color: #666; display: inline;">Timestamp:</MudText>
+                                <MudText Typo="Typo.caption" Style="color: var(--mud-palette-text-secondary); display: inline;">Timestamp:</MudText>
                                 <MudText Typo="Typo.body2" Style="font-family: monospace; display: inline; margin-left: 8px;">
                                     @FormatUnixNanoToDateTime(context.Item.TimeUnixNano.Value)
                                 </MudText>
@@ -247,13 +268,13 @@
                     {
                         <MudStack Spacing="1">
                             <div>
-                                <MudText Typo="Typo.caption" Style="color: #666; display: inline;">Service:</MudText>
+                                <MudText Typo="Typo.caption" Style="color: var(--mud-palette-text-secondary); display: inline;">Service:</MudText>
                                 <MudText Typo="Typo.body2" Style="display: inline; margin-left: 8px;">
                                     @context.Item.Resource?.Attributes["service.name"]
                                 </MudText>
                             </div>
                             <div>
-                                <MudText Typo="Typo.caption" Style="color: #666; display: inline;">Scope:</MudText>
+                                <MudText Typo="Typo.caption" Style="color: var(--mud-palette-text-secondary); display: inline;">Scope:</MudText>
                                 <MudText Typo="Typo.body2" Style="display: inline; margin-left: 8px;">
                                     @context.Item.InstrumentationScope.Name
                                 </MudText>
@@ -261,7 +282,7 @@
                             @if (!string.IsNullOrEmpty(context.Item.InstrumentationScope.Version))
                             {
                                 <div>
-                                    <MudText Typo="Typo.caption" Style="color: #666; display: inline;">Version:</MudText>
+                                    <MudText Typo="Typo.caption" Style="color: var(--mud-palette-text-secondary); display: inline;">Version:</MudText>
                                     <MudText Typo="Typo.body2" Style="display: inline; margin-left: 8px;">
                                         @context.Item.InstrumentationScope.Version
                                     </MudText>
@@ -278,12 +299,12 @@
                     <MudText Typo="Typo.subtitle2" Class="mb-2" Style="font-weight: 600;">
                         Attributes
                     </MudText>
-                    <MudSimpleTable Dense="true" Style="font-size: 0.85rem; background-color: white;">
+                    <MudSimpleTable Dense="true" Style="font-size: 0.85rem; background-color: var(--mud-palette-surface);">
                         <tbody>
                             @foreach (var attr in context.Item.Attributes.OrderBy(a => a.Key))
                             {
                                 <tr>
-                                    <td style="font-family: monospace; color: #666; font-weight: 500; padding: 6px 12px;">
+                                    <td style="font-family: monospace; color: var(--mud-palette-text-secondary); font-weight: 500; padding: 6px 12px;">
                                         @attr.Key
                                     </td>
                                     <td style="padding: 6px 12px;">
@@ -303,12 +324,31 @@
                           PageSizeOptions="new int[] { 100, 250, 500, 1000 }"/>
     </PagerContent>
 </MudDataGrid>
+</div>
 
 <style>
+    /* Severity row background colors — automatically adapt via color-mix with --mud-palette-surface */
+    :root {
+        --severity-trace-bg:   color-mix(in srgb, #9C27B0 12%, var(--mud-palette-surface));
+        --severity-debug-bg:   color-mix(in srgb, #2196F3 12%, var(--mud-palette-surface));
+        --severity-info-bg:    transparent;
+        --severity-warning-bg: color-mix(in srgb, #FF9800 12%, var(--mud-palette-surface));
+        --severity-error-bg:   color-mix(in srgb, #f44336 12%, var(--mud-palette-surface));
+        --severity-fatal-bg:   color-mix(in srgb, #FF5722 18%, var(--mud-palette-surface));
+    }
+
     /* CRITICAL FIX: Force fixed table layout ONLY on the main data grid, not child tables */
     .compact-logs-grid > .mud-table-container > .mud-table-root {
-        table-layout: fixed !important;
-        width: 100% !important;
+        table-layout: auto !important;
+        min-width: 100% !important;
+    }
+
+    .compact-logs-grid {
+        container-type: inline-size;
+    }
+
+    .compact-logs-grid > .mud-table-container {
+        overflow-x: auto !important;
     }
     
     /* Set explicit widths for main grid columns */
@@ -321,68 +361,71 @@
     }
     
     .compact-logs-grid > .mud-table-container > .mud-table-root > thead > tr > th:nth-child(3) {
+        width: 150px !important; /* Service */
+    }
+
+    .compact-logs-grid > .mud-table-container > .mud-table-root > thead > tr > th:nth-child(4) {
         width: 130px !important; /* Level */
     }
-    
-    .compact-logs-grid > .mud-table-container > .mud-table-root > thead > tr > th:nth-child(4) {
-        width: auto !important; /* Message - takes remaining space */
+
+    .compact-logs-grid > .mud-table-container > .mud-table-root > thead > tr > th:nth-child(5) {
+        width: 400px !important; /* Message - minimum, grows with content */
     }
     
-    /* Reduce cell padding to make rows more compact */
-    .mud-table-cell {
-        padding-top: 4px !important;
-        padding-bottom: 4px !important;
-        line-height: 1.3 !important;
-    }
-    
-    /* Truncate long message text with ellipsis in the main grid ONLY */
-    .compact-logs-grid > .mud-table-container > .mud-table-root > tbody > tr:not(.mud-table-row-group-footer) > td:nth-child(4) {
-        overflow: hidden !important;
-        text-overflow: ellipsis !important;
+    /* Apply monospace font to main grid body cells (descendant selectors survive Virtualize wrappers) */
+    .compact-logs-grid .mud-table-body .mud-table-row:not(.mud-table-row-group-footer) .mud-table-cell {
+        font-family: 'Consolas', 'Courier New', Courier, monospace !important;
+        font-size: 0.78rem !important;
         white-space: nowrap !important;
     }
-    
-    /* Make severity chips smaller */
-    .mud-chip.mud-chip-size-small {
-        height: 22px !important;
-        font-size: 0.75rem !important;
+
+    /* Belt-and-suspenders: also target spans inside PropertyColumn cells */
+    .compact-logs-grid .mud-table-body .mud-table-row:not(.mud-table-row-group-footer) .mud-table-cell span {
+        font-family: 'Consolas', 'Courier New', Courier, monospace !important;
+        font-size: 0.78rem !important;
+    }
+
+    /* Reduce cell padding to make rows more compact */
+    .mud-table-cell {
+        padding-top: 2px !important;
+        padding-bottom: 2px !important;
+        line-height: 1.2 !important;
     }
     
     /* Ensure expanded child content row displays properly */
     .compact-logs-grid .mud-table-row-group-footer td {
         padding: 8px !important;
+        overflow: hidden !important;
     }
-    
-    /* Constrain child content card to grid width */
+
+    /* Constrain child content card to visible container width, not table width */
     .compact-logs-grid .mud-table-row-group-footer .mud-card {
-        max-width: 100% !important;
+        max-width: 100cqi !important;
+        width: 100cqi !important;
         box-sizing: border-box !important;
     }
-    
-    /* IMPORTANT: Child attribute tables use AUTO layout for proper column sizing */
+
+    /* Table expands to content; wrapper scrolls */
     .compact-logs-grid .mud-simple-table table {
         table-layout: auto !important;
-        width: 100% !important;
+        min-width: 100% !important;
     }
-    
+
     /* Key column: Let it size based on content, prevent wrapping */
     .compact-logs-grid .mud-simple-table td:first-child {
         width: 1% !important; /* Trick: makes it as narrow as possible while fitting content */
         white-space: nowrap !important; /* Prevent wrapping */
         font-family: monospace !important;
-        color: #666 !important;
+        color: var(--mud-palette-text-secondary) !important;
         font-weight: 500 !important;
         padding: 6px 12px !important;
     }
-    
-    /* Value column takes remaining space and wraps long content */
+
+    /* Value column: don't wrap — let the scrollbar handle it */
     .compact-logs-grid .mud-simple-table td:last-child {
-        width: 99% !important; /* Takes all remaining space */
-        word-wrap: break-word !important;
-        word-break: break-word !important;
-        white-space: pre-wrap !important;
-        overflow-wrap: break-word !important;
-        font-family: 'Courier New', monospace !important;
+        width: 99% !important;
+        white-space: pre !important;
+        font-family: Consolas, 'Courier New', monospace !important;
         font-size: 0.85rem !important;
         padding: 6px 12px !important;
     }

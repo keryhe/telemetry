@@ -1,7 +1,5 @@
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
-using System.Security.Cryptography;
-using System.Text;
 using System.Text.Json;
 using Keryhe.Telemetry.Core.Models;
 using Keryhe.Telemetry.Data.Access;
@@ -10,147 +8,15 @@ using Keryhe.Telemetry.Core;
 
 namespace Keryhe.Telemetry.Data;
 
-// =============================================================================
-// METRICS REPOSITORY IMPLEMENTATION
-// =============================================================================
-
-public class MetricRepository : IMetricRepository
+public class MetricReadRepository : IMetricReadRepository
 {
-    private readonly OpenTelemetryDbContext _context;
-    private readonly ILogger<MetricRepository> _logger;
+    private readonly TelemetryReadDbContext _context;
+    private readonly ILogger<MetricReadRepository> _logger;
 
-    public MetricRepository(OpenTelemetryDbContext context, ILogger<MetricRepository> logger)
+    public MetricReadRepository(TelemetryReadDbContext context, ILogger<MetricReadRepository> logger)
     {
         _context = context ?? throw new ArgumentNullException(nameof(context));
         _logger = logger ?? throw new ArgumentNullException(nameof(logger));
-    }
-
-    /// <summary>
-    /// Stores a single metric with all its data points
-    /// </summary>
-    public async Task<long> StoreMetricAsync(MetricModel metric, CancellationToken cancellationToken = default)
-    {
-        if (metric == null)
-            throw new ArgumentNullException(nameof(metric));
-
-        Threading.LockSignal.Wait();
-        try
-        {
-            using var transaction = await _context.Database.BeginTransactionAsync(cancellationToken);
-
-            // Get or create resource and scope
-            var resource = await GetOrCreateResourceAsync(metric.Resource, cancellationToken);
-            var scope = await GetOrCreateInstrumentationScopeAsync(metric.InstrumentationScope, cancellationToken);
-
-            // Create metric entity
-            var metricEntity = new Metric
-            {
-                ResourceId = resource.Id,
-                ScopeId = scope.Id,
-                Name = metric.Name,
-                Description = metric.Description,
-                Unit = metric.Unit,
-                Type = metric.Type
-            };
-
-            _context.Metrics.Add(metricEntity);
-            await _context.SaveChangesAsync(cancellationToken);
-
-            // Store data points based on metric type
-            await StoreDataPointsAsync(metricEntity.Id, metric, cancellationToken);
-
-            await transaction.CommitAsync(cancellationToken);
-
-            _logger.LogDebug("Successfully stored metric {MetricName} with ID {MetricId}",
-                metric.Name, metricEntity.Id);
-
-            return metricEntity.Id;
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "Error storing metric {MetricName}", metric.Name);
-            throw;
-        }
-        finally
-        {
-            Threading.LockSignal.Release();
-        }
-    }
-
-    /// <summary>
-    /// Stores multiple metrics in a batch
-    /// </summary>
-    public async Task<IEnumerable<long>> StoreMetricsBatchAsync(IEnumerable<MetricModel> metrics, CancellationToken cancellationToken = default)
-    {
-        if (metrics == null)
-            throw new ArgumentNullException(nameof(metrics));
-
-        var metricsList = metrics.ToList();
-        if (!metricsList.Any())
-            return Enumerable.Empty<long>();
-
-        var metricIds = new List<long>();
-
-        Threading.LockSignal.Wait();
-        try
-        {
-            using var transaction = await _context.Database.BeginTransactionAsync(cancellationToken);
-
-            var resourceCache = new Dictionary<string, Resource>();
-            var scopeCache = new Dictionary<string, InstrumentationScope>();
-
-            foreach (var metric in metricsList)
-            {
-                // Get or create resource
-                var resourceKey = GenerateResourceKey(metric.Resource);
-                if (!resourceCache.TryGetValue(resourceKey, out var resource))
-                {
-                    resource = await GetOrCreateResourceAsync(metric.Resource, cancellationToken);
-                    resourceCache[resourceKey] = resource;
-                }
-
-                // Get or create scope
-                var scopeKey = GenerateScopeKey(metric.InstrumentationScope);
-                if (!scopeCache.TryGetValue(scopeKey, out var scope))
-                {
-                    scope = await GetOrCreateInstrumentationScopeAsync(metric.InstrumentationScope, cancellationToken);
-                    scopeCache[scopeKey] = scope;
-                }
-
-                // Create metric entity
-                var metricEntity = new Metric
-                {
-                    ResourceId = resource.Id,
-                    ScopeId = scope.Id,
-                    Name = metric.Name,
-                    Description = metric.Description,
-                    Unit = metric.Unit,
-                    Type = metric.Type
-                };
-
-                _context.Metrics.Add(metricEntity);
-                await _context.SaveChangesAsync(cancellationToken);
-
-                metricIds.Add(metricEntity.Id);
-
-                // Store data points
-                await StoreDataPointsAsync(metricEntity.Id, metric, cancellationToken);
-            }
-
-            await transaction.CommitAsync(cancellationToken);
-
-            _logger.LogDebug("Successfully stored batch of {Count} metrics", metricsList.Count);
-            return metricIds;
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "Error storing metrics batch");
-            throw;
-        }
-        finally
-        {
-            Threading.LockSignal.Release();
-        }
     }
 
     /// <summary>
@@ -227,7 +93,8 @@ public class MetricRepository : IMetricRepository
     /// <summary>
     /// Gets metrics by service name
     /// </summary>
-    public async Task<List<MetricInfo>> GetMetricsByServiceAsync(string serviceName, CancellationToken cancellationToken = default)
+    public async Task<List<MetricInfo>> GetMetricsByServiceAsync(string serviceName, DateTime? startTime = null,
+        DateTime? endTime = null, CancellationToken cancellationToken = default)
     {
         if (string.IsNullOrEmpty(serviceName))
             throw new ArgumentException("Service name cannot be null or empty", nameof(serviceName));
@@ -235,7 +102,7 @@ public class MetricRepository : IMetricRepository
         try
         {
             // First, get raw data from database with Resource.Attributes
-            var rawData = await _context.Metrics
+            var query = _context.Metrics
                 .Include(m => m.Resource)
                 .Select(m => new
                 {
@@ -246,14 +113,25 @@ public class MetricRepository : IMetricRepository
                     m.Type,
                     m.CreatedAt,
                     ResourceAttributes = m.Resource.Attributes
-                })
-                .ToListAsync(cancellationToken);
+                });
+
+            var metricIdsWithData = await GetMetricIdsWithDataInRangeAsync(startTime, endTime, cancellationToken);
+            if (metricIdsWithData is { Count: 0 })
+                return new List<MetricInfo>();
+
+            if (metricIdsWithData != null)
+            {
+                query = query.Where(m => metricIdsWithData.Contains(m.Id));
+            }
+
+            var rawData = await query.ToListAsync(cancellationToken);
 
             // Then filter by service name in memory
             var result = rawData
                 .Where(m => m.ResourceAttributes != null &&
                            m.ResourceAttributes.ContainsKey("service.name") &&
-                           m.ResourceAttributes["service.name"]?.ToString() == serviceName)
+                           string.Equals(m.ResourceAttributes["service.name"]?.ToString(), serviceName,
+                               StringComparison.OrdinalIgnoreCase))
                 .Select(m => new MetricInfo
                 {
                     Id = m.Id,
@@ -324,15 +202,15 @@ public class MetricRepository : IMetricRepository
     /// <summary>
     /// Gets all metrics with pagination
     /// </summary>
-    public async Task<List<MetricInfo>> GetAllMetricsAsync(int limit = 100, CancellationToken cancellationToken = default)
+    public async Task<List<MetricInfo>> GetAllMetricsAsync(int limit = 100, DateTime? startTime = null,
+        DateTime? endTime = null, CancellationToken cancellationToken = default)
     {
         try
         {
             // First, get raw data from database with Resource.Attributes
-            var rawData = await _context.Metrics
+            var query = _context.Metrics
                 .Include(m => m.Resource)
                 .OrderByDescending(m => m.CreatedAt)
-                .Take(limit)
                 .Select(m => new
                 {
                     m.Id,
@@ -342,7 +220,19 @@ public class MetricRepository : IMetricRepository
                     m.Type,
                     m.CreatedAt,
                     ResourceAttributes = m.Resource.Attributes
-                })
+                });
+
+            var metricIdsWithData = await GetMetricIdsWithDataInRangeAsync(startTime, endTime, cancellationToken);
+            if (metricIdsWithData is { Count: 0 })
+                return new List<MetricInfo>();
+
+            if (metricIdsWithData != null)
+            {
+                query = query.Where(m => metricIdsWithData.Contains(m.Id));
+            }
+
+            var rawData = await query
+                .Take(limit)
                 .ToListAsync(cancellationToken);
 
             // Then extract service name in memory and create MetricInfo objects
@@ -370,16 +260,24 @@ public class MetricRepository : IMetricRepository
     /// <summary>
     /// Gets time series data for a specific metric
     /// </summary>
-    public async Task<MetricSeries?> GetMetricSeriesAsync(string metricName, Dictionary<string, string>? labelFilters = null, 
-        DateTime? startTime = null, DateTime? endTime = null, CancellationToken cancellationToken = default)
+    public async Task<MetricSeries?> GetMetricSeriesAsync(string metricName, Dictionary<string, string>? labelFilters = null,
+        DateTime? startTime = null, DateTime? endTime = null, long? metricId = null,
+        CancellationToken cancellationToken = default)
     {
         if (string.IsNullOrEmpty(metricName))
             throw new ArgumentException("Metric name cannot be null or empty", nameof(metricName));
 
         try
         {
-            var metric = await _context.Metrics
-                .FirstOrDefaultAsync(m => m.Name == metricName, cancellationToken);
+            var metricQuery = _context.Metrics.Where(m => m.Name == metricName);
+            if (metricId.HasValue)
+            {
+                metricQuery = metricQuery.Where(m => m.Id == metricId.Value);
+            }
+
+            var metric = await metricQuery
+                .OrderByDescending(m => m.CreatedAt)
+                .FirstOrDefaultAsync(cancellationToken);
 
             if (metric == null)
                 return null;
@@ -419,6 +317,61 @@ public class MetricRepository : IMetricRepository
         }
     }
 
+    public async Task<MultiSeriesMetricData?> GetMetricSeriesByServiceAsync(string metricName,
+        DateTime? startTime = null, DateTime? endTime = null,
+        CancellationToken cancellationToken = default)
+    {
+        if (string.IsNullOrEmpty(metricName))
+            throw new ArgumentException("Metric name cannot be null or empty", nameof(metricName));
+
+        try
+        {
+            var metrics = await _context.Metrics
+                .Include(m => m.Resource)
+                .Where(m => m.Name == metricName)
+                .ToListAsync(cancellationToken);
+
+            if (!metrics.Any())
+                return null;
+
+            var firstMetric = metrics.First();
+            var result = new MultiSeriesMetricData
+            {
+                Name = metricName,
+                Type = firstMetric.Type
+            };
+
+            foreach (var metric in metrics)
+            {
+                var serviceName = ExtractServiceName(metric.Resource.Attributes) ?? "unknown";
+
+                List<MetricDataPoint> points = metric.Type switch
+                {
+                    MetricType.GAUGE => await GetGaugeDataPointsAsync(metric.Id, null, startTime, endTime, cancellationToken),
+                    MetricType.SUM => await GetSumDataPointsAsync(metric.Id, null, startTime, endTime, cancellationToken),
+                    MetricType.HISTOGRAM => await GetHistogramDataPointsAsync(metric.Id, null, startTime, endTime, cancellationToken),
+                    MetricType.EXPONENTIAL_HISTOGRAM => await GetExponentialHistogramDataPointsAsync(metric.Id, null, startTime, endTime, cancellationToken),
+                    MetricType.SUMMARY => await GetSummaryDataPointsAsync(metric.Id, null, startTime, endTime, cancellationToken),
+                    _ => new List<MetricDataPoint>()
+                };
+
+                result.Series.Add(new NamedMetricSeries
+                {
+                    SeriesName = serviceName,
+                    MetricId = metric.Id,
+                    Points = points
+                });
+            }
+
+            return result;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error retrieving metric series by service for {MetricName}", metricName);
+            throw;
+        }
+    }
+
     /// <summary>
     /// Gets time series data for multiple metrics
     /// </summary>
@@ -433,7 +386,13 @@ public class MetricRepository : IMetricRepository
 
         foreach (var metricName in metricNames)
         {
-            var series = await GetMetricSeriesAsync(metricName, labelFilters, startTime, endTime, cancellationToken);
+            var series = await GetMetricSeriesAsync(
+                metricName,
+                labelFilters,
+                startTime,
+                endTime,
+                metricId: null,
+                cancellationToken: cancellationToken);
             if (series != null)
                 seriesList.Add(series);
         }
@@ -650,7 +609,7 @@ public class MetricRepository : IMetricRepository
             throw;
         }
     }
-    
+
     /// <summary>
     /// Gets metric labels (attribute keys and values) for a specific metric
     /// </summary>
@@ -674,39 +633,39 @@ public class MetricRepository : IMetricRepository
             switch (metric.Type)
             {
                 case MetricType.GAUGE:
-                    var gaugeAttributes = await _context.GaugeDataPoints
-                        .Where(dp => dp.MetricId == metric.Id && dp.Attributes != null)
-                        .Select(dp => dp.Attributes)
+                    var gaugeAttributeJson = await _context.GaugeDataPoints
+                        .Where(dp => dp.MetricId == metric.Id && dp.AttributesJson != null)
+                        .Select(dp => dp.AttributesJson)
                         .ToListAsync(cancellationToken);
-                    allAttributes.AddRange(gaugeAttributes.Where(a => a != null)!);
+                    allAttributes.AddRange(ParseAttributesJson(gaugeAttributeJson));
                     break;
                 case MetricType.SUM:
-                    var sumAttributes = await _context.SumDataPoints
-                        .Where(dp => dp.MetricId == metric.Id && dp.Attributes != null)
-                        .Select(dp => dp.Attributes)
+                    var sumAttributeJson = await _context.SumDataPoints
+                        .Where(dp => dp.MetricId == metric.Id && dp.AttributesJson != null)
+                        .Select(dp => dp.AttributesJson)
                         .ToListAsync(cancellationToken);
-                    allAttributes.AddRange(sumAttributes.Where(a => a != null)!);
+                    allAttributes.AddRange(ParseAttributesJson(sumAttributeJson));
                     break;
                 case MetricType.HISTOGRAM:
-                    var histogramAttributes = await _context.HistogramDataPoints
-                        .Where(dp => dp.MetricId == metric.Id && dp.Attributes != null)
-                        .Select(dp => dp.Attributes)
+                    var histogramAttributeJson = await _context.HistogramDataPoints
+                        .Where(dp => dp.MetricId == metric.Id && dp.AttributesJson != null)
+                        .Select(dp => dp.AttributesJson)
                         .ToListAsync(cancellationToken);
-                    allAttributes.AddRange(histogramAttributes.Where(a => a != null)!);
+                    allAttributes.AddRange(ParseAttributesJson(histogramAttributeJson));
                     break;
                 case MetricType.EXPONENTIAL_HISTOGRAM:
-                    var expHistogramAttributes = await _context.ExponentialHistogramDataPoints
-                        .Where(dp => dp.MetricId == metric.Id && dp.Attributes != null)
-                        .Select(dp => dp.Attributes)
+                    var expHistogramAttributeJson = await _context.ExponentialHistogramDataPoints
+                        .Where(dp => dp.MetricId == metric.Id && dp.AttributesJson != null)
+                        .Select(dp => dp.AttributesJson)
                         .ToListAsync(cancellationToken);
-                    allAttributes.AddRange(expHistogramAttributes.Where(a => a != null)!);
+                    allAttributes.AddRange(ParseAttributesJson(expHistogramAttributeJson));
                     break;
                 case MetricType.SUMMARY:
-                    var summaryAttributes = await _context.SummaryDataPoints
-                        .Where(dp => dp.MetricId == metric.Id && dp.Attributes != null)
-                        .Select(dp => dp.Attributes)
+                    var summaryAttributeJson = await _context.SummaryDataPoints
+                        .Where(dp => dp.MetricId == metric.Id && dp.AttributesJson != null)
+                        .Select(dp => dp.AttributesJson)
                         .ToListAsync(cancellationToken);
-                    allAttributes.AddRange(summaryAttributes.Where(a => a != null)!);
+                    allAttributes.AddRange(ParseAttributesJson(summaryAttributeJson));
                     break;
             }
             // Extract all unique keys and their unique values
@@ -738,116 +697,35 @@ public class MetricRepository : IMetricRepository
             throw;
         }
     }
-    
-    /// <summary>
-    /// Deletes a metric by ID
-    /// </summary>
-    public async Task<bool> DeleteMetricAsync(long id, CancellationToken cancellationToken = default)
+
+    private IEnumerable<Dictionary<string, object>> ParseAttributesJson(IEnumerable<string?> attributeJsonValues)
     {
-        try
+        foreach (var attributesJson in attributeJsonValues)
         {
-            var metric = await _context.Metrics.FindAsync(new object[] { id }, cancellationToken);
-            if (metric == null)
-                return false;
+            if (string.IsNullOrWhiteSpace(attributesJson))
+                continue;
 
-            _context.Metrics.Remove(metric);
-            await _context.SaveChangesAsync(cancellationToken);
+            Dictionary<string, object>? parsed;
+            try
+            {
+                parsed = JsonSerializer.Deserialize<Dictionary<string, object>>(attributesJson);
+            }
+            catch (JsonException)
+            {
+                continue;
+            }
 
-            _logger.LogDebug("Successfully deleted metric with ID {MetricId}", id);
-            return true;
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "Error deleting metric with ID {MetricId}", id);
-            throw;
+            if (parsed != null)
+            {
+                yield return parsed;
+            }
         }
     }
 
-    /// <summary>
-    /// Deletes metrics by name
-    /// </summary>
-    public async Task<int> DeleteMetricsByNameAsync(string name, CancellationToken cancellationToken = default)
-    {
-        if (string.IsNullOrEmpty(name))
-            throw new ArgumentException("Metric name cannot be null or empty", nameof(name));
+    // =============================================================================
+    // PRIVATE HELPER METHODS
+    // =============================================================================
 
-        try
-        {
-            var metrics = await _context.Metrics
-                .Where(m => m.Name == name)
-                .ToListAsync(cancellationToken);
-
-            var deleteCount = metrics.Count;
-            _context.Metrics.RemoveRange(metrics);
-            await _context.SaveChangesAsync(cancellationToken);
-
-            _logger.LogDebug("Successfully deleted {Count} metrics with name {MetricName}", deleteCount, name);
-            return deleteCount;
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "Error deleting metrics with name {MetricName}", name);
-            throw;
-        }
-    }
-
-    /// <summary>
-    /// Deletes metrics within a time range
-    /// </summary>
-    public async Task<int> DeleteMetricsByTimeRangeAsync(DateTime startTime, DateTime endTime, CancellationToken cancellationToken = default)
-    {
-        if (startTime >= endTime)
-            throw new ArgumentException("Start time must be before end time");
-
-        try
-        {
-            var metrics = await _context.Metrics
-                .Where(m => m.CreatedAt >= startTime && m.CreatedAt <= endTime)
-                .ToListAsync(cancellationToken);
-
-            var deleteCount = metrics.Count;
-            _context.Metrics.RemoveRange(metrics);
-            await _context.SaveChangesAsync(cancellationToken);
-
-            _logger.LogDebug("Successfully deleted {Count} metrics for time range {StartTime} to {EndTime}", 
-                deleteCount, startTime, endTime);
-            
-            return deleteCount;
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "Error deleting metrics for time range {StartTime} to {EndTime}", startTime, endTime);
-            throw;
-        }
-    }
-
-    /// <summary>
-    /// Deletes old metrics based on retention period
-    /// </summary>
-    public async Task<int> DeleteOldMetricsAsync(TimeSpan retentionPeriod, CancellationToken cancellationToken = default)
-    {
-        try
-        {
-            var cutoffTime = DateTime.UtcNow - retentionPeriod;
-
-            var metrics = await _context.Metrics
-                .Where(m => m.CreatedAt < cutoffTime)
-                .ToListAsync(cancellationToken);
-
-            var deleteCount = metrics.Count;
-            _context.Metrics.RemoveRange(metrics);
-            await _context.SaveChangesAsync(cancellationToken);
-
-            _logger.LogDebug("Successfully deleted {Count} old metrics older than {CutoffTime}", deleteCount, cutoffTime);
-            return deleteCount;
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "Error deleting old metrics with retention period {RetentionPeriod}", retentionPeriod);
-            throw;
-        }
-    }
-    
     private MetricModel? ConvertToMetricModel(Metric? metric)
     {
         if (metric == null)
@@ -860,273 +738,67 @@ public class MetricRepository : IMetricRepository
         return model;
     }
 
-    // =============================================================================
-    // PRIVATE HELPER METHODS
-    // =============================================================================
-
-    private async Task StoreDataPointsAsync(long metricId, MetricModel metric, CancellationToken cancellationToken)
+    private async Task<HashSet<long>?> GetMetricIdsWithDataInRangeAsync(
+        DateTime? startTime,
+        DateTime? endTime,
+        CancellationToken cancellationToken)
     {
-        switch (metric.Type)
+        if (!startTime.HasValue && !endTime.HasValue)
+            return null;
+
+        var startTimeNano = startTime.HasValue
+            ? OpenTelemetryDbContextExtensions.DateTimeToUnixNano(startTime.Value)
+            : (long?)null;
+        var endTimeNano = endTime.HasValue
+            ? OpenTelemetryDbContextExtensions.DateTimeToUnixNano(endTime.Value)
+            : (long?)null;
+
+        var metricIds = new HashSet<long>();
+
+        async Task AddMetricIdsAsync(IQueryable<long> query)
         {
-            case MetricType.GAUGE:
-                if (metric.GaugeDataPoints?.Any() == true)
-                    await StoreGaugeDataPointsAsync(metricId, metric.GaugeDataPoints, cancellationToken);
-                break;
-
-            case MetricType.SUM:
-                if (metric.SumDataPoints?.Any() == true)
-                    await StoreSumDataPointsAsync(metricId, metric.SumDataPoints, cancellationToken);
-                break;
-
-            case MetricType.HISTOGRAM:
-                if (metric.HistogramDataPoints?.Any() == true)
-                    await StoreHistogramDataPointsAsync(metricId, metric.HistogramDataPoints, cancellationToken);
-                break;
-
-            case MetricType.EXPONENTIAL_HISTOGRAM:
-                if (metric.ExponentialHistogramDataPoints?.Any() == true)
-                    await StoreExponentialHistogramDataPointsAsync(metricId, metric.ExponentialHistogramDataPoints, cancellationToken);
-                break;
-
-            case MetricType.SUMMARY:
-                if (metric.SummaryDataPoints?.Any() == true)
-                    await StoreSummaryDataPointsAsync(metricId, metric.SummaryDataPoints, cancellationToken);
-                break;
-        }
-    }
-
-    private async Task StoreGaugeDataPointsAsync(long metricId, List<GaugeDataPointModel> dataPoints, CancellationToken cancellationToken)
-    {
-        var entities = new List<GaugeDataPoint>();
-        var exemplars = new List<Exemplar>();
-
-        foreach (var dp in dataPoints)
-        {
-            // Store exemplar if present
-            long? exemplarId = null;
-            if (dp.Exemplar != null)
+            var ids = await query.Distinct().ToListAsync(cancellationToken);
+            foreach (var id in ids)
             {
-                var exemplar = await CreateExemplarAsync(dp.Exemplar, cancellationToken);
-                exemplars.Add(exemplar);
-                exemplarId = exemplar.Id;
+                metricIds.Add(id);
             }
-
-            var entity = new GaugeDataPoint
-            {
-                MetricId = metricId,
-                StartTimeUnixNano = dp.StartTimeUnixNano,
-                TimeUnixNano = dp.TimeUnixNano,
-                ValueDouble = dp.ValueDouble,
-                ValueInt = dp.ValueInt,
-                Flags = dp.Flags,
-                ExemplarId = exemplarId,
-                Attributes = dp.Attributes
-            };
-
-            entities.Add(entity);
         }
 
-        if (exemplars.Any())
-        {
-            _context.Exemplars.AddRange(exemplars);
-            await _context.SaveChangesAsync(cancellationToken);
-        }
+        var gaugeQuery = _context.GaugeDataPoints.AsQueryable();
+        if (startTimeNano.HasValue) gaugeQuery = gaugeQuery.Where(x => x.TimeUnixNano >= startTimeNano.Value);
+        if (endTimeNano.HasValue) gaugeQuery = gaugeQuery.Where(x => x.TimeUnixNano <= endTimeNano.Value);
+        await AddMetricIdsAsync(gaugeQuery.Select(x => x.MetricId));
 
-        _context.GaugeDataPoints.AddRange(entities);
-        await _context.SaveChangesAsync(cancellationToken);
-    }
+        var sumQuery = _context.SumDataPoints.AsQueryable();
+        if (startTimeNano.HasValue) sumQuery = sumQuery.Where(x => x.TimeUnixNano >= startTimeNano.Value);
+        if (endTimeNano.HasValue) sumQuery = sumQuery.Where(x => x.TimeUnixNano <= endTimeNano.Value);
+        await AddMetricIdsAsync(sumQuery.Select(x => x.MetricId));
 
-    private async Task StoreSumDataPointsAsync(long metricId, List<SumDataPointModel> dataPoints, CancellationToken cancellationToken)
-    {
-        var entities = new List<SumDataPoint>();
-        var exemplars = new List<Exemplar>();
+        var histogramQuery = _context.HistogramDataPoints.AsQueryable();
+        if (startTimeNano.HasValue) histogramQuery = histogramQuery.Where(x => x.TimeUnixNano >= startTimeNano.Value);
+        if (endTimeNano.HasValue) histogramQuery = histogramQuery.Where(x => x.TimeUnixNano <= endTimeNano.Value);
+        await AddMetricIdsAsync(histogramQuery.Select(x => x.MetricId));
 
-        foreach (var dp in dataPoints)
-        {
-            // Store exemplar if present
-            long? exemplarId = null;
-            if (dp.Exemplar != null)
-            {
-                var exemplar = await CreateExemplarAsync(dp.Exemplar, cancellationToken);
-                exemplars.Add(exemplar);
-                exemplarId = exemplar.Id;
-            }
+        var exponentialHistogramQuery = _context.ExponentialHistogramDataPoints.AsQueryable();
+        if (startTimeNano.HasValue) exponentialHistogramQuery = exponentialHistogramQuery.Where(x => x.TimeUnixNano >= startTimeNano.Value);
+        if (endTimeNano.HasValue) exponentialHistogramQuery = exponentialHistogramQuery.Where(x => x.TimeUnixNano <= endTimeNano.Value);
+        await AddMetricIdsAsync(exponentialHistogramQuery.Select(x => x.MetricId));
 
-            var entity = new SumDataPoint
-            {
-                MetricId = metricId,
-                StartTimeUnixNano = dp.StartTimeUnixNano,
-                TimeUnixNano = dp.TimeUnixNano,
-                ValueDouble = dp.ValueDouble,
-                ValueInt = dp.ValueInt,
-                AggregationTemporality = dp.AggregationTemporality,
-                IsMonotonic = dp.IsMonotonic,
-                Flags = dp.Flags,
-                ExemplarId = exemplarId,
-                Attributes = dp.Attributes
-            };
+        var summaryQuery = _context.SummaryDataPoints.AsQueryable();
+        if (startTimeNano.HasValue) summaryQuery = summaryQuery.Where(x => x.TimeUnixNano >= startTimeNano.Value);
+        if (endTimeNano.HasValue) summaryQuery = summaryQuery.Where(x => x.TimeUnixNano <= endTimeNano.Value);
+        await AddMetricIdsAsync(summaryQuery.Select(x => x.MetricId));
 
-            entities.Add(entity);
-        }
-
-        if (exemplars.Any())
-        {
-            _context.Exemplars.AddRange(exemplars);
-            await _context.SaveChangesAsync(cancellationToken);
-        }
-
-        _context.SumDataPoints.AddRange(entities);
-        await _context.SaveChangesAsync(cancellationToken);
-    }
-
-    private async Task StoreHistogramDataPointsAsync(long metricId, List<HistogramDataPointModel> dataPoints, CancellationToken cancellationToken)
-    {
-        var entities = new List<HistogramDataPoint>();
-        var exemplars = new List<Exemplar>();
-
-        foreach (var dp in dataPoints)
-        {
-            // Store exemplars if present
-            long? exemplarId = null;
-            if (dp.Exemplars?.Any() == true)
-            {
-                var exemplar = await CreateExemplarAsync(dp.Exemplars.First(), cancellationToken);
-                exemplars.Add(exemplar);
-                exemplarId = exemplar.Id;
-            }
-
-            var entity = new HistogramDataPoint
-            {
-                MetricId = metricId,
-                StartTimeUnixNano = dp.StartTimeUnixNano,
-                TimeUnixNano = dp.TimeUnixNano,
-                Count = dp.Count,
-                SumValue = dp.Sum,
-                BucketCountsArray = dp.BucketCounts,
-                ExplicitBoundsArray = dp.ExplicitBounds,
-                AggregationTemporality = dp.AggregationTemporality,
-                Flags = dp.Flags,
-                MinValue = dp.Min,
-                MaxValue = dp.Max,
-                ExemplarId = exemplarId,
-                Attributes = dp.Attributes
-            };
-
-            entities.Add(entity);
-        }
-
-        if (exemplars.Any())
-        {
-            _context.Exemplars.AddRange(exemplars);
-            await _context.SaveChangesAsync(cancellationToken);
-        }
-
-        _context.HistogramDataPoints.AddRange(entities);
-        await _context.SaveChangesAsync(cancellationToken);
-    }
-
-    private async Task StoreExponentialHistogramDataPointsAsync(long metricId, List<ExponentialHistogramDataPointModel> dataPoints, CancellationToken cancellationToken)
-    {
-        var entities = new List<ExponentialHistogramDataPoint>();
-        var exemplars = new List<Exemplar>();
-
-        foreach (var dp in dataPoints)
-        {
-            // Store exemplars if present
-            long? exemplarId = null;
-            if (dp.Exemplars?.Any() == true)
-            {
-                var exemplar = await CreateExemplarAsync(dp.Exemplars.First(), cancellationToken);
-                exemplars.Add(exemplar);
-                exemplarId = exemplar.Id;
-            }
-
-            var entity = new ExponentialHistogramDataPoint
-            {
-                MetricId = metricId,
-                StartTimeUnixNano = dp.StartTimeUnixNano,
-                TimeUnixNano = dp.TimeUnixNano,
-                Count = dp.Count,
-                SumValue = dp.Sum,
-                Scale = dp.Scale,
-                ZeroCount = dp.ZeroCount,
-                PositiveOffset = dp.PositiveOffset,
-                PositiveBucketCountsArray = dp.PositiveBucketCounts,
-                NegativeOffset = dp.NegativeOffset,
-                NegativeBucketCountsArray = dp.NegativeBucketCounts,
-                AggregationTemporality = dp.AggregationTemporality,
-                Flags = dp.Flags,
-                MinValue = dp.Min,
-                MaxValue = dp.Max,
-                ExemplarId = exemplarId,
-                Attributes = dp.Attributes
-            };
-
-            entities.Add(entity);
-        }
-
-        if (exemplars.Any())
-        {
-            _context.Exemplars.AddRange(exemplars);
-            await _context.SaveChangesAsync(cancellationToken);
-        }
-
-        _context.ExponentialHistogramDataPoints.AddRange(entities);
-        await _context.SaveChangesAsync(cancellationToken);
-    }
-
-    private async Task StoreSummaryDataPointsAsync(long metricId, List<SummaryDataPointModel> dataPoints, CancellationToken cancellationToken)
-    {
-        var entities = dataPoints.Select(dp => new SummaryDataPoint
-        {
-            MetricId = metricId,
-            StartTimeUnixNano = dp.StartTimeUnixNano,
-            TimeUnixNano = dp.TimeUnixNano,
-            Count = dp.Count,
-            SumValue = dp.Sum,
-            QuantileValuesArray = dp.QuantileValues?.Select(qv => new QuantileValue { Quantile = qv.Quantile, Value = qv.Value }).ToArray(),
-            Flags = dp.Flags,
-            Attributes = dp.Attributes
-            
-        }).ToList();
-
-        _context.SummaryDataPoints.AddRange(entities);
-        await _context.SaveChangesAsync(cancellationToken);
-    }
-
-    private async Task<Exemplar> CreateExemplarAsync(ExemplarModel exemplarModel, CancellationToken cancellationToken)
-    {
-        var exemplar = new Exemplar
-        {
-            FilteredAttributesDictionary = exemplarModel.FilteredAttributes,
-            TimeUnixNano = exemplarModel.TimeUnixNano,
-            ValueDouble = exemplarModel.ValueDouble,
-            ValueInt = exemplarModel.ValueInt,
-            SpanId = exemplarModel.SpanIdHex,
-            TraceId = exemplarModel.TraceIdHex
-        };
-
-        return exemplar;
-    }
-
-    private static long GetDataPointId(object entity)
-    {
-        return entity switch
-        {
-            GaugeDataPoint gdp => gdp.Id,
-            SumDataPoint sdp => sdp.Id,
-            HistogramDataPoint hdp => hdp.Id,
-            ExponentialHistogramDataPoint ehdp => ehdp.Id,
-            SummaryDataPoint sdp => sdp.Id,
-            _ => throw new ArgumentException($"Unknown data point entity type: {entity.GetType()}")
-        };
+        return metricIds;
     }
 
     // Time series data retrieval methods
     private async Task<List<MetricDataPoint>> GetGaugeDataPointsAsync(long metricId, Dictionary<string, string>? labelFilters, 
         DateTime? startTime, DateTime? endTime, CancellationToken cancellationToken)
     {
-        var query = _context.GaugeDataPoints.Where(gdp => gdp.MetricId == metricId);
+        var query = _context.GaugeDataPoints
+            .Include(gdp => gdp.Exemplar)
+            .Where(gdp => gdp.MetricId == metricId);
 
         if (startTime.HasValue)
         {
@@ -1140,24 +812,34 @@ public class MetricRepository : IMetricRepository
             query = query.Where(gdp => gdp.TimeUnixNano <= endTimeNano);
         }
 
-        var dataPoints = await query
+        var entities = await query
             .OrderBy(gdp => gdp.TimeUnixNano)
+            .ToListAsync(cancellationToken);
+
+        var dataPoints = entities
             .Select(gdp => new MetricDataPoint
             {
+                StartTimestamp = gdp.StartTimeUnixNano.HasValue
+                    ? OpenTelemetryDbContextExtensions.UnixNanoToDateTime(gdp.StartTimeUnixNano.Value)
+                    : null,
                 Timestamp = OpenTelemetryDbContextExtensions.UnixNanoToDateTime(gdp.TimeUnixNano),
                 DoubleValue = gdp.ValueDouble,
                 IntValue = gdp.ValueInt,
-                Attributes = gdp.Attributes
+                Flags = gdp.Flags,
+                Attributes = gdp.Attributes,
+                Exemplars = BuildExemplarList(gdp.Exemplar)
             })
-            .ToListAsync(cancellationToken);
+            .ToList();
 
-        return dataPoints;
+        return FilterByLabelFilters(dataPoints, labelFilters);
     }
 
     private async Task<List<MetricDataPoint>> GetSumDataPointsAsync(long metricId, Dictionary<string, string>? labelFilters, 
         DateTime? startTime, DateTime? endTime, CancellationToken cancellationToken)
     {
-        var query = _context.SumDataPoints.Where(sdp => sdp.MetricId == metricId);
+        var query = _context.SumDataPoints
+            .Include(sdp => sdp.Exemplar)
+            .Where(sdp => sdp.MetricId == metricId);
 
         if (startTime.HasValue)
         {
@@ -1171,24 +853,36 @@ public class MetricRepository : IMetricRepository
             query = query.Where(sdp => sdp.TimeUnixNano <= endTimeNano);
         }
 
-        var dataPoints = await query
+        var entities = await query
             .OrderBy(sdp => sdp.TimeUnixNano)
+            .ToListAsync(cancellationToken);
+
+        var dataPoints = entities
             .Select(sdp => new MetricDataPoint
             {
+                StartTimestamp = sdp.StartTimeUnixNano.HasValue
+                    ? OpenTelemetryDbContextExtensions.UnixNanoToDateTime(sdp.StartTimeUnixNano.Value)
+                    : null,
                 Timestamp = OpenTelemetryDbContextExtensions.UnixNanoToDateTime(sdp.TimeUnixNano),
                 DoubleValue = sdp.ValueDouble,
                 IntValue = sdp.ValueInt,
-                Attributes = sdp.Attributes
+                AggregationTemporality = sdp.AggregationTemporality,
+                IsMonotonic = sdp.IsMonotonic,
+                Flags = sdp.Flags,
+                Attributes = sdp.Attributes,
+                Exemplars = BuildExemplarList(sdp.Exemplar)
             })
-            .ToListAsync(cancellationToken);
+            .ToList();
 
-        return dataPoints;
+        return FilterByLabelFilters(dataPoints, labelFilters);
     }
 
     private async Task<List<MetricDataPoint>> GetHistogramDataPointsAsync(long metricId, Dictionary<string, string>? labelFilters, 
         DateTime? startTime, DateTime? endTime, CancellationToken cancellationToken)
     {
-        var query = _context.HistogramDataPoints.Where(hdp => hdp.MetricId == metricId);
+        var query = _context.HistogramDataPoints
+            .Include(hdp => hdp.Exemplar)
+            .Where(hdp => hdp.MetricId == metricId);
 
         if (startTime.HasValue)
         {
@@ -1202,28 +896,39 @@ public class MetricRepository : IMetricRepository
             query = query.Where(hdp => hdp.TimeUnixNano <= endTimeNano);
         }
 
-        var dataPoints = await query
+        var entities = await query
             .OrderBy(hdp => hdp.TimeUnixNano)
+            .ToListAsync(cancellationToken);
+
+        var dataPoints = entities
             .Select(hdp => new MetricDataPoint
             {
+                StartTimestamp = hdp.StartTimeUnixNano.HasValue
+                    ? OpenTelemetryDbContextExtensions.UnixNanoToDateTime(hdp.StartTimeUnixNano.Value)
+                    : null,
                 Timestamp = OpenTelemetryDbContextExtensions.UnixNanoToDateTime(hdp.TimeUnixNano),
                 Count = hdp.Count,
                 Sum = hdp.SumValue,
                 Min = hdp.MinValue,
                 Max = hdp.MaxValue,
+                AggregationTemporality = hdp.AggregationTemporality,
+                Flags = hdp.Flags,
                 BucketCounts = (hdp.BucketCountsArray != null) ? hdp.BucketCountsArray.ToList() : new List<long>(),
                 BucketBounds = (hdp.ExplicitBoundsArray != null) ? hdp.ExplicitBoundsArray.ToList() : new List<double>(),
-                Attributes = hdp.Attributes
+                Attributes = hdp.Attributes,
+                Exemplars = BuildExemplarList(hdp.Exemplar)
             })
-            .ToListAsync(cancellationToken);
+            .ToList();
 
-        return dataPoints;
+        return FilterByLabelFilters(dataPoints, labelFilters);
     }
 
     private async Task<List<MetricDataPoint>> GetExponentialHistogramDataPointsAsync(long metricId, Dictionary<string, string>? labelFilters, 
         DateTime? startTime, DateTime? endTime, CancellationToken cancellationToken)
     {
-        var query = _context.ExponentialHistogramDataPoints.Where(ehdp => ehdp.MetricId == metricId);
+        var query = _context.ExponentialHistogramDataPoints
+            .Include(ehdp => ehdp.Exemplar)
+            .Where(ehdp => ehdp.MetricId == metricId);
 
         if (startTime.HasValue)
         {
@@ -1237,20 +942,35 @@ public class MetricRepository : IMetricRepository
             query = query.Where(ehdp => ehdp.TimeUnixNano <= endTimeNano);
         }
 
-        var dataPoints = await query
+        var entities = await query
             .OrderBy(ehdp => ehdp.TimeUnixNano)
+            .ToListAsync(cancellationToken);
+
+        var dataPoints = entities
             .Select(ehdp => new MetricDataPoint
             {
+                StartTimestamp = ehdp.StartTimeUnixNano.HasValue
+                    ? OpenTelemetryDbContextExtensions.UnixNanoToDateTime(ehdp.StartTimeUnixNano.Value)
+                    : null,
                 Timestamp = OpenTelemetryDbContextExtensions.UnixNanoToDateTime(ehdp.TimeUnixNano),
                 Count = ehdp.Count,
                 Sum = ehdp.SumValue,
                 Min = ehdp.MinValue,
                 Max = ehdp.MaxValue,
-                Attributes = ehdp.Attributes
+                Scale = ehdp.Scale,
+                ZeroCount = ehdp.ZeroCount,
+                PositiveOffset = ehdp.PositiveOffset,
+                PositiveBucketCounts = ehdp.PositiveBucketCountsArray?.ToList(),
+                NegativeOffset = ehdp.NegativeOffset,
+                NegativeBucketCounts = ehdp.NegativeBucketCountsArray?.ToList(),
+                AggregationTemporality = ehdp.AggregationTemporality,
+                Flags = ehdp.Flags,
+                Attributes = ehdp.Attributes,
+                Exemplars = BuildExemplarList(ehdp.Exemplar)
             })
-            .ToListAsync(cancellationToken);
+            .ToList();
 
-        return dataPoints;
+        return FilterByLabelFilters(dataPoints, labelFilters);
     }
 
     private async Task<List<MetricDataPoint>> GetSummaryDataPointsAsync(long metricId, Dictionary<string, string>? labelFilters, 
@@ -1270,109 +990,86 @@ public class MetricRepository : IMetricRepository
             query = query.Where(sdp => sdp.TimeUnixNano <= endTimeNano);
         }
 
-        var dataPoints = await query
+        var entities = await query
             .OrderBy(sdp => sdp.TimeUnixNano)
+            .ToListAsync(cancellationToken);
+
+        var dataPoints = entities
             .Select(sdp => new MetricDataPoint
             {
+                StartTimestamp = sdp.StartTimeUnixNano.HasValue
+                    ? OpenTelemetryDbContextExtensions.UnixNanoToDateTime(sdp.StartTimeUnixNano.Value)
+                    : null,
                 Timestamp = OpenTelemetryDbContextExtensions.UnixNanoToDateTime(sdp.TimeUnixNano),
                 Count = sdp.Count,
                 Sum = sdp.SumValue,
+                Flags = sdp.Flags,
                 Quantiles = sdp.QuantileValuesArray != null ? sdp.QuantileValuesArray.Select(qv => qv.Quantile).ToList() : null,
                 QuantileValues = sdp.QuantileValuesArray != null ? sdp.QuantileValuesArray.Select(qv => qv.Value).ToList() : null,
                 Attributes = sdp.Attributes
             })
-            .ToListAsync(cancellationToken);
+            .ToList();
 
-        return dataPoints;
+        return FilterByLabelFilters(dataPoints, labelFilters);
     }
 
-    private async Task<Resource> GetOrCreateResourceAsync(ResourceModel? resourceModel, CancellationToken cancellationToken)
+    private static List<MetricDataPoint> FilterByLabelFilters(List<MetricDataPoint> points,
+        Dictionary<string, string>? labelFilters)
     {
-        if (resourceModel == null)
+        if (labelFilters == null || labelFilters.Count == 0)
+            return points;
+
+        return points
+            .Where(point => MatchesLabelFilters(point.Attributes, labelFilters))
+            .ToList();
+    }
+
+    private static bool MatchesLabelFilters(Dictionary<string, object>? attributes,
+        Dictionary<string, string> labelFilters)
+    {
+        if (labelFilters.Count == 0)
+            return true;
+
+        if (attributes == null || attributes.Count == 0)
+            return false;
+
+        foreach (var filter in labelFilters)
         {
-            resourceModel = new ResourceModel
+            var key = attributes.Keys.FirstOrDefault(k =>
+                string.Equals(k, filter.Key, StringComparison.OrdinalIgnoreCase));
+
+            if (key == null)
+                return false;
+
+            var rawValue = attributes[key];
+            var value = ConvertAttributeValueToString(rawValue);
+
+            if (!string.Equals(value, filter.Value, StringComparison.OrdinalIgnoreCase))
+                return false;
+        }
+
+        return true;
+    }
+
+    private static List<ExemplarModel>? BuildExemplarList(Exemplar? exemplar)
+    {
+        if (exemplar == null)
+            return null;
+
+        return new List<ExemplarModel>
+        {
+            new()
             {
-                Attributes = new Dictionary<string, object> { { "service.name", "unknown" } }
-            };
-        }
-
-        var resourceHash = GenerateResourceHash(resourceModel);
-
-        var existingResource = await _context.Resources
-            .FirstOrDefaultAsync(r => r.ResourceHash == resourceHash, cancellationToken);
-
-        if (existingResource != null)
-            return existingResource;
-
-        var resource = new Resource
-        {
-            ResourceHash = resourceHash,
-            SchemaUrl = resourceModel.SchemaUrl,
-            Attributes = resourceModel.Attributes
+                FilteredAttributes = exemplar.FilteredAttributesDictionary,
+                TimeUnixNano = exemplar.TimeUnixNano,
+                ValueDouble = exemplar.ValueDouble,
+                ValueInt = exemplar.ValueInt,
+                SpanIdHex = exemplar.SpanId,
+                TraceIdHex = exemplar.TraceId
+            }
         };
-
-        _context.Resources.Add(resource);
-        await _context.SaveChangesAsync(cancellationToken);
-
-        return resource;
     }
 
-    private async Task<InstrumentationScope> GetOrCreateInstrumentationScopeAsync(InstrumentationScopeModel? scopeModel, CancellationToken cancellationToken)
-    {
-        if (scopeModel == null)
-        {
-            scopeModel = new InstrumentationScopeModel { Name = "unknown" };
-        }
-
-        var scopeHash = GenerateScopeHash(scopeModel);
-
-        var existingScope = await _context.InstrumentationScopes
-            .FirstOrDefaultAsync(s => s.ScopeHash == scopeHash, cancellationToken);
-
-        if (existingScope != null)
-            return existingScope;
-
-        var scope = new InstrumentationScope
-        {
-            Name = scopeModel.Name,
-            Version = scopeModel.Version,
-            SchemaUrl = scopeModel.SchemaUrl,
-            ScopeHash = scopeHash,
-            Attributes = scopeModel.Attributes
-        };
-
-        _context.InstrumentationScopes.Add(scope);
-        await _context.SaveChangesAsync(cancellationToken);
-
-        return scope;
-    }
-
-    private static string GenerateResourceHash(ResourceModel resourceModel)
-    {
-        var content = $"{resourceModel.SchemaUrl ?? ""}__{JsonSerializer.Serialize(resourceModel.Attributes ?? new Dictionary<string, object>())}";
-        using var sha256 = SHA256.Create();
-        var hash = sha256.ComputeHash(Encoding.UTF8.GetBytes(content));
-        return Convert.ToHexString(hash).ToLowerInvariant();
-    }
-
-    private static string GenerateScopeHash(InstrumentationScopeModel scopeModel)
-    {
-        var content = $"{scopeModel.Name}__{scopeModel.Version ?? ""}__{scopeModel.SchemaUrl ?? ""}__{JsonSerializer.Serialize(scopeModel.Attributes ?? new Dictionary<string, object>())}";
-        using var sha256 = SHA256.Create();
-        var hash = sha256.ComputeHash(Encoding.UTF8.GetBytes(content));
-        return Convert.ToHexString(hash).ToLowerInvariant();
-    }
-
-    private static string GenerateResourceKey(ResourceModel? resourceModel)
-    {
-        return GenerateResourceHash(resourceModel ?? new ResourceModel());
-    }
-
-    private static string GenerateScopeKey(InstrumentationScopeModel? scopeModel)
-    {
-        return GenerateScopeHash(scopeModel ?? new InstrumentationScopeModel { Name = "unknown" });
-    }
-    
     /// <summary>
     /// Extracts the service name from Resource attributes
     /// </summary>
@@ -1383,7 +1080,7 @@ public class MetricRepository : IMetricRepository
         
         return attributes["service.name"]?.ToString();
     }
-    
+
     /// <summary>
     /// Helper method to convert attribute values to strings for label display
     /// </summary>
@@ -1419,20 +1116,6 @@ public class MetricRepository : IMetricRepository
             JsonValueKind.Array => JsonSerializer.Serialize(element),
             JsonValueKind.Object => JsonSerializer.Serialize(element),
             _ => element.ToString()
-        };
-    }
-
-    private static AttributeType DetermineAttributeType(object value)
-    {
-        return value switch
-        {
-            string => AttributeType.STRING,
-            bool => AttributeType.BOOL,
-            int or long => AttributeType.INT,
-            double or float => AttributeType.DOUBLE,
-            byte[] => AttributeType.BYTES,
-            Array or IEnumerable<object> => AttributeType.ARRAY,
-            _ => AttributeType.KVLIST
         };
     }
 }

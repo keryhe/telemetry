@@ -1,13 +1,19 @@
 using Keryhe.Telemetry.Client.Services;
+using Keryhe.Telemetry.Client.Services.State;
 using Keryhe.Telemetry.Core.Models;
 using Microsoft.AspNetCore.Components;
 using MudBlazor;
 
 namespace Keryhe.Telemetry.Client.Components.Pages;
 
-public partial class Traces : ComponentBase
+public partial class Traces : ComponentBase, IDisposable
 {
-    private int _activeTabIndex = 0;
+    private int _activeTabIndexBacking = 0;
+    private int _activeTabIndex
+    {
+        get => _activeTabIndexBacking;
+        set { _activeTabIndexBacking = value; State.ActiveTabIndex = value; }
+    }
     private List<TraceInfo> _traces = new();
     private List<ServiceDependency> _serviceDependencies = new();
     private List<SpanModel> _selectedTraceSpans = new();
@@ -16,26 +22,26 @@ public partial class Traces : ComponentBase
     private List<string> _availableServices = new();
     private bool _dataLoading = true;
     private string _searchText = "";
-    private DateRange? _dateRange = new DateRange(DateTime.Today.AddDays(-1), DateTime.Today);
     private string _filterMode = "all"; // all, errors, slow
     private string? _selectedService = null;
     private int _minDurationMs = 500;
     private string? _selectedTraceId = null;
     private string? _selectedAnalyticsService = null;
-    
+
     // Span expansion state
     private HashSet<string> _expandedSpanIds = new();
-    
+
     // Stats cards
     private int _totalTraces = 0;
     private double _avgDuration = 0;
     private double _errorRate = 0;
     private int _servicesCount = 0;
-    
+
     // Chart data
     private List<ChartSeries> _chartSeries = new();
     private string[] _chartXAxisLabels = Array.Empty<string>();
     private ChartOptions _chartOptions = new();
+    private bool _hasTraceData = false;
 
     [Inject]
     private ITraceService TraceService { get; set; } = null!;
@@ -43,13 +49,36 @@ public partial class Traces : ComponentBase
     [Inject]
     private NavigationManager NavigationManager { get; set; } = null!;
 
+    [Inject]
+    private TracesPageState State { get; set; } = null!;
+
+    [Inject]
+    private TimeRangeState TimeRangeState { get; set; } = null!;
+
     [SupplyParameterFromQuery(Name = "traceId")]
     public string? TraceIdFromQuery { get; set; }
 
     protected override async Task OnInitializedAsync()
     {
+        TimeRangeState.OnChange += OnTimeRangeChanged;
+
+        // Restore filter state
+        _filterMode = State.FilterMode;
+        _selectedService = State.SelectedService;
+        _minDurationMs = State.MinDurationMs;
+        _selectedAnalyticsService = State.SelectedAnalyticsService;
+
+        // Restore search text only when not navigating via traceId query param
+        if (string.IsNullOrEmpty(TraceIdFromQuery))
+        {
+            _searchText = State.SearchText;
+        }
+
+        // Clamp tab index: tab 3 (Trace Detail) requires live span data
+        _activeTabIndexBacking = Math.Min(State.ActiveTabIndex, 2);
+
         await LoadDataAsync();
-        
+
         // If traceId is provided in query string, automatically view that trace
         if (!string.IsNullOrEmpty(TraceIdFromQuery))
         {
@@ -57,20 +86,25 @@ public partial class Traces : ComponentBase
         }
     }
 
+    private void OnTimeRangeChanged()
+    {
+        _ = InvokeAsync(LoadDataAsync);
+    }
+
     private async Task LoadDataAsync()
     {
+        // Persist current filter state
+        State.FilterMode = _filterMode;
+        State.SelectedService = _selectedService;
+        State.MinDurationMs = _minDurationMs;
+        State.SearchText = _searchText;
+
         _dataLoading = true;
         StateHasChanged();
 
         try
         {
-            if (_dateRange?.Start == null || _dateRange?.End == null)
-            {
-                return;
-            }
-
-            var start = _dateRange.Start.Value;
-            var end = _dateRange.End.Value.AddDays(1);
+            var (start, end) = TimeRangeState.GetDateTimeRange();
 
             // Load traces based on filter mode
             switch (_filterMode)
@@ -96,7 +130,7 @@ public partial class Traces : ComponentBase
             // Filter by search text if provided
             if (!string.IsNullOrEmpty(_searchText))
             {
-                _traces = _traces.Where(t => 
+                _traces = _traces.Where(t =>
                     t.TraceIdHex.Contains(_searchText, StringComparison.OrdinalIgnoreCase) ||
                     (t.ServiceName?.Contains(_searchText, StringComparison.OrdinalIgnoreCase) ?? false)
                 ).ToList();
@@ -164,7 +198,8 @@ public partial class Traces : ComponentBase
     private async Task OnAnalyticsServiceChanged(string? service)
     {
         _selectedAnalyticsService = service;
-        
+        State.SelectedAnalyticsService = service;
+
         if (string.IsNullOrEmpty(service))
         {
             _operationCounts.Clear();
@@ -177,8 +212,7 @@ public partial class Traces : ComponentBase
 
         try
         {
-            var start = _dateRange?.Start ?? DateTime.Today.AddDays(-7);
-            var end = _dateRange?.End?.AddDays(1) ?? DateTime.Today.AddDays(1);
+            var (start, end) = TimeRangeState.GetDateTimeRange();
 
             _operationCounts = await TraceService.GetOperationCountsAsync(service, start, end);
             _averageLatencies = await TraceService.GetAverageLatenciesAsync(service, start, end);
@@ -198,6 +232,48 @@ public partial class Traces : ComponentBase
         _servicesCount = _traces.Select(t => t.ServiceName).Distinct().Count();
     }
 
+    private record BucketConfig(
+        TimeSpan BucketSize,
+        string LabelFormat,
+        Func<DateTime, bool> ShowLabel
+    );
+
+    private static readonly BucketConfig[] BucketConfigs =
+    [
+        new(TimeSpan.FromMinutes(1),  "HH:mm",  dt => dt.Minute % 15 == 0),
+        new(TimeSpan.FromMinutes(5),  "HH:mm",  dt => dt.Minute == 0),
+        new(TimeSpan.FromMinutes(10), "HH:mm",  dt => dt.Minute == 0),
+        new(TimeSpan.FromMinutes(30), "HH:mm",  dt => dt.Hour % 6 == 0 && dt.Minute == 0),
+        new(TimeSpan.FromHours(1),    "HH:mm",  dt => dt.Hour % 6 == 0 && dt.Minute == 0),
+        new(TimeSpan.FromHours(3),    "MM/dd",  dt => dt.Hour == 0),
+        new(TimeSpan.FromHours(6),    "MM/dd",  dt => dt.Hour == 0),
+        new(TimeSpan.FromHours(12),   "MM/dd",  dt => dt.Day % 2 == 1 && dt.Hour == 0),
+        new(TimeSpan.FromDays(1),     "MM/dd",  dt => dt.Day % 7 == 1 || dt.Day == 1),
+        new(TimeSpan.FromDays(2),     "MM/dd",  dt => dt.Day <= 2 || (dt.Day >= 15 && dt.Day <= 16)),
+        new(TimeSpan.FromDays(7),     "MMM",    dt => dt.Day <= 7),
+        new(TimeSpan.FromDays(30),    "MMM yy", dt => true),
+    ];
+
+    private const int MaxBucketCount = 50;
+
+    private static BucketConfig SelectBucketConfig(TimeSpan duration)
+    {
+        foreach (var config in BucketConfigs)
+        {
+            if ((long)(duration / config.BucketSize) <= MaxBucketCount)
+                return config;
+        }
+        return BucketConfigs[^1];
+    }
+
+    private static DateTime FloorToBucketBoundary(DateTime dt, TimeSpan bucketSize)
+    {
+        if (bucketSize >= TimeSpan.FromDays(1))
+            return new DateTime(dt.Year, dt.Month, dt.Day, 0, 0, 0, dt.Kind);
+
+        return new DateTime(dt.Ticks / bucketSize.Ticks * bucketSize.Ticks, dt.Kind);
+    }
+
     private void UpdateChartData(DateTime start, DateTime end)
     {
         if (_traces.Count == 0)
@@ -205,62 +281,65 @@ public partial class Traces : ComponentBase
             _chartSeries = new List<ChartSeries>();
             _chartXAxisLabels = Array.Empty<string>();
             _chartOptions = new ChartOptions();
+            _hasTraceData = false;
             return;
         }
 
         var duration = end - start;
-        var bucketSize = duration.TotalHours <= 24 ? TimeSpan.FromHours(1) :
-                        duration.TotalDays <= 7 ? TimeSpan.FromHours(6) :
-                        TimeSpan.FromDays(1);
+        var config = SelectBucketConfig(duration);
+        var alignedStart = FloorToBucketBoundary(start, config.BucketSize);
 
         var buckets = new Dictionary<DateTime, (int Total, int Errors)>();
-        var currentBucket = start;
-
-        while (currentBucket <= end)
+        var current = alignedStart;
+        while (current <= end)
         {
-            buckets[currentBucket] = (0, 0);
-            currentBucket = currentBucket.Add(bucketSize);
+            buckets[current] = (0, 0);
+            current = current.Add(config.BucketSize);
         }
 
         foreach (var trace in _traces)
         {
-            var bucketKey = buckets.Keys
-                .Where(b => trace.TraceStartTime >= b && trace.TraceStartTime < b.Add(bucketSize))
-                .FirstOrDefault();
-
-            if (bucketKey != default && buckets.ContainsKey(bucketKey))
+            var offset = (long)((trace.TraceStartTime - alignedStart).Ticks / config.BucketSize.Ticks);
+            var bucketKey = alignedStart + TimeSpan.FromTicks(offset * config.BucketSize.Ticks);
+            if (buckets.ContainsKey(bucketKey))
             {
-                var current = buckets[bucketKey];
-                buckets[bucketKey] = (current.Total + 1, current.Errors + (trace.HasErrors ? 1 : 0));
+                var cur = buckets[bucketKey];
+                buckets[bucketKey] = (cur.Total + 1, cur.Errors + (trace.HasErrors ? 1 : 0));
             }
         }
 
-        var sortedBuckets = buckets.OrderBy(b => b.Key).ToList();
+        var sorted = buckets.OrderBy(b => b.Key).ToList();
 
-        _chartXAxisLabels = sortedBuckets.Select(b => 
-            duration.TotalHours <= 24 ? b.Key.ToString("HH:mm") : b.Key.ToString("MM/dd")
+        _chartXAxisLabels = sorted.Select(b =>
+            config.ShowLabel(b.Key) ? b.Key.ToString(config.LabelFormat) : ""
         ).ToArray();
+
+        var maxValue = sorted.Max(b => b.Value.Total);
+        int yAxisTicks;
+        if (maxValue < 10) yAxisTicks = 1;
+        else if (maxValue < 50) yAxisTicks = 5;
+        else if (maxValue < 100) yAxisTicks = 10;
+        else if (maxValue < 500) yAxisTicks = 50;
+        else if (maxValue < 1000) yAxisTicks = 100;
+        else if (maxValue < 5000) yAxisTicks = 500;
+        else if (maxValue < 10000) yAxisTicks = 1000;
+        else if (maxValue < 50000) yAxisTicks = 5000;
+        else if (maxValue < 100000) yAxisTicks = 10000;
+        else yAxisTicks = 50000;
+
+        _chartOptions = new ChartOptions
+        {
+            YAxisTicks = yAxisTicks,
+            ChartPalette = new[] { "#2196F3", "#F44336" }
+        };
 
         _chartSeries = new List<ChartSeries>
         {
-            new ChartSeries 
-            { 
-                Name = "Total Traces", 
-                Data = sortedBuckets.Select(b => (double)b.Value.Total).ToArray() 
-            },
-            new ChartSeries 
-            { 
-                Name = "Error Traces", 
-                Data = sortedBuckets.Select(b => (double)b.Value.Errors).ToArray() 
-            }
+            new() { Name = "Total",  Data = sorted.Select(b => (double)b.Value.Total).ToArray() },
+            new() { Name = "Errors", Data = sorted.Select(b => (double)b.Value.Errors).ToArray() },
         };
 
-        var maxValue = sortedBuckets.Max(b => b.Value.Total);
-        _chartOptions = new ChartOptions 
-        { 
-            YAxisTicks = maxValue < 10 ? 1 : maxValue < 50 ? 5 : 10,
-            ChartPalette = new[] { Colors.Blue.Default, Colors.Red.Default }
-        };
+        _hasTraceData = true;
     }
 
     private string FormatDuration(TimeSpan duration)
@@ -319,7 +398,6 @@ public partial class Traces : ComponentBase
         if (!_selectedTraceSpans.Any())
             return new List<SpanModel>();
 
-        // Find root spans (no parent)
         var rootSpans = _selectedTraceSpans.Where(s => string.IsNullOrEmpty(s.ParentSpanIdHex)).ToList();
         return rootSpans;
     }
@@ -386,10 +464,9 @@ public partial class Traces : ComponentBase
 
     private int GetSpanLevel(SpanModel span)
     {
-        // Calculate hierarchy level for better visualization
         var level = 0;
         var currentParent = span.ParentSpanIdHex;
-        
+
         while (!string.IsNullOrEmpty(currentParent))
         {
             level++;
@@ -397,7 +474,7 @@ public partial class Traces : ComponentBase
             if (parentSpan == null) break;
             currentParent = parentSpan.ParentSpanIdHex;
         }
-        
+
         return level;
     }
 
@@ -412,7 +489,7 @@ public partial class Traces : ComponentBase
             _expandedSpanIds.Remove(spanId);
         else
             _expandedSpanIds.Add(spanId);
-        
+
         StateHasChanged();
     }
 
@@ -429,8 +506,7 @@ public partial class Traces : ComponentBase
     private RenderFragment RenderSpanDetails(SpanModel span, int level) => builder =>
     {
         var seq = 0;
-        
-        // Details container
+
         builder.OpenComponent<MudPaper>(seq++);
         builder.AddAttribute(seq++, "Class", "pa-3 mt-1 mb-2");
         builder.AddAttribute(seq++, "Style", $"margin-left: {level * 20 + 40}px; background-color: #f9f9f9; border-left: 3px solid {GetSpanKindColor(span.Kind)};");
@@ -438,8 +514,7 @@ public partial class Traces : ComponentBase
         builder.AddAttribute(seq++, "ChildContent", (RenderFragment)(builder2 =>
         {
             var seq2 = 0;
-            
-            // Attributes Section
+
             if (span.Attributes != null && span.Attributes.Any())
             {
                 builder2.OpenComponent<MudText>(seq2++);
@@ -447,7 +522,7 @@ public partial class Traces : ComponentBase
                 builder2.AddAttribute(seq2++, "Class", "mb-2");
                 builder2.AddAttribute(seq2++, "ChildContent", (RenderFragment)(b => b.AddContent(0, "Attributes")));
                 builder2.CloseComponent();
-                
+
                 builder2.OpenComponent<MudSimpleTable>(seq2++);
                 builder2.AddAttribute(seq2++, "Dense", true);
                 builder2.AddAttribute(seq2++, "Style", "font-size: 0.85rem; background-color: white;");
@@ -455,29 +530,28 @@ public partial class Traces : ComponentBase
                 {
                     var seq3 = 0;
                     builder3.OpenElement(seq3++, "tbody");
-                    
+
                     foreach (var attr in span.Attributes.OrderBy(a => a.Key))
                     {
                         builder3.OpenElement(seq3++, "tr");
-                        
+
                         builder3.OpenElement(seq3++, "td");
                         builder3.AddAttribute(seq3++, "style", "font-family: monospace; color: #666; font-weight: 500; width: 30%;");
                         builder3.AddContent(seq3++, attr.Key);
                         builder3.CloseElement();
-                        
+
                         builder3.OpenElement(seq3++, "td");
                         builder3.AddContent(seq3++, FormatAttributeValue(attr.Value));
                         builder3.CloseElement();
-                        
+
                         builder3.CloseElement(); // tr
                     }
-                    
+
                     builder3.CloseElement(); // tbody
                 }));
                 builder2.CloseComponent();
             }
-            
-            // Events Section
+
             if (span.Events != null && span.Events.Any())
             {
                 builder2.OpenComponent<MudText>(seq2++);
@@ -485,18 +559,17 @@ public partial class Traces : ComponentBase
                 builder2.AddAttribute(seq2++, "Class", "mt-3 mb-2");
                 builder2.AddAttribute(seq2++, "ChildContent", (RenderFragment)(b => b.AddContent(0, $"Events ({span.Events.Count})")));
                 builder2.CloseComponent();
-                
-                // Use div container instead of MudList
+
                 builder2.OpenElement(seq2++, "div");
                 builder2.AddAttribute(seq2++, "style", "padding-left: 0;");
-                
+
                 foreach (var evt in span.Events.OrderBy(e => e.TimeUnixNano))
                 {
                     var eventTime = UnixNanoToDateTime(evt.TimeUnixNano);
-                    
+
                     builder2.OpenElement(seq2++, "div");
                     builder2.AddAttribute(seq2++, "style", "padding: 8px 0; border-bottom: 1px solid #eeeeee;");
-                    
+
                     builder2.OpenComponent<MudStack>(seq2++);
                     builder2.AddAttribute(seq2++, "Row", true);
                     builder2.AddAttribute(seq2++, "Spacing", 2);
@@ -504,18 +577,18 @@ public partial class Traces : ComponentBase
                     builder2.AddAttribute(seq2++, "ChildContent", (RenderFragment)(builder5 =>
                     {
                         var seq5 = 0;
-                        
+
                         builder5.OpenComponent<MudIcon>(seq5++);
                         builder5.AddAttribute(seq5++, "Icon", Icons.Material.Filled.Event);
                         builder5.AddAttribute(seq5++, "Size", Size.Small);
                         builder5.AddAttribute(seq5++, "Color", Color.Info);
                         builder5.CloseComponent();
-                        
+
                         builder5.OpenComponent<MudText>(seq5++);
                         builder5.AddAttribute(seq5++, "Typo", Typo.body2);
                         builder5.AddAttribute(seq5++, "ChildContent", (RenderFragment)(b => b.AddContent(0, evt.Name)));
                         builder5.CloseComponent();
-                        
+
                         builder5.OpenComponent<MudText>(seq5++);
                         builder5.AddAttribute(seq5++, "Typo", Typo.caption);
                         builder5.AddAttribute(seq5++, "Style", "font-family: monospace;");
@@ -523,24 +596,23 @@ public partial class Traces : ComponentBase
                         builder5.CloseComponent();
                     }));
                     builder2.CloseComponent();
-                    
+
                     if (evt.Attributes != null && evt.Attributes.Any())
                     {
                         builder2.OpenComponent<MudText>(seq2++);
                         builder2.AddAttribute(seq2++, "Typo", Typo.caption);
                         builder2.AddAttribute(seq2++, "Class", "ml-6");
-                        builder2.AddAttribute(seq2++, "ChildContent", (RenderFragment)(b => 
+                        builder2.AddAttribute(seq2++, "ChildContent", (RenderFragment)(b =>
                             b.AddContent(0, string.Join(", ", evt.Attributes.Select(a => $"{a.Key}={FormatAttributeValue(a.Value)}")))));
                         builder2.CloseComponent();
                     }
-                    
+
                     builder2.CloseElement(); // event div
                 }
-                
+
                 builder2.CloseElement(); // container div
             }
-            
-            // Links Section
+
             if (span.Links != null && span.Links.Any())
             {
                 builder2.OpenComponent<MudText>(seq2++);
@@ -548,16 +620,15 @@ public partial class Traces : ComponentBase
                 builder2.AddAttribute(seq2++, "Class", "mt-3 mb-2");
                 builder2.AddAttribute(seq2++, "ChildContent", (RenderFragment)(b => b.AddContent(0, $"Links ({span.Links.Count})")));
                 builder2.CloseComponent();
-                
-                // Use div container instead of MudList
+
                 builder2.OpenElement(seq2++, "div");
                 builder2.AddAttribute(seq2++, "style", "padding-left: 0;");
-                
+
                 foreach (var link in span.Links)
                 {
                     builder2.OpenElement(seq2++, "div");
                     builder2.AddAttribute(seq2++, "style", "padding: 8px 0; border-bottom: 1px solid #eeeeee;");
-                    
+
                     builder2.OpenComponent<MudStack>(seq2++);
                     builder2.AddAttribute(seq2++, "Row", true);
                     builder2.AddAttribute(seq2++, "Spacing", 2);
@@ -565,19 +636,19 @@ public partial class Traces : ComponentBase
                     builder2.AddAttribute(seq2++, "ChildContent", (RenderFragment)(builder5 =>
                     {
                         var seq5 = 0;
-                        
+
                         builder5.OpenComponent<MudIcon>(seq5++);
                         builder5.AddAttribute(seq5++, "Icon", Icons.Material.Filled.Link);
                         builder5.AddAttribute(seq5++, "Size", Size.Small);
                         builder5.AddAttribute(seq5++, "Color", Color.Secondary);
                         builder5.CloseComponent();
-                        
+
                         builder5.OpenComponent<MudText>(seq5++);
                         builder5.AddAttribute(seq5++, "Typo", Typo.body2);
                         builder5.AddAttribute(seq5++, "Style", "font-family: monospace; font-size: 0.8rem;");
                         builder5.AddAttribute(seq5++, "ChildContent", (RenderFragment)(b => b.AddContent(0, link.LinkedTraceIdHex)));
                         builder5.CloseComponent();
-                        
+
                         builder5.OpenComponent<MudText>(seq5++);
                         builder5.AddAttribute(seq5++, "Typo", Typo.caption);
                         builder5.AddAttribute(seq5++, "Color", Color.Secondary);
@@ -585,39 +656,37 @@ public partial class Traces : ComponentBase
                         builder5.CloseComponent();
                     }));
                     builder2.CloseComponent();
-                    
+
                     builder2.CloseElement(); // link div
                 }
-                
+
                 builder2.CloseElement(); // container div
             }
-            
-            // Status and Instrumentation Grid
+
             builder2.OpenComponent<MudGrid>(seq2++);
             builder2.AddAttribute(seq2++, "Class", "mt-3");
             builder2.AddAttribute(seq2++, "Spacing", 2);
             builder2.AddAttribute(seq2++, "ChildContent", (RenderFragment)(builder3 =>
             {
                 var seq3 = 0;
-                
-                // Status column
+
                 builder3.OpenComponent<MudItem>(seq3++);
                 builder3.AddAttribute(seq3++, "xs", 6);
                 builder3.AddAttribute(seq3++, "ChildContent", (RenderFragment)(builder4 =>
                 {
                     var seq4 = 0;
-                    
+
                     builder4.OpenComponent<MudText>(seq4++);
                     builder4.AddAttribute(seq4++, "Typo", Typo.subtitle2);
                     builder4.AddAttribute(seq4++, "ChildContent", (RenderFragment)(b => b.AddContent(0, "Status")));
                     builder4.CloseComponent();
-                    
+
                     builder4.OpenComponent<MudChip<string>>(seq4++);
                     builder4.AddAttribute(seq4++, "Size", Size.Small);
                     builder4.AddAttribute(seq4++, "Color", span.StatusCode == SpanStatusCode.ERROR ? Color.Error : Color.Success);
                     builder4.AddAttribute(seq4++, "Text", span.StatusCode.ToString());
                     builder4.CloseComponent();
-                    
+
                     if (!string.IsNullOrEmpty(span.StatusMessage))
                     {
                         builder4.OpenComponent<MudText>(seq4++);
@@ -628,8 +697,7 @@ public partial class Traces : ComponentBase
                     }
                 }));
                 builder3.CloseComponent();
-                
-                // Instrumentation column
+
                 if (span.InstrumentationScope != null)
                 {
                     builder3.OpenComponent<MudItem>(seq3++);
@@ -637,17 +705,17 @@ public partial class Traces : ComponentBase
                     builder3.AddAttribute(seq3++, "ChildContent", (RenderFragment)(builder4 =>
                     {
                         var seq4 = 0;
-                        
+
                         builder4.OpenComponent<MudText>(seq4++);
                         builder4.AddAttribute(seq4++, "Typo", Typo.subtitle2);
                         builder4.AddAttribute(seq4++, "ChildContent", (RenderFragment)(b => b.AddContent(0, "Instrumentation")));
                         builder4.CloseComponent();
-                        
+
                         builder4.OpenComponent<MudText>(seq4++);
                         builder4.AddAttribute(seq4++, "Typo", Typo.body2);
                         builder4.AddAttribute(seq4++, "ChildContent", (RenderFragment)(b => b.AddContent(0, span.InstrumentationScope.Name ?? "N/A")));
                         builder4.CloseComponent();
-                        
+
                         if (!string.IsNullOrEmpty(span.InstrumentationScope.Version))
                         {
                             builder4.OpenComponent<MudText>(seq4++);
@@ -670,26 +738,23 @@ public partial class Traces : ComponentBase
         var spanStartTime = UnixNanoToDateTime(span.StartTimeUnixNano);
         var spanDuration = GetSpanDurationMs(span);
         var isExpanded = IsSpanExpanded(span.SpanIdHex);
-        
-        // Container div
+
         builder.OpenElement(seq++, "div");
         builder.AddAttribute(seq++, "style", "margin-bottom: 4px;");
-        
-        // MudGrid for columns
+
         builder.OpenComponent<MudGrid>(seq++);
         builder.AddAttribute(seq++, "Spacing", 0);
         builder.AddAttribute(seq++, "Style", "align-items: center;");
         builder.AddAttribute(seq++, "ChildContent", (RenderFragment)(builder2 =>
         {
             var seq2 = 0;
-            
-            // Column 1: Operation Name with expand button (5 columns)
+
             builder2.OpenComponent<MudItem>(seq2++);
             builder2.AddAttribute(seq2++, "xs", 5);
             builder2.AddAttribute(seq2++, "ChildContent", (RenderFragment)(builder3 =>
             {
                 var seq3 = 0;
-                
+
                 builder3.OpenComponent<MudStack>(seq3++);
                 builder3.AddAttribute(seq3++, "Row", true);
                 builder3.AddAttribute(seq3++, "AlignItems", AlignItems.Center);
@@ -698,29 +763,25 @@ public partial class Traces : ComponentBase
                 builder3.AddAttribute(seq3++, "ChildContent", (RenderFragment)(builder4 =>
                 {
                     var seq4 = 0;
-                    
-                    // Expand/Collapse Icon Button
+
                     builder4.OpenComponent<MudIconButton>(seq4++);
                     builder4.AddAttribute(seq4++, "Icon", isExpanded ? Icons.Material.Filled.ExpandMore : Icons.Material.Filled.ChevronRight);
                     builder4.AddAttribute(seq4++, "Size", Size.Small);
                     builder4.AddAttribute(seq4++, "OnClick", EventCallback.Factory.Create<Microsoft.AspNetCore.Components.Web.MouseEventArgs>(this, _ => ToggleSpanExpansion(span.SpanIdHex)));
                     builder4.AddAttribute(seq4++, "Style", "padding: 0; margin-right: -4px;");
                     builder4.CloseComponent();
-                    
-                    // Span Kind Chip
+
                     builder4.OpenComponent<MudChip<string>>(seq4++);
                     builder4.AddAttribute(seq4++, "Size", Size.Small);
                     builder4.AddAttribute(seq4++, "Text", span.Kind.ToString());
                     builder4.AddAttribute(seq4++, "Style", $"background-color: {GetSpanKindColor(span.Kind)}; color: white; font-size: 0.7rem;");
                     builder4.CloseComponent();
-                    
-                    // Span Name
+
                     builder4.OpenComponent<MudText>(seq4++);
                     builder4.AddAttribute(seq4++, "Typo", Typo.body2);
                     builder4.AddAttribute(seq4++, "ChildContent", (RenderFragment)(b => b.AddContent(0, span.Name)));
                     builder4.CloseComponent();
-                    
-                    // Error icon if error
+
                     if (span.StatusCode == SpanStatusCode.ERROR)
                     {
                         builder4.OpenComponent<MudIcon>(seq4++);
@@ -733,8 +794,7 @@ public partial class Traces : ComponentBase
                 builder3.CloseComponent();
             }));
             builder2.CloseComponent();
-            
-            // Column 2: Start Time (2 columns)
+
             builder2.OpenComponent<MudItem>(seq2++);
             builder2.AddAttribute(seq2++, "xs", 2);
             builder2.AddAttribute(seq2++, "ChildContent", (RenderFragment)(builder3 =>
@@ -747,8 +807,7 @@ public partial class Traces : ComponentBase
                 builder3.CloseComponent();
             }));
             builder2.CloseComponent();
-            
-            // Column 3: Duration (2 columns)
+
             builder2.OpenComponent<MudItem>(seq2++);
             builder2.AddAttribute(seq2++, "xs", 2);
             builder2.AddAttribute(seq2++, "ChildContent", (RenderFragment)(builder3 =>
@@ -761,38 +820,33 @@ public partial class Traces : ComponentBase
                 builder3.CloseComponent();
             }));
             builder2.CloseComponent();
-            
-            // Column 4: Timeline Bar (3 columns)
+
             builder2.OpenComponent<MudItem>(seq2++);
             builder2.AddAttribute(seq2++, "xs", 3);
             builder2.AddAttribute(seq2++, "ChildContent", (RenderFragment)(builder3 =>
             {
                 var seq3 = 0;
-                // Timeline bar container
                 builder3.OpenElement(seq3++, "div");
                 builder3.AddAttribute(seq3++, "style", "position: relative; height: 16px; background-color: #e0e0e0; border-radius: 3px;");
-                
-                // Timeline bar fill
+
                 builder3.OpenElement(seq3++, "div");
                 builder3.AddAttribute(seq3++, "style", $"position: absolute; left: {GetSpanStartOffsetPercent(span)}%; width: {GetSpanWidthPercent(span)}%; height: 100%; background-color: {GetSpanKindColor(span.Kind)}; border-radius: 3px; opacity: 0.8;");
                 builder3.AddAttribute(seq3++, "title", $"{spanStartTime:HH:mm:ss.fff} - {spanDuration:F2}ms");
                 builder3.CloseElement(); // fill
-                
+
                 builder3.CloseElement(); // container
             }));
             builder2.CloseComponent();
         }));
         builder.CloseComponent(); // MudGrid
-        
-        // Expanded details panel
+
         if (isExpanded)
         {
             builder.AddContent(seq++, RenderSpanDetails(span, level));
         }
-        
+
         builder.CloseElement(); // container div
-        
-        // Render child spans recursively
+
         var childSpans = GetChildSpans(span.SpanIdHex);
         foreach (var childSpan in childSpans)
         {
@@ -803,27 +857,23 @@ public partial class Traces : ComponentBase
     private RenderFragment RenderSpanTree(SpanModel span, int level) => builder =>
     {
         var seq = 0;
-        
-        // Container div
+
         builder.OpenElement(seq++, "div");
         builder.AddAttribute(seq++, "style", $"margin-left: {level * 20}px; margin-bottom: 8px;");
-        
-        // MudPaper
+
         builder.OpenComponent<MudPaper>(seq++);
         builder.AddAttribute(seq++, "Elevation", 1);
         builder.AddAttribute(seq++, "Class", "pa-2");
         builder.AddAttribute(seq++, "ChildContent", (RenderFragment)(builder2 =>
         {
             var seq2 = 0;
-            
-            // Outer MudStack
+
             builder2.OpenComponent<MudStack>(seq2++);
             builder2.AddAttribute(seq2++, "Spacing", 1);
             builder2.AddAttribute(seq2++, "ChildContent", (RenderFragment)(builder3 =>
             {
                 var seq3 = 0;
-                
-                // Top row MudStack
+
                 builder3.OpenComponent<MudStack>(seq3++);
                 builder3.AddAttribute(seq3++, "Row", true);
                 builder3.AddAttribute(seq3++, "AlignItems", AlignItems.Center);
@@ -831,8 +881,7 @@ public partial class Traces : ComponentBase
                 builder3.AddAttribute(seq3++, "ChildContent", (RenderFragment)(builder4 =>
                 {
                     var seq4 = 0;
-                    
-                    // Left side MudStack
+
                     builder4.OpenComponent<MudStack>(seq4++);
                     builder4.AddAttribute(seq4++, "Row", true);
                     builder4.AddAttribute(seq4++, "AlignItems", AlignItems.Center);
@@ -840,23 +889,20 @@ public partial class Traces : ComponentBase
                     builder4.AddAttribute(seq4++, "ChildContent", (RenderFragment)(builder5 =>
                     {
                         var seq5 = 0;
-                        
-                        // Span Kind Chip
+
                         builder5.OpenComponent<MudChip<string>>(seq5++);
                         builder5.AddAttribute(seq5++, "Size", Size.Small);
                         builder5.AddAttribute(seq5++, "Text", span.Kind.ToString());
                         builder5.AddAttribute(seq5++, "Style", $"background-color: {GetSpanKindColor(span.Kind)}; color: white;");
                         builder5.AddAttribute(seq5++, "Variant", Variant.Filled);
                         builder5.CloseComponent();
-                        
-                        // Span Name
+
                         builder5.OpenComponent<MudText>(seq5++);
                         builder5.AddAttribute(seq5++, "Typo", Typo.body2);
                         builder5.AddAttribute(seq5++, "Style", "font-weight: 500;");
                         builder5.AddAttribute(seq5++, "ChildContent", (RenderFragment)(b => b.AddContent(0, span.Name)));
                         builder5.CloseComponent();
-                        
-                        // Service Name Chip
+
                         builder5.OpenComponent<MudChip<string>>(seq5++);
                         builder5.AddAttribute(seq5++, "Size", Size.Small);
                         builder5.AddAttribute(seq5++, "Text", GetServiceName(span));
@@ -864,8 +910,7 @@ public partial class Traces : ComponentBase
                         builder5.CloseComponent();
                     }));
                     builder4.CloseComponent();
-                    
-                    // Right side MudStack
+
                     builder4.OpenComponent<MudStack>(seq4++);
                     builder4.AddAttribute(seq4++, "Row", true);
                     builder4.AddAttribute(seq4++, "AlignItems", AlignItems.Center);
@@ -873,8 +918,7 @@ public partial class Traces : ComponentBase
                     builder4.AddAttribute(seq4++, "ChildContent", (RenderFragment)(builder5 =>
                     {
                         var seq5 = 0;
-                        
-                        // Error icon if error
+
                         if (span.StatusCode == SpanStatusCode.ERROR)
                         {
                             builder5.OpenComponent<MudIcon>(seq5++);
@@ -883,8 +927,7 @@ public partial class Traces : ComponentBase
                             builder5.AddAttribute(seq5++, "Size", Size.Small);
                             builder5.CloseComponent();
                         }
-                        
-                        // Duration text
+
                         builder5.OpenComponent<MudText>(seq5++);
                         builder5.AddAttribute(seq5++, "Typo", Typo.body2);
                         builder5.AddAttribute(seq5++, "Color", Color.Secondary);
@@ -894,8 +937,7 @@ public partial class Traces : ComponentBase
                     builder4.CloseComponent();
                 }));
                 builder3.CloseComponent();
-                
-                // Timeline bar
+
                 builder3.OpenElement(seq3++, "div");
                 builder3.AddAttribute(seq3++, "style", "position: relative; height: 20px; background-color: #f5f5f5; border-radius: 4px;");
                 builder3.OpenElement(seq3++, "div");
@@ -906,12 +948,16 @@ public partial class Traces : ComponentBase
             builder2.CloseComponent();
         }));
         builder.CloseComponent();
-        
-        // Render child spans recursively
+
         var childSpans = GetChildSpans(span.SpanIdHex);
         foreach (var childSpan in childSpans)
         {
             builder.AddContent(seq++, RenderSpanTree(childSpan, level + 1));
         }
     };
+
+    public void Dispose()
+    {
+        TimeRangeState.OnChange -= OnTimeRangeChanged;
+    }
 }

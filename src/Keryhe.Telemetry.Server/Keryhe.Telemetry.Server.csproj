@@ -9,9 +9,8 @@
 
     <ItemGroup>
         <PackageReference Include="Grpc.AspNetCore" Version="2.71.0" />
-        <PackageReference Include="Microsoft.EntityFrameworkCore.SqlServer" Version="9.0.11" />
         <PackageReference Include="Microsoft.Extensions.Logging" Version="9.0.11" />
-        <PackageReference Include="Pomelo.EntityFrameworkCore.MySql" Version="9.0.0" />
+        <PackageReference Include="Npgsql.EntityFrameworkCore.PostgreSQL" Version="9.0.4" />
     </ItemGroup>
 
     <ItemGroup>

@@ -16,13 +16,6 @@
                               Variant="Variant.Outlined"
                               Margin="Margin.Dense"
                               Style="flex: 1;"/>
-                <MudDateRangePicker @bind-DateRange="_dateRange"
-                                    Clearable="true"
-                                    Variant="Variant.Outlined"
-                                    PickerVariant="PickerVariant.Dialog"
-                                    Margin="Margin.Dense"
-                                    PlaceholderStart="Start Date"
-                                    PlaceholderEnd="End Date"/>
                 <MudButton Variant="Variant.Filled"
                            Color="Color.Primary"
                            OnClick="SearchTraces"
@@ -34,7 +27,7 @@
             <!-- Quick Filters -->
             <MudStack Row="true" Spacing="2" AlignItems="AlignItems.Center">
                 <MudText Typo="Typo.body2">Filter:</MudText>
-                <MudChipSet @bind-SelectedValue="_filterMode" Filter="true" Mandatory="true" T="string">
+                <MudChipSet @bind-SelectedValue="_filterMode" T="string">
                     <MudChip Text="All Traces" Value="@("all")" OnClick="@(() => OnFilterModeChanged("all"))" Default="true"/>
                     <MudChip Text="Errors Only" Value="@("errors")" Color="Color.Error" OnClick="@(() => OnFilterModeChanged("errors"))"/>
                     <MudChip Text="Slow Traces" Value="@("slow")" Color="Color.Warning" OnClick="@(() => OnFilterModeChanged("slow"))"/>
@@ -123,25 +116,34 @@
 
         <!-- Timeline Chart -->
         <MudPaper Elevation="2" Class="pa-4 mb-4">
-            <MudText Typo="Typo.h6" Class="mb-2">Trace Timeline</MudText>
-            <MudChart ChartType="ChartType.Line"
-                      ChartSeries="@_chartSeries"
-                      XAxisLabels="@_chartXAxisLabels"
-                      Width="100%"
-                      Height="200px"
-                      ChartOptions="@_chartOptions"/>
+            <MudText Typo="Typo.h6" Class="mb-2">Trace Volume</MudText>
+            @if (_hasTraceData)
+            {
+                <MudChart ChartType="ChartType.Line"
+                          ChartSeries="@_chartSeries"
+                          XAxisLabels="@_chartXAxisLabels"
+                          Width="100%"
+                          Height="150px"
+                          LegendPosition="Position.Right"
+                          AxisChartOptions="new AxisChartOptions { MatchBoundsToSize = true }"
+                          ChartOptions="@_chartOptions"/>
+            }
+            else
+            {
+                <MudText Color="Color.Secondary" Class="pa-4">No trace data in this window.</MudText>
+            }
         </MudPaper>
 
         <!-- Trace Data Grid -->
         <MudDataGrid T="TraceInfo"
                      Items="@_traces"
                      Loading="@_dataLoading"
-                     Height="calc(100vh - 42rem)"
+                     Height="calc(100vh - 41rem)"
                      FixedHeader="true"
                      Virtualize="true"
                      Dense="true"
                      Hover="true"
-                     ColumnResizeMode="ResizeMode.Container">
+                     ColumnResizeMode="ResizeMode.Column">
             <Columns>
                 <HierarchyColumn T="TraceInfo" HeaderClass="mud-theme-secondary"/>
                 <TemplateColumn Title="Trace ID" HeaderClass="mud-theme-secondary">
@@ -153,7 +155,7 @@
                             <MudIconButton Icon="@Icons.Material.Filled.ContentCopy"
                                            Size="Size.Small"
                                            OnClick="@(() => {})"
-                                           Title="Copy Trace ID"/>
+                                           title="Copy Trace ID"/>
                         </MudStack>
                     </CellTemplate>
                 </TemplateColumn>
@@ -282,7 +284,8 @@
     <!-- Tab 3: Analytics -->
     <MudTabPanel Text="Analytics" Icon="@Icons.Material.Filled.Analytics">
         <MudStack Spacing="3">
-            <MudSelect @bind-Value="_selectedAnalyticsService"
+            <MudSelect Value="_selectedAnalyticsService"
+                       ValueChanged="OnAnalyticsServiceChanged"
                        Label="Select Service"
                        Variant="Variant.Outlined"
                        T="string"

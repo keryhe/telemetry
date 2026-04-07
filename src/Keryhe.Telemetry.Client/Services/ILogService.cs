@@ -12,9 +12,9 @@ public interface ILogService
 public class LogService : ILogService
 {
     private readonly ILogger<LogService> _logger;
-    private readonly ILogRepository _logRepository;
+    private readonly ILogReadRepository _logRepository;
     
-    public LogService(ILogRepository logRepository, ILogger<LogService> logger)
+    public LogService(ILogReadRepository logRepository, ILogger<LogService> logger)
     {
         _logger = logger;
         _logRepository = logRepository;
