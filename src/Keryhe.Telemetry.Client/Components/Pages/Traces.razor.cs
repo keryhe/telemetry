@@ -1,8 +1,11 @@
+using ApexCharts;
 using Keryhe.Telemetry.Client.Services;
 using Keryhe.Telemetry.Client.Services.State;
 using Keryhe.Telemetry.Core.Models;
 using Microsoft.AspNetCore.Components;
 using MudBlazor;
+using Color = MudBlazor.Color;
+using Size = MudBlazor.Size;
 
 namespace Keryhe.Telemetry.Client.Components.Pages;
 
@@ -38,9 +41,10 @@ public partial class Traces : ComponentBase, IDisposable
     private int _servicesCount = 0;
 
     // Chart data
-    private List<ChartSeries> _chartSeries = new();
-    private string[] _chartXAxisLabels = Array.Empty<string>();
-    private ChartOptions _chartOptions = new();
+    private record DataPoint(DateTime Time, double Value);
+    private List<DataPoint> _traceTotal = new();
+    private List<DataPoint> _traceErrors = new();
+    private ApexChartOptions<DataPoint> _chartOptions = new();
     private bool _hasTraceData = false;
 
     [Inject]
@@ -232,26 +236,22 @@ public partial class Traces : ComponentBase, IDisposable
         _servicesCount = _traces.Select(t => t.ServiceName).Distinct().Count();
     }
 
-    private record BucketConfig(
-        TimeSpan BucketSize,
-        string LabelFormat,
-        Func<DateTime, bool> ShowLabel
-    );
+    private record BucketConfig(TimeSpan BucketSize, string LabelFormat);
 
     private static readonly BucketConfig[] BucketConfigs =
     [
-        new(TimeSpan.FromMinutes(1),  "HH:mm",  dt => dt.Minute % 15 == 0),
-        new(TimeSpan.FromMinutes(5),  "HH:mm",  dt => dt.Minute == 0),
-        new(TimeSpan.FromMinutes(10), "HH:mm",  dt => dt.Minute == 0),
-        new(TimeSpan.FromMinutes(30), "HH:mm",  dt => dt.Hour % 6 == 0 && dt.Minute == 0),
-        new(TimeSpan.FromHours(1),    "HH:mm",  dt => dt.Hour % 6 == 0 && dt.Minute == 0),
-        new(TimeSpan.FromHours(3),    "MM/dd",  dt => dt.Hour == 0),
-        new(TimeSpan.FromHours(6),    "MM/dd",  dt => dt.Hour == 0),
-        new(TimeSpan.FromHours(12),   "MM/dd",  dt => dt.Day % 2 == 1 && dt.Hour == 0),
-        new(TimeSpan.FromDays(1),     "MM/dd",  dt => dt.Day % 7 == 1 || dt.Day == 1),
-        new(TimeSpan.FromDays(2),     "MM/dd",  dt => dt.Day <= 2 || (dt.Day >= 15 && dt.Day <= 16)),
-        new(TimeSpan.FromDays(7),     "MMM",    dt => dt.Day <= 7),
-        new(TimeSpan.FromDays(30),    "MMM yy", dt => true),
+        new(TimeSpan.FromMinutes(1),  "HH:mm"),
+        new(TimeSpan.FromMinutes(5),  "HH:mm"),
+        new(TimeSpan.FromMinutes(10), "HH:mm"),
+        new(TimeSpan.FromMinutes(30), "HH:mm"),
+        new(TimeSpan.FromHours(1),    "HH:mm"),
+        new(TimeSpan.FromHours(3),    "MM/dd"),
+        new(TimeSpan.FromHours(6),    "MM/dd"),
+        new(TimeSpan.FromHours(12),   "MM/dd"),
+        new(TimeSpan.FromDays(1),     "MM/dd"),
+        new(TimeSpan.FromDays(2),     "MM/dd"),
+        new(TimeSpan.FromDays(7),     "MMM"),
+        new(TimeSpan.FromDays(30),    "MMM yy"),
     ];
 
     private const int MaxBucketCount = 50;
@@ -278,9 +278,9 @@ public partial class Traces : ComponentBase, IDisposable
     {
         if (_traces.Count == 0)
         {
-            _chartSeries = new List<ChartSeries>();
-            _chartXAxisLabels = Array.Empty<string>();
-            _chartOptions = new ChartOptions();
+            _traceTotal = new();
+            _traceErrors = new();
+            _chartOptions = new ApexChartOptions<DataPoint>();
             _hasTraceData = false;
             return;
         }
@@ -310,36 +310,27 @@ public partial class Traces : ComponentBase, IDisposable
 
         var sorted = buckets.OrderBy(b => b.Key).ToList();
 
-        _chartXAxisLabels = sorted.Select(b =>
-            config.ShowLabel(b.Key) ? b.Key.ToString(config.LabelFormat) : ""
-        ).ToArray();
+        _traceTotal  = sorted.Select(b => new DataPoint(b.Key, b.Value.Total)).ToList();
+        _traceErrors = sorted.Select(b => new DataPoint(b.Key, b.Value.Errors)).ToList();
 
-        var maxValue = sorted.Max(b => b.Value.Total);
-        int yAxisTicks;
-        if (maxValue < 10) yAxisTicks = 1;
-        else if (maxValue < 50) yAxisTicks = 5;
-        else if (maxValue < 100) yAxisTicks = 10;
-        else if (maxValue < 500) yAxisTicks = 50;
-        else if (maxValue < 1000) yAxisTicks = 100;
-        else if (maxValue < 5000) yAxisTicks = 500;
-        else if (maxValue < 10000) yAxisTicks = 1000;
-        else if (maxValue < 50000) yAxisTicks = 5000;
-        else if (maxValue < 100000) yAxisTicks = 10000;
-        else yAxisTicks = 50000;
-
-        _chartOptions = new ChartOptions
+        _chartOptions = new ApexChartOptions<DataPoint>
         {
-            YAxisTicks = yAxisTicks,
-            ChartPalette = new[] { "#2196F3", "#F44336" }
-        };
-
-        _chartSeries = new List<ChartSeries>
-        {
-            new() { Name = "Total",  Data = sorted.Select(b => (double)b.Value.Total).ToArray() },
-            new() { Name = "Errors", Data = sorted.Select(b => (double)b.Value.Errors).ToArray() },
+            Chart = new Chart { Toolbar = new Toolbar { Show = false }, Zoom = new Zoom { Enabled = true, Type = AxisType.X } },
+            Colors = new List<string> { "#2196F3", "#F44336" },
+            Stroke = new Stroke { Curve = Curve.Straight, Width = new List<int> { 2 } },
+            Xaxis = new XAxis { Type = XAxisType.Datetime },
         };
 
         _hasTraceData = true;
+    }
+
+    private Task HandleChartZoomed(ZoomedData<DataPoint> e)
+    {
+        if (e.XAxis?.Min == null || e.XAxis?.Max == null) return Task.CompletedTask;
+        var start = DateTimeOffset.FromUnixTimeMilliseconds(Convert.ToInt64(e.XAxis.Min)).UtcDateTime;
+        var end   = DateTimeOffset.FromUnixTimeMilliseconds(Convert.ToInt64(e.XAxis.Max)).UtcDateTime;
+        TimeRangeState.SetCustomRange(start, end);
+        return Task.CompletedTask;
     }
 
     private string FormatDuration(TimeSpan duration)
@@ -353,7 +344,7 @@ public partial class Traces : ComponentBase, IDisposable
 
     private string FormatDateTime(DateTime dateTime)
     {
-        return dateTime.ToString("yyyy-MM-dd HH:mm:ss.fff");
+        return dateTime.ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss.fff");
     }
 
     private string GetDurationColor(double milliseconds)
@@ -565,7 +556,7 @@ public partial class Traces : ComponentBase, IDisposable
 
                 foreach (var evt in span.Events.OrderBy(e => e.TimeUnixNano))
                 {
-                    var eventTime = UnixNanoToDateTime(evt.TimeUnixNano);
+                    var eventTime = UnixNanoToDateTime(evt.TimeUnixNano).ToLocalTime();
 
                     builder2.OpenElement(seq2++, "div");
                     builder2.AddAttribute(seq2++, "style", "padding: 8px 0; border-bottom: 1px solid #eeeeee;");
@@ -735,7 +726,7 @@ public partial class Traces : ComponentBase, IDisposable
     private RenderFragment RenderSpanTreeWithTimestamps(SpanModel span, int level, long traceStart, double traceDuration) => builder =>
     {
         var seq = 0;
-        var spanStartTime = UnixNanoToDateTime(span.StartTimeUnixNano);
+        var spanStartTime = UnixNanoToDateTime(span.StartTimeUnixNano).ToLocalTime();
         var spanDuration = GetSpanDurationMs(span);
         var isExpanded = IsSpanExpanded(span.SpanIdHex);
 

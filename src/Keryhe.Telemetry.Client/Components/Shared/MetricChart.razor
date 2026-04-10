@@ -1,14 +1,21 @@
+@using ApexCharts
 @using Keryhe.Telemetry.Core.Models
+@using Color = MudBlazor.Color
 
-@if (_canShowChart && _chartSeries.Any())
+@if (_canShowChart && _apexSeries.Any())
 {
     <MudStack Spacing="3">
-        <MudChart ChartType="ChartType.Line"
-                  ChartSeries="@_chartSeries"
-                  XAxisLabels="@_xAxisLabels"
-                  Width="100%"
-                  Height="@($"{Height}px")"
-                  ChartOptions="@_chartOptions"/>
+        <ApexChart TItem="DataPoint" Options="@_chartOptions" Height="@Height" OnZoomed="HandleChartZoomed">
+            @foreach (var series in _apexSeries)
+            {
+                <ApexPointSeries TItem="DataPoint"
+                                 Items="@series.Points"
+                                 Name="@series.Name"
+                                 SeriesType="SeriesType.Line"
+                                 XValue="@(e => e.Time)"
+                                 YValue="@(e => (decimal)e.Value)" />
+            }
+        </ApexChart>
 
         @if (Data?.Type == MetricType.HISTOGRAM || Data?.Type == MetricType.EXPONENTIAL_HISTOGRAM)
         {

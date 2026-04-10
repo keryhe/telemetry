@@ -1,5 +1,8 @@
 @page "/traces"
+@using ApexCharts
 @using Keryhe.Telemetry.Core.Models
+@using Color = MudBlazor.Color
+@using Size = MudBlazor.Size
 
 <PageTitle>Traces</PageTitle>
 
@@ -119,14 +122,20 @@
             <MudText Typo="Typo.h6" Class="mb-2">Trace Volume</MudText>
             @if (_hasTraceData)
             {
-                <MudChart ChartType="ChartType.Line"
-                          ChartSeries="@_chartSeries"
-                          XAxisLabels="@_chartXAxisLabels"
-                          Width="100%"
-                          Height="150px"
-                          LegendPosition="Position.Right"
-                          AxisChartOptions="new AxisChartOptions { MatchBoundsToSize = true }"
-                          ChartOptions="@_chartOptions"/>
+                <ApexChart TItem="DataPoint" Options="@_chartOptions" Height="150" OnZoomed="HandleChartZoomed">
+                    <ApexPointSeries TItem="DataPoint"
+                                     Items="@_traceTotal"
+                                     Name="Total"
+                                     SeriesType="SeriesType.Line"
+                                     XValue="@(e => e.Time)"
+                                     YValue="@(e => (decimal)e.Value)" />
+                    <ApexPointSeries TItem="DataPoint"
+                                     Items="@_traceErrors"
+                                     Name="Errors"
+                                     SeriesType="SeriesType.Line"
+                                     XValue="@(e => e.Time)"
+                                     YValue="@(e => (decimal)e.Value)" />
+                </ApexChart>
             }
             else
             {

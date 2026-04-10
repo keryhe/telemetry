@@ -1,13 +1,17 @@
+@using ApexCharts
 @using Keryhe.Telemetry.Core.Models
+@using Color = MudBlazor.Color
 
-@if (_chartSeries.Any())
+@if (_sparkData.Any())
 {
-    <MudChart ChartType="ChartType.Line"
-              ChartSeries="@_chartSeries"
-              XAxisLabels="@_xAxisLabels"
-              Width="100%"
-              Height="@($"{Height}px")"
-              ChartOptions="@_chartOptions"/>
+    <ApexChart TItem="SparkPoint" Options="@_chartOptions" Height="@Height">
+        <ApexPointSeries TItem="SparkPoint"
+                         Items="@_sparkData"
+                         Name=""
+                         SeriesType="SeriesType.Line"
+                         XValue="@(e => e.Index)"
+                         YValue="@(e => (decimal)e.Value)" />
+    </ApexChart>
 }
 else
 {

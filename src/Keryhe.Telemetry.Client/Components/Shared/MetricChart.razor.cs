@@ -1,11 +1,15 @@
+using ApexCharts;
+using Keryhe.Telemetry.Client.Services.State;
 using Keryhe.Telemetry.Core.Models;
 using Microsoft.AspNetCore.Components;
-using MudBlazor;
 
 namespace Keryhe.Telemetry.Client.Components.Shared;
 
 public partial class MetricChart : ComponentBase
 {
+    [Inject]
+    private TimeRangeState TimeRangeState { get; set; } = null!;
+
     [Parameter]
     public MetricSeries? Data { get; set; }
 
@@ -18,18 +22,17 @@ public partial class MetricChart : ComponentBase
     [Parameter]
     public string? Title { get; set; }
 
-    private List<ChartSeries> _chartSeries = new();
-    private string[] _xAxisLabels = Array.Empty<string>();
-    private ChartOptions _chartOptions = new();
+    private record DataPoint(DateTime Time, double Value);
+
+    private List<(string Name, List<DataPoint> Points)> _apexSeries = new();
+    private ApexChartOptions<DataPoint> _chartOptions = new();
     private bool _canShowChart = false;
 
     protected override void OnParametersSet()
     {
-        _chartSeries = new List<ChartSeries>();
-        _xAxisLabels = Array.Empty<string>();
+        _apexSeries = new();
         _canShowChart = false;
 
-        // Multi-series mode
         if (MultiSeriesData != null && MultiSeriesData.Series.Count > 1
             && (MultiSeriesData.Type == MetricType.GAUGE || MultiSeriesData.Type == MetricType.SUM))
         {
@@ -39,9 +42,7 @@ public partial class MetricChart : ComponentBase
         }
 
         if (Data == null || Data.Points == null || !Data.Points.Any())
-        {
             return;
-        }
 
         switch (Data.Type)
         {
@@ -64,117 +65,51 @@ public partial class MetricChart : ComponentBase
 
     private void BuildSingleValueChartData()
     {
-        if (Data?.Points == null || !Data.Points.Any())
-            return;
+        if (Data?.Points == null || !Data.Points.Any()) return;
 
-        // Format X-axis labels (timestamps)
-        _xAxisLabels = Data.Points
-            .Select(p => FormatTimestamp(p.Timestamp))
-            .ToArray();
+        var points = Data.Points
+            .Select(p => new DataPoint(p.Timestamp, (double)(p.DoubleValue ?? p.IntValue ?? 0)))
+            .ToList();
 
-        // Build chart series
-        var values = Data.Points
-            .Select(p => (double)(p.DoubleValue ?? p.IntValue ?? 0))
-            .ToArray();
-
-        _chartSeries = new List<ChartSeries>
+        _apexSeries = new List<(string, List<DataPoint>)>
         {
-            new ChartSeries
-            {
-                Name = Title ?? Data.Name,
-                Data = values,
-                ShowDataMarkers = true
-            }
+            (Title ?? Data.Name, points)
         };
 
-        // Configure chart options
-        var maxValue = values.Any() ? values.Max() : 0;
-        var minValue = values.Any() ? values.Min() : 0;
-        var range = maxValue - minValue;
-
-        _chartOptions = new ChartOptions
-        {
-            YAxisTicks = range > 0 ? 5 : 1,
-            ChartPalette = new[] { Colors.Blue.Default },
-            LineStrokeWidth = 2,
-            InterpolationOption = InterpolationOption.Straight
-        };
+        _chartOptions = BuildLineOptions(new[] { "#2196F3" }, showMarkers: true);
     }
 
     private void BuildHistogramTrendChartData()
     {
-        if (Data?.Points == null || !Data.Points.Any())
-            return;
+        if (Data?.Points == null || !Data.Points.Any()) return;
 
-        _xAxisLabels = Data.Points
-            .Select(p => FormatTimestamp(p.Timestamp))
-            .ToArray();
+        _apexSeries = new List<(string, List<DataPoint>)>();
 
-        var chartSeries = new List<ChartSeries>
-        {
-            new()
-            {
-                Name = "Count",
-                Data = Data.Points.Select(p => (double)(p.Count ?? 0)).ToArray(),
-                ShowDataMarkers = true
-            }
-        };
+        _apexSeries.Add(("Count", Data.Points
+            .Select(p => new DataPoint(p.Timestamp, (double)(p.Count ?? 0)))
+            .ToList()));
 
         if (Data.Points.Any(p => p.Sum.HasValue))
-        {
-            chartSeries.Add(new ChartSeries
-            {
-                Name = "Sum",
-                Data = Data.Points.Select(p => p.Sum ?? double.NaN).ToArray(),
-                ShowDataMarkers = true
-            });
-        }
+            _apexSeries.Add(("Sum", Data.Points
+                .Select(p => new DataPoint(p.Timestamp, p.Sum ?? double.NaN))
+                .ToList()));
 
         if (Data.Points.Any(p => p.Min.HasValue))
-        {
-            chartSeries.Add(new ChartSeries
-            {
-                Name = "Min",
-                Data = Data.Points.Select(p => p.Min ?? double.NaN).ToArray(),
-                ShowDataMarkers = true
-            });
-        }
+            _apexSeries.Add(("Min", Data.Points
+                .Select(p => new DataPoint(p.Timestamp, p.Min ?? double.NaN))
+                .ToList()));
 
         if (Data.Points.Any(p => p.Max.HasValue))
-        {
-            chartSeries.Add(new ChartSeries
-            {
-                Name = "Max",
-                Data = Data.Points.Select(p => p.Max ?? double.NaN).ToArray(),
-                ShowDataMarkers = true
-            });
-        }
+            _apexSeries.Add(("Max", Data.Points
+                .Select(p => new DataPoint(p.Timestamp, p.Max ?? double.NaN))
+                .ToList()));
 
-        _chartSeries = chartSeries;
-
-        _chartOptions = new ChartOptions
-        {
-            YAxisTicks = 5,
-            ChartPalette = new[]
-            {
-                Colors.Blue.Default,
-                Colors.Green.Default,
-                Colors.Orange.Default,
-                Colors.Red.Default
-            },
-            LineStrokeWidth = 2,
-            InterpolationOption = InterpolationOption.Straight
-        };
+        _chartOptions = BuildLineOptions(new[] { "#2196F3", "#4CAF50", "#FF9800", "#F44336" }, showMarkers: true);
     }
 
     private void BuildSummaryQuantileChartData()
     {
-        if (Data?.Points == null || !Data.Points.Any())
-            return;
-
-        _xAxisLabels = Data.Points
-            .Select(p => FormatTimestamp(p.Timestamp))
-            .ToArray();
+        if (Data?.Points == null || !Data.Points.Any()) return;
 
         var quantiles = Data.Points
             .Where(p => p.Quantiles != null)
@@ -183,160 +118,74 @@ public partial class MetricChart : ComponentBase
             .OrderBy(q => q)
             .ToList();
 
-        if (!quantiles.Any())
-        {
-            _canShowChart = false;
-            return;
-        }
+        if (!quantiles.Any()) { _canShowChart = false; return; }
 
-        _chartSeries = new List<ChartSeries>();
+        _apexSeries = new List<(string, List<DataPoint>)>();
 
         foreach (var quantile in quantiles)
         {
-            var data = new double[Data.Points.Count];
-            Array.Fill(data, double.NaN);
-
+            var pts = new List<DataPoint>();
             for (int i = 0; i < Data.Points.Count; i++)
             {
                 var point = Data.Points[i];
-                if (point.Quantiles == null || point.QuantileValues == null)
-                    continue;
-
-                for (int j = 0; j < point.Quantiles.Count && j < point.QuantileValues.Count; j++)
+                double value = double.NaN;
+                if (point.Quantiles != null && point.QuantileValues != null)
                 {
-                    if (Math.Abs(point.Quantiles[j] - quantile) < 0.0000001)
+                    for (int j = 0; j < point.Quantiles.Count && j < point.QuantileValues.Count; j++)
                     {
-                        data[i] = point.QuantileValues[j];
-                        break;
+                        if (Math.Abs(point.Quantiles[j] - quantile) < 0.0000001)
+                        {
+                            value = point.QuantileValues[j];
+                            break;
+                        }
                     }
                 }
+                pts.Add(new DataPoint(point.Timestamp, value));
             }
-
-            _chartSeries.Add(new ChartSeries
-            {
-                Name = $"P{quantile * 100:F0}",
-                Data = data,
-                ShowDataMarkers = true
-            });
+            _apexSeries.Add(($"P{quantile * 100:F0}", pts));
         }
 
-        _chartOptions = new ChartOptions
-        {
-            YAxisTicks = 5,
-            ChartPalette = new[]
-            {
-                Colors.Blue.Default,
-                Colors.Green.Default,
-                Colors.Red.Default,
-                Colors.Orange.Default,
-                Colors.Purple.Default,
-                Colors.Teal.Default
-            },
-            LineStrokeWidth = 2,
-            InterpolationOption = InterpolationOption.Straight
-        };
+        _chartOptions = BuildLineOptions(
+            new[] { "#2196F3", "#4CAF50", "#F44336", "#FF9800", "#9C27B0", "#009688" },
+            showMarkers: true);
     }
 
     private void BuildMultiSeriesChartData()
     {
-        if (MultiSeriesData?.Series == null || !MultiSeriesData.Series.Any())
-            return;
+        if (MultiSeriesData?.Series == null || !MultiSeriesData.Series.Any()) return;
 
-        // Collect union of all timestamps across all series
-        var allTimestamps = MultiSeriesData.Series
-            .SelectMany(s => s.Points.Select(p => p.Timestamp))
-            .Distinct()
-            .OrderBy(t => t)
-            .ToList();
-
-        if (!allTimestamps.Any())
+        _apexSeries = MultiSeriesData.Series.Select(series =>
         {
-            _canShowChart = false;
-            return;
-        }
+            var pts = series.Points
+                .Select(p => new DataPoint(p.Timestamp, (double)(p.DoubleValue ?? p.IntValue ?? 0)))
+                .ToList();
+            return (series.SeriesName, pts);
+        }).ToList();
 
-        // Build timestamp index for fast lookup
-        var timestampIndex = new Dictionary<DateTime, int>();
-        for (int i = 0; i < allTimestamps.Count; i++)
-            timestampIndex[allTimestamps[i]] = i;
+        _chartOptions = BuildLineOptions(
+            new[] { "#2196F3", "#4CAF50", "#F44336", "#FF9800", "#9C27B0", "#009688",
+                    "#E91E63", "#FFC107", "#00BCD4", "#673AB7" },
+            showMarkers: true);
+    }
 
-        // Format X-axis labels
-        _xAxisLabels = allTimestamps
-            .Select(t => FormatTimestamp(t, allTimestamps))
-            .ToArray();
+    private Task HandleChartZoomed(ZoomedData<DataPoint> e)
+    {
+        if (e.XAxis?.Min == null || e.XAxis?.Max == null) return Task.CompletedTask;
+        var start = DateTimeOffset.FromUnixTimeMilliseconds(Convert.ToInt64(e.XAxis.Min)).UtcDateTime;
+        var end   = DateTimeOffset.FromUnixTimeMilliseconds(Convert.ToInt64(e.XAxis.Max)).UtcDateTime;
+        TimeRangeState.SetCustomRange(start, end);
+        return Task.CompletedTask;
+    }
 
-        // Build one ChartSeries per service
-        _chartSeries = new List<ChartSeries>();
-        foreach (var series in MultiSeriesData.Series)
+    private static ApexChartOptions<DataPoint> BuildLineOptions(string[] colors, bool showMarkers)
+    {
+        return new ApexChartOptions<DataPoint>
         {
-            var values = new double[allTimestamps.Count];
-            Array.Fill(values, double.NaN);
-
-            foreach (var point in series.Points)
-            {
-                if (timestampIndex.TryGetValue(point.Timestamp, out var idx))
-                {
-                    values[idx] = (double)(point.DoubleValue ?? point.IntValue ?? 0);
-                }
-            }
-
-            _chartSeries.Add(new ChartSeries
-            {
-                Name = series.SeriesName,
-                Data = values,
-                ShowDataMarkers = true
-            });
-        }
-
-        // Configure chart options with distinguishable colors
-        var allValues = _chartSeries
-            .SelectMany(s => s.Data)
-            .Where(v => !double.IsNaN(v))
-            .ToList();
-
-        var maxValue = allValues.Any() ? allValues.Max() : 0;
-        var minValue = allValues.Any() ? allValues.Min() : 0;
-        var range = maxValue - minValue;
-
-        _chartOptions = new ChartOptions
-        {
-            YAxisTicks = range > 0 ? 5 : 1,
-            ChartPalette = new[]
-            {
-                Colors.Blue.Default, Colors.Green.Default, Colors.Red.Default,
-                Colors.Orange.Default, Colors.Purple.Default, Colors.Teal.Default,
-                Colors.Pink.Default, Colors.Amber.Default, Colors.Cyan.Default,
-                Colors.DeepPurple.Default
-            },
-            LineStrokeWidth = 2,
-            InterpolationOption = InterpolationOption.Straight
+            Chart = new Chart { Toolbar = new Toolbar { Show = false }, Zoom = new Zoom { Enabled = true, Type = AxisType.X } },
+            Colors = colors.ToList(),
+            Stroke = new Stroke { Curve = Curve.Straight, Width = new List<int> { 2 } },
+            Markers = new Markers { Size = showMarkers ? new List<int> { 4 } : new List<int> { 0 } },
+            Xaxis = new XAxis { Type = XAxisType.Datetime },
         };
-    }
-
-    private string FormatTimestamp(DateTime timestamp)
-    {
-        // Format based on data point density
-        if (Data?.Points == null || !Data.Points.Any())
-            return timestamp.ToString("HH:mm");
-
-        var timeSpan = Data.Points.Max(p => p.Timestamp) - Data.Points.Min(p => p.Timestamp);
-        return FormatByTimeSpan(timestamp, timeSpan);
-    }
-
-    private string FormatTimestamp(DateTime timestamp, List<DateTime> allTimestamps)
-    {
-        var timeSpan = allTimestamps.Last() - allTimestamps.First();
-        return FormatByTimeSpan(timestamp, timeSpan);
-    }
-
-    private static string FormatByTimeSpan(DateTime timestamp, TimeSpan timeSpan)
-    {
-        timestamp = timestamp.ToLocalTime();
-
-        if (timeSpan.TotalHours < 1)
-            return timestamp.ToString("HH:mm:ss");
-        if (timeSpan.TotalHours < 24)
-            return timestamp.ToString("HH:mm");
-        return timestamp.ToString("MM/dd HH:mm");
     }
 }

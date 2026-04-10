@@ -1,4 +1,5 @@
 @page "/"
+@using ApexCharts
 @using Color = MudBlazor.Color
 @using Size = MudBlazor.Size
 @using Keryhe.Telemetry.Client.Models
@@ -102,13 +103,20 @@
                 <MudText Typo="Typo.h6" Class="mb-3">Trace Volume</MudText>
                 @if (_hasTraceData)
                 {
-                    <MudChart ChartType="ChartType.Line"
-                              ChartSeries="@_traceChartSeries"
-                              XAxisLabels="@_traceXAxisLabels"
-                              Width="100%" Height="250px"
-                              LegendPosition="Position.Right"
-                              AxisChartOptions="new AxisChartOptions { MatchBoundsToSize = true }"
-                              ChartOptions="@_traceChartOptions" />
+                    <ApexChart TItem="DataPoint" Options="@_traceChartOptions" Height="250" OnZoomed="HandleChartZoomed">
+                        <ApexPointSeries TItem="DataPoint"
+                                         Items="@_traceTotal"
+                                         Name="Total"
+                                         SeriesType="SeriesType.Line"
+                                         XValue="@(e => e.Time)"
+                                         YValue="@(e => (decimal)e.Value)" />
+                        <ApexPointSeries TItem="DataPoint"
+                                         Items="@_traceErrors"
+                                         Name="Errors"
+                                         SeriesType="SeriesType.Line"
+                                         XValue="@(e => e.Time)"
+                                         YValue="@(e => (decimal)e.Value)" />
+                    </ApexChart>
                 }
                 else
                 {
@@ -121,13 +129,17 @@
                 <MudText Typo="Typo.h6" Class="mb-3">Log Volume by Severity</MudText>
                 @if (_hasLogData)
                 {
-                    <MudChart ChartType="ChartType.StackedBar"
-                              ChartSeries="@_logChartSeries"
-                              XAxisLabels="@_logXAxisLabels"
-                              Width="100%" Height="250px"
-                              LegendPosition="Position.Right"
-                              AxisChartOptions="new AxisChartOptions { MatchBoundsToSize = true }"
-                              ChartOptions="@_logChartOptions" />
+                    <ApexChart TItem="SeverityPoint" Options="@_logChartOptions" Height="250" OnZoomed="HandleLogChartZoomed">
+                        @foreach (var sev in _severityLevels)
+                        {
+                            <ApexPointSeries TItem="SeverityPoint"
+                                             Items="@_logSeverityData[sev]"
+                                             Name="@sev"
+                                             SeriesType="SeriesType.Bar"
+                                             XValue="@(e => e.Time)"
+                                             YValue="@(e => (decimal)e.Count)" />
+                        }
+                    </ApexChart>
                 }
                 else
                 {

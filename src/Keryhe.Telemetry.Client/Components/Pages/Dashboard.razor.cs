@@ -1,3 +1,4 @@
+using ApexCharts;
 using Keryhe.Telemetry.Client.Models;
 using Keryhe.Telemetry.Client.Services;
 using Keryhe.Telemetry.Client.Services.State;
@@ -33,17 +34,17 @@ public partial class Dashboard : ComponentBase, IDisposable
     private int _logEventCount = 0;
 
     // Trace chart
-    private List<ChartSeries> _traceChartSeries = new();
-    private string[] _traceXAxisLabels = Array.Empty<string>();
+    private record DataPoint(DateTime Time, double Value);
+    private List<DataPoint> _traceTotal = new();
+    private List<DataPoint> _traceErrors = new();
     private bool _hasTraceData = false;
-    private ChartOptions _traceChartOptions = new();
+    private ApexChartOptions<DataPoint> _traceChartOptions = new();
 
     // Log chart
-    private List<ChartSeries> _logChartSeries = new();
-    private string[] _logXAxisLabels = Array.Empty<string>();
+    private record SeverityPoint(DateTime Time, double Count);
+    private Dictionary<string, List<SeverityPoint>> _logSeverityData = new();
     private bool _hasLogData = false;
-    private ChartOptions _logChartOptions = new();
-
+    private ApexChartOptions<SeverityPoint> _logChartOptions = new();
 
     // Tables
     private List<TraceInfo> _recentErrorTraces = new();
@@ -56,26 +57,22 @@ public partial class Dashboard : ComponentBase, IDisposable
 
     private record ServiceSummary(string Name, int TraceCount, int ErrorCount, int MetricCount);
 
-    private record BucketConfig(
-        TimeSpan BucketSize,
-        string LabelFormat,
-        Func<DateTime, bool> ShowLabel
-    );
+    private record BucketConfig(TimeSpan BucketSize, string LabelFormat);
 
     private static readonly BucketConfig[] BucketConfigs =
     [
-        new(TimeSpan.FromMinutes(1),  "HH:mm",  dt => dt.Minute % 15 == 0),
-        new(TimeSpan.FromMinutes(5),  "HH:mm",  dt => dt.Minute == 0),
-        new(TimeSpan.FromMinutes(10), "HH:mm",  dt => dt.Minute == 0),
-        new(TimeSpan.FromMinutes(30), "HH:mm",  dt => dt.Hour % 6 == 0 && dt.Minute == 0),
-        new(TimeSpan.FromHours(1),    "HH:mm",  dt => dt.Hour % 6 == 0 && dt.Minute == 0),
-        new(TimeSpan.FromHours(3),    "MM/dd",  dt => dt.Hour == 0),
-        new(TimeSpan.FromHours(6),    "MM/dd",  dt => dt.Hour == 0),
-        new(TimeSpan.FromHours(12),   "MM/dd",  dt => dt.Day % 2 == 1 && dt.Hour == 0),
-        new(TimeSpan.FromDays(1),     "MM/dd",  dt => dt.Day % 7 == 1 || dt.Day == 1),
-        new(TimeSpan.FromDays(2),     "MM/dd",  dt => dt.Day <= 2 || (dt.Day >= 15 && dt.Day <= 16)),
-        new(TimeSpan.FromDays(7),     "MMM",    dt => dt.Day <= 7),
-        new(TimeSpan.FromDays(30),    "MMM yy", dt => true),
+        new(TimeSpan.FromMinutes(1),  "HH:mm"),
+        new(TimeSpan.FromMinutes(5),  "HH:mm"),
+        new(TimeSpan.FromMinutes(10), "HH:mm"),
+        new(TimeSpan.FromMinutes(30), "HH:mm"),
+        new(TimeSpan.FromHours(1),    "HH:mm"),
+        new(TimeSpan.FromHours(3),    "MM/dd"),
+        new(TimeSpan.FromHours(6),    "MM/dd"),
+        new(TimeSpan.FromHours(12),   "MM/dd"),
+        new(TimeSpan.FromDays(1),     "MM/dd"),
+        new(TimeSpan.FromDays(2),     "MM/dd"),
+        new(TimeSpan.FromDays(7),     "MMM"),
+        new(TimeSpan.FromDays(30),    "MMM yy"),
     ];
 
     private const int MaxBucketCount = 50;
@@ -94,7 +91,6 @@ public partial class Dashboard : ComponentBase, IDisposable
     {
         if (bucketSize >= TimeSpan.FromDays(1))
             return new DateTime(dt.Year, dt.Month, dt.Day, 0, 0, 0, dt.Kind);
-
         return new DateTime(dt.Ticks / bucketSize.Ticks * bucketSize.Ticks, dt.Kind);
     }
 
@@ -105,7 +101,6 @@ public partial class Dashboard : ComponentBase, IDisposable
         _selectedService = State.SelectedService;
         _autoRefresh = State.AutoRefresh;
 
-        // Seed available services from 24h window for full dropdown coverage
         var (init24Start, init24End) = TimeRange.Last24Hours.ToDateTimeRange();
         _availableServices = await TraceService.GetDistinctServicesAsync(init24Start, init24End);
 
@@ -136,9 +131,6 @@ public partial class Dashboard : ComponentBase, IDisposable
         {
             var (start, end) = TimeRangeState.GetDateTimeRange();
 
-            // Sequential loads — EF Core scoped DbContext cannot run concurrently
-
-            // 1. Traces
             List<TraceInfo> traces;
             if (!string.IsNullOrEmpty(_selectedService))
                 traces = await TraceService.GetTracesByServiceAsync(_selectedService, start, end, limit: 500);
@@ -163,7 +155,6 @@ public partial class Dashboard : ComponentBase, IDisposable
 
             BuildTraceChartData(traces, start, end);
 
-            // 2. Logs
             var logs = await LogService.GetLogRecordsByTimeRangeAsync(start, end);
             if (!string.IsNullOrEmpty(_selectedService))
             {
@@ -176,17 +167,14 @@ public partial class Dashboard : ComponentBase, IDisposable
             _logEventCount = logs.Count;
             BuildLogChartData(logs, start, end);
 
-            // 3. Services in this time window
             var services = await TraceService.GetDistinctServicesAsync(start, end);
             _servicesCount = services.Count;
             if (services.Count > 0)
                 _availableServices = services;
 
-            // 4. Metric summaries
             var metricSummaries = await MetricService.GetServiceMetricSummariesAsync();
             var metricDict = metricSummaries.ToDictionary(m => m.ServiceName, m => m.MetricCount);
 
-            // 5. Build service summaries from already-loaded traces
             var tracesByService = traces.GroupBy(t => t.ServiceName ?? "unknown").ToList();
             _serviceSummaries = services.Select(svc =>
             {
@@ -210,14 +198,11 @@ public partial class Dashboard : ComponentBase, IDisposable
     {
         if (traces.Count == 0)
         {
-            _traceChartSeries = new();
-            _traceXAxisLabels = Array.Empty<string>();
+            _traceTotal = new();
+            _traceErrors = new();
             _hasTraceData = false;
             return;
         }
-
-        start = start.ToLocalTime();
-        end   = end.ToLocalTime();
 
         var duration = end - start;
         var config = SelectBucketConfig(duration);
@@ -233,7 +218,7 @@ public partial class Dashboard : ComponentBase, IDisposable
 
         foreach (var trace in traces)
         {
-            var offset = (long)((trace.TraceStartTime.ToLocalTime() - alignedStart).Ticks / config.BucketSize.Ticks);
+            var offset = (long)((trace.TraceStartTime - alignedStart).Ticks / config.BucketSize.Ticks);
             var bucketKey = alignedStart + TimeSpan.FromTicks(offset * config.BucketSize.Ticks);
             if (buckets.ContainsKey(bucketKey))
             {
@@ -244,33 +229,15 @@ public partial class Dashboard : ComponentBase, IDisposable
 
         var sorted = buckets.OrderBy(b => b.Key).ToList();
 
-        _traceXAxisLabels = sorted.Select(b =>
-            config.ShowLabel(b.Key) ? b.Key.ToString(config.LabelFormat) : ""
-        ).ToArray();
+        _traceTotal  = sorted.Select(b => new DataPoint(b.Key, b.Value.Total)).ToList();
+        _traceErrors = sorted.Select(b => new DataPoint(b.Key, b.Value.Errors)).ToList();
 
-        var maxValue = sorted.Max(b => b.Value.Total);
-        int yAxisTicks;
-        if (maxValue < 10) yAxisTicks = 1;
-        else if (maxValue < 50) yAxisTicks = 5;
-        else if (maxValue < 100) yAxisTicks = 10;
-        else if (maxValue < 500) yAxisTicks = 50;
-        else if (maxValue < 1000) yAxisTicks = 100;
-        else if (maxValue < 5000) yAxisTicks = 500;
-        else if (maxValue < 10000) yAxisTicks = 1000;
-        else if (maxValue < 50000) yAxisTicks = 5000;
-        else if (maxValue < 100000) yAxisTicks = 10000;
-        else yAxisTicks = 50000;
-
-        _traceChartOptions = new ChartOptions
+        _traceChartOptions = new ApexChartOptions<DataPoint>
         {
-            YAxisTicks = yAxisTicks,
-            ChartPalette = new[] { "#2196F3", "#F44336" }
-        };
-
-        _traceChartSeries = new List<ChartSeries>
-        {
-            new() { Name = "Total",  Data = sorted.Select(b => (double)b.Value.Total).ToArray() },
-            new() { Name = "Errors", Data = sorted.Select(b => (double)b.Value.Errors).ToArray() },
+            Chart = new Chart { Toolbar = new Toolbar { Show = false }, Zoom = new Zoom { Enabled = true, Type = AxisType.X } },
+            Colors = new List<string> { "#2196F3", "#F44336" },
+            Stroke = new Stroke { Curve = Curve.Straight, Width = new List<int> { 2 } },
+            Xaxis = new XAxis { Type = XAxisType.Datetime },
         };
 
         _hasTraceData = true;
@@ -280,14 +247,10 @@ public partial class Dashboard : ComponentBase, IDisposable
     {
         if (logs.Count == 0)
         {
-            _logChartSeries = new();
-            _logXAxisLabels = Array.Empty<string>();
+            _logSeverityData = new();
             _hasLogData = false;
             return;
         }
-
-        start = start.ToLocalTime();
-        end   = end.ToLocalTime();
 
         var duration = end - start;
         var config = SelectBucketConfig(duration);
@@ -305,7 +268,7 @@ public partial class Dashboard : ComponentBase, IDisposable
 
         foreach (var log in logs.Where(l => l.TimeUnixNano.HasValue))
         {
-            var logTime = UnixNanoToDateTime(log.TimeUnixNano!.Value).ToLocalTime();
+            var logTime = UnixNanoToDateTime(log.TimeUnixNano!.Value);
             var severity = NormalizeSeverity(log.SeverityText);
 
             var offset = (long)((logTime - alignedStart).Ticks / config.BucketSize.Ticks);
@@ -322,50 +285,36 @@ public partial class Dashboard : ComponentBase, IDisposable
 
         var sorted = buckets.OrderBy(b => b.Key).ToList();
 
-        _logXAxisLabels = sorted.Select(b =>
-            config.ShowLabel(b.Key) ? b.Key.ToString(config.LabelFormat) : ""
-        ).ToArray();
-
-        var maxValue = sorted.Max(b => b.Value.Values.Sum());
-        int yAxisTicks;
-        if (maxValue < 10) yAxisTicks = 1;
-        else if (maxValue < 50) yAxisTicks = 5;
-        else if (maxValue < 100) yAxisTicks = 10;
-        else if (maxValue < 500) yAxisTicks = 50;
-        else if (maxValue < 1000) yAxisTicks = 100;
-        else if (maxValue < 5000) yAxisTicks = 500;
-        else if (maxValue < 10000) yAxisTicks = 1000;
-        else if (maxValue < 50000) yAxisTicks = 5000;
-        else if (maxValue < 100000) yAxisTicks = 10000;
-        else yAxisTicks = 50000;
-
-        var colors = _severityLevels.Select(GetSeverityColor).ToArray();
-
-        _logChartOptions = new ChartOptions
+        _logSeverityData = new Dictionary<string, List<SeverityPoint>>();
+        foreach (var sev in _severityLevels)
         {
-            YAxisTicks = yAxisTicks,
-            ChartPalette = colors
+            _logSeverityData[sev] = sorted
+                .Select(b => new SeverityPoint(b.Key, b.Value[sev]))
+                .ToList();
+        }
+
+        _logChartOptions = new ApexChartOptions<SeverityPoint>
+        {
+            Chart = new Chart
+            {
+                Toolbar = new Toolbar { Show = false },
+                Stacked = true,
+                Zoom = new Zoom { Enabled = true, Type = AxisType.X }
+            },
+            Colors = new List<string>
+            {
+                "#9C27B0", // Trace
+                "#2196F3", // Debug
+                "#4CAF50", // Information
+                "#FF9800", // Warning
+                "#F44336", // Error
+                "#B71C1C"  // Fatal
+            },
+            Xaxis = new XAxis { Type = XAxisType.Datetime },
         };
-
-        _logChartSeries = _severityLevels.Select(sev => new ChartSeries
-        {
-            Name = sev,
-            Data = sorted.Select(b => (double)b.Value[sev]).ToArray()
-        }).ToList();
 
         _hasLogData = true;
     }
-
-    private string GetSeverityColor(string severity) => severity.ToUpper() switch
-    {
-        "TRACE"       => Colors.Purple.Default,
-        "DEBUG"       => Colors.Blue.Default,
-        "INFORMATION" => Colors.Green.Default,
-        "WARNING"     => Colors.Orange.Default,
-        "ERROR"       => Colors.Red.Default,
-        "FATAL"       => Colors.Red.Darken4,
-        _             => Colors.Gray.Default
-    };
 
     private string NormalizeSeverity(string? severityText)
     {
@@ -413,6 +362,24 @@ public partial class Dashboard : ComponentBase, IDisposable
                 TimeSpan.FromSeconds(interval)
             );
         }
+    }
+
+    private Task HandleChartZoomed(ZoomedData<DataPoint> e)
+    {
+        if (e.XAxis?.Min == null || e.XAxis?.Max == null) return Task.CompletedTask;
+        var start = DateTimeOffset.FromUnixTimeMilliseconds(Convert.ToInt64(e.XAxis.Min)).UtcDateTime;
+        var end   = DateTimeOffset.FromUnixTimeMilliseconds(Convert.ToInt64(e.XAxis.Max)).UtcDateTime;
+        TimeRangeState.SetCustomRange(start, end);
+        return Task.CompletedTask;
+    }
+
+    private Task HandleLogChartZoomed(ZoomedData<SeverityPoint> e)
+    {
+        if (e.XAxis?.Min == null || e.XAxis?.Max == null) return Task.CompletedTask;
+        var start = DateTimeOffset.FromUnixTimeMilliseconds(Convert.ToInt64(e.XAxis.Min)).UtcDateTime;
+        var end   = DateTimeOffset.FromUnixTimeMilliseconds(Convert.ToInt64(e.XAxis.Max)).UtcDateTime;
+        TimeRangeState.SetCustomRange(start, end);
+        return Task.CompletedTask;
     }
 
     private void NavigateToTrace(string traceId) =>

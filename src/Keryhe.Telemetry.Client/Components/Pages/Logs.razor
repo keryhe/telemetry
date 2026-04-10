@@ -1,5 +1,8 @@
 @page "/logs"
+@using ApexCharts
 @using Keryhe.Telemetry.Core.Models
+@using Color = MudBlazor.Color
+@using Size = MudBlazor.Size
 
 <!-- Row 1: Dropdowns, Date Range, and Search Button -->
 <MudStack Spacing="2" Class="mb-2">
@@ -156,41 +159,21 @@
     </DialogActions>
 </MudDialog>
 
-<div @ref="_chartContainer" style="position: relative; user-select: none;">
-    <MudChart ChartType="ChartType.StackedBar"
-              ChartSeries="@_chartSeries"
-              XAxisLabels="@_chartXAxisLabels"
-              Width="100%"
-              Height="150px"
-              LegendPosition="Position.Right"
-              AxisChartOptions="new AxisChartOptions { MatchBoundsToSize = true }"
-              ChartOptions="@_chartOptions">
-    </MudChart>
-
-    <!-- Pointer-capture overlay for click and drag-to-select -->
-    <div style="position: absolute; top: 0; left: 0; right: 0; bottom: 0;
-                cursor: crosshair; z-index: 10;"
-         @onpointerdown="OnOverlayPointerDown"
-         @onpointerdown:preventDefault="true"
-         @onpointermove="OnOverlayPointerMove"
-         @onpointerup="OnOverlayPointerUp"
-         @onpointercancel="OnOverlayPointerCancel">
-
-        @if (_isDragging && _highlightWidth > 2)
+<div class="log-chart-wrapper">
+    <ApexChart @key="@_chartRenderKey" TItem="SeverityPoint" Options="@_chartOptions" Height="150" OnZoomed="HandleChartZoomed">
+        @foreach (var sev in _severityLevels)
         {
-            <div style="position: absolute; top: 0; bottom: 0;
-                        left: @(_highlightLeft.ToString("F0", System.Globalization.CultureInfo.InvariantCulture))px;
-                        width: @(_highlightWidth.ToString("F0", System.Globalization.CultureInfo.InvariantCulture))px;
-                        background-color: rgba(25, 118, 210, 0.25);
-                        border-left: 2px solid rgba(25, 118, 210, 0.7);
-                        border-right: 2px solid rgba(25, 118, 210, 0.7);
-                        pointer-events: none;">
-            </div>
+            <ApexPointSeries TItem="SeverityPoint"
+                             Items="@_apexSeverityData.GetValueOrDefault(sev, new())"
+                             Name="@sev"
+                             SeriesType="SeriesType.Bar"
+                             XValue="@(e => e.Time)"
+                             YValue="@(e => (decimal)e.Count)" />
         }
-    </div>
+    </ApexChart>
 </div>
 
-<div @ref="_logGridContainer">
+<div>
 <MudDataGrid T="LogRecordModel"
              Items="@_logs"
              Loading="@_dataLoading"
