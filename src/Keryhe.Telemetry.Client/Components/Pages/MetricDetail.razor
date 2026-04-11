@@ -384,7 +384,7 @@
                             <MudTd DataLabel="Trace">
                                 @if (!string.IsNullOrEmpty(context.TraceIdHex))
                                 {
-                                    <MudLink Href="@($"/traces?traceId={Uri.EscapeDataString(context.TraceIdHex)}")" Typo="Typo.body2">
+                                    <MudLink Href="@($"/traces/{Uri.EscapeDataString(context.TraceIdHex)}")" Typo="Typo.body2">
                                         @context.TraceIdHex
                                     </MudLink>
                                 }

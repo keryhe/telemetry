@@ -43,7 +43,7 @@ public partial class Logs : ComponentBase, IDisposable
             "#B71C1C"  // Fatal
         },
         Xaxis = new XAxis { Type = XAxisType.Datetime },
-        Legend = new Legend { Position = LegendPosition.Right },
+        Legend = new Legend { Show = false },
     };
 
     // Severity levels in consistent order

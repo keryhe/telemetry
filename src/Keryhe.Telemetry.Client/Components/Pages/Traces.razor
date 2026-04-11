@@ -6,6 +6,7 @@
 
 <PageTitle>Traces</PageTitle>
 
+
 <MudTabs @bind-ActivePanelIndex="_activeTabIndex" Elevation="2" Rounded="true" ApplyEffectsToContainer="true" PanelClass="pa-6">
     <!-- Tab 1: Trace List -->
     <MudTabPanel Text="Trace List" Icon="@Icons.Material.Filled.List">
@@ -376,107 +377,6 @@
         </MudStack>
     </MudTabPanel>
 
-    <!-- Tab 4: Trace Detail -->
-    <MudTabPanel Text="Trace Detail" Icon="@Icons.Material.Filled.ZoomIn" Disabled="@(string.IsNullOrEmpty(_selectedTraceId))">
-        @if (!string.IsNullOrEmpty(_selectedTraceId))
-        {
-            <MudStack Spacing="3">
-                <!-- Header -->
-                <MudPaper Elevation="2" Class="pa-4">
-                    <MudStack Row="true" AlignItems="AlignItems.Center" Justify="Justify.SpaceBetween">
-                        <div>
-                            <MudText Typo="Typo.h6">Trace: @TruncateTraceId(_selectedTraceId, 32)</MudText>
-                            <MudText Typo="Typo.body2" Color="Color.Secondary" Style="font-family: monospace;">@_selectedTraceId</MudText>
-                        </div>
-                        <MudStack Row="true" Spacing="2">
-                            <MudButton Variant="Variant.Filled"
-                                       Color="Color.Info"
-                                       StartIcon="@Icons.Material.Filled.Description"
-                                       Href="@($"/logs?traceId={_selectedTraceId}")">
-                                View Logs
-                            </MudButton>
-                            <MudButton Variant="Variant.Text"
-                                       Color="Color.Primary"
-                                       StartIcon="@Icons.Material.Filled.ArrowBack"
-                                       OnClick="BackToTraceList">
-                                Back to List
-                            </MudButton>
-                        </MudStack>
-                    </MudStack>
-                </MudPaper>
-
-                @if (_selectedTraceSpans.Any())
-                {
-                    var rootSpans = BuildSpanHierarchy();
-                    var traceStart = _selectedTraceSpans.Min(s => s.StartTimeUnixNano);
-                    var traceEnd = _selectedTraceSpans.Max(s => s.EndTimeUnixNano);
-                    var traceDuration = (traceEnd - traceStart) / 1_000_000.0;
-
-                    <!-- Summary Info -->
-                    <MudGrid>
-                        <MudItem xs="12" sm="6" md="3">
-                            <MudPaper Elevation="1" Class="pa-3">
-                                <MudText Typo="Typo.body2" Color="Color.Secondary">Duration</MudText>
-                                <MudText Typo="Typo.h6">@($"{traceDuration:F2}ms")</MudText>
-                            </MudPaper>
-                        </MudItem>
-                        <MudItem xs="12" sm="6" md="3">
-                            <MudPaper Elevation="1" Class="pa-3">
-                                <MudText Typo="Typo.body2" Color="Color.Secondary">Spans</MudText>
-                                <MudText Typo="Typo.h6">@_selectedTraceSpans.Count</MudText>
-                            </MudPaper>
-                        </MudItem>
-                        <MudItem xs="12" sm="6" md="3">
-                            <MudPaper Elevation="1" Class="pa-3">
-                                <MudText Typo="Typo.body2" Color="Color.Secondary">Services</MudText>
-                                <MudText Typo="Typo.h6">@_selectedTraceSpans.Select(s => GetServiceName(s)).Distinct().Count()</MudText>
-                            </MudPaper>
-                        </MudItem>
-                        <MudItem xs="12" sm="6" md="3">
-                            <MudPaper Elevation="1" Class="pa-3">
-                                <MudText Typo="Typo.body2" Color="Color.Secondary">Status</MudText>
-                                <MudText Typo="Typo.h6">
-                                    @(_selectedTraceSpans.Any(s => s.StatusCode == SpanStatusCode.ERROR) ? "ERROR" : "OK")
-                                </MudText>
-                            </MudPaper>
-                        </MudItem>
-                    </MudGrid>
-
-                    <!-- Span Waterfall -->
-                    <MudPaper Elevation="2" Class="pa-4">
-                        <MudText Typo="Typo.h6" Class="mb-3">Span Timeline</MudText>
-                        
-                        <!-- Header Row -->
-                        <MudPaper Elevation="0" Class="mb-2" Style="background-color: #f5f5f5; padding: 12px 4px; border-radius: 4px;">
-                            <MudGrid Spacing="0">
-                                <MudItem xs="5">
-                                    <MudText Typo="Typo.body2" Style="font-weight: 600; padding-left: 8px;">Operation</MudText>
-                                </MudItem>
-                                <MudItem xs="2">
-                                    <MudText Typo="Typo.body2" Style="font-weight: 600;">Start Time</MudText>
-                                </MudItem>
-                                <MudItem xs="2">
-                                    <MudText Typo="Typo.body2" Style="font-weight: 600;">Duration</MudText>
-                                </MudItem>
-                                <MudItem xs="3">
-                                    <MudText Typo="Typo.body2" Style="font-weight: 600;">Timeline</MudText>
-                                </MudItem>
-                            </MudGrid>
-                        </MudPaper>
-                        
-                        @foreach (var rootSpan in rootSpans)
-                        {
-                            @RenderSpanTreeWithTimestamps(rootSpan, 0, traceStart, traceDuration)
-                        }
-                    </MudPaper>
-                }
-                else
-                {
-                    <MudAlert Severity="Severity.Info">Loading trace details...</MudAlert>
-                }
-            </MudStack>
-        }
-    </MudTabPanel>
 </MudTabs>
 
 @code {
