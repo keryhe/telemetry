@@ -9,7 +9,7 @@
     .trace-scale {
         display: flex;
         border-bottom: 2px solid var(--mud-palette-divider);
-        background: var(--mud-palette-surface);
+        background: var(--mud-palette-secondary);
     }
     .trace-scale-info {
         width: 40%;
@@ -18,7 +18,7 @@
         border-right: 1px solid var(--mud-palette-divider);
         font-size: 0.75rem;
         font-weight: 600;
-        color: var(--mud-palette-text-secondary);
+        color: var(--mud-palette-secondary-text);
     }
     .trace-scale-ticks {
         flex: 1;
@@ -29,7 +29,7 @@
         position: absolute;
         transform: translateX(-50%);
         font-size: 0.7rem;
-        color: var(--mud-palette-text-secondary);
+        color: var(--mud-palette-secondary-text);
         top: 6px;
         white-space: nowrap;
     }
@@ -40,7 +40,7 @@
         left: 50%;
         height: 4px;
         width: 1px;
-        background: var(--mud-palette-divider);
+        background: rgba(255, 255, 255, 0.4);
     }
     .trace-row {
         display: flex;
@@ -95,21 +95,14 @@
         font-weight: 700;
         white-space: nowrap;
         flex-shrink: 0;
+        color: var(--mud-palette-text-primary);
     }
     .trace-op-name {
-        font-size: 0.82rem;
+        font-size: 0.75rem;
         white-space: nowrap;
         overflow: hidden;
         text-overflow: ellipsis;
         color: var(--mud-palette-text-primary);
-    }
-    .trace-span-duration {
-        font-size: 0.72rem;
-        color: var(--mud-palette-text-secondary);
-        white-space: nowrap;
-        margin-left: auto;
-        flex-shrink: 0;
-        padding-right: 4px;
     }
     .trace-col-bars {
         flex: 1;
@@ -279,9 +272,8 @@ else
                             {
                                 <span class="trace-chevron-spacer"></span>
                             }
-                            <span class="trace-svc-name" style="color: @color;">@svc</span>
+                            <span class="trace-svc-name">@svc</span>
                             <span class="trace-op-name">@span.Name</span>
-                            <span class="trace-span-duration">@FormatRelativeNano(spanDurationNano)</span>
                         </div>
                     </div>
 
