@@ -69,6 +69,7 @@ public class TraceInfo
     public string? RootOperationName { get; set; }
     public bool HasErrors { get; set; }
     public List<string> Services { get; set; } = new();
+    public Dictionary<string, object>? RootSpanAttributes { get; set; }
 }
 
 public class ServiceDependency

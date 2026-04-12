@@ -40,6 +40,19 @@ public partial class ServiceMetrics : ComponentBase, IDisposable
         await LoadServicesAsync();
     }
 
+    private bool _stateLoaded = false;
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (!firstRender || _stateLoaded) return;
+        _stateLoaded = true;
+
+        await State.LoadAsync();
+        _selectedService = State.SelectedService;
+        _autoRefresh = State.AutoRefresh;
+        StateHasChanged();
+    }
+
     private void OnTimeRangeChanged()
     {
         _refreshIntervalSeconds = TimeRangeState.SelectedTimeRange.GetRecommendedRefreshInterval();
@@ -100,6 +113,7 @@ public partial class ServiceMetrics : ComponentBase, IDisposable
             return;
 
         State.SelectedService = _selectedService;
+        _ = State.SaveAsync();
 
         _loading = true;
         _loadedCount = 0;

@@ -1,6 +1,7 @@
 using Keryhe.Telemetry.Client.Services;
 using Keryhe.Telemetry.Core.Models;
 using Microsoft.AspNetCore.Components;
+using Microsoft.JSInterop;
 using MudBlazor;
 using Color = MudBlazor.Color;
 using Size = MudBlazor.Size;
@@ -18,6 +19,9 @@ public partial class TraceDetail : ComponentBase
     [Inject]
     private NavigationManager NavigationManager { get; set; } = null!;
 
+    [Inject]
+    private IJSRuntime JS { get; set; } = null!;
+
     private List<SpanModel> _selectedTraceSpans = new();
     private string? _selectedSpanId = null;
     private List<SpanRow> _allSpanRows = new();
@@ -32,7 +36,14 @@ public partial class TraceDetail : ComponentBase
 
     private static readonly string[] ServiceColorPalette =
     [
-        "#2196F3", "#4CAF50", "#FF9800", "#9C27B0", "#F44336", "#00BCD4", "#FF5722", "#607D8B"
+        "#1565C0", // dark blue
+        "#F9A825", // amber
+        "#2E7D32", // dark green
+        "#E65100", // orange
+        "#0097A7", // teal blue
+        "#7B1FA2", // purple
+        "#7CB342", // lime green
+        "#5D4037", // brown
     ];
 
     protected override async Task OnParametersSetAsync()
@@ -179,4 +190,7 @@ public partial class TraceDetail : ComponentBase
 
     private string TruncateTraceId(string traceId, int maxLength = 16) =>
         traceId.Length > maxLength ? traceId[..maxLength] + "..." : traceId;
+
+    private async Task CopyToClipboard(string text) =>
+        await JS.InvokeVoidAsync("navigator.clipboard.writeText", text);
 }

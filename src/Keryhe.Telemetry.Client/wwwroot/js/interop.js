@@ -7,3 +7,6 @@ window.downloadFile = function (filename, base64Content) {
     link.click();
     document.body.removeChild(link);
 };
+
+window.localStorageGetItem = (key) => localStorage.getItem(key);
+window.localStorageSetItem = (key, value) => localStorage.setItem(key, value);

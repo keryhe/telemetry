@@ -47,6 +47,21 @@ public partial class Metrics : ComponentBase, IDisposable
         await LoadServicesAsync();
     }
 
+    private bool _stateLoaded = false;
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (!firstRender || _stateLoaded) return;
+        _stateLoaded = true;
+
+        await State.LoadAsync();
+        _searchText = State.SearchText;
+        _selectedService = State.SelectedService;
+        _selectedType = State.SelectedType;
+        _showUniqueNamesView = State.ShowUniqueNamesView;
+        StateHasChanged();
+    }
+
     private void OnTimeRangeChanged()
     {
         _ = InvokeAsync(async () =>
@@ -127,6 +142,7 @@ public partial class Metrics : ComponentBase, IDisposable
         State.SelectedService = _selectedService;
         State.SelectedType = _selectedType;
         State.ShowUniqueNamesView = _showUniqueNamesView;
+        _ = State.SaveAsync();
 
         // Filter flat list
         _filteredMetrics = _allMetrics;

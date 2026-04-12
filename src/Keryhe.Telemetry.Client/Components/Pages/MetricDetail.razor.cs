@@ -41,12 +41,14 @@ public partial class MetricDetail : ComponentBase, IDisposable
     private string? _serviceName;
     private bool _initialized = false;
 
+    private bool _stateLoaded = false;
+
     // Active tab with state persistence
     private int _activeTabBacking = 0;
     private int _activeTab
     {
         get => _activeTabBacking;
-        set { _activeTabBacking = value; State.ActiveTab = value; }
+        set { _activeTabBacking = value; State.ActiveTab = value; _ = State.SaveAsync(); }
     }
 
     // Filtering
@@ -102,6 +104,22 @@ public partial class MetricDetail : ComponentBase, IDisposable
             RestartRefreshTimer();
     }
 
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (!firstRender || _stateLoaded) return;
+        _stateLoaded = true;
+
+        await State.LoadAsync();
+        if (State.CurrentMetricName == Uri.UnescapeDataString(MetricName))
+        {
+            _selectedServiceFilter = State.SelectedServiceFilter;
+            _selectedLabelFilters = new Dictionary<string, string>(State.SelectedLabelFilters);
+            _showPerServiceView = State.ShowPerServiceView;
+            _activeTabBacking = State.ActiveTab;
+        }
+        StateHasChanged();
+    }
+
     private void OnTimeRangeChanged()
     {
         _ = InvokeAsync(async () =>
@@ -145,6 +163,7 @@ public partial class MetricDetail : ComponentBase, IDisposable
         State.SelectedServiceFilter = _selectedServiceFilter;
         State.SelectedLabelFilters = new Dictionary<string, string>(_selectedLabelFilters);
         State.ShowPerServiceView = _showPerServiceView;
+        _ = State.SaveAsync();
 
         _loading = true;
         StateHasChanged();

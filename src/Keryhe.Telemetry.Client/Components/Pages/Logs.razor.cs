@@ -61,12 +61,7 @@ public partial class Logs : ComponentBase, IDisposable
     [SupplyParameterFromQuery(Name = "traceId")]
     public string? TraceIdFilter { get; set; }
 
-    private bool IsTraceIdSearch => !string.IsNullOrWhiteSpace(_searchText) &&
-                                     _searchText.Length == 32 &&
-                                     !_searchText.Contains(' ') &&
-                                     !_searchText.Contains('=') &&
-                                     !_searchText.Contains(':') &&
-                                     !_searchText.Contains('"');
+    private bool IsTraceIdSearch => SearchQueryParser.Parse(_searchText).IsTraceIdSearch;
 
     protected override async Task OnInitializedAsync()
     {
@@ -107,6 +102,20 @@ public partial class Logs : ComponentBase, IDisposable
         _searchText = State.SearchText;
 
         await SearchLogs();
+    }
+
+    private bool _stateLoaded = false;
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (!firstRender || _stateLoaded) return;
+        _stateLoaded = true;
+
+        await State.LoadAsync();
+        _searchText = State.SearchText;
+        _selectedService = State.SelectedService;
+        _selectedSeverity = State.SelectedSeverity;
+        StateHasChanged();
     }
 
     private void OnTimeRangeChanged()
@@ -162,9 +171,9 @@ public partial class Logs : ComponentBase, IDisposable
     private string GetLevelCellStyle(string? severity)
     {
         if (severity?.ToUpper() == "INFORMATION")
-            return $"background-color: var(--mud-palette-surface); text-align: center; color: {GetSeverityColor(severity)};";
+            return $"background-color: var(--mud-palette-surface); color: {GetSeverityColor(severity)}; font-weight: 700;";
 
-        return $"background-color: {GetSeverityLightColor(severity)}; text-align: center; color: {GetSeverityColor(severity)};";
+        return $"background-color: {GetSeverityLightColor(severity)}; color: {GetSeverityColor(severity)}; font-weight: 700;";
     }
 
     private static string? TryGetServiceName(LogRecordModel log)
@@ -182,22 +191,18 @@ public partial class Logs : ComponentBase, IDisposable
         State.SearchText = _searchText;
         State.SelectedService = _selectedService;
         State.SelectedSeverity = _selectedSeverity;
+        _ = State.SaveAsync();
 
         _dataLoading = true;
         StateHasChanged();
 
         try
         {
-            bool isTraceIdSearch = !string.IsNullOrWhiteSpace(_searchText) &&
-                                   _searchText.Length == 32 &&
-                                   !_searchText.Contains(' ') &&
-                                   !_searchText.Contains('=') &&
-                                   !_searchText.Contains(':') &&
-                                   !_searchText.Contains('"');
+            var parsedQuery = SearchQueryParser.Parse(_searchText);
 
-            if (isTraceIdSearch)
+            if (parsedQuery.IsTraceIdSearch)
             {
-                var traceLogs = await LogService.GetLogRecordsByTraceIdAsync(_searchText);
+                var traceLogs = await LogService.GetLogRecordsByTraceIdAsync(parsedQuery.TraceId!);
 
                 if (!string.IsNullOrEmpty(_selectedService))
                     traceLogs = traceLogs.Where(l => TryGetServiceName(l) == _selectedService).ToList();
@@ -240,8 +245,8 @@ public partial class Logs : ComponentBase, IDisposable
                     string.Equals(l.SeverityText, _selectedSeverity, StringComparison.OrdinalIgnoreCase)
                 ).ToList();
 
-            if (!string.IsNullOrWhiteSpace(_searchText))
-                allLogs = ApplyTextSearch(allLogs, _searchText);
+            if (parsedQuery.Terms.Count > 0)
+                allLogs = ApplyParsedSearch(allLogs, parsedQuery);
 
             _logs = allLogs;
             UpdateChartData(start, end);
@@ -253,67 +258,52 @@ public partial class Logs : ComponentBase, IDisposable
         }
     }
 
-    private List<LogRecordModel> ApplyTextSearch(List<LogRecordModel> logs, string searchText)
+    private List<LogRecordModel> ApplyParsedSearch(List<LogRecordModel> logs, ParsedSearchQuery query)
     {
-        if (string.IsNullOrWhiteSpace(searchText))
-            return logs;
-
-        var terms = searchText.Split(new[] { " AND " }, StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
-
-        foreach (var term in terms)
+        foreach (var term in query.Terms)
         {
-            var cleanTerm = term.Trim();
+            if (term.IsAttributeFilter)
+            {
+                var key = term.Key!;
+                var value = term.Value!;
+                var exactMatch = term.IsExactMatch;
 
-            if (cleanTerm.Contains('=') || cleanTerm.Contains(':'))
-                logs = ApplyAttributeFilter(logs, cleanTerm);
-            else
                 logs = logs.Where(l =>
-                    l.BodyValue?.Contains(cleanTerm, StringComparison.OrdinalIgnoreCase) ?? false
+                {
+                    if (l.Attributes?.ContainsKey(key) == true)
+                    {
+                        var v = l.Attributes[key]?.ToString() ?? "";
+                        return exactMatch
+                            ? v.Equals(value, StringComparison.OrdinalIgnoreCase)
+                            : v.Contains(value, StringComparison.OrdinalIgnoreCase);
+                    }
+                    if (l.Resource?.Attributes?.ContainsKey(key) == true)
+                    {
+                        var v = l.Resource.Attributes[key]?.ToString() ?? "";
+                        return exactMatch
+                            ? v.Equals(value, StringComparison.OrdinalIgnoreCase)
+                            : v.Contains(value, StringComparison.OrdinalIgnoreCase);
+                    }
+                    if (l.InstrumentationScope?.Attributes?.ContainsKey(key) == true)
+                    {
+                        var v = l.InstrumentationScope.Attributes[key]?.ToString() ?? "";
+                        return exactMatch
+                            ? v.Equals(value, StringComparison.OrdinalIgnoreCase)
+                            : v.Contains(value, StringComparison.OrdinalIgnoreCase);
+                    }
+                    return false;
+                }).ToList();
+            }
+            else
+            {
+                var text = term.FreeText!;
+                logs = logs.Where(l =>
+                    l.BodyValue?.Contains(text, StringComparison.OrdinalIgnoreCase) ?? false
                 ).ToList();
+            }
         }
 
         return logs;
-    }
-
-    private List<LogRecordModel> ApplyAttributeFilter(List<LogRecordModel> logs, string filter)
-    {
-        var separator = filter.Contains('=') ? '=' : ':';
-        var parts = filter.Split(separator, 2);
-
-        if (parts.Length != 2) return logs;
-
-        var key = parts[0].Trim();
-        var value = parts[1].Trim().Trim('"', '\'');
-        var isExactMatch = separator == '=';
-
-        return logs.Where(l =>
-        {
-            if (l.Attributes?.ContainsKey(key) == true)
-            {
-                var attrValue = l.Attributes[key]?.ToString() ?? "";
-                return isExactMatch
-                    ? attrValue.Equals(value, StringComparison.OrdinalIgnoreCase)
-                    : attrValue.Contains(value, StringComparison.OrdinalIgnoreCase);
-            }
-
-            if (l.Resource?.Attributes?.ContainsKey(key) == true)
-            {
-                var attrValue = l.Resource.Attributes[key]?.ToString() ?? "";
-                return isExactMatch
-                    ? attrValue.Equals(value, StringComparison.OrdinalIgnoreCase)
-                    : attrValue.Contains(value, StringComparison.OrdinalIgnoreCase);
-            }
-
-            if (l.InstrumentationScope?.Attributes?.ContainsKey(key) == true)
-            {
-                var attrValue = l.InstrumentationScope.Attributes[key]?.ToString() ?? "";
-                return isExactMatch
-                    ? attrValue.Equals(value, StringComparison.OrdinalIgnoreCase)
-                    : attrValue.Contains(value, StringComparison.OrdinalIgnoreCase);
-            }
-
-            return false;
-        }).ToList();
     }
 
     private string FormatAttributeValue(object? value)

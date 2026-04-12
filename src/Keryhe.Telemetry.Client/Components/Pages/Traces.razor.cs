@@ -11,11 +11,12 @@ namespace Keryhe.Telemetry.Client.Components.Pages;
 
 public partial class Traces : ComponentBase, IDisposable
 {
+    private bool _stateLoaded = false;
     private int _activeTabIndexBacking = 0;
     private int _activeTabIndex
     {
         get => _activeTabIndexBacking;
-        set { _activeTabIndexBacking = value; State.ActiveTabIndex = value; }
+        set { _activeTabIndexBacking = value; State.ActiveTabIndex = value; _ = State.SaveAsync(); }
     }
     private List<TraceInfo> _traces = new();
     private List<ServiceDependency> _serviceDependencies = new();
@@ -25,7 +26,10 @@ public partial class Traces : ComponentBase, IDisposable
     private List<string> _availableServices = new();
     private bool _dataLoading = true;
     private string _searchText = "";
+    private bool _showSearchHelp = false;
     private string _filterMode = "all";
+
+    private bool IsTraceIdSearch => SearchQueryParser.Parse(_searchText).IsTraceIdSearch;
     private string? _selectedService = null;
     private int _minDurationMs = 500;
 
@@ -71,6 +75,21 @@ public partial class Traces : ComponentBase, IDisposable
         await LoadDataAsync();
     }
 
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (!firstRender || _stateLoaded) return;
+        _stateLoaded = true;
+
+        await State.LoadAsync();
+        _searchText = State.SearchText;
+        _selectedService = State.SelectedService;
+        _filterMode = State.FilterMode;
+        _minDurationMs = State.MinDurationMs;
+        _selectedAnalyticsService = State.SelectedAnalyticsService;
+        _activeTabIndexBacking = Math.Min(State.ActiveTabIndex, 2);
+        StateHasChanged();
+    }
+
     private void OnTimeRangeChanged()
     {
         _ = InvokeAsync(LoadDataAsync);
@@ -82,6 +101,7 @@ public partial class Traces : ComponentBase, IDisposable
         State.SelectedService = _selectedService;
         State.MinDurationMs = _minDurationMs;
         State.SearchText = _searchText;
+        _ = State.SaveAsync();
 
         _dataLoading = true;
         StateHasChanged();
@@ -106,12 +126,20 @@ public partial class Traces : ComponentBase, IDisposable
                     break;
             }
 
-            if (!string.IsNullOrEmpty(_searchText))
+            if (!string.IsNullOrWhiteSpace(_searchText))
             {
-                _traces = _traces.Where(t =>
-                    t.TraceIdHex.Contains(_searchText, StringComparison.OrdinalIgnoreCase) ||
-                    (t.ServiceName?.Contains(_searchText, StringComparison.OrdinalIgnoreCase) ?? false)
-                ).ToList();
+                var parsedQuery = SearchQueryParser.Parse(_searchText);
+
+                if (parsedQuery.IsTraceIdSearch)
+                {
+                    _traces = _traces.Where(t =>
+                        t.TraceIdHex.Equals(parsedQuery.TraceId, StringComparison.OrdinalIgnoreCase)
+                    ).ToList();
+                }
+                else if (parsedQuery.Terms.Count > 0)
+                {
+                    _traces = ApplyParsedSearch(_traces, parsedQuery);
+                }
             }
 
             CalculateStats();
@@ -150,6 +178,7 @@ public partial class Traces : ComponentBase, IDisposable
     {
         _selectedAnalyticsService = service;
         State.SelectedAnalyticsService = service;
+        _ = State.SaveAsync();
 
         if (string.IsNullOrEmpty(service))
         {
@@ -331,6 +360,41 @@ public partial class Traces : ComponentBase, IDisposable
 
     private string TruncateTraceId(string traceId, int maxLength = 16) =>
         traceId.Length > maxLength ? traceId[..maxLength] + "..." : traceId;
+
+    private List<TraceInfo> ApplyParsedSearch(List<TraceInfo> traces, ParsedSearchQuery query)
+    {
+        foreach (var term in query.Terms)
+        {
+            if (term.IsAttributeFilter)
+            {
+                var key = term.Key!;
+                var value = term.Value!;
+                var exactMatch = term.IsExactMatch;
+
+                traces = traces.Where(t =>
+                {
+                    if (t.RootSpanAttributes?.ContainsKey(key) == true)
+                    {
+                        var v = t.RootSpanAttributes[key]?.ToString() ?? "";
+                        return exactMatch
+                            ? v.Equals(value, StringComparison.OrdinalIgnoreCase)
+                            : v.Contains(value, StringComparison.OrdinalIgnoreCase);
+                    }
+                    return false;
+                }).ToList();
+            }
+            else
+            {
+                var text = term.FreeText!;
+                traces = traces.Where(t =>
+                    (t.RootOperationName?.Contains(text, StringComparison.OrdinalIgnoreCase) ?? false) ||
+                    (t.ServiceName?.Contains(text, StringComparison.OrdinalIgnoreCase) ?? false)
+                ).ToList();
+            }
+        }
+
+        return traces;
+    }
 
     public void Dispose()
     {

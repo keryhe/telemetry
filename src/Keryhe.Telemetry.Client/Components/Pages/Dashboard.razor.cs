@@ -110,6 +110,19 @@ public partial class Dashboard : ComponentBase, IDisposable
             RestartRefreshTimer();
     }
 
+    private bool _stateLoaded = false;
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (!firstRender || _stateLoaded) return;
+        _stateLoaded = true;
+
+        await State.LoadAsync();
+        _selectedService = State.SelectedService;
+        _autoRefresh = State.AutoRefresh;
+        StateHasChanged();
+    }
+
     private void OnTimeRangeChanged()
     {
         _ = InvokeAsync(async () =>
@@ -123,6 +136,7 @@ public partial class Dashboard : ComponentBase, IDisposable
     {
         State.SelectedService = _selectedService;
         State.AutoRefresh = _autoRefresh;
+        _ = State.SaveAsync();
 
         _loading = true;
         StateHasChanged();

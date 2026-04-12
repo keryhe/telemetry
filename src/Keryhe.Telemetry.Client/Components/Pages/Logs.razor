@@ -312,12 +312,12 @@
 <style>
     /* Severity row background colors — automatically adapt via color-mix with --mud-palette-surface */
     :root {
-        --severity-trace-bg:   color-mix(in srgb, #9C27B0 12%, var(--mud-palette-surface));
-        --severity-debug-bg:   color-mix(in srgb, #2196F3 12%, var(--mud-palette-surface));
+        --severity-trace-bg:   color-mix(in srgb, #9C27B0 14%, var(--mud-palette-surface));
+        --severity-debug-bg:   color-mix(in srgb, #2196F3 14%, var(--mud-palette-surface));
         --severity-info-bg:    transparent;
-        --severity-warning-bg: color-mix(in srgb, #FF9800 12%, var(--mud-palette-surface));
-        --severity-error-bg:   color-mix(in srgb, #f44336 12%, var(--mud-palette-surface));
-        --severity-fatal-bg:   color-mix(in srgb, #FF5722 18%, var(--mud-palette-surface));
+        --severity-warning-bg: color-mix(in srgb, #FF9800 16%, var(--mud-palette-surface));
+        --severity-error-bg:   color-mix(in srgb, #f44336 18%, var(--mud-palette-surface));
+        --severity-fatal-bg:   color-mix(in srgb, #FF5722 24%, var(--mud-palette-surface));
     }
 
     /* CRITICAL FIX: Force fixed table layout ONLY on the main data grid, not child tables */
@@ -348,31 +348,36 @@
     }
 
     .compact-logs-grid > .mud-table-container > .mud-table-root > thead > tr > th:nth-child(4) {
-        width: 130px !important; /* Level */
+        width: 100px !important; /* Level */
     }
 
     .compact-logs-grid > .mud-table-container > .mud-table-root > thead > tr > th:nth-child(5) {
-        width: 400px !important; /* Message - minimum, grows with content */
+        width: 600px !important; /* Message - minimum, grows with content */
     }
     
-    /* Apply monospace font to main grid body cells (descendant selectors survive Virtualize wrappers) */
+    /* Apply default font to all main grid body cells */
     .compact-logs-grid .mud-table-body .mud-table-row:not(.mud-table-row-group-footer) .mud-table-cell {
-        font-family: 'Consolas', 'Courier New', Courier, monospace !important;
-        font-size: 0.78rem !important;
+        font-size: 0.82rem !important;
         white-space: nowrap !important;
     }
 
-    /* Belt-and-suspenders: also target spans inside PropertyColumn cells */
-    .compact-logs-grid .mud-table-body .mud-table-row:not(.mud-table-row-group-footer) .mud-table-cell span {
+    /* Apply monospace font only to the Message column (last cell) */
+    .compact-logs-grid .mud-table-body .mud-table-row:not(.mud-table-row-group-footer) .mud-table-cell:last-child {
         font-family: 'Consolas', 'Courier New', Courier, monospace !important;
-        font-size: 0.78rem !important;
+        overflow: hidden !important;
+        text-overflow: ellipsis !important;
+    }
+
+    /* Belt-and-suspenders: also target spans inside the Message PropertyColumn cell */
+    .compact-logs-grid .mud-table-body .mud-table-row:not(.mud-table-row-group-footer) .mud-table-cell:last-child span {
+        font-family: 'Consolas', 'Courier New', Courier, monospace !important;
     }
 
     /* Reduce cell padding to make rows more compact */
     .mud-table-cell {
-        padding-top: 2px !important;
-        padding-bottom: 2px !important;
-        line-height: 1.2 !important;
+        padding-top: 4px !important;
+        padding-bottom: 4px !important;
+        line-height: 1.4 !important;
     }
     
     /* Ensure expanded child content row displays properly */

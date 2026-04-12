@@ -140,6 +140,9 @@ public class TraceReadRepository : ITraceReadRepository
                     s.StartTimeUnixNano,
                     s.EndTimeUnixNano,
                     s.StatusCode,
+                    s.Name,
+                    s.ParentSpanId,
+                    SpanAttributes = s.Attributes,
                     ResourceAttributes = s.Resource.Attributes
                 })
                 .ToListAsync(cancellationToken);
@@ -153,6 +156,7 @@ public class TraceReadRepository : ITraceReadRepository
                     MinStartTimeNano = g.Min(s => s.StartTimeUnixNano),
                     MaxEndTimeNano = g.Max(s => s.EndTimeUnixNano),
                     HasErrors = g.Any(s => s.StatusCode == SpanStatusCode.ERROR),
+                    RootSpan = g.FirstOrDefault(s => s.ParentSpanId == null) ?? g.OrderBy(s => s.StartTimeUnixNano).First(),
                     ServiceName = ExtractServiceName(g.OrderBy(s => s.StartTimeUnixNano)
                                                       .FirstOrDefault()?.ResourceAttributes)
                 })
@@ -168,6 +172,8 @@ public class TraceReadRepository : ITraceReadRepository
                 TraceEndTime = OpenTelemetryDbContextExtensions.UnixNanoToDateTime(t.MaxEndTimeNano),
                 HasErrors = t.HasErrors,
                 ServiceName = t.ServiceName,
+                RootOperationName = t.RootSpan.Name,
+                RootSpanAttributes = t.RootSpan.SpanAttributes,
                 TraceDuration = OpenTelemetryDbContextExtensions.UnixNanoToDateTime(t.MaxEndTimeNano)
                               - OpenTelemetryDbContextExtensions.UnixNanoToDateTime(t.MinStartTimeNano)
             }).ToList();
@@ -212,6 +218,9 @@ public class TraceReadRepository : ITraceReadRepository
                     s.StartTimeUnixNano,
                     s.EndTimeUnixNano,
                     s.StatusCode,
+                    s.Name,
+                    s.ParentSpanId,
+                    SpanAttributes = s.Attributes,
                     ResourceAttributes = s.Resource.Attributes
                 })
                 .ToListAsync(cancellationToken);
@@ -230,7 +239,8 @@ public class TraceReadRepository : ITraceReadRepository
                     SpanCount = g.Count(),
                     MinStartTimeNano = g.Min(s => s.StartTimeUnixNano),
                     MaxEndTimeNano = g.Max(s => s.EndTimeUnixNano),
-                    HasErrors = g.Any(s => s.StatusCode == SpanStatusCode.ERROR)
+                    HasErrors = g.Any(s => s.StatusCode == SpanStatusCode.ERROR),
+                    RootSpan = g.FirstOrDefault(s => s.ParentSpanId == null) ?? g.OrderBy(s => s.StartTimeUnixNano).First()
                 })
                 .OrderByDescending(t => t.MinStartTimeNano)
                 .Take(limit)
@@ -244,6 +254,8 @@ public class TraceReadRepository : ITraceReadRepository
                 TraceEndTime = OpenTelemetryDbContextExtensions.UnixNanoToDateTime(t.MaxEndTimeNano),
                 HasErrors = t.HasErrors,
                 ServiceName = serviceName,
+                RootOperationName = t.RootSpan.Name,
+                RootSpanAttributes = t.RootSpan.SpanAttributes,
                 TraceDuration = OpenTelemetryDbContextExtensions.UnixNanoToDateTime(t.MaxEndTimeNano)
                               - OpenTelemetryDbContextExtensions.UnixNanoToDateTime(t.MinStartTimeNano)
             }).ToList();
@@ -284,6 +296,9 @@ public class TraceReadRepository : ITraceReadRepository
                     s.TraceId,
                     s.StartTimeUnixNano,
                     s.EndTimeUnixNano,
+                    s.Name,
+                    s.ParentSpanId,
+                    SpanAttributes = s.Attributes,
                     ResourceAttributes = s.Resource.Attributes
                 })
                 .ToListAsync(cancellationToken);
@@ -296,6 +311,7 @@ public class TraceReadRepository : ITraceReadRepository
                     SpanCount = g.Count(),
                     MinStartTimeNano = g.Min(s => s.StartTimeUnixNano),
                     MaxEndTimeNano = g.Max(s => s.EndTimeUnixNano),
+                    RootSpan = g.FirstOrDefault(s => s.ParentSpanId == null) ?? g.OrderBy(s => s.StartTimeUnixNano).First(),
                     ServiceName = ExtractServiceName(g.OrderBy(s => s.StartTimeUnixNano)
                                                       .FirstOrDefault()?.ResourceAttributes)
                 })
@@ -311,6 +327,8 @@ public class TraceReadRepository : ITraceReadRepository
                 TraceEndTime = OpenTelemetryDbContextExtensions.UnixNanoToDateTime(t.MaxEndTimeNano),
                 HasErrors = true,
                 ServiceName = t.ServiceName,
+                RootOperationName = t.RootSpan.Name,
+                RootSpanAttributes = t.RootSpan.SpanAttributes,
                 TraceDuration = OpenTelemetryDbContextExtensions.UnixNanoToDateTime(t.MaxEndTimeNano)
                               - OpenTelemetryDbContextExtensions.UnixNanoToDateTime(t.MinStartTimeNano)
             }).ToList();
@@ -354,6 +372,9 @@ public class TraceReadRepository : ITraceReadRepository
                     s.StartTimeUnixNano,
                     s.EndTimeUnixNano,
                     s.StatusCode,
+                    s.Name,
+                    s.ParentSpanId,
+                    SpanAttributes = s.Attributes,
                     ResourceAttributes = s.Resource.Attributes
                 })
                 .ToListAsync(cancellationToken);
@@ -368,6 +389,7 @@ public class TraceReadRepository : ITraceReadRepository
                     MaxEndTimeNano = g.Max(s => s.EndTimeUnixNano),
                     HasErrors = g.Any(s => s.StatusCode == SpanStatusCode.ERROR),
                     DurationNano = g.Max(s => s.EndTimeUnixNano) - g.Min(s => s.StartTimeUnixNano),
+                    RootSpan = g.FirstOrDefault(s => s.ParentSpanId == null) ?? g.OrderBy(s => s.StartTimeUnixNano).First(),
                     ServiceName = ExtractServiceName(g.OrderBy(s => s.StartTimeUnixNano)
                                                       .FirstOrDefault()?.ResourceAttributes)
                 })
@@ -384,6 +406,8 @@ public class TraceReadRepository : ITraceReadRepository
                 TraceEndTime = OpenTelemetryDbContextExtensions.UnixNanoToDateTime(t.MaxEndTimeNano),
                 HasErrors = t.HasErrors,
                 ServiceName = t.ServiceName,
+                RootOperationName = t.RootSpan.Name,
+                RootSpanAttributes = t.RootSpan.SpanAttributes,
                 TraceDuration = OpenTelemetryDbContextExtensions.UnixNanoToDateTime(t.MaxEndTimeNano)
                               - OpenTelemetryDbContextExtensions.UnixNanoToDateTime(t.MinStartTimeNano)
             }).ToList();

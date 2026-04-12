@@ -38,6 +38,7 @@ builder.Services
     .AddScoped<ILogService, LogService>()
     .AddScoped<IMetricService, MetricService>()
     .AddScoped<ITraceService, TraceService>()
+    .AddScoped<LocalStorageService>()
     .AddScoped<TimeRangeState>()
     .AddScoped<MetricsPageState>()
     .AddScoped<MetricDetailPageState>()

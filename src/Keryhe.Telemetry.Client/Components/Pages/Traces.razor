@@ -12,23 +12,7 @@
     <MudTabPanel Text="Trace List" Icon="@Icons.Material.Filled.List">
         <!-- Filter Bar -->
         <MudStack Spacing="2" Class="mb-4">
-            <MudStack Row="true" Spacing="2">
-                <MudTextField @bind-Value="_searchText"
-                              Placeholder="Search by Trace ID or Service..."
-                              Adornment="Adornment.Start"
-                              AdornmentIcon="@Icons.Material.Filled.Search"
-                              Variant="Variant.Outlined"
-                              Margin="Margin.Dense"
-                              Style="flex: 1;"/>
-                <MudButton Variant="Variant.Filled"
-                           Color="Color.Primary"
-                           OnClick="SearchTraces"
-                           StartIcon="@Icons.Material.Filled.Search">
-                    Search
-                </MudButton>
-            </MudStack>
-
-            <!-- Quick Filters -->
+            <!-- Row 1: Quick Filters, Service, Search Button -->
             <MudStack Row="true" Spacing="2" AlignItems="AlignItems.Center">
                 <MudText Typo="Typo.body2">Filter:</MudText>
                 <MudChipSet @bind-SelectedValue="_filterMode" T="string">
@@ -59,8 +43,92 @@
                         <MudSelectItem Value="@service">@service</MudSelectItem>
                     }
                 </MudSelect>
+
+                <MudButton Variant="Variant.Filled"
+                           Color="Color.Primary"
+                           OnClick="SearchTraces"
+                           StartIcon="@Icons.Material.Filled.Search">
+                    Search
+                </MudButton>
+            </MudStack>
+
+            <!-- Row 2: Search Text Field -->
+            <MudStack Row="true" Spacing="1" AlignItems="AlignItems.Center">
+                <MudTextField @bind-Value="_searchText"
+                              Placeholder='Search: Trace ID OR "operation name" OR key=value OR key:value'
+                              Adornment="Adornment.Start"
+                              AdornmentIcon="@Icons.Material.Filled.Search"
+                              Variant="Variant.Outlined"
+                              Margin="Margin.Dense"
+                              HelperText="Examples: abc123... (Trace ID) | database query | http.status_code=500"
+                              Style="flex: 1;"/>
+                @if (IsTraceIdSearch)
+                {
+                    <MudChip T="string"
+                             Size="Size.Small"
+                             Color="Color.Info"
+                             Icon="@Icons.Material.Filled.Link"
+                             Text="Trace ID Search"
+                             Style="margin-bottom: 20px;"/>
+                }
+                <MudIconButton Icon="@Icons.Material.Filled.HelpOutline"
+                               Color="Color.Info"
+                               Size="Size.Small"
+                               OnClick="@(() => _showSearchHelp = true)"
+                               Style="margin-top: 4px;"/>
             </MudStack>
         </MudStack>
+
+        <!-- Search Help Dialog -->
+        <MudDialog @bind-Visible="_showSearchHelp" Options="new DialogOptions { MaxWidth = MaxWidth.Medium }">
+            <TitleContent>
+                <MudText Typo="Typo.h6">
+                    <MudIcon Icon="@Icons.Material.Filled.Help" Class="mr-2"/> Search Syntax Guide
+                </MudText>
+            </TitleContent>
+            <DialogContent>
+                <MudText Typo="Typo.subtitle2" Class="mb-2">Search Types</MudText>
+                <MudSimpleTable Dense="true" Style="margin-bottom: 16px;">
+                    <thead>
+                        <tr>
+                            <th>Type</th>
+                            <th>Example</th>
+                            <th>Description</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr>
+                            <td><strong>Trace ID</strong></td>
+                            <td><code>abc123def456...</code></td>
+                            <td>Exact trace ID (32 hex chars, date range not required)</td>
+                        </tr>
+                        <tr>
+                            <td><strong>Free Text</strong></td>
+                            <td><code>database query</code></td>
+                            <td>Searches root operation name and service names</td>
+                        </tr>
+                        <tr>
+                            <td><strong>Exact Attribute</strong></td>
+                            <td><code>http.status_code=500</code></td>
+                            <td>Root span attribute exact match</td>
+                        </tr>
+                        <tr>
+                            <td><strong>Contains Attribute</strong></td>
+                            <td><code>http.url:/api/orders</code></td>
+                            <td>Root span attribute contains match</td>
+                        </tr>
+                        <tr>
+                            <td><strong>AND Logic</strong></td>
+                            <td><code>GET AND http.status_code=200</code></td>
+                            <td>Combine multiple conditions (all must match)</td>
+                        </tr>
+                    </tbody>
+                </MudSimpleTable>
+            </DialogContent>
+            <DialogActions>
+                <MudButton OnClick="@(() => _showSearchHelp = false)">Close</MudButton>
+            </DialogActions>
+        </MudDialog>
 
         <!-- Stats Cards -->
         <MudGrid Class="mb-4">
@@ -156,17 +224,11 @@
                      ColumnResizeMode="ResizeMode.Column">
             <Columns>
                 <HierarchyColumn T="TraceInfo" HeaderClass="mud-theme-secondary"/>
-                <TemplateColumn Title="Trace ID" HeaderClass="mud-theme-secondary">
+                <TemplateColumn Title="Operation" HeaderClass="mud-theme-secondary">
                     <CellTemplate>
-                        <MudStack Row="true" AlignItems="AlignItems.Center" Spacing="1">
-                            <MudText Typo="Typo.body2" Style="font-family: monospace;">
-                                @TruncateTraceId(context.Item.TraceIdHex)
-                            </MudText>
-                            <MudIconButton Icon="@Icons.Material.Filled.ContentCopy"
-                                           Size="Size.Small"
-                                           OnClick="@(() => {})"
-                                           title="Copy Trace ID"/>
-                        </MudStack>
+                        <MudText Typo="Typo.body2">
+                            @(context.Item.RootOperationName ?? context.Item.TraceIdHex)
+                        </MudText>
                     </CellTemplate>
                 </TemplateColumn>
                 <TemplateColumn Title="Service" HeaderClass="mud-theme-secondary">
