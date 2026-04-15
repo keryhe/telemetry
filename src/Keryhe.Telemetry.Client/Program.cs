@@ -1,3 +1,6 @@
+using Keryhe.Telemetry.Alerting;
+using Keryhe.Telemetry.Alerting.Evaluators;
+using Keryhe.Telemetry.Alerting.Notifications;
 using Keryhe.Telemetry.Client.Components;
 using Keryhe.Telemetry.Client.Services;
 using Keryhe.Telemetry.Client.Services.State;
@@ -46,6 +49,23 @@ builder.Services
     .AddScoped<LogsPageState>()
     .AddScoped<TracesPageState>()
     .AddScoped<DashboardPageState>();
+
+// Alert feature
+builder.Services.AddDbContext<AlertDbContext>(options =>
+{
+    var connectionString = builder.Configuration.GetConnectionString("Read");
+    options.UseNpgsql(connectionString);
+});
+builder.Services.AddHttpClient("AlertWebhook");
+builder.Services
+    .AddScoped<IAlertRuleRepository, AlertRuleRepository>()
+    .AddScoped<INotificationChannel, WebhookNotificationChannel>()
+    .AddScoped<IAlertEvaluator, MetricThresholdEvaluator>()
+    .AddScoped<IAlertEvaluator, ErrorRateEvaluator>()
+    .AddScoped<IAlertEvaluator, SlowTraceEvaluator>()
+    .AddScoped<IAlertEvaluator, LogSeveritySpikeEvaluator>()
+    .AddScoped<IAlertService, AlertService>();
+builder.Services.AddHostedService<AlertEvaluationWorker>();
 
 var app = builder.Build();
 
