@@ -27,7 +27,7 @@ public class AlertDbContext : DbContext
             entity.Property(e => e.ServiceName).HasMaxLength(255);
             entity.Property(e => e.ConditionJson).HasColumnType("jsonb");
             entity.Property(e => e.WebhookUrl).HasColumnType("text");
-            entity.Property(e => e.CreatedAt).HasDefaultValueSql("NOW()");
+            entity.Property(e => e.CreatedAt).HasDefaultValueSql("CURRENT_TIMESTAMP");
 
             entity.HasMany(e => e.Events)
                   .WithOne(e => e.Rule)
@@ -39,7 +39,7 @@ public class AlertDbContext : DbContext
         {
             entity.ToTable("alert_events");
             entity.Property(e => e.DetailsJson).HasColumnType("jsonb");
-            entity.Property(e => e.FiredAt).HasDefaultValueSql("NOW()");
+            entity.Property(e => e.FiredAt).HasDefaultValueSql("CURRENT_TIMESTAMP");
             entity.HasIndex(e => e.RuleId).HasDatabaseName("idx_alert_events_rule_id");
             entity.HasIndex(e => e.FiredAt).HasDatabaseName("idx_alert_events_fired_at");
         });

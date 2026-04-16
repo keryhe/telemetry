@@ -31,7 +31,7 @@ public partial class Logs : ComponentBase, IDisposable
         {
             Toolbar = new Toolbar { Show = false },
             Stacked = true,
-            Zoom = new Zoom { Enabled = true, Type = AxisType.X }
+            Zoom = new Zoom { Enabled = true, Type = AxisType.X, AllowMouseWheelZoom = false }
         },
         Colors = new List<string>
         {

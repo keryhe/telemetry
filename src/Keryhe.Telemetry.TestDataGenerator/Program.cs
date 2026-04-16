@@ -12,6 +12,7 @@ using OpenTelemetry.Metrics;
 using OpenTelemetry.Resources;
 using OpenTelemetry.Trace;
 using Keryhe.Telemetry.TestDataGenerator;
+using Keryhe.Telemetry.TestDataGenerator.Generators;
 
 var host = new HostBuilder()
     .ConfigureAppConfiguration((context, config) =>
@@ -29,19 +30,46 @@ var host = new HostBuilder()
         var generatorConfig = context.Configuration.GetSection("GeneratorConfig").Get<GeneratorConfig>()
             ?? new GeneratorConfig();
 
-        // Create ActivitySource for traces
-        ActivitySource? activitySource = new ActivitySource(
-            generatorConfig.ServiceName,
-            generatorConfig.ServiceVersion
-        );
+        // Build service sources: one ActivitySource per simulated service
+        List<ServiceSource> serviceSources;
+        if (generatorConfig.Services.Count > 0)
+        {
+            serviceSources = generatorConfig.Services
+                .Select(def => new ServiceSource
+                {
+                    ActivitySource = new ActivitySource(def.Name, def.Version),
+                    Definition = def
+                })
+                .ToList();
+        }
+        else
+        {
+            // Fallback: single service using top-level ServiceName / ServiceVersion
+            serviceSources =
+            [
+                new ServiceSource
+                {
+                    ActivitySource = new ActivitySource(generatorConfig.ServiceName, generatorConfig.ServiceVersion),
+                    Definition = new ServiceDefinition
+                    {
+                        Name = generatorConfig.ServiceName,
+                        Version = generatorConfig.ServiceVersion,
+                        CanBeRootService = true
+                    }
+                }
+            ];
+        }
 
-        // Create Meter for metrics
+        services.AddSingleton<IReadOnlyList<ServiceSource>>(serviceSources);
+
+        // Keep a single ActivitySource registered for the Meter and LogGenerator
+        services.AddSingleton(serviceSources[0].ActivitySource);
+
+        // Create Meter for metrics (single service)
         Meter? meter = new Meter(
             generatorConfig.ServiceName,
             generatorConfig.ServiceVersion
         );
-
-        services.AddSingleton(activitySource);
         services.AddSingleton(meter);
 
         // Register background worker
@@ -75,6 +103,7 @@ var host = new HostBuilder()
         // Export ILogger logs to OTLP so they are stored by the telemetry server.
         logging.AddOpenTelemetry(otlpLogging =>
         {
+            otlpLogging.IncludeFormattedMessage = true;
             otlpLogging
                 .SetResourceBuilder(ResourceBuilder.CreateDefault().AddService(serviceName, serviceVersion: serviceVersion))
                 .AddOtlpExporter(exporterOptions =>
@@ -92,34 +121,40 @@ var config = host.Services.GetRequiredService<IOptions<GeneratorConfig>>()?.Valu
 
 var otlpEndpoint = new Uri(config.OtlpEndpoint);
 
-// Configure OpenTelemetry Tracing
-var tracerProvider = Sdk.CreateTracerProviderBuilder()
-    .SetResourceBuilder(ResourceBuilder.CreateDefault()
-        .AddService(config.ServiceName, serviceVersion: config.ServiceVersion))
-    .AddSource(config.ServiceName)
-    .AddOtlpExporter(exporterOptions =>
-    {
-        exporterOptions.Endpoint = otlpEndpoint;
-        exporterOptions.Protocol = OtlpExportProtocol.Grpc;
-    })
-    .Build();
+// Create one TracerProvider per simulated service so each service gets its own
+// service.name resource attribute in exported spans.
+var serviceSources = host.Services.GetRequiredService<IReadOnlyList<ServiceSource>>();
+var tracerProviders = serviceSources
+    .Select(ss => Sdk.CreateTracerProviderBuilder()
+        .SetResourceBuilder(ResourceBuilder.CreateDefault()
+            .AddService(ss.Definition.Name, serviceVersion: ss.Definition.Version))
+        .AddSource(ss.Definition.Name)
+        .AddOtlpExporter(exporterOptions =>
+        {
+            exporterOptions.Endpoint = otlpEndpoint;
+            exporterOptions.Protocol = OtlpExportProtocol.Grpc;
+        })
+        .Build())
+    .ToList();
 
-// Configure OpenTelemetry Metrics
+// Configure OpenTelemetry Metrics (single provider for the primary service)
 var meterProvider = Sdk.CreateMeterProviderBuilder()
     .SetResourceBuilder(ResourceBuilder.CreateDefault()
         .AddService(config.ServiceName, serviceVersion: config.ServiceVersion))
     .AddMeter(config.ServiceName)
-    .AddOtlpExporter(exporterOptions =>
+    .AddOtlpExporter((exporterOptions, metricReaderOptions) =>
     {
         exporterOptions.Endpoint = otlpEndpoint;
         exporterOptions.Protocol = OtlpExportProtocol.Grpc;
+        metricReaderOptions.PeriodicExportingMetricReaderOptions.ExportIntervalMilliseconds = 15_000;
     })
     .Build();
 
 await host.RunAsync();
 
-// Graceful cleanup
-tracerProvider?.ForceFlush();
-tracerProvider?.Dispose();
-meterProvider?.ForceFlush();
-meterProvider?.Dispose();
+// Dispose all tracer providers
+foreach (var tp in tracerProviders)
+{
+    tp.Dispose();
+}
+meterProvider.Dispose();

@@ -181,7 +181,7 @@ public partial class MetricChart : ComponentBase
     {
         return new ApexChartOptions<DataPoint>
         {
-            Chart = new Chart { Toolbar = new Toolbar { Show = false }, Zoom = new Zoom { Enabled = true, Type = AxisType.X } },
+            Chart = new Chart { Toolbar = new Toolbar { Show = false }, Zoom = new Zoom { Enabled = true, Type = AxisType.X, AllowMouseWheelZoom = false } },
             Colors = colors.ToList(),
             Stroke = new Stroke { Curve = Curve.Straight, Width = new List<int> { 2 } },
             Markers = new Markers { Size = showMarkers ? new List<int> { 4 } : new List<int> { 0 } },

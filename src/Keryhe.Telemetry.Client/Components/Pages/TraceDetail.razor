@@ -9,7 +9,7 @@
     .trace-scale {
         display: flex;
         border-bottom: 2px solid var(--mud-palette-divider);
-        background: var(--mud-palette-secondary);
+        background: var(--mud-palette-surface);
     }
     .trace-scale-info {
         width: 40%;
@@ -18,7 +18,7 @@
         border-right: 1px solid var(--mud-palette-divider);
         font-size: 0.75rem;
         font-weight: 600;
-        color: var(--mud-palette-secondary-text);
+        color: var(--mud-palette-text-primary);
     }
     .trace-scale-ticks {
         flex: 1;
@@ -29,7 +29,7 @@
         position: absolute;
         transform: translateX(-50%);
         font-size: 0.7rem;
-        color: var(--mud-palette-secondary-text);
+        color: var(--mud-palette-text-secondary);
         top: 6px;
         white-space: nowrap;
     }
@@ -40,7 +40,7 @@
         left: 50%;
         height: 4px;
         width: 1px;
-        background: rgba(255, 255, 255, 0.4);
+        background: var(--mud-palette-text-secondary);
     }
     .trace-row {
         display: flex;
@@ -243,7 +243,7 @@ else
             {
                 var span = row.Span;
                 var svc = GetServiceName(span);
-                var color = _serviceColorMap.GetValueOrDefault(svc, "#607D8B");
+                var color = _serviceColorMap.GetValueOrDefault(svc, "var(--mud-palette-primary)");
                 var leftPct = GetSpanLeftPct(span).ToString("F2", System.Globalization.CultureInfo.InvariantCulture);
                 var widthPct = GetSpanWidthPct(span);
                 var widthPctStr = widthPct.ToString("F2", System.Globalization.CultureInfo.InvariantCulture);

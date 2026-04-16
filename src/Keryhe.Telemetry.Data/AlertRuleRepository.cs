@@ -76,11 +76,11 @@ public class AlertRuleRepository : IAlertRuleRepository
         var rows = await _db.Database.ExecuteSqlAsync(
             $"""
             UPDATE alert_rules
-            SET last_fired_at = NOW()
-            WHERE id = {ruleId}
-              AND enabled = TRUE
-              AND (last_fired_at IS NULL
-                   OR last_fired_at < NOW() - ({cooldownMinutes} * INTERVAL '1 minute'))
+            SET "LastFiredAt" = NOW()
+            WHERE "Id" = {ruleId}
+              AND "Enabled" = TRUE
+              AND ("LastFiredAt" IS NULL
+                   OR "LastFiredAt" < NOW() - ({cooldownMinutes} * INTERVAL '1 minute'))
             """, ct);
         return rows > 0;
     }

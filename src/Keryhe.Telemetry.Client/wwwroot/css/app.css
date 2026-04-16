@@ -1,0 +1,39 @@
+/* Override ApexCharts default dark text colors using MudBlazor's theme CSS variable.
+   --mud-palette-text-primary automatically switches between dark (light mode) and
+   light (dark mode) values when the MudBlazor theme changes. */
+
+/* SVG text elements: axis labels, tick marks, data labels */
+.apexcharts-text {
+    fill: var(--mud-palette-text-primary) !important;
+}
+
+/* HTML legend label spans */
+.apexcharts-legend-text {
+    color: var(--mud-palette-text-primary) !important;
+}
+
+/* Axis and chart titles */
+.apexcharts-title-text,
+.apexcharts-subtitle-text {
+    fill: var(--mud-palette-text-primary) !important;
+}
+
+/* Tooltip container and border */
+.apexcharts-tooltip {
+    background: var(--mud-palette-surface) !important;
+    border-color: var(--mud-palette-divider) !important;
+    color: var(--mud-palette-text-primary) !important;
+}
+
+/* Tooltip header (the slightly gray section at the top) */
+.apexcharts-tooltip-title {
+    background: var(--mud-palette-background) !important;
+    border-bottom-color: var(--mud-palette-divider) !important;
+    color: var(--mud-palette-text-primary) !important;
+}
+
+/* Tooltip body rows */
+.apexcharts-tooltip-series-group {
+    background: transparent !important;
+    color: var(--mud-palette-text-primary) !important;
+}

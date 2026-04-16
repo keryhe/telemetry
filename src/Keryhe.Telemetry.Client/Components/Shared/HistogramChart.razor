@@ -4,6 +4,7 @@
 @if (_bucketData != null && _bucketData.Any())
 {
     <ApexChart TItem="BucketData"
+               Options="@_chartOptions"
                Title="Histogram Distribution"
                Height="@Height">
         <ApexPointSeries TItem="BucketData"

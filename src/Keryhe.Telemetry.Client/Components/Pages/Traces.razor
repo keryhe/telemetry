@@ -179,7 +179,7 @@
                                 <MudText Typo="Typo.body2" Color="Color.Secondary">Services</MudText>
                                 <MudText Typo="Typo.h5">@_servicesCount</MudText>
                             </div>
-                            <MudIcon Icon="@Icons.Material.Filled.Cloud" Size="Size.Large" Color="Color.Success"/>
+                            <MudIcon Icon="@Icons.Material.Filled.Cloud" Size="Size.Large" Color="Color.Tertiary"/>
                         </MudStack>
                     </MudCardContent>
                 </MudCard>
@@ -223,22 +223,22 @@
                      Hover="true"
                      ColumnResizeMode="ResizeMode.Column">
             <Columns>
-                <HierarchyColumn T="TraceInfo" HeaderClass="mud-theme-secondary"/>
-                <TemplateColumn Title="Operation" HeaderClass="mud-theme-secondary">
+                <HierarchyColumn T="TraceInfo"/>
+                <TemplateColumn Title="Operation">
                     <CellTemplate>
                         <MudText Typo="Typo.body2">
                             @(context.Item.RootOperationName ?? context.Item.TraceIdHex)
                         </MudText>
                     </CellTemplate>
                 </TemplateColumn>
-                <TemplateColumn Title="Service" HeaderClass="mud-theme-secondary">
+                <TemplateColumn Title="Service">
                     <CellTemplate>
                         <MudChip Size="Size.Small" Color="Color.Primary" Variant="Variant.Text">
                             @(context.Item.ServiceName ?? "unknown")
                         </MudChip>
                     </CellTemplate>
                 </TemplateColumn>
-                <TemplateColumn Title="Duration" HeaderClass="mud-theme-secondary">
+                <TemplateColumn Title="Duration">
                     <CellTemplate>
                         <MudChip Size="Size.Small"
                                  Style="@($"background-color: {GetDurationColor(context.Item.TraceDuration.TotalMilliseconds)}; color: white;")"
@@ -247,20 +247,20 @@
                         </MudChip>
                     </CellTemplate>
                 </TemplateColumn>
-                <PropertyColumn Property="x => x.SpanCount" Title="Spans" HeaderClass="mud-theme-secondary"/>
-                <TemplateColumn Title="Start Time" HeaderClass="mud-theme-secondary">
+                <PropertyColumn Property="x => x.SpanCount" Title="Spans"/>
+                <TemplateColumn Title="Start Time">
                     <CellTemplate>
                         @FormatDateTime(context.Item.TraceStartTime)
                     </CellTemplate>
                 </TemplateColumn>
-                <TemplateColumn Title="Status" HeaderClass="mud-theme-secondary">
+                <TemplateColumn Title="Status">
                     <CellTemplate>
                         <MudIcon Icon="@GetStatusIcon(context.Item.HasErrors)"
                                  Color="@(context.Item.HasErrors ? Color.Error : Color.Success)"
                                  Size="Size.Small"/>
                     </CellTemplate>
                 </TemplateColumn>
-                <TemplateColumn Title="Actions" HeaderClass="mud-theme-secondary">
+                <TemplateColumn Title="Actions">
                     <CellTemplate>
                         <MudButton Size="Size.Small"
                                    Variant="Variant.Text"

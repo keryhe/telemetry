@@ -36,14 +36,14 @@ public partial class TraceDetail : ComponentBase
 
     private static readonly string[] ServiceColorPalette =
     [
-        "#1565C0", // dark blue
-        "#F9A825", // amber
-        "#2E7D32", // dark green
-        "#E65100", // orange
-        "#0097A7", // teal blue
-        "#7B1FA2", // purple
-        "#7CB342", // lime green
-        "#5D4037", // brown
+        "var(--mud-palette-primary)",
+        "var(--mud-palette-secondary)",
+        "var(--mud-palette-tertiary)",
+        "var(--mud-palette-warning)",
+        "var(--mud-palette-info)",
+        "var(--mud-palette-success)"
+        ,
+        
     ];
 
     protected override async Task OnParametersSetAsync()

@@ -14,6 +14,7 @@ public class TelemetryGeneratorWorker : BackgroundService
 {
     private readonly ILogger<TelemetryGeneratorWorker> _logger;
     private readonly GeneratorConfig _config;
+    private readonly IReadOnlyList<ServiceSource> _serviceSources;
     private readonly ActivitySource? _activitySource;
     private readonly Meter? _meter;
     private readonly ILogger<LogGenerator> _loggerForLogGen;
@@ -24,12 +25,14 @@ public class TelemetryGeneratorWorker : BackgroundService
     public TelemetryGeneratorWorker(
         ILogger<TelemetryGeneratorWorker> logger,
         IOptions<GeneratorConfig> config,
+        IReadOnlyList<ServiceSource> serviceSources,
         ActivitySource? activitySource,
         Meter? meter,
         ILogger<LogGenerator> loggerForLogGen)
     {
         _logger = logger;
         _config = config.Value;
+        _serviceSources = serviceSources;
         _activitySource = activitySource;
         _meter = meter;
         _loggerForLogGen = loggerForLogGen;
@@ -38,12 +41,20 @@ public class TelemetryGeneratorWorker : BackgroundService
     public override Task StartAsync(CancellationToken cancellationToken)
     {
         _logger.LogInformation("Starting telemetry test data generator");
-        _logger.LogInformation("Configuration: Mode={Mode}, Interval={Interval}s, Spans={Spans}, Metrics={Metrics}, Logs={Logs}",
+        var isLoadTest = _config.GeneratorMode == "LoadTest";
+        _logger.LogInformation("Configuration: Mode={Mode}, Interval={Interval}s, Spans={Spans}, Metrics={Metrics}, Logs={Logs}, Services={ServiceCount}",
             _config.GeneratorMode,
-            _config.EmissionIntervalSeconds,
-            _config.SpansPerBatch,
-            _config.MetricsPerBatch,
-            _config.LogsPerBatch);
+            isLoadTest ? _config.LoadTestEmissionIntervalSeconds : _config.EmissionIntervalSeconds,
+            isLoadTest ? _config.LoadTestSpansPerBatch   : _config.SpansPerBatch,
+            isLoadTest ? _config.LoadTestMetricsPerBatch : _config.MetricsPerBatch,
+            isLoadTest ? _config.LoadTestLogsPerBatch    : _config.LogsPerBatch,
+            _serviceSources.Count);
+
+        foreach (var ss in _serviceSources)
+        {
+            _logger.LogInformation("  Simulated service: {Name} v{Version} (root={CanBeRoot})",
+                ss.Definition.Name, ss.Definition.Version, ss.Definition.CanBeRootService);
+        }
 
         if (_config.GeneratorMode == "LoadTest")
         {
@@ -55,11 +66,7 @@ public class TelemetryGeneratorWorker : BackgroundService
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
-        // Initialize generators
-        if (_activitySource != null)
-        {
-            _traceGenerator = new TraceGenerator(_activitySource);
-        }
+        _traceGenerator = new TraceGenerator(_serviceSources);
 
         if (_meter != null)
         {
@@ -68,7 +75,11 @@ public class TelemetryGeneratorWorker : BackgroundService
 
         _logGenerator = new LogGenerator(_loggerForLogGen, _activitySource);
 
-        var interval = TimeSpan.FromSeconds(_config.EmissionIntervalSeconds);
+        var isLoadTest = _config.GeneratorMode == "LoadTest";
+        var interval       = TimeSpan.FromSeconds(isLoadTest ? _config.LoadTestEmissionIntervalSeconds : _config.EmissionIntervalSeconds);
+        var spansPerBatch  = isLoadTest ? _config.LoadTestSpansPerBatch   : _config.SpansPerBatch;
+        var metricsPerBatch = isLoadTest ? _config.LoadTestMetricsPerBatch : _config.MetricsPerBatch;
+        var logsPerBatch   = isLoadTest ? _config.LoadTestLogsPerBatch    : _config.LogsPerBatch;
         var emissionCount = 0;
 
         while (!stoppingToken.IsCancellationRequested)
@@ -79,28 +90,25 @@ public class TelemetryGeneratorWorker : BackgroundService
                 var startTime = DateTime.UtcNow;
 
                 // Generate telemetry
-                if (_traceGenerator != null)
-                {
-                    _traceGenerator.GenerateBatch(_config.SpansPerBatch);
-                }
+                _traceGenerator.GenerateBatch(spansPerBatch);
 
                 if (_metricGenerator != null)
                 {
-                    _metricGenerator.GenerateBatch(_config.MetricsPerBatch);
+                    _metricGenerator.GenerateBatch(metricsPerBatch);
                 }
 
                 if (_logGenerator != null)
                 {
-                    _logGenerator.GenerateBatch(_config.LogsPerBatch);
+                    _logGenerator.GenerateBatch(logsPerBatch);
                 }
 
                 var elapsed = DateTime.UtcNow - startTime;
                 _logger.LogInformation(
                     "Emission #{Count}: Generated {Spans} spans, {Metrics} metrics, {Logs} logs (elapsed: {ElapsedMs}ms)",
                     emissionCount,
-                    _config.SpansPerBatch,
-                    _config.MetricsPerBatch,
-                    _config.LogsPerBatch,
+                    spansPerBatch,
+                    metricsPerBatch,
+                    logsPerBatch,
                     elapsed.TotalMilliseconds
                 );
 

@@ -1,3 +1,4 @@
+using ApexCharts;
 using Keryhe.Telemetry.Core.Models;
 using Microsoft.AspNetCore.Components;
 
@@ -12,6 +13,10 @@ public partial class HistogramChart : ComponentBase
     public int Height { get; set; } = 400;
 
     private List<BucketData>? _bucketData;
+    private ApexChartOptions<BucketData> _chartOptions = new()
+    {
+        Chart = new Chart { Toolbar = new Toolbar { Show = false } },
+    };
 
     protected override void OnParametersSet()
     {

@@ -13,12 +13,12 @@ namespace Keryhe.Telemetry.Data;
 
 public class LogReadRepository : ILogReadRepository
 {
-    private readonly TelemetryReadDbContext _context;
+    private readonly IDbContextFactory<TelemetryReadDbContext> _contextFactory;
     private readonly ILogger<LogReadRepository> _logger;
 
-    public LogReadRepository(TelemetryReadDbContext context, ILogger<LogReadRepository> logger)
+    public LogReadRepository(IDbContextFactory<TelemetryReadDbContext> contextFactory, ILogger<LogReadRepository> logger)
     {
-        _context = context ?? throw new ArgumentNullException(nameof(context));
+        _contextFactory = contextFactory ?? throw new ArgumentNullException(nameof(contextFactory));
         _logger = logger ?? throw new ArgumentNullException(nameof(logger));
     }
 
@@ -29,7 +29,8 @@ public class LogReadRepository : ILogReadRepository
     {
         try
         {
-            var logRecord = await _context.LogRecords
+            await using var context = await _contextFactory.CreateDbContextAsync(cancellationToken);
+            var logRecord = await context.LogRecords
                 .Include(lr => lr.Resource)
                 .Include(lr => lr.Scope)
                 .FirstOrDefaultAsync(lr => lr.Id == id, cancellationToken);
@@ -53,9 +54,10 @@ public class LogReadRepository : ILogReadRepository
 
         try
         {
+            await using var context = await _contextFactory.CreateDbContextAsync(cancellationToken);
             var traceId = traceIdHex;
 
-            var logRecords = await _context.LogRecords
+            var logRecords = await context.LogRecords
                 .Include(lr => lr.Resource)
                 .Include(lr => lr.Scope)
                 .Where(lr => lr.TraceId == traceId)
@@ -81,10 +83,11 @@ public class LogReadRepository : ILogReadRepository
 
         try
         {
+            await using var context = await _contextFactory.CreateDbContextAsync(cancellationToken);
             var startTimeNano = OpenTelemetryDbContextExtensions.DateTimeToUnixNano(startTime);
             var endTimeNano = OpenTelemetryDbContextExtensions.DateTimeToUnixNano(endTime);
 
-            var logRecordModels = await _context.LogRecords
+            var logRecordModels = await context.LogRecords
                 .Include(lr => lr.Resource)
                 .Include(lr => lr.Scope)
                 .Where(lr => lr.TimeUnixNano >= startTimeNano && lr.TimeUnixNano <= endTimeNano)
@@ -107,7 +110,8 @@ public class LogReadRepository : ILogReadRepository
     {
         try
         {
-            var query = _context.LogRecords
+            await using var context = await _contextFactory.CreateDbContextAsync(cancellationToken);
+            var query = context.LogRecords
                 .Include(lr => lr.Resource)
                 .Include(lr => lr.Scope)
                 .Where(lr => lr.SeverityNumber >= minSeverity);

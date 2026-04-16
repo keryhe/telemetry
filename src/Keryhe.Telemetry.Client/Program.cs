@@ -12,17 +12,14 @@ using MudBlazor.Services;
 
 var builder = WebApplication.CreateBuilder(args);
 
-// Add read DbContext — the Client only reads telemetry data
-builder.Services.AddDbContext<TelemetryReadDbContext>(options =>
+// Add read DbContext factory — using a factory ensures each repository method gets its
+// own short-lived context instance, preventing concurrent-operation errors in Blazor Server.
+builder.Services.AddDbContextFactory<TelemetryReadDbContext>(options =>
 {
     var connectionString = builder.Configuration.GetConnectionString("Read");
-    options.UseNpgsql(connectionString, dbOptions =>
-    {
-                
-    });
+    options.UseNpgsql(connectionString);
     options.UseQueryTrackingBehavior(QueryTrackingBehavior.NoTracking);
-            
-    // Enable sensitive data logging in development
+
     if (builder.Environment.IsDevelopment())
     {
         options.EnableSensitiveDataLogging();

@@ -14,7 +14,7 @@
 
     <!-- Header bar -->
     <MudStack Row="true" AlignItems="AlignItems.Center" Spacing="2" Class="mb-4">
-        <MudText Typo="Typo.h4">Dashboard</MudText>
+        <MudText Typo="Typo.h5">Dashboard</MudText>
         <MudSpacer />
         <MudSelect Value="SelectedServiceValue" ValueChanged="OnServiceChanged" T="string"
                    Label="Service" Variant="Variant.Outlined" Dense="true" Style="min-width:180px"
@@ -225,10 +225,11 @@
         <MudPaper Elevation="2" Class="pa-4 mb-4">
             <MudText Typo="Typo.h6" Class="mb-3">Services</MudText>
             <MudGrid Spacing="2">
-                @foreach (var svc in _serviceSummaries)
+                @foreach (var (svc, i) in _serviceSummaries.Select((s, idx) => (s, idx)))
                 {
                     <MudItem xs="12" sm="6" md="4" lg="3">
-                        <MudPaper Elevation="1" Class="pa-3" Style="cursor:pointer"
+                        <MudPaper Elevation="1" Class="pa-3"
+                                  Style="@($"cursor:pointer; border-left: 4px solid {ServiceAccentColor(i)}; background: color-mix(in srgb, {ServiceAccentColor(i)} 8%, transparent)")"
                                   @onclick="() => NavigateToServiceMetrics(svc.Name)">
                             <MudStack Row="true" AlignItems="AlignItems.Center" Justify="Justify.SpaceBetween">
                                 <MudText Typo="Typo.subtitle2">@svc.Name</MudText>

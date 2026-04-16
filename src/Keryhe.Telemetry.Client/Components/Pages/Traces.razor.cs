@@ -290,7 +290,7 @@ public partial class Traces : ComponentBase, IDisposable
 
         _chartOptions = new ApexChartOptions<DataPoint>
         {
-            Chart = new Chart { Toolbar = new Toolbar { Show = false }, Zoom = new Zoom { Enabled = true, Type = AxisType.X } },
+            Chart = new Chart { Toolbar = new Toolbar { Show = false }, Zoom = new Zoom { Enabled = true, Type = AxisType.X, AllowMouseWheelZoom = false } },
             Colors = new List<string> { "#2196F3", "#F44336" },
             Stroke = new Stroke { Curve = Curve.Straight, Width = new List<int> { 2 } },
             Xaxis = new XAxis

@@ -5,7 +5,7 @@
 
 <MudContainer MaxWidth="MaxWidth.ExtraLarge" Class="mt-4">
     <MudStack Row="true" AlignItems="AlignItems.Center" Justify="Justify.SpaceBetween" Class="mb-4">
-        <MudText Typo="Typo.h4">Metrics</MudText>
+        <MudText Typo="Typo.h5">Metrics</MudText>
         <MudButtonGroup Variant="Variant.Outlined" Color="Color.Primary">
             <MudButton OnClick="@(() => { _showUniqueNamesView = true; })"
                        Variant="@(_showUniqueNamesView ? Variant.Filled : Variant.Outlined)">
@@ -116,7 +116,7 @@
                             <MudText Typo="Typo.body2" Color="Color.Secondary">Services</MudText>
                             <MudText Typo="Typo.h5">@_servicesCount</MudText>
                         </div>
-                        <MudIcon Icon="@Icons.Material.Filled.Cloud" Size="Size.Large" Color="Color.Warning"/>
+                        <MudIcon Icon="@Icons.Material.Filled.Cloud" Size="Size.Large" Color="Color.Tertiary"/>
                     </MudStack>
                 </MudCardContent>
             </MudCard>
@@ -136,14 +136,14 @@
                      Dense="true"
                      ColumnResizeMode="ResizeMode.Column">
             <Columns>
-                <TemplateColumn Title="Metric Name" HeaderClass="mud-theme-secondary">
+                <TemplateColumn Title="Metric Name">
                     <CellTemplate>
                         <MudLink Href="@($"/metrics/detail/{Uri.EscapeDataString(context.Item.Name)}")" Typo="Typo.body2">
                             @context.Item.Name
                         </MudLink>
                     </CellTemplate>
                 </TemplateColumn>
-                <TemplateColumn Title="Type" HeaderClass="mud-theme-secondary">
+                <TemplateColumn Title="Type">
                     <CellTemplate>
                         <MudChip Size="Size.Small"
                                  Color="@GetMetricTypeColor(context.Item.Type)"
@@ -152,22 +152,22 @@
                         </MudChip>
                     </CellTemplate>
                 </TemplateColumn>
-                <PropertyColumn Property="x => x.Unit" Title="Unit" HeaderClass="mud-theme-secondary"/>
-                <TemplateColumn Title="Description" HeaderClass="mud-theme-secondary">
+                <PropertyColumn Property="x => x.Unit" Title="Unit"/>
+                <TemplateColumn Title="Description">
                     <CellTemplate>
                         <MudText Typo="Typo.body2" Style="max-width: 300px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">
                             @(context.Item.Description ?? "")
                         </MudText>
                     </CellTemplate>
                 </TemplateColumn>
-                <TemplateColumn Title="Instances" HeaderClass="mud-theme-secondary">
+                <TemplateColumn Title="Instances">
                     <CellTemplate>
                         <MudChip Size="Size.Small" Color="Color.Info">
                             @context.Item.InstanceCount
                         </MudChip>
                     </CellTemplate>
                 </TemplateColumn>
-                <TemplateColumn Title="Services" HeaderClass="mud-theme-secondary">
+                <TemplateColumn Title="Services">
                     <CellTemplate>
                         <MudStack Row="true" Spacing="1">
                             @foreach (var service in context.Item.Services)
@@ -177,7 +177,7 @@
                         </MudStack>
                     </CellTemplate>
                 </TemplateColumn>
-                <TemplateColumn Title="Last Seen" HeaderClass="mud-theme-secondary">
+                <TemplateColumn Title="Last Seen">
                     <CellTemplate>
                         @FormatDateTime(context.Item.LastSeen)
                     </CellTemplate>
@@ -197,22 +197,22 @@
                      Dense="true"
                      ColumnResizeMode="ResizeMode.Container">
             <Columns>
-                <HierarchyColumn T="MetricInfo" HeaderClass="mud-theme-secondary"/>
-                <TemplateColumn Title="Name" HeaderClass="mud-theme-secondary">
+                <HierarchyColumn T="MetricInfo"/>
+                <TemplateColumn Title="Name">
                     <CellTemplate>
                         <MudLink Href="@($"/metrics/detail/{Uri.EscapeDataString(context.Item.Name)}")" Typo="Typo.body2">
                             @context.Item.Name
                         </MudLink>
                     </CellTemplate>
                 </TemplateColumn>
-                <TemplateColumn Title="Service" HeaderClass="mud-theme-secondary">
+                <TemplateColumn Title="Service">
                     <CellTemplate>
                         <MudChip Size="Size.Small" Color="Color.Primary" Variant="Variant.Text">
                             @(context.Item.ServiceName ?? "unknown")
                         </MudChip>
                     </CellTemplate>
                 </TemplateColumn>
-                <TemplateColumn Title="Type" HeaderClass="mud-theme-secondary">
+                <TemplateColumn Title="Type">
                     <CellTemplate>
                         <MudChip Size="Size.Small"
                                  Color="@GetMetricTypeColor(context.Item.Type)"
@@ -221,9 +221,9 @@
                         </MudChip>
                     </CellTemplate>
                 </TemplateColumn>
-                <PropertyColumn Property="x => x.Unit" Title="Unit" HeaderClass="mud-theme-secondary"/>
-                <PropertyColumn Property="x => x.Description" Title="Description" HeaderClass="mud-theme-secondary"/>
-                <TemplateColumn Title="Last Seen" HeaderClass="mud-theme-secondary">
+                <PropertyColumn Property="x => x.Unit" Title="Unit"/>
+                <PropertyColumn Property="x => x.Description" Title="Description"/>
+                <TemplateColumn Title="Last Seen">
                     <CellTemplate>
                         @FormatDateTime(context.Item.LastSeen)
                     </CellTemplate>

@@ -14,12 +14,12 @@ namespace Keryhe.Telemetry.Data;
 
 public class TraceReadRepository : ITraceReadRepository
 {
-    private readonly TelemetryReadDbContext _context;
+    private readonly IDbContextFactory<TelemetryReadDbContext> _contextFactory;
     private readonly ILogger<TraceReadRepository> _logger;
 
-    public TraceReadRepository(TelemetryReadDbContext context, ILogger<TraceReadRepository> logger)
+    public TraceReadRepository(IDbContextFactory<TelemetryReadDbContext> contextFactory, ILogger<TraceReadRepository> logger)
     {
-        _context = context ?? throw new ArgumentNullException(nameof(context));
+        _contextFactory = contextFactory ?? throw new ArgumentNullException(nameof(contextFactory));
         _logger = logger ?? throw new ArgumentNullException(nameof(logger));
     }
 
@@ -33,9 +33,10 @@ public class TraceReadRepository : ITraceReadRepository
 
         try
         {
+            await using var context = await _contextFactory.CreateDbContextAsync(cancellationToken);
             var traceId = traceIdHex;
 
-            var spans = await _context.Spans
+            var spans = await context.Spans
                 .Include(s => s.Resource)
                 .Include(s => s.Scope)
                 .Include(s => s.Events)
@@ -65,10 +66,11 @@ public class TraceReadRepository : ITraceReadRepository
 
         try
         {
+            await using var context = await _contextFactory.CreateDbContextAsync(cancellationToken);
             var traceId = traceIdHex;
             var spanId = spanIdHex;
 
-            var span = await _context.Spans
+            var span = await context.Spans
                 .Include(s => s.Resource)
                 .Include(s => s.Scope)
                 .Include(s => s.Events)
@@ -96,10 +98,11 @@ public class TraceReadRepository : ITraceReadRepository
 
         try
         {
+            await using var context = await _contextFactory.CreateDbContextAsync(cancellationToken);
             var traceId = traceIdHex;
             var parentSpanId = parentSpanIdHex;
 
-            var spans = await _context.Spans
+            var spans = await context.Spans
                 .Include(s => s.Resource)
                 .Include(s => s.Scope)
                 .Include(s => s.Events)
@@ -128,10 +131,11 @@ public class TraceReadRepository : ITraceReadRepository
 
         try
         {
+            await using var context = await _contextFactory.CreateDbContextAsync(cancellationToken);
             var startTimeNano = OpenTelemetryDbContextExtensions.DateTimeToUnixNano(startTime);
             var endTimeNano = OpenTelemetryDbContextExtensions.DateTimeToUnixNano(endTime);
 
-            var rawData = await _context.Spans
+            var rawData = await context.Spans
                 .Include(s => s.Resource)
                 .Where(s => s.StartTimeUnixNano >= startTimeNano && s.StartTimeUnixNano <= endTimeNano)
                 .Select(s => new
@@ -195,7 +199,8 @@ public class TraceReadRepository : ITraceReadRepository
 
         try
         {
-            var query = _context.Spans
+            await using var context = await _contextFactory.CreateDbContextAsync(cancellationToken);
+            var query = context.Spans
                 .Include(s => s.Resource)
                 .AsQueryable();
 
@@ -274,7 +279,8 @@ public class TraceReadRepository : ITraceReadRepository
     {
         try
         {
-            var query = _context.Spans
+            await using var context = await _contextFactory.CreateDbContextAsync(cancellationToken);
+            var query = context.Spans
                 .Include(s => s.Resource)
                 .Where(s => s.StatusCode == SpanStatusCode.ERROR);
 
@@ -347,9 +353,10 @@ public class TraceReadRepository : ITraceReadRepository
     {
         try
         {
+            await using var context = await _contextFactory.CreateDbContextAsync(cancellationToken);
             var minDurationNano = (long)(minDuration.TotalMilliseconds * 1_000_000);
 
-            var query = _context.Spans
+            var query = context.Spans
                 .Include(s => s.Resource)
                 .AsQueryable();
 
@@ -426,12 +433,13 @@ public class TraceReadRepository : ITraceReadRepository
     {
         try
         {
-            var query = from child in _context.Spans
-                        join parent in _context.Spans
+            await using var context = await _contextFactory.CreateDbContextAsync(cancellationToken);
+            var query = from child in context.Spans
+                        join parent in context.Spans
                             on new { child.ParentSpanId, child.TraceId }
                             equals new { ParentSpanId = parent.SpanId, parent.TraceId }
-                        join parentRes in _context.Resources on parent.ResourceId equals parentRes.Id
-                        join childRes in _context.Resources on child.ResourceId equals childRes.Id
+                        join parentRes in context.Resources on parent.ResourceId equals parentRes.Id
+                        join childRes in context.Resources on child.ResourceId equals childRes.Id
                         select new { child, parent, parentRes, childRes };
 
             if (startTime.HasValue)
@@ -513,7 +521,8 @@ public class TraceReadRepository : ITraceReadRepository
 
         try
         {
-            var query = _context.Spans
+            await using var context = await _contextFactory.CreateDbContextAsync(cancellationToken);
+            var query = context.Spans
                 .Include(s => s.Resource)
                 .AsQueryable();
 
@@ -561,7 +570,8 @@ public class TraceReadRepository : ITraceReadRepository
 
         try
         {
-            var query = _context.Spans
+            await using var context = await _contextFactory.CreateDbContextAsync(cancellationToken);
+            var query = context.Spans
                 .Include(s => s.Resource)
                 .AsQueryable();
 

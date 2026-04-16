@@ -307,6 +307,34 @@ CREATE TABLE schema_version (
 INSERT INTO schema_version ("Version") VALUES ('2.0.0');
 
 -- =============================================================================
+-- ALERTING TABLES
+-- =============================================================================
+
+CREATE TABLE alert_rules (
+    "Id"              INTEGER      GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    "Name"            TEXT         NOT NULL,
+    "Type"            VARCHAR(50)  NOT NULL,
+    "ServiceName"     VARCHAR(255),
+    "ConditionJson"   JSONB        NOT NULL,
+    "WebhookUrl"      TEXT         NOT NULL,
+    "CooldownMinutes" INTEGER      NOT NULL DEFAULT 60,
+    "Enabled"         BOOLEAN      NOT NULL DEFAULT TRUE,
+    "CreatedAt"       TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+    "LastFiredAt"     TIMESTAMPTZ
+);
+CREATE INDEX idx_alert_rules_enabled ON alert_rules ("Enabled") WHERE "Enabled" = TRUE;
+
+CREATE TABLE alert_events (
+    "Id"          BIGINT       GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    "RuleId"      INTEGER      NOT NULL,
+    "FiredAt"     TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+    "DetailsJson" JSONB        NOT NULL,
+    CONSTRAINT fk_alert_events_alert_rules FOREIGN KEY ("RuleId") REFERENCES alert_rules ("Id") ON DELETE CASCADE
+);
+CREATE INDEX idx_alert_events_rule_id  ON alert_events ("RuleId");
+CREATE INDEX idx_alert_events_fired_at ON alert_events ("FiredAt" DESC);
+
+-- =============================================================================
 -- VIEWS
 -- =============================================================================
 
@@ -438,3 +466,4 @@ GROUP BY
 -- 3. Add data retention policies as needed:
 --    SELECT add_retention_policy('log_records', INTERVAL '90 days');
 -- 4. Consider continuous aggregates for pre-computed service map metrics
+

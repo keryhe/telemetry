@@ -10,12 +10,12 @@ namespace Keryhe.Telemetry.Data;
 
 public class MetricReadRepository : IMetricReadRepository
 {
-    private readonly TelemetryReadDbContext _context;
+    private readonly IDbContextFactory<TelemetryReadDbContext> _contextFactory;
     private readonly ILogger<MetricReadRepository> _logger;
 
-    public MetricReadRepository(TelemetryReadDbContext context, ILogger<MetricReadRepository> logger)
+    public MetricReadRepository(IDbContextFactory<TelemetryReadDbContext> contextFactory, ILogger<MetricReadRepository> logger)
     {
-        _context = context ?? throw new ArgumentNullException(nameof(context));
+        _contextFactory = contextFactory ?? throw new ArgumentNullException(nameof(contextFactory));
         _logger = logger ?? throw new ArgumentNullException(nameof(logger));
     }
 
@@ -26,13 +26,14 @@ public class MetricReadRepository : IMetricReadRepository
     {
         try
         {
-            var metric = await _context.Metrics
+            await using var context = await _contextFactory.CreateDbContextAsync(cancellationToken);
+            var metric = await context.Metrics
                 .Include(m => m.Resource)
                 .Include(m => m.Scope)
                     .ThenInclude(s => s.Attributes)
                 .Include(m => m.GaugeDataPoints)
                 .FirstOrDefaultAsync(m => m.Id == id, cancellationToken);
-                
+
             return ConvertToMetricModel(metric);
         }
         catch (Exception ex)
@@ -52,8 +53,9 @@ public class MetricReadRepository : IMetricReadRepository
 
         try
         {
+            await using var context = await _contextFactory.CreateDbContextAsync(cancellationToken);
             // First, get raw data from database with Resource.Attributes
-            var rawData = await _context.Metrics
+            var rawData = await context.Metrics
                 .Include(m => m.Resource)
                 .Where(m => m.Name == name)
                 .Select(m => new
@@ -101,8 +103,9 @@ public class MetricReadRepository : IMetricReadRepository
 
         try
         {
+            await using var context = await _contextFactory.CreateDbContextAsync(cancellationToken);
             // First, get raw data from database with Resource.Attributes
-            var query = _context.Metrics
+            var query = context.Metrics
                 .Include(m => m.Resource)
                 .Select(m => new
                 {
@@ -115,7 +118,7 @@ public class MetricReadRepository : IMetricReadRepository
                     ResourceAttributes = m.Resource.Attributes
                 });
 
-            var metricIdsWithData = await GetMetricIdsWithDataInRangeAsync(startTime, endTime, cancellationToken);
+            var metricIdsWithData = await GetMetricIdsWithDataInRangeAsync(context, startTime, endTime, cancellationToken);
             if (metricIdsWithData is { Count: 0 })
                 return new List<MetricInfo>();
 
@@ -161,8 +164,9 @@ public class MetricReadRepository : IMetricReadRepository
     {
         try
         {
+            await using var context = await _contextFactory.CreateDbContextAsync(cancellationToken);
             // First, get raw data from database with Resource.Attributes
-            var rawData = await _context.Metrics
+            var rawData = await context.Metrics
                 .Include(m => m.Resource)
                 .Where(m => m.Type == type)
                 .Select(m => new
@@ -207,8 +211,9 @@ public class MetricReadRepository : IMetricReadRepository
     {
         try
         {
+            await using var context = await _contextFactory.CreateDbContextAsync(cancellationToken);
             // First, get raw data from database with Resource.Attributes
-            var query = _context.Metrics
+            var query = context.Metrics
                 .Include(m => m.Resource)
                 .OrderByDescending(m => m.CreatedAt)
                 .Select(m => new
@@ -222,7 +227,7 @@ public class MetricReadRepository : IMetricReadRepository
                     ResourceAttributes = m.Resource.Attributes
                 });
 
-            var metricIdsWithData = await GetMetricIdsWithDataInRangeAsync(startTime, endTime, cancellationToken);
+            var metricIdsWithData = await GetMetricIdsWithDataInRangeAsync(context, startTime, endTime, cancellationToken);
             if (metricIdsWithData is { Count: 0 })
                 return new List<MetricInfo>();
 
@@ -269,7 +274,8 @@ public class MetricReadRepository : IMetricReadRepository
 
         try
         {
-            var metricQuery = _context.Metrics.Where(m => m.Name == metricName);
+            await using var context = await _contextFactory.CreateDbContextAsync(cancellationToken);
+            var metricQuery = context.Metrics.Where(m => m.Name == metricName);
             if (metricId.HasValue)
             {
                 metricQuery = metricQuery.Where(m => m.Id == metricId.Value);
@@ -292,19 +298,19 @@ public class MetricReadRepository : IMetricReadRepository
             switch (metric.Type)
             {
                 case MetricType.GAUGE:
-                    series.Points = await GetGaugeDataPointsAsync(metric.Id, labelFilters, startTime, endTime, cancellationToken);
+                    series.Points = await GetGaugeDataPointsAsync(context, metric.Id, labelFilters, startTime, endTime, cancellationToken);
                     break;
                 case MetricType.SUM:
-                    series.Points = await GetSumDataPointsAsync(metric.Id, labelFilters, startTime, endTime, cancellationToken);
+                    series.Points = await GetSumDataPointsAsync(context, metric.Id, labelFilters, startTime, endTime, cancellationToken);
                     break;
                 case MetricType.HISTOGRAM:
-                    series.Points = await GetHistogramDataPointsAsync(metric.Id, labelFilters, startTime, endTime, cancellationToken);
+                    series.Points = await GetHistogramDataPointsAsync(context, metric.Id, labelFilters, startTime, endTime, cancellationToken);
                     break;
                 case MetricType.EXPONENTIAL_HISTOGRAM:
-                    series.Points = await GetExponentialHistogramDataPointsAsync(metric.Id, labelFilters, startTime, endTime, cancellationToken);
+                    series.Points = await GetExponentialHistogramDataPointsAsync(context, metric.Id, labelFilters, startTime, endTime, cancellationToken);
                     break;
                 case MetricType.SUMMARY:
-                    series.Points = await GetSummaryDataPointsAsync(metric.Id, labelFilters, startTime, endTime, cancellationToken);
+                    series.Points = await GetSummaryDataPointsAsync(context, metric.Id, labelFilters, startTime, endTime, cancellationToken);
                     break;
             }
 
@@ -326,7 +332,8 @@ public class MetricReadRepository : IMetricReadRepository
 
         try
         {
-            var metrics = await _context.Metrics
+            await using var context = await _contextFactory.CreateDbContextAsync(cancellationToken);
+            var metrics = await context.Metrics
                 .Include(m => m.Resource)
                 .Where(m => m.Name == metricName)
                 .ToListAsync(cancellationToken);
@@ -347,11 +354,11 @@ public class MetricReadRepository : IMetricReadRepository
 
                 List<MetricDataPoint> points = metric.Type switch
                 {
-                    MetricType.GAUGE => await GetGaugeDataPointsAsync(metric.Id, null, startTime, endTime, cancellationToken),
-                    MetricType.SUM => await GetSumDataPointsAsync(metric.Id, null, startTime, endTime, cancellationToken),
-                    MetricType.HISTOGRAM => await GetHistogramDataPointsAsync(metric.Id, null, startTime, endTime, cancellationToken),
-                    MetricType.EXPONENTIAL_HISTOGRAM => await GetExponentialHistogramDataPointsAsync(metric.Id, null, startTime, endTime, cancellationToken),
-                    MetricType.SUMMARY => await GetSummaryDataPointsAsync(metric.Id, null, startTime, endTime, cancellationToken),
+                    MetricType.GAUGE => await GetGaugeDataPointsAsync(context, metric.Id, null, startTime, endTime, cancellationToken),
+                    MetricType.SUM => await GetSumDataPointsAsync(context, metric.Id, null, startTime, endTime, cancellationToken),
+                    MetricType.HISTOGRAM => await GetHistogramDataPointsAsync(context, metric.Id, null, startTime, endTime, cancellationToken),
+                    MetricType.EXPONENTIAL_HISTOGRAM => await GetExponentialHistogramDataPointsAsync(context, metric.Id, null, startTime, endTime, cancellationToken),
+                    MetricType.SUMMARY => await GetSummaryDataPointsAsync(context, metric.Id, null, startTime, endTime, cancellationToken),
                     _ => new List<MetricDataPoint>()
                 };
 
@@ -375,8 +382,8 @@ public class MetricReadRepository : IMetricReadRepository
     /// <summary>
     /// Gets time series data for multiple metrics
     /// </summary>
-    public async Task<List<MetricSeries>> GetMultipleMetricSeriesAsync(List<string> metricNames, 
-        Dictionary<string, string>? labelFilters = null, DateTime? startTime = null, DateTime? endTime = null, 
+    public async Task<List<MetricSeries>> GetMultipleMetricSeriesAsync(List<string> metricNames,
+        Dictionary<string, string>? labelFilters = null, DateTime? startTime = null, DateTime? endTime = null,
         CancellationToken cancellationToken = default)
     {
         if (metricNames == null || !metricNames.Any())
@@ -410,10 +417,11 @@ public class MetricReadRepository : IMetricReadRepository
 
         try
         {
+            await using var context = await _contextFactory.CreateDbContextAsync(cancellationToken);
             var result = new Dictionary<string, double>();
 
             // Get latest gauge values - retrieve raw data first
-            var gaugeRawData = await _context.GaugeDataPoints
+            var gaugeRawData = await context.GaugeDataPoints
                 .Include(gdp => gdp.Metric)
                     .ThenInclude(m => m.Resource)
                 .Select(gdp => new
@@ -444,7 +452,7 @@ public class MetricReadRepository : IMetricReadRepository
             }
 
             // Get latest sum values - retrieve raw data first
-            var sumRawData = await _context.SumDataPoints
+            var sumRawData = await context.SumDataPoints
                 .Include(sdp => sdp.Metric)
                     .ThenInclude(m => m.Resource)
                 .Select(sdp => new
@@ -490,8 +498,9 @@ public class MetricReadRepository : IMetricReadRepository
     {
         try
         {
+            await using var context = await _contextFactory.CreateDbContextAsync(cancellationToken);
             // First, get raw data from database with Resource.Attributes
-            var rawData = await _context.Metrics
+            var rawData = await context.Metrics
                 .Include(m => m.Resource)
                 .Select(m => new
                 {
@@ -533,8 +542,9 @@ public class MetricReadRepository : IMetricReadRepository
     {
         try
         {
+            await using var context = await _contextFactory.CreateDbContextAsync(cancellationToken);
             // First, get raw data from database with Resource.Attributes
-            var rawData = await _context.Metrics
+            var rawData = await context.Metrics
                 .Include(m => m.Resource)
                 .Select(m => new
                 {
@@ -574,8 +584,9 @@ public class MetricReadRepository : IMetricReadRepository
     {
         try
         {
+            await using var context = await _contextFactory.CreateDbContextAsync(cancellationToken);
             // First, get raw data from database with Resource.Attributes
-            var rawData = await _context.Metrics
+            var rawData = await context.Metrics
                 .Include(m => m.Resource)
                 .Select(m => new
                 {
@@ -620,8 +631,9 @@ public class MetricReadRepository : IMetricReadRepository
 
         try
         {
+            await using var context = await _contextFactory.CreateDbContextAsync(cancellationToken);
             // Find the metric
-            var metric = await _context.Metrics
+            var metric = await context.Metrics
                 .FirstOrDefaultAsync(m => m.Name == metricName, cancellationToken);
             if (metric == null)
             {
@@ -633,35 +645,35 @@ public class MetricReadRepository : IMetricReadRepository
             switch (metric.Type)
             {
                 case MetricType.GAUGE:
-                    var gaugeAttributeJson = await _context.GaugeDataPoints
+                    var gaugeAttributeJson = await context.GaugeDataPoints
                         .Where(dp => dp.MetricId == metric.Id && dp.AttributesJson != null)
                         .Select(dp => dp.AttributesJson)
                         .ToListAsync(cancellationToken);
                     allAttributes.AddRange(ParseAttributesJson(gaugeAttributeJson));
                     break;
                 case MetricType.SUM:
-                    var sumAttributeJson = await _context.SumDataPoints
+                    var sumAttributeJson = await context.SumDataPoints
                         .Where(dp => dp.MetricId == metric.Id && dp.AttributesJson != null)
                         .Select(dp => dp.AttributesJson)
                         .ToListAsync(cancellationToken);
                     allAttributes.AddRange(ParseAttributesJson(sumAttributeJson));
                     break;
                 case MetricType.HISTOGRAM:
-                    var histogramAttributeJson = await _context.HistogramDataPoints
+                    var histogramAttributeJson = await context.HistogramDataPoints
                         .Where(dp => dp.MetricId == metric.Id && dp.AttributesJson != null)
                         .Select(dp => dp.AttributesJson)
                         .ToListAsync(cancellationToken);
                     allAttributes.AddRange(ParseAttributesJson(histogramAttributeJson));
                     break;
                 case MetricType.EXPONENTIAL_HISTOGRAM:
-                    var expHistogramAttributeJson = await _context.ExponentialHistogramDataPoints
+                    var expHistogramAttributeJson = await context.ExponentialHistogramDataPoints
                         .Where(dp => dp.MetricId == metric.Id && dp.AttributesJson != null)
                         .Select(dp => dp.AttributesJson)
                         .ToListAsync(cancellationToken);
                     allAttributes.AddRange(ParseAttributesJson(expHistogramAttributeJson));
                     break;
                 case MetricType.SUMMARY:
-                    var summaryAttributeJson = await _context.SummaryDataPoints
+                    var summaryAttributeJson = await context.SummaryDataPoints
                         .Where(dp => dp.MetricId == metric.Id && dp.AttributesJson != null)
                         .Select(dp => dp.AttributesJson)
                         .ToListAsync(cancellationToken);
@@ -687,7 +699,7 @@ public class MetricReadRepository : IMetricReadRepository
             var result = labelDictionary.ToDictionary(
                 kvp => kvp.Key,
                 kvp => kvp.Value.OrderBy(v => v).ToList() );
-            _logger.LogDebug("Retrieved {KeyCount} label keys with values for metric {MetricName}", 
+            _logger.LogDebug("Retrieved {KeyCount} label keys with values for metric {MetricName}",
                 result.Count, metricName);
             return result;
         }
@@ -732,13 +744,14 @@ public class MetricReadRepository : IMetricReadRepository
         {
             return null;
         }
-        
+
         var model = new MetricModel();
-        
+
         return model;
     }
 
     private async Task<HashSet<long>?> GetMetricIdsWithDataInRangeAsync(
+        TelemetryReadDbContext context,
         DateTime? startTime,
         DateTime? endTime,
         CancellationToken cancellationToken)
@@ -764,27 +777,27 @@ public class MetricReadRepository : IMetricReadRepository
             }
         }
 
-        var gaugeQuery = _context.GaugeDataPoints.AsQueryable();
+        var gaugeQuery = context.GaugeDataPoints.AsQueryable();
         if (startTimeNano.HasValue) gaugeQuery = gaugeQuery.Where(x => x.TimeUnixNano >= startTimeNano.Value);
         if (endTimeNano.HasValue) gaugeQuery = gaugeQuery.Where(x => x.TimeUnixNano <= endTimeNano.Value);
         await AddMetricIdsAsync(gaugeQuery.Select(x => x.MetricId));
 
-        var sumQuery = _context.SumDataPoints.AsQueryable();
+        var sumQuery = context.SumDataPoints.AsQueryable();
         if (startTimeNano.HasValue) sumQuery = sumQuery.Where(x => x.TimeUnixNano >= startTimeNano.Value);
         if (endTimeNano.HasValue) sumQuery = sumQuery.Where(x => x.TimeUnixNano <= endTimeNano.Value);
         await AddMetricIdsAsync(sumQuery.Select(x => x.MetricId));
 
-        var histogramQuery = _context.HistogramDataPoints.AsQueryable();
+        var histogramQuery = context.HistogramDataPoints.AsQueryable();
         if (startTimeNano.HasValue) histogramQuery = histogramQuery.Where(x => x.TimeUnixNano >= startTimeNano.Value);
         if (endTimeNano.HasValue) histogramQuery = histogramQuery.Where(x => x.TimeUnixNano <= endTimeNano.Value);
         await AddMetricIdsAsync(histogramQuery.Select(x => x.MetricId));
 
-        var exponentialHistogramQuery = _context.ExponentialHistogramDataPoints.AsQueryable();
+        var exponentialHistogramQuery = context.ExponentialHistogramDataPoints.AsQueryable();
         if (startTimeNano.HasValue) exponentialHistogramQuery = exponentialHistogramQuery.Where(x => x.TimeUnixNano >= startTimeNano.Value);
         if (endTimeNano.HasValue) exponentialHistogramQuery = exponentialHistogramQuery.Where(x => x.TimeUnixNano <= endTimeNano.Value);
         await AddMetricIdsAsync(exponentialHistogramQuery.Select(x => x.MetricId));
 
-        var summaryQuery = _context.SummaryDataPoints.AsQueryable();
+        var summaryQuery = context.SummaryDataPoints.AsQueryable();
         if (startTimeNano.HasValue) summaryQuery = summaryQuery.Where(x => x.TimeUnixNano >= startTimeNano.Value);
         if (endTimeNano.HasValue) summaryQuery = summaryQuery.Where(x => x.TimeUnixNano <= endTimeNano.Value);
         await AddMetricIdsAsync(summaryQuery.Select(x => x.MetricId));
@@ -793,10 +806,11 @@ public class MetricReadRepository : IMetricReadRepository
     }
 
     // Time series data retrieval methods
-    private async Task<List<MetricDataPoint>> GetGaugeDataPointsAsync(long metricId, Dictionary<string, string>? labelFilters, 
+    private async Task<List<MetricDataPoint>> GetGaugeDataPointsAsync(TelemetryReadDbContext context,
+        long metricId, Dictionary<string, string>? labelFilters,
         DateTime? startTime, DateTime? endTime, CancellationToken cancellationToken)
     {
-        var query = _context.GaugeDataPoints
+        var query = context.GaugeDataPoints
             .Include(gdp => gdp.Exemplar)
             .Where(gdp => gdp.MetricId == metricId);
 
@@ -834,10 +848,11 @@ public class MetricReadRepository : IMetricReadRepository
         return FilterByLabelFilters(dataPoints, labelFilters);
     }
 
-    private async Task<List<MetricDataPoint>> GetSumDataPointsAsync(long metricId, Dictionary<string, string>? labelFilters, 
+    private async Task<List<MetricDataPoint>> GetSumDataPointsAsync(TelemetryReadDbContext context,
+        long metricId, Dictionary<string, string>? labelFilters,
         DateTime? startTime, DateTime? endTime, CancellationToken cancellationToken)
     {
-        var query = _context.SumDataPoints
+        var query = context.SumDataPoints
             .Include(sdp => sdp.Exemplar)
             .Where(sdp => sdp.MetricId == metricId);
 
@@ -877,10 +892,11 @@ public class MetricReadRepository : IMetricReadRepository
         return FilterByLabelFilters(dataPoints, labelFilters);
     }
 
-    private async Task<List<MetricDataPoint>> GetHistogramDataPointsAsync(long metricId, Dictionary<string, string>? labelFilters, 
+    private async Task<List<MetricDataPoint>> GetHistogramDataPointsAsync(TelemetryReadDbContext context,
+        long metricId, Dictionary<string, string>? labelFilters,
         DateTime? startTime, DateTime? endTime, CancellationToken cancellationToken)
     {
-        var query = _context.HistogramDataPoints
+        var query = context.HistogramDataPoints
             .Include(hdp => hdp.Exemplar)
             .Where(hdp => hdp.MetricId == metricId);
 
@@ -923,10 +939,11 @@ public class MetricReadRepository : IMetricReadRepository
         return FilterByLabelFilters(dataPoints, labelFilters);
     }
 
-    private async Task<List<MetricDataPoint>> GetExponentialHistogramDataPointsAsync(long metricId, Dictionary<string, string>? labelFilters, 
+    private async Task<List<MetricDataPoint>> GetExponentialHistogramDataPointsAsync(TelemetryReadDbContext context,
+        long metricId, Dictionary<string, string>? labelFilters,
         DateTime? startTime, DateTime? endTime, CancellationToken cancellationToken)
     {
-        var query = _context.ExponentialHistogramDataPoints
+        var query = context.ExponentialHistogramDataPoints
             .Include(ehdp => ehdp.Exemplar)
             .Where(ehdp => ehdp.MetricId == metricId);
 
@@ -973,10 +990,11 @@ public class MetricReadRepository : IMetricReadRepository
         return FilterByLabelFilters(dataPoints, labelFilters);
     }
 
-    private async Task<List<MetricDataPoint>> GetSummaryDataPointsAsync(long metricId, Dictionary<string, string>? labelFilters, 
+    private async Task<List<MetricDataPoint>> GetSummaryDataPointsAsync(TelemetryReadDbContext context,
+        long metricId, Dictionary<string, string>? labelFilters,
         DateTime? startTime, DateTime? endTime, CancellationToken cancellationToken)
     {
-        var query = _context.SummaryDataPoints.Where(sdp => sdp.MetricId == metricId);
+        var query = context.SummaryDataPoints.Where(sdp => sdp.MetricId == metricId);
 
         if (startTime.HasValue)
         {
@@ -1077,7 +1095,7 @@ public class MetricReadRepository : IMetricReadRepository
     {
         if (attributes == null || !attributes.ContainsKey("service.name"))
             return null;
-        
+
         return attributes["service.name"]?.ToString();
     }
 

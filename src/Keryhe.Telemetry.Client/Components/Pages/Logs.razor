@@ -159,7 +159,7 @@
     </DialogActions>
 </MudDialog>
 
-<div class="log-chart-wrapper">
+<MudPaper Elevation="2" Class="mb-4">
     <ApexChart @key="@_chartRenderKey" TItem="SeverityPoint" Options="@_chartOptions" Height="150" OnZoomed="HandleChartZoomed">
         @foreach (var sev in _severityLevels)
         {
@@ -171,7 +171,7 @@
                              YValue="@(e => (decimal)e.Count)" />
         }
     </ApexChart>
-</div>
+</MudPaper>
 
 <div>
 <MudDataGrid T="LogRecordModel"
@@ -184,8 +184,8 @@
              Class="compact-logs-grid"
              RowStyleFunc='@((item, index) => $"background-color: {GetSeverityLightColor(item.SeverityText)};")'>
     <Columns>
-        <HierarchyColumn T="LogRecordModel" HeaderClass="mud-theme-secondary" />
-        <TemplateColumn Title="Timestamp" HeaderClass="mud-theme-secondary">
+        <HierarchyColumn T="LogRecordModel" />
+        <TemplateColumn Title="Timestamp">
             <CellTemplate>
                 @if (context.Item.TimeUnixNano.HasValue)
                 {
@@ -193,18 +193,13 @@
                 }
             </CellTemplate>
         </TemplateColumn>
-            <TemplateColumn Title="Service" HeaderClass="mud-theme-secondary">
-                <CellTemplate>
-                    @context.Item.Resource?.Attributes["service.name"]
-                </CellTemplate>
-            </TemplateColumn>
-        <TemplateColumn Title="Level" HeaderClass="mud-theme-secondary"
+            <TemplateColumn Title="Level"
                         CellStyleFunc='@(item => GetLevelCellStyle(item.SeverityText))'>
             <CellTemplate>
                 <span style="font-weight: 600;">@context.Item.SeverityText</span>
             </CellTemplate>
         </TemplateColumn>
-        <PropertyColumn Property="x => x.BodyValue" Title="Message" Sortable="false" HeaderClass="mud-theme-secondary"/>
+        <PropertyColumn Property="x => x.BodyValue" Title="Message" Sortable="false"/>
     </Columns>
     <ChildRowContent>
         <MudCard Elevation="0">
@@ -219,7 +214,7 @@
                         @if (!string.IsNullOrEmpty(context.Item.TraceIdHex))
                         {
                             <div>
-                                <MudText Typo="Typo.caption" Style="color: var(--mud-palette-text-secondary); display: inline;">Trace ID:</MudText>
+                                <MudText Typo="Typo.caption" Style="font-size: 0.85rem; font-weight:600; color: var(--mud-palette-text-secondary); display: inline;">Trace ID:</MudText>
                                 <MudLink Href="@($"/traces?traceId={context.Item.TraceIdHex}")" 
                                          Typo="Typo.body2" 
                                          Style="font-family: monospace; font-size: 0.85rem; margin-left: 8px;">
@@ -230,7 +225,7 @@
                         @if (!string.IsNullOrEmpty(context.Item.SpanIdHex))
                         {
                             <div>
-                                <MudText Typo="Typo.caption" Style="color: var(--mud-palette-text-secondary); display: inline;">Span ID:</MudText>
+                                <MudText Typo="Typo.caption" Style="font-size: 0.85rem; font-weight:600; color: var(--mud-palette-text-secondary); display: inline;">Span ID:</MudText>
                                 <MudText Typo="Typo.body2" Style="font-family: monospace; font-size: 0.85rem; display: inline; margin-left: 8px;">
                                     @context.Item.SpanIdHex
                                 </MudText>
@@ -239,7 +234,7 @@
                         @if (context.Item.TimeUnixNano.HasValue)
                         {
                             <div>
-                                <MudText Typo="Typo.caption" Style="color: var(--mud-palette-text-secondary); display: inline;">Timestamp:</MudText>
+                                <MudText Typo="Typo.caption" Style="font-size: 0.85rem; font-weight:600; color: var(--mud-palette-text-secondary); display: inline;">Timestamp:</MudText>
                                 <MudText Typo="Typo.body2" Style="font-family: monospace; display: inline; margin-left: 8px;">
                                     @FormatUnixNanoToDateTime(context.Item.TimeUnixNano.Value)
                                 </MudText>
@@ -251,13 +246,13 @@
                     {
                         <MudStack Spacing="1">
                             <div>
-                                <MudText Typo="Typo.caption" Style="color: var(--mud-palette-text-secondary); display: inline;">Service:</MudText>
+                                <MudText Typo="Typo.caption" Style="font-size: 0.85rem; font-weight:600; color: var(--mud-palette-text-secondary); display: inline;">Service:</MudText>
                                 <MudText Typo="Typo.body2" Style="display: inline; margin-left: 8px;">
                                     @context.Item.Resource?.Attributes["service.name"]
                                 </MudText>
                             </div>
                             <div>
-                                <MudText Typo="Typo.caption" Style="color: var(--mud-palette-text-secondary); display: inline;">Scope:</MudText>
+                                <MudText Typo="Typo.caption" Style="font-size: 0.85rem; font-weight:600; color: var(--mud-palette-text-secondary); display: inline;">Scope:</MudText>
                                 <MudText Typo="Typo.body2" Style="display: inline; margin-left: 8px;">
                                     @context.Item.InstrumentationScope.Name
                                 </MudText>
@@ -265,7 +260,7 @@
                             @if (!string.IsNullOrEmpty(context.Item.InstrumentationScope.Version))
                             {
                                 <div>
-                                    <MudText Typo="Typo.caption" Style="color: var(--mud-palette-text-secondary); display: inline;">Version:</MudText>
+                                    <MudText Typo="Typo.caption" Style="font-size: 0.85rem; font-weight:600; color: var(--mud-palette-text-secondary); display: inline;">Version:</MudText>
                                     <MudText Typo="Typo.body2" Style="display: inline; margin-left: 8px;">
                                         @context.Item.InstrumentationScope.Version
                                     </MudText>
@@ -344,26 +339,22 @@
     }
     
     .compact-logs-grid > .mud-table-container > .mud-table-root > thead > tr > th:nth-child(3) {
-        width: 150px !important; /* Service */
-    }
-
-    .compact-logs-grid > .mud-table-container > .mud-table-root > thead > tr > th:nth-child(4) {
         width: 100px !important; /* Level */
     }
 
-    .compact-logs-grid > .mud-table-container > .mud-table-root > thead > tr > th:nth-child(5) {
+    .compact-logs-grid > .mud-table-container > .mud-table-root > thead > tr > th:nth-child(4) {
         width: 600px !important; /* Message - minimum, grows with content */
     }
     
     /* Apply default font to all main grid body cells */
     .compact-logs-grid .mud-table-body .mud-table-row:not(.mud-table-row-group-footer) .mud-table-cell {
-        font-size: 0.82rem !important;
+        font-size: 0.85rem !important;
         white-space: nowrap !important;
     }
 
     /* Apply monospace font only to the Message column (last cell) */
     .compact-logs-grid .mud-table-body .mud-table-row:not(.mud-table-row-group-footer) .mud-table-cell:last-child {
-        font-family: 'Consolas', 'Courier New', Courier, monospace !important;
+        font-family: monospace !important;
         overflow: hidden !important;
         text-overflow: ellipsis !important;
     }

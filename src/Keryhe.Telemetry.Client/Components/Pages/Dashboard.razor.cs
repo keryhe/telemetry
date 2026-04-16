@@ -248,7 +248,7 @@ public partial class Dashboard : ComponentBase, IDisposable
 
         _traceChartOptions = new ApexChartOptions<DataPoint>
         {
-            Chart = new Chart { Toolbar = new Toolbar { Show = false }, Zoom = new Zoom { Enabled = true, Type = AxisType.X } },
+            Chart = new Chart { Toolbar = new Toolbar { Show = false }, Zoom = new Zoom { Enabled = true, Type = AxisType.X, AllowMouseWheelZoom = false } },
             Colors = new List<string> { "#2196F3", "#F44336" },
             Stroke = new Stroke { Curve = Curve.Straight, Width = new List<int> { 2 } },
             Xaxis = new XAxis { Type = XAxisType.Datetime },
@@ -313,7 +313,7 @@ public partial class Dashboard : ComponentBase, IDisposable
             {
                 Toolbar = new Toolbar { Show = false },
                 Stacked = true,
-                Zoom = new Zoom { Enabled = true, Type = AxisType.X }
+                Zoom = new Zoom { Enabled = true, Type = AxisType.X, AllowMouseWheelZoom = false }
             },
             Colors = new List<string>
             {
@@ -404,6 +404,17 @@ public partial class Dashboard : ComponentBase, IDisposable
         ServiceMetricsState.SelectedService = service;
         NavigationManager.NavigateTo("/service-metrics");
     }
+
+    private static string ServiceAccentColor(int index) => (index % 6) switch
+    {
+        0 => "var(--mud-palette-primary)",
+        1 => "var(--mud-palette-secondary)",
+        2 => "var(--mud-palette-tertiary)",
+        3 => "var(--mud-palette-warning)",
+        4 => "var(--mud-palette-info)",
+        _ => "var(--mud-palette-success)",
+        
+    };
 
     private string TruncateId(string id, int maxLength = 16) =>
         id.Length > maxLength ? id[..maxLength] + "..." : id;
