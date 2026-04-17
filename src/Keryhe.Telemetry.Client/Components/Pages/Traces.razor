@@ -310,42 +310,7 @@
 
         @if (_serviceDependencies.Any())
         {
-            <MudDataGrid T="ServiceDependency"
-                         Items="@_serviceDependencies"
-                         Dense="true"
-                         Hover="true"
-                         Height="calc(100vh - 20rem)"
-                         FixedHeader="true">
-                <Columns>
-                    <PropertyColumn Property="x => x.ParentService" Title="Parent Service"/>
-                    <PropertyColumn Property="x => x.ChildService" Title="Child Service"/>
-                    <TemplateColumn Title="Span Kind">
-                        <CellTemplate>
-                            <MudChip Size="Size.Small"
-                                     Style="@($"background-color: {GetSpanKindColor(context.Item.SpanKind)}; color: white;")"
-                                     Variant="Variant.Filled">
-                                @context.Item.SpanKind
-                            </MudChip>
-                        </CellTemplate>
-                    </TemplateColumn>
-                    <PropertyColumn Property="x => x.CallCount" Title="Calls" Format="N0"/>
-                    <PropertyColumn Property="x => x.AvgDurationMs" Title="Avg Duration" Format="F2">
-                        <CellTemplate>
-                            @($"{context.Item.AvgDurationMs:F2}ms")
-                        </CellTemplate>
-                    </PropertyColumn>
-                    <PropertyColumn Property="x => x.ErrorCount" Title="Errors" Format="N0"/>
-                    <TemplateColumn Title="Error Rate">
-                        <CellTemplate>
-                            <MudChip Size="Size.Small"
-                                     Color="@(context.Item.ErrorRate > 5 ? Color.Error : context.Item.ErrorRate > 1 ? Color.Warning : Color.Success)"
-                                     Variant="Variant.Text">
-                                @($"{context.Item.ErrorRate:F1}%")
-                            </MudChip>
-                        </CellTemplate>
-                    </TemplateColumn>
-                </Columns>
-            </MudDataGrid>
+            <ServiceMapGraph Dependencies="_serviceDependencies" />
         }
         else
         {

@@ -10,3 +10,4 @@ window.downloadFile = function (filename, base64Content) {
 
 window.localStorageGetItem = (key) => localStorage.getItem(key);
 window.localStorageSetItem = (key, value) => localStorage.setItem(key, value);
+
