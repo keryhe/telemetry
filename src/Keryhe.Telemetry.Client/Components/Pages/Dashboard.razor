@@ -10,12 +10,14 @@
 
 <PageTitle>Dashboard</PageTitle>
 
+<SectionContent SectionName="page-title">
+    <MudText Typo="Typo.h6" Style="font-weight: 600;">Dashboard</MudText>
+</SectionContent>
+
 <MudContainer MaxWidth="MaxWidth.ExtraLarge" Class="mt-4">
 
     <!-- Header bar -->
     <MudStack Row="true" AlignItems="AlignItems.Center" Spacing="2" Class="mb-4">
-        <MudText Typo="Typo.h5">Dashboard</MudText>
-        <MudSpacer />
         <MudSelect Value="SelectedServiceValue" ValueChanged="OnServiceChanged" T="string"
                    Label="Service" Variant="Variant.Outlined" Dense="true" Style="min-width:180px"
                    Clearable="false">

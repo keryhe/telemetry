@@ -4,6 +4,10 @@
 @using Color = MudBlazor.Color
 @using Size = MudBlazor.Size
 
+<SectionContent SectionName="page-title">
+    <MudText Typo="Typo.h6" Style="font-weight: 600;">Logs</MudText>
+</SectionContent>
+
 <!-- Row 1: Dropdowns, Date Range, and Search Button -->
 <MudStack Spacing="2" Class="mb-2">
     <MudStack Row="true" Spacing="2" AlignItems="AlignItems.Center">
@@ -348,20 +352,20 @@
     
     /* Apply default font to all main grid body cells */
     .compact-logs-grid .mud-table-body .mud-table-row:not(.mud-table-row-group-footer) .mud-table-cell {
-        font-size: 0.85rem !important;
+        font-size: 0.82rem !important;
         white-space: nowrap !important;
     }
 
     /* Apply monospace font only to the Message column (last cell) */
     .compact-logs-grid .mud-table-body .mud-table-row:not(.mud-table-row-group-footer) .mud-table-cell:last-child {
-        font-family: monospace !important;
+        font-family: 'Courier New', monospace !important;
         overflow: hidden !important;
         text-overflow: ellipsis !important;
     }
 
     /* Belt-and-suspenders: also target spans inside the Message PropertyColumn cell */
     .compact-logs-grid .mud-table-body .mud-table-row:not(.mud-table-row-group-footer) .mud-table-cell:last-child span {
-        font-family: 'Consolas', 'Courier New', Courier, monospace !important;
+        font-family: 'Courier New', monospace !important;
     }
 
     /* Reduce cell padding to make rows more compact */

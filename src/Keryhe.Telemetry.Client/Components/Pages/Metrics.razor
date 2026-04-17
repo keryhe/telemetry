@@ -3,9 +3,12 @@
 
 <PageTitle>Metrics</PageTitle>
 
+<SectionContent SectionName="page-title">
+    <MudText Typo="Typo.h6" Style="font-weight: 600;">Metrics</MudText>
+</SectionContent>
+
 <MudContainer MaxWidth="MaxWidth.ExtraLarge" Class="mt-4">
     <MudStack Row="true" AlignItems="AlignItems.Center" Justify="Justify.SpaceBetween" Class="mb-4">
-        <MudText Typo="Typo.h5">Metrics</MudText>
         <MudButtonGroup Variant="Variant.Outlined" Color="Color.Primary">
             <MudButton OnClick="@(() => { _showUniqueNamesView = true; })"
                        Variant="@(_showUniqueNamesView ? Variant.Filled : Variant.Outlined)">
