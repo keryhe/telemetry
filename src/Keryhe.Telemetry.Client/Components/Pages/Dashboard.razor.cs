@@ -39,12 +39,14 @@ public partial class Dashboard : ComponentBase, IDisposable
     private List<DataPoint> _traceErrors = new();
     private bool _hasTraceData = false;
     private ApexChartOptions<DataPoint> _traceChartOptions = new();
+    private int _traceChartRenderKey = 0;
 
     // Log chart
     private record SeverityPoint(DateTime Time, double Count);
     private Dictionary<string, List<SeverityPoint>> _logSeverityData = new();
     private bool _hasLogData = false;
     private ApexChartOptions<SeverityPoint> _logChartOptions = new();
+    private int _logChartRenderKey = 0;
 
     // Tables
     private List<TraceInfo> _recentErrorTraces = new();
@@ -158,7 +160,7 @@ public partial class Dashboard : ComponentBase, IDisposable
             _recentErrorTraces = traces
                 .Where(t => t.HasErrors)
                 .OrderByDescending(t => t.TraceStartTime)
-                .Take(10)
+                .Take(5)
                 .ToList();
 
             _slowTraces = traces
@@ -251,9 +253,15 @@ public partial class Dashboard : ComponentBase, IDisposable
             Chart = new Chart { Toolbar = new Toolbar { Show = false }, Zoom = new Zoom { Enabled = true, Type = AxisType.X, AllowMouseWheelZoom = false } },
             Colors = new List<string> { "#2196F3", "#F44336" },
             Stroke = new Stroke { Curve = Curve.Straight, Width = new List<int> { 2 } },
-            Xaxis = new XAxis { Type = XAxisType.Datetime },
+            Xaxis = new XAxis
+            {
+                Type = XAxisType.Datetime,
+                Min = (decimal)new DateTimeOffset(start, TimeSpan.Zero).ToUnixTimeMilliseconds(),
+                Max = (decimal)new DateTimeOffset(end, TimeSpan.Zero).ToUnixTimeMilliseconds(),
+            },
         };
 
+        _traceChartRenderKey++;
         _hasTraceData = true;
     }
 
@@ -324,9 +332,15 @@ public partial class Dashboard : ComponentBase, IDisposable
                 "#F44336", // Error
                 "#B71C1C"  // Fatal
             },
-            Xaxis = new XAxis { Type = XAxisType.Datetime },
+            Xaxis = new XAxis
+            {
+                Type = XAxisType.Datetime,
+                Min = (decimal)new DateTimeOffset(start, TimeSpan.Zero).ToUnixTimeMilliseconds(),
+                Max = (decimal)new DateTimeOffset(end, TimeSpan.Zero).ToUnixTimeMilliseconds(),
+            },
         };
 
+        _logChartRenderKey++;
         _hasLogData = true;
     }
 
@@ -383,6 +397,7 @@ public partial class Dashboard : ComponentBase, IDisposable
         if (e.XAxis?.Min == null || e.XAxis?.Max == null) return Task.CompletedTask;
         var start = DateTimeOffset.FromUnixTimeMilliseconds(Convert.ToInt64(e.XAxis.Min)).UtcDateTime;
         var end   = DateTimeOffset.FromUnixTimeMilliseconds(Convert.ToInt64(e.XAxis.Max)).UtcDateTime;
+        if (start >= end) return Task.CompletedTask;
         TimeRangeState.SetCustomRange(start, end);
         return Task.CompletedTask;
     }
@@ -392,6 +407,7 @@ public partial class Dashboard : ComponentBase, IDisposable
         if (e.XAxis?.Min == null || e.XAxis?.Max == null) return Task.CompletedTask;
         var start = DateTimeOffset.FromUnixTimeMilliseconds(Convert.ToInt64(e.XAxis.Min)).UtcDateTime;
         var end   = DateTimeOffset.FromUnixTimeMilliseconds(Convert.ToInt64(e.XAxis.Max)).UtcDateTime;
+        if (start >= end) return Task.CompletedTask;
         TimeRangeState.SetCustomRange(start, end);
         return Task.CompletedTask;
     }

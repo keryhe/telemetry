@@ -119,7 +119,7 @@
                             <MudText Typo="Typo.body2" Color="Color.Secondary">Services</MudText>
                             <MudText Typo="Typo.h5">@_servicesCount</MudText>
                         </div>
-                        <MudIcon Icon="@Icons.Material.Filled.Cloud" Size="Size.Large" Color="Color.Tertiary"/>
+                        <MudIcon Icon="@Icons.Material.Filled.Cloud" Size="Size.Large" Color="Color.Info"/>
                     </MudStack>
                 </MudCardContent>
             </MudCard>
@@ -165,7 +165,7 @@
                 </TemplateColumn>
                 <TemplateColumn Title="Instances">
                     <CellTemplate>
-                        <MudChip Size="Size.Small" Color="Color.Info">
+                        <MudChip Size="Size.Small" Color="Color.Tertiary">
                             @context.Item.InstanceCount
                         </MudChip>
                     </CellTemplate>

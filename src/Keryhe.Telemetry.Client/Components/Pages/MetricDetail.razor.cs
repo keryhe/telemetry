@@ -1,6 +1,7 @@
 using Keryhe.Telemetry.Client.Services;
 using Keryhe.Telemetry.Client.Services.State;
 using Keryhe.Telemetry.Client.Models;
+using Keryhe.Telemetry.Core;
 using Keryhe.Telemetry.Core.Models;
 using Microsoft.AspNetCore.Components;
 using Microsoft.JSInterop;
@@ -125,6 +126,12 @@ public partial class MetricDetail : ComponentBase, IDisposable
         _ = InvokeAsync(async () =>
         {
             _refreshInterval = TimeRangeState.SelectedTimeRange.GetRecommendedRefreshInterval();
+            // Auto-refresh is meaningless on a frozen custom/zoomed range — pause it
+            if (TimeRangeState.SelectedTimeRange == TimeRange.Custom)
+            {
+                _autoRefresh = false;
+                State.AutoRefresh = false;
+            }
             RestartRefreshTimer();
             await LoadDataAsync();
         });
@@ -327,7 +334,7 @@ public partial class MetricDetail : ComponentBase, IDisposable
                 csv.AppendLine(string.Join(",", row.Select(EscapeCsv)));
             }
 
-            var fileName = $"{Uri.UnescapeDataString(MetricName)}_{DateTime.Now:yyyyMMdd_HHmmss}.csv";
+            var fileName = $"{Uri.UnescapeDataString(MetricName)}_{DateTime.UtcNow:yyyyMMdd_HHmmss}Z.csv";
             var bytes = Encoding.UTF8.GetBytes(csv.ToString());
             var base64 = Convert.ToBase64String(bytes);
 
@@ -357,7 +364,7 @@ public partial class MetricDetail : ComponentBase, IDisposable
 
     private static string[] BuildExportRow(MetricDataPoint point, MetricType type)
     {
-        var timestamp = point.Timestamp.ToString("yyyy-MM-dd HH:mm:ss");
+        var timestamp = point.Timestamp.ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss");
         var value = (point.DoubleValue ?? point.IntValue)?.ToString() ?? "";
         var attributes = SerializeObject(point.Attributes);
 
@@ -466,11 +473,11 @@ public partial class MetricDetail : ComponentBase, IDisposable
 
     private Color GetMetricTypeColor(MetricType type) => type switch
     {
-        MetricType.GAUGE => Color.Primary,
+        MetricType.GAUGE => Color.Info,
         MetricType.SUM => Color.Success,
         MetricType.HISTOGRAM => Color.Warning,
         MetricType.EXPONENTIAL_HISTOGRAM => Color.Warning,
-        MetricType.SUMMARY => Color.Info,
+        MetricType.SUMMARY => Color.Primary,
         _ => Color.Default
     };
 
@@ -512,9 +519,7 @@ public partial class MetricDetail : ComponentBase, IDisposable
     }
 
     private static DateTime UnixNanoToDateTime(long unixNano)
-    {
-        return DateTime.UnixEpoch.AddTicks(unixNano / 100);
-    }
+        => TimestampConverter.UnixNanoToUtcDateTime(unixNano);
 
     private sealed class ExemplarRow
     {

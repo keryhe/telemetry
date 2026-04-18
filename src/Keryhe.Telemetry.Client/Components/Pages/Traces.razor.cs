@@ -47,6 +47,7 @@ public partial class Traces : ComponentBase, IDisposable
     private List<DataPoint> _traceErrors = new();
     private ApexChartOptions<DataPoint> _chartOptions = new();
     private bool _hasTraceData = false;
+    private int _traceChartRenderKey = 0;
 
     [Inject]
     private ITraceService TraceService { get; set; } = null!;
@@ -257,6 +258,7 @@ public partial class Traces : ComponentBase, IDisposable
             _traceTotal = new();
             _traceErrors = new();
             _chartOptions = new ApexChartOptions<DataPoint>();
+            _traceChartRenderKey++;
             _hasTraceData = false;
             return;
         }
@@ -296,9 +298,10 @@ public partial class Traces : ComponentBase, IDisposable
             Xaxis = new XAxis
             {
                 Type = XAxisType.Datetime,
+                Min = (decimal)new DateTimeOffset(start, TimeSpan.Zero).ToUnixTimeMilliseconds(),
+                Max = (decimal)new DateTimeOffset(end, TimeSpan.Zero).ToUnixTimeMilliseconds(),
                 Labels = new XAxisLabels
                 {
-                    DatetimeUTC = false,
                     DatetimeFormatter = new DatetimeFormatter
                     {
                         Year   = "yyyy",
@@ -311,6 +314,7 @@ public partial class Traces : ComponentBase, IDisposable
             },
         };
 
+        _traceChartRenderKey++;
         _hasTraceData = true;
     }
 
@@ -319,6 +323,7 @@ public partial class Traces : ComponentBase, IDisposable
         if (e.XAxis?.Min == null || e.XAxis?.Max == null) return Task.CompletedTask;
         var start = DateTimeOffset.FromUnixTimeMilliseconds(Convert.ToInt64(e.XAxis.Min)).UtcDateTime;
         var end   = DateTimeOffset.FromUnixTimeMilliseconds(Convert.ToInt64(e.XAxis.Max)).UtcDateTime;
+        if (start >= end) return Task.CompletedTask;
         TimeRangeState.SetCustomRange(start, end);
         return Task.CompletedTask;
     }

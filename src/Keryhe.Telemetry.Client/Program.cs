@@ -39,6 +39,7 @@ builder.Services
     .AddScoped<IMetricService, MetricService>()
     .AddScoped<ITraceService, TraceService>()
     .AddScoped<LocalStorageService>()
+    .AddScoped<BrowserTimezoneService>()
     .AddScoped<TimeRangeState>()
     .AddScoped<MetricsPageState>()
     .AddScoped<MetricDetailPageState>()

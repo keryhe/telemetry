@@ -183,7 +183,7 @@
                                 <MudText Typo="Typo.body2" Color="Color.Secondary">Services</MudText>
                                 <MudText Typo="Typo.h5">@_servicesCount</MudText>
                             </div>
-                            <MudIcon Icon="@Icons.Material.Filled.Cloud" Size="Size.Large" Color="Color.Tertiary"/>
+                            <MudIcon Icon="@Icons.Material.Filled.Cloud" Size="Size.Large" Color="Color.Info"/>
                         </MudStack>
                     </MudCardContent>
                 </MudCard>
@@ -195,7 +195,7 @@
             <MudText Typo="Typo.h6" Class="mb-2">Trace Volume</MudText>
             @if (_hasTraceData)
             {
-                <ApexChart TItem="DataPoint" Options="@_chartOptions" Height="150" OnZoomed="HandleChartZoomed">
+                <ApexChart @key="@_traceChartRenderKey" TItem="DataPoint" Options="@_chartOptions" Height="150" OnZoomed="HandleChartZoomed">
                     <ApexPointSeries TItem="DataPoint"
                                      Items="@_traceTotal"
                                      Name="Total"

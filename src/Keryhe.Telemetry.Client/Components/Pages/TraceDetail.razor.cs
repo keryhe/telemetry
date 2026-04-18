@@ -184,7 +184,7 @@ public partial class TraceDetail : ComponentBase
         if (value is string s) return s;
         if (value is bool b)   return b.ToString().ToLower();
         if (value is int || value is long || value is double || value is decimal) return value.ToString()!;
-        if (value is DateTime dt) return dt.ToString("yyyy-MM-dd HH:mm:ss.fff");
+        if (value is DateTime dt) return dt.ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss.fff");
         return value.ToString() ?? "N/A";
     }
 

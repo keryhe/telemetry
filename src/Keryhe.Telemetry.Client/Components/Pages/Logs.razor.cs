@@ -312,7 +312,7 @@ public partial class Logs : ComponentBase, IDisposable
         if (value is string s) return s;
         if (value is bool b) return b.ToString().ToLower();
         if (value is int || value is long || value is double || value is decimal) return value.ToString()!;
-        if (value is DateTime dt) return dt.ToString("yyyy-MM-dd HH:mm:ss.fff");
+        if (value is DateTime dt) return dt.ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss.fff");
         return value.ToString() ?? "N/A";
     }
 
@@ -356,10 +356,11 @@ public partial class Logs : ComponentBase, IDisposable
 
     private void UpdateChartData(DateTime start, DateTime end)
     {
-
         if (_logs.Count == 0)
         {
             _apexSeverityData = new Dictionary<string, List<SeverityPoint>>();
+            _chartOptions.Xaxis.Min = (decimal)new DateTimeOffset(start, TimeSpan.Zero).ToUnixTimeMilliseconds();
+            _chartOptions.Xaxis.Max = (decimal)new DateTimeOffset(end, TimeSpan.Zero).ToUnixTimeMilliseconds();
             _chartRenderKey++;
             return;
         }
@@ -409,6 +410,8 @@ public partial class Logs : ComponentBase, IDisposable
                 .Select(b => new SeverityPoint(b.Key, b.Value[severity]))
                 .ToList();
         }
+        _chartOptions.Xaxis.Min = (decimal)new DateTimeOffset(start, TimeSpan.Zero).ToUnixTimeMilliseconds();
+        _chartOptions.Xaxis.Max = (decimal)new DateTimeOffset(end, TimeSpan.Zero).ToUnixTimeMilliseconds();
         _chartRenderKey++;
     }
 

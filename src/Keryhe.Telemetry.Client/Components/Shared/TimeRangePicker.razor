@@ -35,21 +35,21 @@
                 }
                 <MudDivider Class="my-2" />
                 <MudText Typo="Typo.overline" Class="mb-1">Custom Range</MudText>
-                <MudDatePicker @bind-Date="_customStart"
+                <MudDatePicker @bind-Date="_customStartDate"
                                Label="Start Date"
                                Variant="Variant.Outlined"
                                Margin="Margin.Dense"
-                               Class="mb-2" />
-                <MudDatePicker @bind-Date="_customEnd"
+                               Class="mb-1" />
+                <MudDatePicker @bind-Date="_customEndDate"
                                Label="End Date"
                                Variant="Variant.Outlined"
                                Margin="Margin.Dense"
-                               Class="mb-2" />
+                               Class="mb-1" />
                 <MudButton Variant="Variant.Filled"
                            Color="Color.Primary"
                            FullWidth="true"
                            Size="Size.Small"
-                           Disabled="@(!_customStart.HasValue || !_customEnd.HasValue)"
+                           Disabled="@(!_customStartDate.HasValue || !_customEndDate.HasValue)"
                            OnClick="ApplyCustomRange">
                     Apply
                 </MudButton>

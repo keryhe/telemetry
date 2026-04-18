@@ -1,3 +1,5 @@
+using Keryhe.Telemetry.Core;
+
 namespace Keryhe.Telemetry.Data.Access;
 
 /// <summary>
@@ -6,18 +8,18 @@ namespace Keryhe.Telemetry.Data.Access;
 public static class OpenTelemetryDbContextExtensions
 {
     /// <summary>
-    /// Converts Unix nanoseconds to DateTime (UTC).
+    /// Converts Unix nanoseconds to UTC DateTime.
     /// </summary>
     public static DateTime UnixNanoToDateTime(long unixNano)
-    {
-        return DateTimeOffset.FromUnixTimeMilliseconds(unixNano / 1_000_000).UtcDateTime;
-    }
+        => TimestampConverter.UnixNanoToUtcDateTime(unixNano);
 
     /// <summary>
-    /// Converts DateTime to Unix nanoseconds.
+    /// Converts DateTime to Unix nanoseconds. Treats Unspecified Kind as UTC.
     /// </summary>
     public static long DateTimeToUnixNano(DateTime dateTime)
     {
+        if (dateTime.Kind == DateTimeKind.Unspecified)
+            dateTime = DateTime.SpecifyKind(dateTime, DateTimeKind.Utc);
         return new DateTimeOffset(dateTime).ToUnixTimeMilliseconds() * 1_000_000;
     }
 }

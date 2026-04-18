@@ -209,17 +209,17 @@ public partial class Metrics : ComponentBase, IDisposable
 
     private Color GetMetricTypeColor(MetricType type) => type switch
     {
-        MetricType.GAUGE => Color.Primary,
+        MetricType.GAUGE => Color.Info,
         MetricType.SUM => Color.Success,
         MetricType.HISTOGRAM => Color.Warning,
         MetricType.EXPONENTIAL_HISTOGRAM => Color.Warning,
-        MetricType.SUMMARY => Color.Info,
+        MetricType.SUMMARY => Color.Primary,
         _ => Color.Default
     };
 
     private string FormatDateTime(DateTime dateTime)
     {
-        return dateTime.ToString("yyyy-MM-dd HH:mm:ss");
+        return dateTime.ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss");
     }
 
     public void Dispose()

@@ -28,39 +28,53 @@ public partial class MetricChart : ComponentBase
     private ApexChartOptions<DataPoint> _chartOptions = new();
     private bool _canShowChart = false;
 
+    private ApexChart<DataPoint>? _chart;
+    private int _chartRenderKey = 0;
+    private string[]? _lastColors;
+    private bool? _lastShowMarkers;
+    private MetricType? _lastBuiltMetricType;
+
     protected override void OnParametersSet()
     {
         _apexSeries = new();
-        _canShowChart = false;
 
         if (MultiSeriesData != null && MultiSeriesData.Series.Count > 1
             && (MultiSeriesData.Type == MetricType.GAUGE || MultiSeriesData.Type == MetricType.SUM))
         {
-            _canShowChart = true;
             BuildMultiSeriesChartData();
+            BuildLineOptionsIfNeeded(MultiSeriesData.Type);
+            _canShowChart = true;
+            _chartRenderKey++;
             return;
         }
 
         if (Data == null || Data.Points == null || !Data.Points.Any())
+        {
+            _canShowChart = false;
             return;
+        }
 
         switch (Data.Type)
         {
             case MetricType.GAUGE:
             case MetricType.SUM:
-                _canShowChart = true;
                 BuildSingleValueChartData();
                 break;
             case MetricType.HISTOGRAM:
             case MetricType.EXPONENTIAL_HISTOGRAM:
-                _canShowChart = true;
                 BuildHistogramTrendChartData();
                 break;
             case MetricType.SUMMARY:
-                _canShowChart = true;
                 BuildSummaryQuantileChartData();
                 break;
+            default:
+                _canShowChart = false;
+                return;
         }
+
+        BuildLineOptionsIfNeeded(Data.Type);
+        _canShowChart = true;
+        _chartRenderKey++;
     }
 
     private void BuildSingleValueChartData()
@@ -75,8 +89,6 @@ public partial class MetricChart : ComponentBase
         {
             (Title ?? Data.Name, points)
         };
-
-        _chartOptions = BuildLineOptions(new[] { "#2196F3" }, showMarkers: true);
     }
 
     private void BuildHistogramTrendChartData()
@@ -103,8 +115,6 @@ public partial class MetricChart : ComponentBase
             _apexSeries.Add(("Max", Data.Points
                 .Select(p => new DataPoint(p.Timestamp, p.Max ?? double.NaN))
                 .ToList()));
-
-        _chartOptions = BuildLineOptions(new[] { "#2196F3", "#4CAF50", "#FF9800", "#F44336" }, showMarkers: true);
     }
 
     private void BuildSummaryQuantileChartData()
@@ -144,10 +154,6 @@ public partial class MetricChart : ComponentBase
             }
             _apexSeries.Add(($"P{quantile * 100:F0}", pts));
         }
-
-        _chartOptions = BuildLineOptions(
-            new[] { "#2196F3", "#4CAF50", "#F44336", "#FF9800", "#9C27B0", "#009688" },
-            showMarkers: true);
     }
 
     private void BuildMultiSeriesChartData()
@@ -161,23 +167,44 @@ public partial class MetricChart : ComponentBase
                 .ToList();
             return (series.SeriesName, pts);
         }).ToList();
-
-        _chartOptions = BuildLineOptions(
-            new[] { "#2196F3", "#4CAF50", "#F44336", "#FF9800", "#9C27B0", "#009688",
-                    "#E91E63", "#FFC107", "#00BCD4", "#673AB7" },
-            showMarkers: true);
     }
+
+    private void BuildLineOptionsIfNeeded(MetricType type)
+    {
+        if (_lastBuiltMetricType != type)
+        {
+            _lastBuiltMetricType = type;
+            (_lastColors, _lastShowMarkers) = type switch
+            {
+                MetricType.HISTOGRAM or MetricType.EXPONENTIAL_HISTOGRAM =>
+                    (new[] { "#2196F3", "#4CAF50", "#FF9800", "#F44336" }, true),
+                MetricType.SUMMARY =>
+                    (new[] { "#2196F3", "#4CAF50", "#F44336", "#FF9800", "#9C27B0", "#009688" }, true),
+                _ when MultiSeriesData != null =>
+                    (new[] { "#2196F3", "#4CAF50", "#F44336", "#FF9800", "#9C27B0", "#009688",
+                             "#E91E63", "#FFC107", "#00BCD4", "#673AB7" }, true),
+                _ => (new[] { "#2196F3" }, true),
+            };
+        }
+
+        var (start, end) = TimeRangeState.GetDateTimeRange();
+        _chartOptions = BuildLineOptions(_lastColors!, _lastShowMarkers!.Value, ToApexMs(start), ToApexMs(end));
+    }
+
+    private static decimal ToApexMs(DateTime utc)
+        => (decimal)new DateTimeOffset(utc, TimeSpan.Zero).ToUnixTimeMilliseconds();
 
     private Task HandleChartZoomed(ZoomedData<DataPoint> e)
     {
         if (e.XAxis?.Min == null || e.XAxis?.Max == null) return Task.CompletedTask;
         var start = DateTimeOffset.FromUnixTimeMilliseconds(Convert.ToInt64(e.XAxis.Min)).UtcDateTime;
         var end   = DateTimeOffset.FromUnixTimeMilliseconds(Convert.ToInt64(e.XAxis.Max)).UtcDateTime;
+        if (start >= end) return Task.CompletedTask;
         TimeRangeState.SetCustomRange(start, end);
         return Task.CompletedTask;
     }
 
-    private static ApexChartOptions<DataPoint> BuildLineOptions(string[] colors, bool showMarkers)
+    private static ApexChartOptions<DataPoint> BuildLineOptions(string[] colors, bool showMarkers, decimal xMin, decimal xMax)
     {
         return new ApexChartOptions<DataPoint>
         {
@@ -185,7 +212,7 @@ public partial class MetricChart : ComponentBase
             Colors = colors.ToList(),
             Stroke = new Stroke { Curve = Curve.Straight, Width = new List<int> { 2 } },
             Markers = new Markers { Size = showMarkers ? new List<int> { 4 } : new List<int> { 0 } },
-            Xaxis = new XAxis { Type = XAxisType.Datetime },
+            Xaxis = new XAxis { Type = XAxisType.Datetime, Min = xMin, Max = xMax },
         };
     }
 }

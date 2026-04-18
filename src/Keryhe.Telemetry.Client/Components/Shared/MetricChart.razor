@@ -5,7 +5,9 @@
 @if (_canShowChart && _apexSeries.Any())
 {
     <MudStack Spacing="3">
-        <ApexChart TItem="DataPoint" Options="@_chartOptions" Height="@Height" OnZoomed="HandleChartZoomed">
+        <ApexChart @ref="_chart" @key="@_chartRenderKey"
+                   TItem="DataPoint" Options="@_chartOptions" Height="@Height"
+                   OnZoomed="HandleChartZoomed">
             @foreach (var series in _apexSeries)
             {
                 <ApexPointSeries TItem="DataPoint"

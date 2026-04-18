@@ -31,7 +31,7 @@ public static class TimeRangeExtensions
             TimeRange.Last24Hours => end.AddHours(-24),
             TimeRange.Last7Days => end.AddDays(-7),
             TimeRange.Last30Days => end.AddDays(-30),
-            TimeRange.Custom => end.AddHours(-1), // Default to 1 hour for custom
+            TimeRange.Custom => throw new InvalidOperationException("Custom range requires explicit start/end; use TimeRangeState.GetDateTimeRange() instead of ToDateTimeRange()."),
             _ => end.AddHours(-1)
         };
         
