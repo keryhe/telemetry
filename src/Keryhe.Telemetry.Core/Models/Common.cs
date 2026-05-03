@@ -2,6 +2,9 @@ namespace Keryhe.Telemetry.Core.Models;
 
 public class ResourceModel
 {
+    public const long DefaultTenantId = 1;
+
+    public long TenantId { get; set; } = DefaultTenantId;
     public string? SchemaUrl { get; set; }
     public Dictionary<string, object> Attributes { get; set; } = new  Dictionary<string, object>(); 
 }

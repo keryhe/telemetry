@@ -3,6 +3,7 @@ namespace Keryhe.Telemetry.Data.Access.Models;
 public class AlertRuleEntity
 {
     public int Id { get; set; }
+    public long TenantId { get; set; }
     public string Name { get; set; } = null!;
     public string Type { get; set; } = null!;
     public string? ServiceName { get; set; }

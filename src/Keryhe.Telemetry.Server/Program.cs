@@ -3,6 +3,7 @@ using Keryhe.Telemetry.Data;
 using Keryhe.Telemetry.Server.Services;
 using Microsoft.EntityFrameworkCore;
 using Keryhe.Telemetry.Core;
+using Npgsql;
 
 namespace Keryhe.Telemetry.Server;
 
@@ -15,16 +16,18 @@ public class Program
         // Add services to the container.
         builder.Services.AddGrpc();
         builder.Services.AddLogging();
-        
-        // Add write DbContext — the Server only writes telemetry data
-        builder.Services.AddDbContext<TelemetryWriteDbContext>(options =>
+
+        var writeConnectionString = builder.Configuration.GetConnectionString("Write")!;
+
+        // Raw NpgsqlDataSource for the background ingestion worker (bulk inserts).
+        builder.Services.AddSingleton(_ => NpgsqlDataSource.Create(writeConnectionString));
+
+        // DbContextPool reuses DbContext instances across requests (delete operations only).
+        builder.Services.AddDbContextPool<TelemetryWriteDbContext>(options =>
         {
-            var connectionString = builder.Configuration.GetConnectionString("Write");
-            options.UseNpgsql(connectionString, dbOptions =>
-            {
-            });
-            
-            // Enable sensitive data logging in development
+            options.UseNpgsql(writeConnectionString);
+            options.UseSnakeCaseNamingConvention();
+
             if (builder.Environment.IsDevelopment())
             {
                 options.EnableSensitiveDataLogging();
@@ -32,7 +35,13 @@ public class Program
             }
         });
 
+        // Singletons shared across all gRPC requests and the background worker.
+        builder.Services.AddSingleton<TelemetryIngestionChannel>();
+        builder.Services.AddSingleton<ResourceScopeCache>();
+        builder.Services.AddHostedService<TelemetryIngestionWorker>();
+
         builder.Services
+            .AddScoped<ITenantResolver, ApiKeyTenantResolver>()
             .AddScoped<ILogWriteRepository, LogWriteRepository>()
             .AddScoped<IMetricWriteRepository, MetricWriteRepository>()
             .AddScoped<ITraceWriteRepository, TraceWriteRepository>();

@@ -1,0 +1,15 @@
+<MudSelect T="long"
+           Label="Tenant"
+           Dense="true"
+           Variant="Variant.Outlined"
+           Margin="Margin.Dense"
+           Value="_selectedTenantId"
+           ValueChanged="OnTenantChangedAsync"
+           Disabled="@(_loading || _tenantOptions.Count == 0)"
+           Class="tenant-picker"
+           Style="min-width: 210px;">
+    @foreach (var tenant in _tenantOptions)
+    {
+        <MudSelectItem T="long" Value="@tenant.Id">@tenant.Name</MudSelectItem>
+    }
+</MudSelect>

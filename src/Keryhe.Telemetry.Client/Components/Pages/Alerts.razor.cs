@@ -127,6 +127,7 @@ public partial class Alerts : ComponentBase
         var updated = new AlertRule
         {
             Id = rule.Id,
+            TenantId = rule.TenantId,
             Name = rule.Name,
             Type = rule.Type,
             ServiceName = rule.ServiceName,

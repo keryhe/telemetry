@@ -95,6 +95,8 @@ var host = new HostBuilder()
 
         var otlpEndpoint = context.Configuration.GetSection("GeneratorConfig:OtlpEndpoint").Value
             ?? "http://localhost:5117";
+        var otlpHeaders = context.Configuration.GetSection("GeneratorConfig:OtlpHeaders").Value
+            ?? "";
         var serviceName = context.Configuration.GetSection("GeneratorConfig:ServiceName").Value
             ?? "telemetry-test-generator";
         var serviceVersion = context.Configuration.GetSection("GeneratorConfig:ServiceVersion").Value
@@ -109,6 +111,7 @@ var host = new HostBuilder()
                 .AddOtlpExporter(exporterOptions =>
                 {
                     exporterOptions.Endpoint = new Uri(otlpEndpoint);
+                    exporterOptions.Headers = otlpHeaders;
                     exporterOptions.Protocol = OtlpExportProtocol.Grpc;
                 });
         });
@@ -132,6 +135,7 @@ var tracerProviders = serviceSources
         .AddOtlpExporter(exporterOptions =>
         {
             exporterOptions.Endpoint = otlpEndpoint;
+            exporterOptions.Headers = config.OtlpHeaders;
             exporterOptions.Protocol = OtlpExportProtocol.Grpc;
         })
         .Build())
@@ -145,6 +149,7 @@ var meterProvider = Sdk.CreateMeterProviderBuilder()
     .AddOtlpExporter((exporterOptions, metricReaderOptions) =>
     {
         exporterOptions.Endpoint = otlpEndpoint;
+        exporterOptions.Headers = config.OtlpHeaders;
         exporterOptions.Protocol = OtlpExportProtocol.Grpc;
         metricReaderOptions.PeriodicExportingMetricReaderOptions.ExportIntervalMilliseconds = 15_000;
     })

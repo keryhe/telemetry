@@ -17,11 +17,13 @@ public class TraceService : OpenTelemetry.Proto.Collector.Trace.V1.TraceService.
 {
     private readonly ITraceWriteRepository _traceRepository;
     private readonly ILogger<TraceService> _logger;
+    private readonly ITenantResolver _tenantResolver;
 
-    public TraceService(ITraceWriteRepository traceRepository, ILogger<TraceService> logger)
+    public TraceService(ITraceWriteRepository traceRepository, ILogger<TraceService> logger, ITenantResolver tenantResolver)
     {
         _traceRepository = traceRepository ?? throw new ArgumentNullException(nameof(traceRepository));
         _logger = logger ?? throw new ArgumentNullException(nameof(logger));
+        _tenantResolver = tenantResolver ?? throw new ArgumentNullException(nameof(tenantResolver));
     }
 
     /// <summary>
@@ -47,11 +49,13 @@ public class TraceService : OpenTelemetry.Proto.Collector.Trace.V1.TraceService.
         var storedSpanCount = 0;
         try
         {
+            var tenantId = await _tenantResolver.ResolveTenantIdAsync(context, context.CancellationToken);
+
             _logger.LogDebug("Received traces export request with {ResourceSpansCount} resource spans", 
                 request.ResourceSpans?.Count ?? 0);
 
             // Convert protobuf message to Models
-            traces = ConvertToTraceModels(request);
+            traces = ConvertToTraceModels(request, tenantId);
 
             if (!traces.Any())
             {
@@ -104,14 +108,14 @@ public class TraceService : OpenTelemetry.Proto.Collector.Trace.V1.TraceService.
     /// <summary>
     /// Converts OTLP ExportTraceServiceRequest to a list of TraceModel objects
     /// </summary>
-    private List<TraceModel> ConvertToTraceModels(ExportTraceServiceRequest request)
+    private List<TraceModel> ConvertToTraceModels(ExportTraceServiceRequest request, long tenantId)
     {
         var traceGroups = new Dictionary<string, TraceModel>();
 
         foreach (var resourceSpans in request.ResourceSpans)
         {
             // Convert resource information
-            var resourceModel = ConvertResource(resourceSpans);
+            var resourceModel = ConvertResource(resourceSpans, tenantId);
 
             foreach (var scopeSpans in resourceSpans.ScopeSpans)
             {
@@ -151,13 +155,14 @@ public class TraceService : OpenTelemetry.Proto.Collector.Trace.V1.TraceService.
     /// <summary>
     /// Converts OTLP Resource to ResourceModel
     /// </summary>
-    private ResourceModel? ConvertResource(OpenTelemetry.Proto.Trace.V1.ResourceSpans? resourceSpan)
+    private ResourceModel? ConvertResource(OpenTelemetry.Proto.Trace.V1.ResourceSpans? resourceSpan, long tenantId)
     {
         if (resourceSpan?.Resource == null)
             return null;
 
         return new ResourceModel
         {
+            TenantId = tenantId,
             SchemaUrl = string.IsNullOrEmpty(resourceSpan.SchemaUrl) ? null : resourceSpan.SchemaUrl,
             Attributes = ConvertAttributes(resourceSpan.Resource.Attributes)
         };

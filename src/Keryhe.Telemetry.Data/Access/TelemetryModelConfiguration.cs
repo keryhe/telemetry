@@ -18,12 +18,21 @@ internal static class TelemetryModelConfiguration
         var metricTypeConverter = new EnumToStringConverter<MetricType>();
         var aggregationTemporalityConverter = new EnumToStringConverter<AggregationTemporality>();
 
+        modelBuilder.Entity<Tenant>(entity =>
+        {
+            entity.ToTable("tenants");
+            entity.HasIndex(e => e.Name).IsUnique().HasDatabaseName("uk_tenant_name");
+            entity.Property(e => e.CreatedAt).HasDefaultValueSql("CURRENT_TIMESTAMP");
+        });
+
         // Resources
         modelBuilder.Entity<Resource>(entity =>
         {
             entity.ToTable("resources");
-            entity.HasIndex(e => e.ResourceHash).IsUnique().HasDatabaseName("uk_resource_hash");
+            entity.HasIndex(e => new { e.TenantId, e.ResourceHash }).IsUnique().HasDatabaseName("uk_resource_tenant_hash");
+            entity.HasIndex(e => e.TenantId).HasDatabaseName("idx_resources_tenant_id");
             entity.HasIndex(e => e.CreatedAt).HasDatabaseName("idx_created_at");
+            entity.Property(e => e.TenantId).HasDefaultValue(Core.Models.ResourceModel.DefaultTenantId);
             entity.Property(e => e.CreatedAt).HasDefaultValueSql("CURRENT_TIMESTAMP");
             entity.Property(e => e.AttributesJson).HasColumnType("jsonb");
         });

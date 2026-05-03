@@ -9,23 +9,42 @@ namespace Keryhe.Telemetry.Data;
 public class AlertRuleRepository : IAlertRuleRepository
 {
     private readonly AlertDbContext _db;
+    private readonly ITenantContext _tenantContext;
 
-    public AlertRuleRepository(AlertDbContext db)
+    public AlertRuleRepository(AlertDbContext db, ITenantContext tenantContext)
     {
         _db = db;
+        _tenantContext = tenantContext ?? throw new ArgumentNullException(nameof(tenantContext));
+    }
+
+    public async Task<List<long>> GetEnabledTenantIdsAsync(CancellationToken ct = default)
+    {
+        return await _db.AlertRules.AsNoTracking()
+            .Where(r => r.Enabled)
+            .Select(r => r.TenantId)
+            .Distinct()
+            .ToListAsync(ct);
     }
 
     public async Task<List<AlertRule>> GetEnabledRulesAsync(CancellationToken ct = default)
     {
+        var tenantId = _tenantContext.GetRequiredTenantId();
+        return await GetEnabledRulesAsync(tenantId, ct);
+    }
+
+    public async Task<List<AlertRule>> GetEnabledRulesAsync(long tenantId, CancellationToken ct = default)
+    {
         var entities = await _db.AlertRules.AsNoTracking()
-            .Where(r => r.Enabled)
+            .Where(r => r.Enabled && r.TenantId == tenantId)
             .ToListAsync(ct);
         return entities.Select(MapToDomain).ToList();
     }
 
     public async Task<List<AlertRule>> GetAllRulesAsync(CancellationToken ct = default)
     {
+        var tenantId = _tenantContext.GetRequiredTenantId();
         var entities = await _db.AlertRules.AsNoTracking()
+            .Where(r => r.TenantId == tenantId)
             .OrderByDescending(r => r.CreatedAt)
             .ToListAsync(ct);
         return entities.Select(MapToDomain).ToList();
@@ -33,8 +52,10 @@ public class AlertRuleRepository : IAlertRuleRepository
 
     public async Task<AlertRule> CreateRuleAsync(AlertRule rule, CancellationToken ct = default)
     {
+        var tenantId = _tenantContext.GetRequiredTenantId();
         var entity = new AlertRuleEntity
         {
+            TenantId = tenantId,
             Name = rule.Name,
             Type = rule.Type.ToString(),
             ServiceName = rule.ServiceName,
@@ -51,7 +72,10 @@ public class AlertRuleRepository : IAlertRuleRepository
 
     public async Task<AlertRule> UpdateRuleAsync(AlertRule rule, CancellationToken ct = default)
     {
-        var entity = await _db.AlertRules.FindAsync(new object[] { rule.Id }, ct)
+        var tenantId = _tenantContext.GetRequiredTenantId();
+        var entity = await _db.AlertRules
+            .Where(r => r.Id == rule.Id && r.TenantId == tenantId)
+            .FirstOrDefaultAsync(ct)
             ?? throw new InvalidOperationException($"Alert rule {rule.Id} not found.");
 
         entity.Name = rule.Name;
@@ -68,19 +92,21 @@ public class AlertRuleRepository : IAlertRuleRepository
 
     public async Task DeleteRuleAsync(int id, CancellationToken ct = default)
     {
-        await _db.AlertRules.Where(r => r.Id == id).ExecuteDeleteAsync(ct);
+        var tenantId = _tenantContext.GetRequiredTenantId();
+        await _db.AlertRules.Where(r => r.Id == id && r.TenantId == tenantId).ExecuteDeleteAsync(ct);
     }
 
-    public async Task<bool> TryClaimFireAsync(int ruleId, int cooldownMinutes, CancellationToken ct = default)
+    public async Task<bool> TryClaimFireAsync(int ruleId, long tenantId, int cooldownMinutes, CancellationToken ct = default)
     {
         var rows = await _db.Database.ExecuteSqlAsync(
             $"""
             UPDATE alert_rules
-            SET "LastFiredAt" = NOW()
-            WHERE "Id" = {ruleId}
-              AND "Enabled" = TRUE
-              AND ("LastFiredAt" IS NULL
-                   OR "LastFiredAt" < NOW() - ({cooldownMinutes} * INTERVAL '1 minute'))
+            SET "last_fired_at" = NOW()
+            WHERE "id" = {ruleId}
+              AND "tenant_id" = {tenantId}
+              AND "enabled" = TRUE
+              AND ("last_fired_at" IS NULL
+                   OR "last_fired_at" < NOW() - ({cooldownMinutes} * INTERVAL '1 minute'))
             """, ct);
         return rows > 0;
     }
@@ -99,8 +125,10 @@ public class AlertRuleRepository : IAlertRuleRepository
 
     public async Task<List<AlertEvent>> GetRecentAlertEventsAsync(int limit = 50, CancellationToken ct = default)
     {
+        var tenantId = _tenantContext.GetRequiredTenantId();
         var entities = await _db.AlertEvents.AsNoTracking()
             .Include(e => e.Rule)
+            .Where(e => e.Rule.TenantId == tenantId)
             .OrderByDescending(e => e.FiredAt)
             .Take(limit)
             .ToListAsync(ct);
@@ -118,6 +146,7 @@ public class AlertRuleRepository : IAlertRuleRepository
     private static AlertRule MapToDomain(AlertRuleEntity e) => new AlertRule
     {
         Id = e.Id,
+        TenantId = e.TenantId,
         Name = e.Name,
         Type = Enum.Parse<AlertRuleType>(e.Type),
         ServiceName = e.ServiceName,

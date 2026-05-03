@@ -27,9 +27,9 @@ public class HistogramDataPoint
 
     public int Flags { get; set; } = 0;
 
-    [Column("Min_Value")] public double? MinValue { get; set; }
+    public double? MinValue { get; set; }
 
-    [Column("Max_Value")] public double? MaxValue { get; set; }
+    public double? MaxValue { get; set; }
 
     public long? ExemplarId { get; set; }
 

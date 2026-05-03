@@ -8,6 +8,8 @@ namespace Keryhe.Telemetry.Data.Access.Models;
 public class Resource
 {
     public long Id { get; set; }
+
+    public long TenantId { get; set; } = Core.Models.ResourceModel.DefaultTenantId;
     
     [Required]
     [StringLength(64)]

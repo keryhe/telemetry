@@ -15,6 +15,7 @@ public enum AlertRuleType
 public class AlertRule
 {
     public int Id { get; set; }
+    public long TenantId { get; set; }
     public string Name { get; set; } = null!;
     public AlertRuleType Type { get; set; }
     public string? ServiceName { get; set; }

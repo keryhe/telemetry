@@ -17,11 +17,13 @@ public class LogService : OpenTelemetry.Proto.Collector.Logs.V1.LogsService.Logs
 {
     private readonly ILogWriteRepository _logRepository;
     private readonly ILogger<LogService> _logger;
+    private readonly ITenantResolver _tenantResolver;
 
-    public LogService(ILogWriteRepository logRepository, ILogger<LogService> logger)
+    public LogService(ILogWriteRepository logRepository, ILogger<LogService> logger, ITenantResolver tenantResolver)
     {
         _logRepository = logRepository ?? throw new ArgumentNullException(nameof(logRepository));
         _logger = logger ?? throw new ArgumentNullException(nameof(logger));
+        _tenantResolver = tenantResolver ?? throw new ArgumentNullException(nameof(tenantResolver));
     }
 
     /// <summary>
@@ -44,10 +46,12 @@ public class LogService : OpenTelemetry.Proto.Collector.Logs.V1.LogsService.Logs
         var storedLogCount = 0;
         try
         {
+            var tenantId = await _tenantResolver.ResolveTenantIdAsync(context, context.CancellationToken);
+
             _logger.LogDebug("Received logs export request with {ResourceLogsCount} resource logs", request.ResourceLogs?.Count ?? 0);
 
             // Convert protobuf message to Models
-            logRecords = ConvertToLogRecordModels(request);
+            logRecords = ConvertToLogRecordModels(request, tenantId);
 
             if (!logRecords.Any())
             {
@@ -97,14 +101,14 @@ public class LogService : OpenTelemetry.Proto.Collector.Logs.V1.LogsService.Logs
     /// <summary>
     /// Converts OTLP ExportLogsServiceRequest to a list of LogRecordModel objects
     /// </summary>
-    private List<LogRecordModel> ConvertToLogRecordModels(ExportLogsServiceRequest request)
+    private List<LogRecordModel> ConvertToLogRecordModels(ExportLogsServiceRequest request, long tenantId)
     {
         var logRecords = new List<LogRecordModel>();
 
         foreach (var resourceLogs in request.ResourceLogs)
         {
             // Convert resource information
-            var resourceModel = ConvertResource(resourceLogs.SchemaUrl, resourceLogs.Resource);
+            var resourceModel = ConvertResource(resourceLogs.SchemaUrl, resourceLogs.Resource, tenantId);
 
             foreach (var scopeLogs in resourceLogs.ScopeLogs)
             {
@@ -125,13 +129,14 @@ public class LogService : OpenTelemetry.Proto.Collector.Logs.V1.LogsService.Logs
     /// <summary>
     /// Converts OTLP Resource to ResourceModel
     /// </summary>
-    private ResourceModel? ConvertResource(string schemaUrl, OpenTelemetry.Proto.Resource.V1.Resource? resource)
+    private ResourceModel? ConvertResource(string schemaUrl, OpenTelemetry.Proto.Resource.V1.Resource? resource, long tenantId)
     {
         if (resource == null)
             return null;
 
         return new ResourceModel
         {
+            TenantId = tenantId,
             SchemaUrl = string.IsNullOrEmpty(schemaUrl) ? null : schemaUrl,
             Attributes = ConvertAttributes(resource.Attributes)
         };

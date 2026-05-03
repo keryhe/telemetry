@@ -13,22 +13,39 @@ public class AlertService : IAlertService
     private readonly Dictionary<AlertRuleType, IAlertEvaluator> _evaluators;
     private readonly INotificationChannel _notification;
     private readonly ILogger<AlertService> _logger;
+    private readonly ITenantContext _tenantContext;
 
     public AlertService(
         IAlertRuleRepository ruleRepo,
         IEnumerable<IAlertEvaluator> evaluators,
         INotificationChannel notification,
-        ILogger<AlertService> logger)
+        ILogger<AlertService> logger,
+        ITenantContext tenantContext)
     {
         _ruleRepo = ruleRepo;
         _evaluators = evaluators.ToDictionary(e => e.SupportedType);
         _notification = notification;
         _logger = logger;
+        _tenantContext = tenantContext ?? throw new ArgumentNullException(nameof(tenantContext));
     }
 
     public async Task EvaluateAllAsync(CancellationToken ct = default)
     {
-        var rules = await _ruleRepo.GetEnabledRulesAsync(ct);
+        var tenantIds = await _ruleRepo.GetEnabledTenantIdsAsync(ct);
+
+        foreach (var tenantId in tenantIds)
+        {
+            if (ct.IsCancellationRequested)
+                break;
+
+            _tenantContext.SetTenantId(tenantId);
+            await EvaluateTenantRulesAsync(tenantId, ct);
+        }
+    }
+
+    private async Task EvaluateTenantRulesAsync(long tenantId, CancellationToken ct)
+    {
+        var rules = await _ruleRepo.GetEnabledRulesAsync(tenantId, ct);
         var now = DateTime.UtcNow;
 
         foreach (var rule in rules)
@@ -54,7 +71,7 @@ public class AlertService : IAlertService
 
                 // Atomically claim the fire slot — only one instance wins under a load balancer.
                 // The UPDATE checks the cooldown and sets last_fired_at in a single statement.
-                var claimed = await _ruleRepo.TryClaimFireAsync(rule.Id, rule.CooldownMinutes, ct);
+                var claimed = await _ruleRepo.TryClaimFireAsync(rule.Id, tenantId, rule.CooldownMinutes, ct);
                 if (!claimed)
                     continue;
 

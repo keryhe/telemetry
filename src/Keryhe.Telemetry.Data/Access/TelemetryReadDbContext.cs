@@ -1,4 +1,5 @@
 using Microsoft.EntityFrameworkCore;
+using Keryhe.Telemetry.Core;
 using Keryhe.Telemetry.Data.Access.Models;
 
 namespace Keryhe.Telemetry.Data.Access;
@@ -9,11 +10,15 @@ namespace Keryhe.Telemetry.Data.Access;
 /// </summary>
 public class TelemetryReadDbContext : DbContext
 {
-    public TelemetryReadDbContext(DbContextOptions<TelemetryReadDbContext> options) : base(options)
+    private readonly long _tenantId;
+
+    public TelemetryReadDbContext(DbContextOptions<TelemetryReadDbContext> options, ITenantContext tenantContext) : base(options)
     {
+        _tenantId = tenantContext?.GetRequiredTenantId() ?? throw new ArgumentNullException(nameof(tenantContext));
     }
 
     public DbSet<Resource> Resources { get; set; }
+    public DbSet<Tenant> Tenants { get; set; }
     public DbSet<InstrumentationScope> InstrumentationScopes { get; set; }
 
     public DbSet<Span> Spans { get; set; }
@@ -36,6 +41,18 @@ public class TelemetryReadDbContext : DbContext
     {
         base.OnModelCreating(modelBuilder);
         TelemetryModelConfiguration.Configure(modelBuilder);
+
+        modelBuilder.Entity<Resource>().HasQueryFilter(resource => resource.TenantId == _tenantId);
+        modelBuilder.Entity<Span>().HasQueryFilter(span => span.Resource.TenantId == _tenantId);
+        modelBuilder.Entity<SpanEvent>().HasQueryFilter(spanEvent => spanEvent.Span.Resource.TenantId == _tenantId);
+        modelBuilder.Entity<SpanLink>().HasQueryFilter(spanLink => spanLink.Span.Resource.TenantId == _tenantId);
+        modelBuilder.Entity<Metric>().HasQueryFilter(metric => metric.Resource.TenantId == _tenantId);
+        modelBuilder.Entity<GaugeDataPoint>().HasQueryFilter(dataPoint => dataPoint.Metric.Resource.TenantId == _tenantId);
+        modelBuilder.Entity<SumDataPoint>().HasQueryFilter(dataPoint => dataPoint.Metric.Resource.TenantId == _tenantId);
+        modelBuilder.Entity<HistogramDataPoint>().HasQueryFilter(dataPoint => dataPoint.Metric.Resource.TenantId == _tenantId);
+        modelBuilder.Entity<ExponentialHistogramDataPoint>().HasQueryFilter(dataPoint => dataPoint.Metric.Resource.TenantId == _tenantId);
+        modelBuilder.Entity<SummaryDataPoint>().HasQueryFilter(dataPoint => dataPoint.Metric.Resource.TenantId == _tenantId);
+        modelBuilder.Entity<LogRecord>().HasQueryFilter(logRecord => logRecord.Resource.TenantId == _tenantId);
     }
 
     protected override void ConfigureConventions(ModelConfigurationBuilder configurationBuilder)

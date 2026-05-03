@@ -18,6 +18,7 @@ builder.Services.AddDbContextFactory<TelemetryReadDbContext>(options =>
 {
     var connectionString = builder.Configuration.GetConnectionString("Read");
     options.UseNpgsql(connectionString);
+    options.UseSnakeCaseNamingConvention();
     options.UseQueryTrackingBehavior(QueryTrackingBehavior.NoTracking);
 
     if (builder.Environment.IsDevelopment())
@@ -25,13 +26,16 @@ builder.Services.AddDbContextFactory<TelemetryReadDbContext>(options =>
         options.EnableSensitiveDataLogging();
         options.EnableDetailedErrors();
     }
-});
+}, ServiceLifetime.Scoped);
 
 builder.Services.AddMudServices();
 builder.Services.AddRazorComponents()
     .AddInteractiveServerComponents();
 
+builder.Services.AddScoped<TenantContext>();
 builder.Services
+    .AddScoped<ITenantContext>(serviceProvider => serviceProvider.GetRequiredService<TenantContext>())
+    .AddScoped<ITenantCatalogService, TenantCatalogService>()
     .AddScoped<ILogReadRepository, LogReadRepository>()
     .AddScoped<IMetricReadRepository, MetricReadRepository>()
     .AddScoped<ITraceReadRepository, TraceReadRepository>()
@@ -53,6 +57,7 @@ builder.Services.AddDbContext<AlertDbContext>(options =>
 {
     var connectionString = builder.Configuration.GetConnectionString("Read");
     options.UseNpgsql(connectionString);
+    options.UseSnakeCaseNamingConvention();
 });
 builder.Services.AddHttpClient("AlertWebhook");
 builder.Services

@@ -22,12 +22,15 @@ public class AlertDbContext : DbContext
         modelBuilder.Entity<AlertRuleEntity>(entity =>
         {
             entity.ToTable("alert_rules");
+            entity.Property(e => e.TenantId).IsRequired();
             entity.Property(e => e.Name).HasMaxLength(255);
             entity.Property(e => e.Type).HasMaxLength(50);
             entity.Property(e => e.ServiceName).HasMaxLength(255);
             entity.Property(e => e.ConditionJson).HasColumnType("jsonb");
             entity.Property(e => e.WebhookUrl).HasColumnType("text");
             entity.Property(e => e.CreatedAt).HasDefaultValueSql("CURRENT_TIMESTAMP");
+            entity.HasIndex(e => e.TenantId).HasDatabaseName("idx_alert_rules_tenant_id");
+            entity.HasIndex(e => new { e.TenantId, e.Enabled }).HasDatabaseName("idx_alert_rules_tenant_enabled");
 
             entity.HasMany(e => e.Events)
                   .WithOne(e => e.Rule)

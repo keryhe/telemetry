@@ -18,11 +18,13 @@ public class MetricService : MetricsService.MetricsServiceBase
 {
     private readonly IMetricWriteRepository _metricRepository;
     private readonly ILogger<MetricService> _logger;
+    private readonly ITenantResolver _tenantResolver;
 
-    public MetricService(IMetricWriteRepository metricRepository, ILogger<MetricService> logger)
+    public MetricService(IMetricWriteRepository metricRepository, ILogger<MetricService> logger, ITenantResolver tenantResolver)
     {
         _metricRepository = metricRepository ?? throw new ArgumentNullException(nameof(metricRepository));
         _logger = logger ?? throw new ArgumentNullException(nameof(logger));
+        _tenantResolver = tenantResolver ?? throw new ArgumentNullException(nameof(tenantResolver));
     }
 
     /// <summary>
@@ -48,11 +50,13 @@ public class MetricService : MetricsService.MetricsServiceBase
         var storedDataPointCount = 0;
         try
         {
+            var tenantId = await _tenantResolver.ResolveTenantIdAsync(context, context.CancellationToken);
+
             _logger.LogDebug("Received metrics export request with {ResourceMetricsCount} resource metrics", 
                 request.ResourceMetrics?.Count ?? 0);
 
             // Convert protobuf message to Models
-            metrics = ConvertToMetricModels(request);
+            metrics = ConvertToMetricModels(request, tenantId);
 
             if (!metrics.Any())
             {
@@ -106,14 +110,14 @@ public class MetricService : MetricsService.MetricsServiceBase
     /// <summary>
     /// Converts OTLP ExportMetricsServiceRequest to a list of MetricModel objects
     /// </summary>
-    private List<MetricModel> ConvertToMetricModels(ExportMetricsServiceRequest request)
+    private List<MetricModel> ConvertToMetricModels(ExportMetricsServiceRequest request, long tenantId)
     {
         var metricModels = new List<MetricModel>();
 
         foreach (var resourceMetrics in request.ResourceMetrics)
         {
             // Convert resource information
-            var resourceModel = ConvertResource(resourceMetrics.SchemaUrl, resourceMetrics.Resource);
+            var resourceModel = ConvertResource(resourceMetrics.SchemaUrl, resourceMetrics.Resource, tenantId);
 
             foreach (var scopeMetrics in resourceMetrics.ScopeMetrics)
             {
@@ -141,13 +145,14 @@ public class MetricService : MetricsService.MetricsServiceBase
     /// <summary>
     /// Converts OTLP Resource to ResourceModel
     /// </summary>
-    private ResourceModel? ConvertResource(string schemaUrl, OpenTelemetry.Proto.Resource.V1.Resource? resource)
+    private ResourceModel? ConvertResource(string schemaUrl, OpenTelemetry.Proto.Resource.V1.Resource? resource, long tenantId)
     {
         if (resource == null)
             return null;
 
         return new ResourceModel
         {
+            TenantId = tenantId,
             SchemaUrl = string.IsNullOrEmpty(schemaUrl) ? null : schemaUrl,
             Attributes = ConvertAttributes(resource.Attributes)
         };

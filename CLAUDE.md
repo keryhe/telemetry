@@ -4,6 +4,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Commands
 
+Requires the .NET 10 SDK.
+
 ```bash
 # Build
 dotnet build Telemetry.sln
@@ -25,7 +27,7 @@ There are no test projects in the solution.
 
 ## Architecture
 
-This is an **OpenTelemetry (OTLP) ingestion and visualization platform** — a self-hosted alternative to tools like Jaeger or Grafana Tempo. It receives telemetry via gRPC, stores it in PostgreSQL, and visualizes it through a Blazor UI.
+This is an **OpenTelemetry (OTLP) ingestion and visualization platform** — a self-hosted alternative to tools like Jaeger or Grafana Tempo. It receives telemetry via gRPC, stores it in PostgreSQL (TimescaleDB), and visualizes it through a Blazor UI.
 
 ### Projects
 
@@ -35,6 +37,7 @@ This is an **OpenTelemetry (OTLP) ingestion and visualization platform** — a s
 | `Keryhe.Telemetry.Data` | EF Core DbContexts and repository implementations |
 | `Keryhe.Telemetry.Server` | gRPC server receiving OTLP traces, metrics, and logs |
 | `Keryhe.Telemetry.Client` | Blazor Server UI for visualization (MudBlazor + ApexCharts) |
+| `Keryhe.Telemetry.Alerting` | Alert rule evaluation with pluggable evaluators and webhook delivery |
 | `Keryhe.Telemetry.TestDataGenerator` | Worker service that emits synthetic telemetry via OpenTelemetry SDK |
 
 ### Data Flow
@@ -42,11 +45,13 @@ This is an **OpenTelemetry (OTLP) ingestion and visualization platform** — a s
 ```
 OpenTelemetry SDKs (any language)
   → OTLP gRPC (port 5117) → Keryhe.Telemetry.Server
-  → TelemetryWriteDbContext → PostgreSQL
+  → TelemetryIngestionChannel (bounded channel, capacity 10k per signal type)
+  → TelemetryIngestionWorker (background) → TelemetryWriteDbContext → PostgreSQL (TimescaleDB)
   → TelemetryReadDbContext → Keryhe.Telemetry.Client (Blazor UI)
+  → AlertEvaluationWorker (background, 60s interval) → AlertDbContext → webhook notifications
 ```
 
-**CQRS split**: The Server uses `TelemetryWriteDbContext` (full change tracking); the Client uses `TelemetryReadDbContext` (no-tracking, read-only). Both contexts share the same `TelemetryModelConfiguration` for entity mappings.
+**Three EF Core DbContexts**: `TelemetryWriteDbContext` (Server writes, full tracking), `TelemetryReadDbContext` (Client reads, no-tracking, global tenant query filter), `AlertDbContext` (alert_rules + alert_events). The main contexts share `TelemetryModelConfiguration` for entity mappings.
 
 ### Key Patterns
 
@@ -61,15 +66,33 @@ OpenTelemetry SDKs (any language)
 
 **Page state classes** (`src/Keryhe.Telemetry.Client/Services/State/`): Scoped services holding per-page state (filters, selected time range, etc.) shared across Blazor components.
 
-**Hash-based deduplication**: Resources and InstrumentationScopes are deduplicated via hash columns (`ResourceHash`, `ScopeHash`) with UNIQUE constraints — inserts use ON CONFLICT DO NOTHING or DO UPDATE.
+**Client pages** (`Components/Pages/`): Dashboard, Traces, TraceDetail, Metrics, MetricDetail, ServiceMetrics, Logs, Alerts. Each has a corresponding `*PageState` scoped service in `Services/State/`.
+
+**Hash-based deduplication**: Resources and InstrumentationScopes are deduplicated via hash columns (`ResourceHash`, `ScopeHash`) with UNIQUE constraints — inserts use ON CONFLICT DO NOTHING or DO UPDATE. An in-memory `ResourceScopeCache` (singleton `ConcurrentDictionary`) short-circuits DB lookups for resources and scopes already seen in the current process lifetime.
 
 **JSONB for attributes**: OpenTelemetry key-value attributes are stored as JSONB columns (`Attributes`, `FilteredAttributes`) rather than normalized tables.
 
+**Multi-tenant architecture**: All telemetry tables include `tenant_id`. The Server resolves tenants by hashing the `Authorization: Bearer <key>` gRPC header against the `api_keys` table (`ApiKeyTenantResolver`). `ITenantContext` (scoped) carries the active tenant ID. `TelemetryReadDbContext` enforces a global EF Core query filter on `tenant_id`.
+
+**TelemetryIngestionChannel** (Data project, singleton): Three bounded `System.Threading.Channels` (one per signal type, capacity 10,000, `FullMode.Wait`). gRPC service handlers write to the channel; `TelemetryIngestionWorker` drains it in the background. Decouples gRPC latency from DB write latency and provides backpressure.
+
+**Alert evaluation** (`Keryhe.Telemetry.Alerting`): `AlertService.EvaluateAllAsync` iterates all tenants with enabled rules. Each rule type dispatches to a registered `IAlertEvaluator` (`MetricThreshold`, `ErrorRate`, `SlowTrace`, `LogSeveritySpike`). An atomic `TryClaimFireAsync` (UPDATE with cooldown check) prevents duplicate fires under load balancing. `AlertEvaluationWorker` (BackgroundService in Client) drives the loop.
+
 ### Database
 
-PostgreSQL with 13 main tables: `resources`, `instrumentation_scopes`, `spans`, `span_events`, `span_links`, `metrics`, `gauge_data_points`, `sum_data_points`, `histogram_data_points`, `exponential_histogram_data_points`, `summary_data_points`, `exemplars`, `log_records`.
+PostgreSQL + TimescaleDB. Metric data point tables and `log_records` are TimescaleDB hypertables (partitioned on `time_unix_nano`). Compression activates at 7 days; retention drops metrics at 180 days and logs at 90 days. `log_severity_stats_daily` is a TimescaleDB continuous aggregate (refreshes every 5 minutes).
 
-Schema also includes built-in views: `trace_summary`, `service_map`, `service_map_detailed`, `log_severity_stats`.
+**Telemetry (13)**: `resources`, `instrumentation_scopes`, `spans`, `span_events`, `span_links`, `metrics`, `gauge_data_points`, `sum_data_points`, `histogram_data_points`, `exponential_histogram_data_points`, `summary_data_points`, `exemplars`, `log_records`
+
+**Multi-tenant/auth (2)**: `tenants`, `api_keys`
+
+**Alerting (2)**: `alert_rules`, `alert_events`
+
+**Utility (1)**: `schema_version`
+
+Built-in views: `trace_summary`, `service_map`, `service_map_detailed`, `log_severity_stats` (compatibility alias over the continuous aggregate).
+
+TimescaleDB continuous aggregate: `log_severity_stats_daily`.
 
 Connection strings:
 - Server reads from `ConnectionStrings:Write` in `src/Keryhe.Telemetry.Server/appsettings.json`
