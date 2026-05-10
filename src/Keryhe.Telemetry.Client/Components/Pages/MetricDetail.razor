@@ -126,8 +126,8 @@
                     <MudCard Elevation="2">
                         <MudCardContent>
                             <MudStack Spacing="1">
-                                <MudText Typo="Typo.body2" Color="Color.Secondary">Current Value</MudText>
-                                <MudText Typo="Typo.h5">@FormatValue(_currentValue)</MudText>
+                                <MudText Typo="Typo.body2" Color="Color.Secondary">@(_statsAreHistogram ? "Mean" : _statsAreRates ? "Current Rate" : "Current Value")</MudText>
+                                <MudText Typo="Typo.h5">@FormatValue(_currentValue)@(_statsAreRates ? "/s" : "")</MudText>
                             </MudStack>
                         </MudCardContent>
                     </MudCard>
@@ -136,8 +136,8 @@
                     <MudCard Elevation="2">
                         <MudCardContent>
                             <MudStack Spacing="1">
-                                <MudText Typo="Typo.body2" Color="Color.Secondary">Minimum</MudText>
-                                <MudText Typo="Typo.h5">@FormatValue(_minValue)</MudText>
+                                <MudText Typo="Typo.body2" Color="Color.Secondary">@(_statsAreHistogram ? "Min" : _statsAreRates ? "Min Rate" : "Minimum")</MudText>
+                                <MudText Typo="Typo.h5">@FormatValue(_minValue)@(_statsAreRates ? "/s" : "")</MudText>
                             </MudStack>
                         </MudCardContent>
                     </MudCard>
@@ -146,8 +146,8 @@
                     <MudCard Elevation="2">
                         <MudCardContent>
                             <MudStack Spacing="1">
-                                <MudText Typo="Typo.body2" Color="Color.Secondary">Maximum</MudText>
-                                <MudText Typo="Typo.h5">@FormatValue(_maxValue)</MudText>
+                                <MudText Typo="Typo.body2" Color="Color.Secondary">@(_statsAreHistogram ? "Max" : _statsAreRates ? "Max Rate" : "Maximum")</MudText>
+                                <MudText Typo="Typo.h5">@FormatValue(_maxValue)@(_statsAreRates ? "/s" : "")</MudText>
                             </MudStack>
                         </MudCardContent>
                     </MudCard>
@@ -156,8 +156,8 @@
                     <MudCard Elevation="2">
                         <MudCardContent>
                             <MudStack Spacing="1">
-                                <MudText Typo="Typo.body2" Color="Color.Secondary">Average</MudText>
-                                <MudText Typo="Typo.h5">@FormatValue(_avgValue)</MudText>
+                                <MudText Typo="Typo.body2" Color="Color.Secondary">@(_statsAreHistogram ? "Count" : _statsAreRates ? "Avg Rate" : "Average")</MudText>
+                                <MudText Typo="Typo.h5">@FormatValue(_avgValue)@(_statsAreRates ? "/s" : "")</MudText>
                             </MudStack>
                         </MudCardContent>
                     </MudCard>
@@ -192,20 +192,32 @@
         <MudTabs Elevation="2" Rounded="true" ApplyEffectsToContainer="true" PanelClass="pa-6" @bind-ActivePanelIndex="_activeTab">
             <!-- Chart Tab -->
             <MudTabPanel Text="Chart" Icon="@Icons.Material.Filled.ShowChart">
-                @if (_multiSeriesData != null && _multiSeriesData.Series.Count > 1)
-                {
-                    <MudStack Row="true" AlignItems="AlignItems.Center" Class="mb-3">
+                <MudStack Row="true" AlignItems="AlignItems.Center" Spacing="3" Class="mb-3">
+                    @if (_multiSeriesData != null && _multiSeriesData.Series.Count > 1)
+                    {
                         <MudSwitch @bind-Value="_showPerServiceView" Color="Color.Primary"
                                    Label="Per-service breakdown" T="bool"/>
-                    </MudStack>
-                }
+                    }
+                    @if (_isCounterMetric)
+                    {
+                        <MudSwitch Value="_showRaw"
+                                   ValueChanged="OnShowRawChanged"
+                                   Color="Color.Secondary"
+                                   Label="Show raw counter"
+                                   T="bool"/>
+                        @if (!_showRaw)
+                        {
+                            <MudText Typo="Typo.caption" Color="Color.Secondary">(per second)</MudText>
+                        }
+                    }
+                </MudStack>
                 @if (_showPerServiceView && _multiSeriesData != null)
                 {
-                    <MetricChart MultiSeriesData="@_multiSeriesData" Height="400" Title="@MetricName"/>
+                    <MetricChart MultiSeriesData="@_multiSeriesData" Height="400" Title="@MetricName" ShowRaw="@_showRaw" Unit="@_metricInfo?.Unit"/>
                 }
                 else
                 {
-                    <MetricChart Data="@_metricData" Height="400" Title="@MetricName"/>
+                    <MetricChart Data="@_metricData" Height="400" Title="@MetricName" ShowRaw="@_showRaw" Unit="@_metricInfo?.Unit"/>
                 }
             </MudTabPanel>
 
@@ -218,7 +230,7 @@
                             <MudTh>Timestamp</MudTh>
                             <MudTh>Value</MudTh>
                             <MudTh>Attributes</MudTh>
-                            @if (_metricData.Type == MetricType.HISTOGRAM)
+                            @if (_metricData.Type is MetricType.HISTOGRAM or MetricType.EXPONENTIAL_HISTOGRAM)
                             {
                                 <MudTh>Count</MudTh>
                                 <MudTh>Sum</MudTh>
@@ -242,7 +254,7 @@
                                     </MudStack>
                                 }
                             </MudTd>
-                            @if (_metricData.Type == MetricType.HISTOGRAM)
+                            @if (_metricData.Type is MetricType.HISTOGRAM or MetricType.EXPONENTIAL_HISTOGRAM)
                             {
                                 <MudTd DataLabel="Count">@context.Count</MudTd>
                                 <MudTd DataLabel="Sum">@context.Sum?.ToString("F2")</MudTd>

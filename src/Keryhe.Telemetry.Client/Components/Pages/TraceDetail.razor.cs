@@ -157,8 +157,19 @@ public partial class TraceDetail : ComponentBase
     private string FormatDateTime(DateTime dateTime) =>
         dateTime.ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss.fff");
 
-    private List<SpanModel> BuildSpanHierarchy() =>
-        _selectedTraceSpans.Where(s => string.IsNullOrEmpty(s.ParentSpanIdHex)).ToList();
+    private List<SpanModel> BuildSpanHierarchy()
+    {
+        var knownSpanIds = _selectedTraceSpans
+            .Select(s => s.SpanIdHex)
+            .ToHashSet(StringComparer.Ordinal);
+
+        return _selectedTraceSpans
+            .Where(s =>
+                string.IsNullOrEmpty(s.ParentSpanIdHex) ||
+                !knownSpanIds.Contains(s.ParentSpanIdHex))
+            .OrderBy(s => s.StartTimeUnixNano)
+            .ToList();
+    }
 
     private List<SpanModel> GetChildSpans(string parentSpanId) =>
         _selectedTraceSpans

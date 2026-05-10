@@ -62,6 +62,12 @@ public partial class MetricDetail : ComponentBase, IDisposable
     private MultiSeriesMetricData? _multiSeriesData;
     private bool _showPerServiceView = false;
 
+    // Counter state
+    private bool _isCounterMetric = false;
+    private bool _showRaw = false;
+    private bool _statsAreRates = false;
+    private bool _statsAreHistogram = false;
+
     // Stats
     private bool _canShowStats = false;
     private double? _currentValue;
@@ -84,6 +90,7 @@ public partial class MetricDetail : ComponentBase, IDisposable
             _selectedLabelFilters = new Dictionary<string, string>(State.SelectedLabelFilters);
             _showPerServiceView = State.ShowPerServiceView;
             _activeTabBacking = State.ActiveTab;
+            _showRaw = State.ShowRaw;
         }
         else
         {
@@ -93,6 +100,7 @@ public partial class MetricDetail : ComponentBase, IDisposable
             _selectedLabelFilters = new();
             _showPerServiceView = false;
             _activeTabBacking = 0;
+            _showRaw = false;
             State.CurrentMetricName = decodedMetricName;
         }
 
@@ -117,6 +125,7 @@ public partial class MetricDetail : ComponentBase, IDisposable
             _selectedLabelFilters = new Dictionary<string, string>(State.SelectedLabelFilters);
             _showPerServiceView = State.ShowPerServiceView;
             _activeTabBacking = State.ActiveTab;
+            _showRaw = State.ShowRaw;
         }
         StateHasChanged();
     }
@@ -170,6 +179,7 @@ public partial class MetricDetail : ComponentBase, IDisposable
         State.SelectedServiceFilter = _selectedServiceFilter;
         State.SelectedLabelFilters = new Dictionary<string, string>(_selectedLabelFilters);
         State.ShowPerServiceView = _showPerServiceView;
+        State.ShowRaw = _showRaw;
         _ = State.SaveAsync();
 
         _loading = true;
@@ -234,6 +244,12 @@ public partial class MetricDetail : ComponentBase, IDisposable
 
                 _labels = await MetricService.GetMetricLabelsAsync(decodedName);
 
+                // Detect counter: monotonic cumulative SUM
+                var firstPoint = _metricData.Points?.FirstOrDefault();
+                _isCounterMetric = _metricData.Type == MetricType.SUM
+                    && firstPoint?.IsMonotonic == true
+                    && firstPoint.AggregationTemporality == AggregationTemporality.CUMULATIVE;
+
                 CalculateStats();
             }
         }
@@ -282,25 +298,82 @@ public partial class MetricDetail : ComponentBase, IDisposable
         if (_metricData?.Points == null || !_metricData.Points.Any())
         {
             _canShowStats = false;
+            _statsAreRates = false;
+            _statsAreHistogram = false;
             return;
         }
 
-        _canShowStats = _metricData.Type == MetricType.GAUGE;
+        bool isCounter = _isCounterMetric && !_showRaw;
+        bool isHistogram = _metricData.Type == MetricType.HISTOGRAM;
+        _canShowStats = _metricData.Type == MetricType.GAUGE || isCounter || isHistogram;
+        _statsAreRates = isCounter;
+        _statsAreHistogram = isHistogram;
 
         if (_canShowStats)
         {
-            var values = _metricData.Points
-                .Select(p => (double?)(p.DoubleValue ?? p.IntValue ?? 0))
-                .Where(v => v.HasValue)
-                .Select(v => v!.Value)
-                .ToList();
-
-            if (values.Any())
+            if (isHistogram)
             {
-                _currentValue = values.Last();
-                _minValue = values.Min();
-                _maxValue = values.Max();
-                _avgValue = values.Average();
+                // Use the latest point that has Count populated
+                var latest = _metricData.Points
+                    .OrderByDescending(p => p.Timestamp)
+                    .FirstOrDefault(p => p.Count is > 0);
+
+                if (latest != null)
+                {
+                    _currentValue = (latest.Sum.HasValue && latest.Count > 0)
+                        ? latest.Sum!.Value / latest.Count!.Value   // mean
+                        : null;
+                    _minValue = latest.Min;
+                    _maxValue = latest.Max;
+                    _avgValue = (double?)latest.Count;
+                }
+                else
+                {
+                    _currentValue = _minValue = _maxValue = _avgValue = null;
+                }
+            }
+            else if (isCounter)
+            {
+                // Compute rate series (Δvalue / Δseconds) and derive stats from rates
+                var rates = new List<double>();
+                var pts = _metricData.Points;
+                for (int i = 1; i < pts.Count; i++)
+                {
+                    double prevVal = (double)(pts[i - 1].DoubleValue ?? pts[i - 1].IntValue ?? 0);
+                    double currVal = (double)(pts[i].DoubleValue ?? pts[i].IntValue ?? 0);
+                    if (currVal < prevVal) continue; // counter reset
+                    double deltaSeconds = (pts[i].Timestamp - pts[i - 1].Timestamp).TotalSeconds;
+                    if (deltaSeconds <= 0) continue;
+                    rates.Add((currVal - prevVal) / deltaSeconds);
+                }
+
+                if (rates.Any())
+                {
+                    _currentValue = rates.Last();
+                    _minValue = rates.Min();
+                    _maxValue = rates.Max();
+                    _avgValue = rates.Average();
+                }
+                else
+                {
+                    _currentValue = _minValue = _maxValue = _avgValue = null;
+                }
+            }
+            else
+            {
+                var values = _metricData.Points
+                    .Select(p => (double?)(p.DoubleValue ?? p.IntValue ?? 0))
+                    .Where(v => v.HasValue)
+                    .Select(v => v!.Value)
+                    .ToList();
+
+                if (values.Any())
+                {
+                    _currentValue = values.Last();
+                    _minValue = values.Min();
+                    _maxValue = values.Max();
+                    _avgValue = values.Average();
+                }
             }
         }
         else
@@ -315,6 +388,14 @@ public partial class MetricDetail : ComponentBase, IDisposable
     private async Task RefreshDataAsync()
     {
         await LoadDataAsync();
+    }
+
+    private void OnShowRawChanged(bool showRaw)
+    {
+        _showRaw = showRaw;
+        State.ShowRaw = showRaw;
+        _ = State.SaveAsync();
+        CalculateStats();
     }
 
     private async Task ExportDataAsync()

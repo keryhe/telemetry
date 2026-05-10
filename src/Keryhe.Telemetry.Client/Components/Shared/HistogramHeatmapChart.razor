@@ -1,0 +1,29 @@
+@using ApexCharts
+@using Keryhe.Telemetry.Core.Models
+@using Color = MudBlazor.Color
+
+@if (_canShow && _heatSeries.Any())
+{
+    <MudText Typo="Typo.body2" Color="Color.Secondary" Class="mt-2 mb-1" Style="font-weight:500;">Distribution over time</MudText>
+    <ApexChart TItem="HeatmapPoint" Options="@_chartOptions" Height="@Height">
+        @* Lowest bucket first so it appears at the bottom of the heatmap *@
+        @foreach (var series in _heatSeries)
+        {
+            <ApexPointSeries TItem="HeatmapPoint"
+                             Items="@series.Points"
+                             Name="@series.BucketLabel"
+                             SeriesType="SeriesType.Heatmap"
+                             XValue="@(e => e.Time)"
+                             YValue="@(e => (decimal)e.Value)" />
+        }
+    </ApexChart>
+}
+else if (Data != null)
+{
+    <MudPaper Class="pa-4 d-flex align-center justify-center" Style="@($"height: {Height}px;")">
+        <MudText Typo="Typo.body2" Color="Color.Secondary">No distribution data available</MudText>
+    </MudPaper>
+}
+
+@code {
+}

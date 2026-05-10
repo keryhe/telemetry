@@ -13,7 +13,7 @@
                 <ApexPointSeries TItem="DataPoint"
                                  Items="@series.Points"
                                  Name="@series.Name"
-                                 SeriesType="SeriesType.Line"
+                                 SeriesType="@_seriesType"
                                  XValue="@(e => e.Time)"
                                  YValue="@(e => (decimal)e.Value)" />
             }
@@ -21,7 +21,22 @@
 
         @if (Data?.Type == MetricType.HISTOGRAM || Data?.Type == MetricType.EXPONENTIAL_HISTOGRAM)
         {
-            <HistogramChart Data="@Data" Height="320" />
+            @if (_apexSeries2.Any())
+            {
+                <MudText Typo="Typo.body2" Color="Color.Secondary" Class="mt-2 mb-1" Style="font-weight:500;">Min / Max</MudText>
+                <ApexChart TItem="DataPoint" Options="@_chartOptions2" Height="220">
+                    @foreach (var series in _apexSeries2)
+                    {
+                        <ApexPointSeries TItem="DataPoint"
+                                         Items="@series.Points"
+                                         Name="@series.Name"
+                                         SeriesType="SeriesType.Line"
+                                         XValue="@(e => e.Time)"
+                                         YValue="@(e => (decimal)e.Value)" />
+                    }
+                </ApexChart>
+            }
+            <HistogramHeatmapChart Data="@Data" Height="320" />
         }
 
         @if (Data?.Type == MetricType.SUMMARY && Data?.Points != null && Data.Points.Any())
