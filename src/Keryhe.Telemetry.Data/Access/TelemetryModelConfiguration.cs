@@ -10,8 +10,10 @@ namespace Keryhe.Telemetry.Data.Access;
 /// </summary>
 internal static class TelemetryModelConfiguration
 {
-    internal static void Configure(ModelBuilder modelBuilder)
+    internal static void Configure(ModelBuilder modelBuilder, bool isPostgres = true)
     {
+        var jsonColumnType = isPostgres ? "jsonb" : "nvarchar(max)";
+
         var attributeTypeConverter = new EnumToStringConverter<AttributeType>();
         var spanKindConverter = new EnumToStringConverter<SpanKind>();
         var spanStatusConverter = new EnumToStringConverter<SpanStatusCode>();
@@ -34,7 +36,7 @@ internal static class TelemetryModelConfiguration
             entity.HasIndex(e => e.CreatedAt).HasDatabaseName("idx_created_at");
             entity.Property(e => e.TenantId).HasDefaultValue(Core.Models.ResourceModel.DefaultTenantId);
             entity.Property(e => e.CreatedAt).HasDefaultValueSql("CURRENT_TIMESTAMP");
-            entity.Property(e => e.AttributesJson).HasColumnType("jsonb");
+            entity.Property(e => e.AttributesJson).HasColumnType(jsonColumnType);
         });
 
         // Instrumentation Scopes
@@ -44,7 +46,7 @@ internal static class TelemetryModelConfiguration
             entity.HasIndex(e => e.ScopeHash).IsUnique().HasDatabaseName("uk_scope_hash");
             entity.HasIndex(e => new { e.Name, e.Version }).HasDatabaseName("idx_name_version");
             entity.Property(e => e.CreatedAt).HasDefaultValueSql("CURRENT_TIMESTAMP");
-            entity.Property(e => e.AttributesJson).HasColumnType("jsonb");
+            entity.Property(e => e.AttributesJson).HasColumnType(jsonColumnType);
         });
 
         // Spans
@@ -67,14 +69,14 @@ internal static class TelemetryModelConfiguration
             entity.HasIndex(e => e.Name).HasDatabaseName("idx_spans_name");
             entity.HasIndex(e => e.Kind).HasDatabaseName("idx_kind");
             entity.HasIndex(e => e.StatusCode).HasDatabaseName("idx_status");
-            entity.Property(e => e.AttributesJson).HasColumnType("jsonb");
+            entity.Property(e => e.AttributesJson).HasColumnType(jsonColumnType);
         });
 
         modelBuilder.Entity<SpanEvent>(entity =>
         {
             entity.ToTable("span_events");
             entity.HasIndex(e => new { e.SpanId, e.TimeUnixNano }).HasDatabaseName("idx_span_time");
-            entity.Property(e => e.AttributesJson).HasColumnType("jsonb");
+            entity.Property(e => e.AttributesJson).HasColumnType(jsonColumnType);
         });
 
         modelBuilder.Entity<SpanLink>(entity =>
@@ -83,7 +85,7 @@ internal static class TelemetryModelConfiguration
             entity.Property(e => e.LinkedTraceId).HasMaxLength(32).IsFixedLength();
             entity.Property(e => e.LinkedSpanId).HasMaxLength(16).IsFixedLength();
             entity.HasIndex(e => new { e.SpanId, e.LinkedTraceId, e.LinkedSpanId }).HasDatabaseName("idx_span_link");
-            entity.Property(e => e.AttributesJson).HasColumnType("jsonb");
+            entity.Property(e => e.AttributesJson).HasColumnType(jsonColumnType);
         });
 
         // Metrics
@@ -101,7 +103,7 @@ internal static class TelemetryModelConfiguration
             entity.ToTable("gauge_data_points");
             entity.HasIndex(e => new { e.MetricId, e.TimeUnixNano }).HasDatabaseName("idx_gauge_metric_time");
             entity.HasIndex(e => e.TimeUnixNano).HasDatabaseName("idx_gauge_time");
-            entity.Property(e => e.AttributesJson).HasColumnType("jsonb");
+            entity.Property(e => e.AttributesJson).HasColumnType(jsonColumnType);
         });
 
         modelBuilder.Entity<SumDataPoint>(entity =>
@@ -110,7 +112,7 @@ internal static class TelemetryModelConfiguration
             entity.Property(e => e.AggregationTemporality).HasConversion(aggregationTemporalityConverter).HasDefaultValue(AggregationTemporality.UNSPECIFIED);
             entity.HasIndex(e => new { e.MetricId, e.TimeUnixNano }).HasDatabaseName("idx_sum_metric_time");
             entity.HasIndex(e => e.AggregationTemporality).HasDatabaseName("idx_temporality");
-            entity.Property(e => e.AttributesJson).HasColumnType("jsonb");
+            entity.Property(e => e.AttributesJson).HasColumnType(jsonColumnType);
         });
 
         modelBuilder.Entity<HistogramDataPoint>(entity =>
@@ -118,9 +120,9 @@ internal static class TelemetryModelConfiguration
             entity.ToTable("histogram_data_points");
             entity.Property(e => e.AggregationTemporality).HasConversion(aggregationTemporalityConverter).HasDefaultValue(AggregationTemporality.UNSPECIFIED);
             entity.HasIndex(e => new { e.MetricId, e.TimeUnixNano }).HasDatabaseName("idx_histogram_metric_time");
-            entity.Property(e => e.BucketCounts).HasColumnType("jsonb");
-            entity.Property(e => e.ExplicitBounds).HasColumnType("jsonb");
-            entity.Property(e => e.AttributesJson).HasColumnType("jsonb");
+            entity.Property(e => e.BucketCounts).HasColumnType(jsonColumnType);
+            entity.Property(e => e.ExplicitBounds).HasColumnType(jsonColumnType);
+            entity.Property(e => e.AttributesJson).HasColumnType(jsonColumnType);
         });
 
         modelBuilder.Entity<ExponentialHistogramDataPoint>(entity =>
@@ -128,17 +130,17 @@ internal static class TelemetryModelConfiguration
             entity.ToTable("exponential_histogram_data_points");
             entity.Property(e => e.AggregationTemporality).HasConversion(aggregationTemporalityConverter).HasDefaultValue(AggregationTemporality.UNSPECIFIED);
             entity.HasIndex(e => new { e.MetricId, e.TimeUnixNano }).HasDatabaseName("idx_exp_histogram_metric_time");
-            entity.Property(e => e.PositiveBucketCounts).HasColumnType("jsonb");
-            entity.Property(e => e.NegativeBucketCounts).HasColumnType("jsonb");
-            entity.Property(e => e.AttributesJson).HasColumnType("jsonb");
+            entity.Property(e => e.PositiveBucketCounts).HasColumnType(jsonColumnType);
+            entity.Property(e => e.NegativeBucketCounts).HasColumnType(jsonColumnType);
+            entity.Property(e => e.AttributesJson).HasColumnType(jsonColumnType);
         });
 
         modelBuilder.Entity<SummaryDataPoint>(entity =>
         {
             entity.ToTable("summary_data_points");
             entity.HasIndex(e => new { e.MetricId, e.TimeUnixNano }).HasDatabaseName("idx_summary_metric_time");
-            entity.Property(e => e.QuantileValues).HasColumnType("jsonb");
-            entity.Property(e => e.AttributesJson).HasColumnType("jsonb");
+            entity.Property(e => e.QuantileValues).HasColumnType(jsonColumnType);
+            entity.Property(e => e.AttributesJson).HasColumnType(jsonColumnType);
         });
 
         modelBuilder.Entity<Exemplar>(entity =>
@@ -148,7 +150,7 @@ internal static class TelemetryModelConfiguration
             entity.Property(e => e.TraceId).HasMaxLength(32).IsFixedLength();
             entity.HasIndex(e => e.TimeUnixNano).HasDatabaseName("idx_exemplar_time");
             entity.HasIndex(e => new { e.TraceId, e.SpanId }).HasDatabaseName("idx_exemplar_trace_span");
-            entity.Property(e => e.FilteredAttributes).HasColumnType("jsonb");
+            entity.Property(e => e.FilteredAttributes).HasColumnType(jsonColumnType);
         });
 
         // Log Records
@@ -165,7 +167,7 @@ internal static class TelemetryModelConfiguration
             entity.HasIndex(e => e.SeverityNumber).HasDatabaseName("idx_severity");
             entity.HasIndex(e => new { e.TraceId, e.SpanId }).HasDatabaseName("idx_log_trace_span");
             entity.HasIndex(e => new { e.ResourceId, e.TimeUnixNano }).HasDatabaseName("idx_log_resource_time");
-            entity.Property(e => e.AttributesJson).HasColumnType("jsonb");
+            entity.Property(e => e.AttributesJson).HasColumnType(jsonColumnType);
         });
 
         // Schema Version

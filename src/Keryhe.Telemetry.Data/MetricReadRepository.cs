@@ -275,42 +275,58 @@ public class MetricReadRepository : IMetricReadRepository
         try
         {
             await using var context = await _contextFactory.CreateDbContextAsync(cancellationToken);
-            var metricQuery = context.Metrics.Where(m => m.Name == metricName);
+
+            Metric? primaryMetric;
+            IList<long> metricIds;
+
             if (metricId.HasValue)
             {
-                metricQuery = metricQuery.Where(m => m.Id == metricId.Value);
+                primaryMetric = await context.Metrics
+                    .Where(m => m.Name == metricName && m.Id == metricId.Value)
+                    .FirstOrDefaultAsync(cancellationToken);
+
+                if (primaryMetric == null)
+                    return null;
+
+                metricIds = new List<long> { primaryMetric.Id };
             }
+            else
+            {
+                var metrics = await context.Metrics
+                    .Where(m => m.Name == metricName)
+                    .OrderByDescending(m => m.CreatedAt)
+                    .ToListAsync(cancellationToken);
 
-            var metric = await metricQuery
-                .OrderByDescending(m => m.CreatedAt)
-                .FirstOrDefaultAsync(cancellationToken);
+                if (metrics.Count == 0)
+                    return null;
 
-            if (metric == null)
-                return null;
+                primaryMetric = metrics[0];
+                metricIds = metrics.Select(m => m.Id).ToList();
+            }
 
             var series = new MetricSeries
             {
                 Name = metricName,
-                Type = metric.Type
+                Type = primaryMetric.Type
             };
 
             // Get data points based on metric type
-            switch (metric.Type)
+            switch (primaryMetric.Type)
             {
                 case MetricType.GAUGE:
-                    series.Points = await GetGaugeDataPointsAsync(context, metric.Id, labelFilters, startTime, endTime, cancellationToken);
+                    series.Points = await GetGaugeDataPointsAsync(context, metricIds, labelFilters, startTime, endTime, cancellationToken);
                     break;
                 case MetricType.SUM:
-                    series.Points = await GetSumDataPointsAsync(context, metric.Id, labelFilters, startTime, endTime, cancellationToken);
+                    series.Points = await GetSumDataPointsAsync(context, metricIds, labelFilters, startTime, endTime, cancellationToken);
                     break;
                 case MetricType.HISTOGRAM:
-                    series.Points = await GetHistogramDataPointsAsync(context, metric.Id, labelFilters, startTime, endTime, cancellationToken);
+                    series.Points = await GetHistogramDataPointsAsync(context, metricIds, labelFilters, startTime, endTime, cancellationToken);
                     break;
                 case MetricType.EXPONENTIAL_HISTOGRAM:
-                    series.Points = await GetExponentialHistogramDataPointsAsync(context, metric.Id, labelFilters, startTime, endTime, cancellationToken);
+                    series.Points = await GetExponentialHistogramDataPointsAsync(context, metricIds, labelFilters, startTime, endTime, cancellationToken);
                     break;
                 case MetricType.SUMMARY:
-                    series.Points = await GetSummaryDataPointsAsync(context, metric.Id, labelFilters, startTime, endTime, cancellationToken);
+                    series.Points = await GetSummaryDataPointsAsync(context, metricIds, labelFilters, startTime, endTime, cancellationToken);
                     break;
             }
 
@@ -352,13 +368,14 @@ public class MetricReadRepository : IMetricReadRepository
             {
                 var serviceName = ExtractServiceName(metric.Resource.Attributes) ?? "unknown";
 
+                var singleId = new List<long> { metric.Id };
                 List<MetricDataPoint> points = metric.Type switch
                 {
-                    MetricType.GAUGE => await GetGaugeDataPointsAsync(context, metric.Id, null, startTime, endTime, cancellationToken),
-                    MetricType.SUM => await GetSumDataPointsAsync(context, metric.Id, null, startTime, endTime, cancellationToken),
-                    MetricType.HISTOGRAM => await GetHistogramDataPointsAsync(context, metric.Id, null, startTime, endTime, cancellationToken),
-                    MetricType.EXPONENTIAL_HISTOGRAM => await GetExponentialHistogramDataPointsAsync(context, metric.Id, null, startTime, endTime, cancellationToken),
-                    MetricType.SUMMARY => await GetSummaryDataPointsAsync(context, metric.Id, null, startTime, endTime, cancellationToken),
+                    MetricType.GAUGE => await GetGaugeDataPointsAsync(context, singleId, null, startTime, endTime, cancellationToken),
+                    MetricType.SUM => await GetSumDataPointsAsync(context, singleId, null, startTime, endTime, cancellationToken),
+                    MetricType.HISTOGRAM => await GetHistogramDataPointsAsync(context, singleId, null, startTime, endTime, cancellationToken),
+                    MetricType.EXPONENTIAL_HISTOGRAM => await GetExponentialHistogramDataPointsAsync(context, singleId, null, startTime, endTime, cancellationToken),
+                    MetricType.SUMMARY => await GetSummaryDataPointsAsync(context, singleId, null, startTime, endTime, cancellationToken),
                     _ => new List<MetricDataPoint>()
                 };
 
@@ -807,12 +824,12 @@ public class MetricReadRepository : IMetricReadRepository
 
     // Time series data retrieval methods
     private async Task<List<MetricDataPoint>> GetGaugeDataPointsAsync(TelemetryReadDbContext context,
-        long metricId, Dictionary<string, string>? labelFilters,
+        IList<long> metricIds, Dictionary<string, string>? labelFilters,
         DateTime? startTime, DateTime? endTime, CancellationToken cancellationToken)
     {
         var query = context.GaugeDataPoints
             .Include(gdp => gdp.Exemplar)
-            .Where(gdp => gdp.MetricId == metricId);
+            .Where(gdp => metricIds.Contains(gdp.MetricId));
 
         if (startTime.HasValue)
         {
@@ -849,12 +866,12 @@ public class MetricReadRepository : IMetricReadRepository
     }
 
     private async Task<List<MetricDataPoint>> GetSumDataPointsAsync(TelemetryReadDbContext context,
-        long metricId, Dictionary<string, string>? labelFilters,
+        IList<long> metricIds, Dictionary<string, string>? labelFilters,
         DateTime? startTime, DateTime? endTime, CancellationToken cancellationToken)
     {
         var query = context.SumDataPoints
             .Include(sdp => sdp.Exemplar)
-            .Where(sdp => sdp.MetricId == metricId);
+            .Where(sdp => metricIds.Contains(sdp.MetricId));
 
         if (startTime.HasValue)
         {
@@ -893,12 +910,12 @@ public class MetricReadRepository : IMetricReadRepository
     }
 
     private async Task<List<MetricDataPoint>> GetHistogramDataPointsAsync(TelemetryReadDbContext context,
-        long metricId, Dictionary<string, string>? labelFilters,
+        IList<long> metricIds, Dictionary<string, string>? labelFilters,
         DateTime? startTime, DateTime? endTime, CancellationToken cancellationToken)
     {
         var query = context.HistogramDataPoints
             .Include(hdp => hdp.Exemplar)
-            .Where(hdp => hdp.MetricId == metricId);
+            .Where(hdp => metricIds.Contains(hdp.MetricId));
 
         if (startTime.HasValue)
         {
@@ -940,12 +957,12 @@ public class MetricReadRepository : IMetricReadRepository
     }
 
     private async Task<List<MetricDataPoint>> GetExponentialHistogramDataPointsAsync(TelemetryReadDbContext context,
-        long metricId, Dictionary<string, string>? labelFilters,
+        IList<long> metricIds, Dictionary<string, string>? labelFilters,
         DateTime? startTime, DateTime? endTime, CancellationToken cancellationToken)
     {
         var query = context.ExponentialHistogramDataPoints
             .Include(ehdp => ehdp.Exemplar)
-            .Where(ehdp => ehdp.MetricId == metricId);
+            .Where(ehdp => metricIds.Contains(ehdp.MetricId));
 
         if (startTime.HasValue)
         {
@@ -991,10 +1008,10 @@ public class MetricReadRepository : IMetricReadRepository
     }
 
     private async Task<List<MetricDataPoint>> GetSummaryDataPointsAsync(TelemetryReadDbContext context,
-        long metricId, Dictionary<string, string>? labelFilters,
+        IList<long> metricIds, Dictionary<string, string>? labelFilters,
         DateTime? startTime, DateTime? endTime, CancellationToken cancellationToken)
     {
-        var query = context.SummaryDataPoints.Where(sdp => sdp.MetricId == metricId);
+        var query = context.SummaryDataPoints.Where(sdp => metricIds.Contains(sdp.MetricId));
 
         if (startTime.HasValue)
         {

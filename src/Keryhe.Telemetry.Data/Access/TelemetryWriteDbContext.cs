@@ -35,7 +35,7 @@ public class TelemetryWriteDbContext : DbContext
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
         base.OnModelCreating(modelBuilder);
-        TelemetryModelConfiguration.Configure(modelBuilder);
+        TelemetryModelConfiguration.Configure(modelBuilder, isPostgres: Database.ProviderName?.Contains("Npgsql") == true);
     }
 
     protected override void ConfigureConventions(ModelConfigurationBuilder configurationBuilder)

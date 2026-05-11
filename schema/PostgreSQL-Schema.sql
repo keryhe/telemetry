@@ -29,11 +29,6 @@ CREATE TABLE tenants (
     CONSTRAINT uk_tenant_name UNIQUE ("name")
 );
 
-INSERT INTO tenants ("id", "name")
-OVERRIDING SYSTEM VALUE
-VALUES (1, 'default')
-ON CONFLICT ("name") DO NOTHING;
-
 CREATE TABLE api_keys (
     "id"         BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     "tenant_id"   BIGINT       NOT NULL REFERENCES tenants("id") ON DELETE CASCADE,

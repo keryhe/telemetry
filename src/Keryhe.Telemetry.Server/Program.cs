@@ -4,6 +4,7 @@ using Keryhe.Telemetry.Server.Services;
 using Microsoft.EntityFrameworkCore;
 using Keryhe.Telemetry.Core;
 using Npgsql;
+using Keryhe.Telemetry.Timescale.Services;
 
 namespace Keryhe.Telemetry.Server;
 

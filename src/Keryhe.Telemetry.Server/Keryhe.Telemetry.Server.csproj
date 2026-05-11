@@ -10,7 +10,6 @@
     <ItemGroup>
         <PackageReference Include="EFCore.NamingConventions" Version="10.0.1" />
         <PackageReference Include="Grpc.AspNetCore" Version="2.76.0" />
-<PackageReference Include="Npgsql.EntityFrameworkCore.PostgreSQL" Version="10.0.1" />
     </ItemGroup>
 
     <ItemGroup>
@@ -47,7 +46,7 @@
     </ItemGroup>
 
     <ItemGroup>
-      <ProjectReference Include="..\Keryhe.Telemetry.Data\Keryhe.Telemetry.Data.csproj" />
+      <ProjectReference Include="../Keryhe.Telemetry.Timescale/Keryhe.Telemetry.Timescale.csproj" />
     </ItemGroup>
 
 </Project>

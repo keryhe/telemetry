@@ -40,7 +40,7 @@ public class TelemetryReadDbContext : DbContext
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
         base.OnModelCreating(modelBuilder);
-        TelemetryModelConfiguration.Configure(modelBuilder);
+        TelemetryModelConfiguration.Configure(modelBuilder, isPostgres: Database.ProviderName?.Contains("Npgsql") == true);
 
         modelBuilder.Entity<Resource>().HasQueryFilter(resource => resource.TenantId == _tenantId);
         modelBuilder.Entity<Span>().HasQueryFilter(span => span.Resource.TenantId == _tenantId);

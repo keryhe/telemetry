@@ -9,7 +9,7 @@ using NpgsqlTypes;
 using Keryhe.Telemetry.Core.Models;
 using Keryhe.Telemetry.Data;
 
-namespace Keryhe.Telemetry.Server.Services;
+namespace Keryhe.Telemetry.Timescale.Services;
 
 public sealed class TelemetryIngestionWorker(
     NpgsqlDataSource dataSource,
