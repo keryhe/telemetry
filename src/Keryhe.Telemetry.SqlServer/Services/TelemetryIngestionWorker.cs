@@ -301,6 +301,8 @@ public sealed class TelemetryIngestionWorker(IConfiguration configuration, Telem
         }
 
         using var bulk = new SqlBulkCopy(conn) { DestinationTableName = "log_records" };
+        foreach (DataColumn col in dt.Columns)
+            bulk.ColumnMappings.Add(col.ColumnName, col.ColumnName);
         await bulk.WriteToServerAsync(dt, ct);
     }
 
@@ -427,6 +429,8 @@ public sealed class TelemetryIngestionWorker(IConfiguration configuration, Telem
                 (object?)SerializeJsonOrNull(e.Attributes) ?? DBNull.Value);
 
         using var bulk = new SqlBulkCopy(conn) { DestinationTableName = "span_events" };
+        foreach (DataColumn col in dt.Columns)
+            bulk.ColumnMappings.Add(col.ColumnName, col.ColumnName);
         await bulk.WriteToServerAsync(dt, ct);
     }
 
@@ -450,6 +454,8 @@ public sealed class TelemetryIngestionWorker(IConfiguration configuration, Telem
                 (object?)SerializeJsonOrNull(l.Attributes) ?? DBNull.Value);
 
         using var bulk = new SqlBulkCopy(conn) { DestinationTableName = "span_links" };
+        foreach (DataColumn col in dt.Columns)
+            bulk.ColumnMappings.Add(col.ColumnName, col.ColumnName);
         await bulk.WriteToServerAsync(dt, ct);
     }
 
@@ -513,6 +519,8 @@ public sealed class TelemetryIngestionWorker(IConfiguration configuration, Telem
                 (object?)SerializeJsonOrNull(d.Attributes) ?? DBNull.Value);
 
         using var bulk = new SqlBulkCopy(conn) { DestinationTableName = "gauge_data_points" };
+        foreach (DataColumn col in dt.Columns)
+            bulk.ColumnMappings.Add(col.ColumnName, col.ColumnName);
         await bulk.WriteToServerAsync(dt, ct);
     }
 
@@ -538,6 +546,8 @@ public sealed class TelemetryIngestionWorker(IConfiguration configuration, Telem
                 (object?)SerializeJsonOrNull(d.Attributes) ?? DBNull.Value);
 
         using var bulk = new SqlBulkCopy(conn) { DestinationTableName = "sum_data_points" };
+        foreach (DataColumn col in dt.Columns)
+            bulk.ColumnMappings.Add(col.ColumnName, col.ColumnName);
         await bulk.WriteToServerAsync(dt, ct);
     }
 
@@ -569,6 +579,8 @@ public sealed class TelemetryIngestionWorker(IConfiguration configuration, Telem
                 (object?)SerializeJsonOrNull(d.Attributes) ?? DBNull.Value);
 
         using var bulk = new SqlBulkCopy(conn) { DestinationTableName = "histogram_data_points" };
+        foreach (DataColumn col in dt.Columns)
+            bulk.ColumnMappings.Add(col.ColumnName, col.ColumnName);
         await bulk.WriteToServerAsync(dt, ct);
     }
 
@@ -606,6 +618,8 @@ public sealed class TelemetryIngestionWorker(IConfiguration configuration, Telem
                 (object?)SerializeJsonOrNull(d.Attributes) ?? DBNull.Value);
 
         using var bulk = new SqlBulkCopy(conn) { DestinationTableName = "exponential_histogram_data_points" };
+        foreach (DataColumn col in dt.Columns)
+            bulk.ColumnMappings.Add(col.ColumnName, col.ColumnName);
         await bulk.WriteToServerAsync(dt, ct);
     }
 
@@ -631,6 +645,8 @@ public sealed class TelemetryIngestionWorker(IConfiguration configuration, Telem
                 (object?)SerializeJsonOrNull(d.Attributes) ?? DBNull.Value);
 
         using var bulk = new SqlBulkCopy(conn) { DestinationTableName = "summary_data_points" };
+        foreach (DataColumn col in dt.Columns)
+            bulk.ColumnMappings.Add(col.ColumnName, col.ColumnName);
         await bulk.WriteToServerAsync(dt, ct);
     }
 

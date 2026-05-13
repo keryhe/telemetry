@@ -6,6 +6,7 @@ using OpenTelemetry.Proto.Trace.V1;
 using Keryhe.Telemetry.Data;
 using Keryhe.Telemetry.Core;
 using Keryhe.Telemetry.Core.Models;
+using Keryhe.Telemetry.Server.Services.Helpers;
 
 namespace Keryhe.Telemetry.Server.Services;
 
@@ -49,7 +50,10 @@ public class TraceService : OpenTelemetry.Proto.Collector.Trace.V1.TraceService.
         var storedSpanCount = 0;
         try
         {
-            var tenantId = await _tenantResolver.ResolveTenantIdAsync(context, context.CancellationToken);
+            string? keyHash = ApiKeyHelper.GetKeyHash(context);
+            var tenantId = await _tenantResolver.ResolveTenantIdAsync(keyHash, context.CancellationToken);
+            if (tenantId <= 0)
+                throw new RpcException(new Grpc.Core.Status(StatusCode.Unauthenticated, "Invalid API key."));
 
             _logger.LogDebug("Received traces export request with {ResourceSpansCount} resource spans", 
                 request.ResourceSpans?.Count ?? 0);

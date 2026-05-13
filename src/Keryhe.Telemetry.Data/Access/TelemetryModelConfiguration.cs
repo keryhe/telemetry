@@ -27,6 +27,13 @@ internal static class TelemetryModelConfiguration
             entity.Property(e => e.CreatedAt).HasDefaultValueSql("CURRENT_TIMESTAMP");
         });
 
+        modelBuilder.Entity<ApiKey>(entity =>
+        {
+            entity.ToTable("api_keys");
+            entity.HasIndex(e => e.Name).IsUnique().HasDatabaseName("uk_tenant_name");
+            entity.Property(e => e.CreatedAt).HasDefaultValueSql("CURRENT_TIMESTAMP");
+        });
+
         // Resources
         modelBuilder.Entity<Resource>(entity =>
         {

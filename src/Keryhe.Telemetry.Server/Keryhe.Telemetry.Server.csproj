@@ -10,6 +10,8 @@
     <ItemGroup>
         <PackageReference Include="EFCore.NamingConventions" Version="10.0.1" />
         <PackageReference Include="Grpc.AspNetCore" Version="2.76.0" />
+        <PackageReference Include="Microsoft.EntityFrameworkCore.SqlServer" Version="10.0.5" />
+        <PackageReference Include="Microsoft.Extensions.Hosting.WindowsServices" Version="10.0.5" />
     </ItemGroup>
 
     <ItemGroup>
@@ -46,7 +48,11 @@
     </ItemGroup>
 
     <ItemGroup>
-      <ProjectReference Include="../Keryhe.Telemetry.Timescale/Keryhe.Telemetry.Timescale.csproj" />
+      <ProjectReference Include="..\Keryhe.Telemetry.SqlServer\Keryhe.Telemetry.SqlServer.csproj" />
+    </ItemGroup>
+
+    <ItemGroup>
+      <Folder Include="Services\Helpers\" />
     </ItemGroup>
 
 </Project>

@@ -17,7 +17,7 @@ var builder = WebApplication.CreateBuilder(args);
 builder.Services.AddDbContextFactory<TelemetryReadDbContext>(options =>
 {
     var connectionString = builder.Configuration.GetConnectionString("Read");
-    options.UseNpgsql(connectionString);
+    options.UseSqlServer(connectionString);
     options.UseSnakeCaseNamingConvention();
     options.UseQueryTrackingBehavior(QueryTrackingBehavior.NoTracking);
 
@@ -56,7 +56,7 @@ builder.Services
 builder.Services.AddDbContext<AlertDbContext>(options =>
 {
     var connectionString = builder.Configuration.GetConnectionString("Read");
-    options.UseNpgsql(connectionString);
+    options.UseSqlServer(connectionString);
     options.UseSnakeCaseNamingConvention();
 });
 builder.Services.AddHttpClient("AlertWebhook");

@@ -3,8 +3,7 @@ using Keryhe.Telemetry.Data;
 using Keryhe.Telemetry.Server.Services;
 using Microsoft.EntityFrameworkCore;
 using Keryhe.Telemetry.Core;
-using Npgsql;
-using Keryhe.Telemetry.Timescale.Services;
+using Keryhe.Telemetry.SqlServer.Services;
 
 namespace Keryhe.Telemetry.Server;
 
@@ -12,21 +11,24 @@ public class Program
 {
     public static void Main(string[] args)
     {
-        var builder = WebApplication.CreateBuilder(args);
+        var builder = WebApplication.CreateBuilder(new WebApplicationOptions
+        {
+            Args = args,
+            ContentRootPath = AppContext.BaseDirectory
+        });
+        builder.Host.UseWindowsService();
 
         // Add services to the container.
+
         builder.Services.AddGrpc();
         builder.Services.AddLogging();
 
         var writeConnectionString = builder.Configuration.GetConnectionString("Write")!;
 
-        // Raw NpgsqlDataSource for the background ingestion worker (bulk inserts).
-        builder.Services.AddSingleton(_ => NpgsqlDataSource.Create(writeConnectionString));
-
         // DbContextPool reuses DbContext instances across requests (delete operations only).
         builder.Services.AddDbContextPool<TelemetryWriteDbContext>(options =>
         {
-            options.UseNpgsql(writeConnectionString);
+            options.UseSqlServer(writeConnectionString);
             options.UseSnakeCaseNamingConvention();
 
             if (builder.Environment.IsDevelopment())
@@ -42,7 +44,7 @@ public class Program
         builder.Services.AddHostedService<TelemetryIngestionWorker>();
 
         builder.Services
-            .AddScoped<ITenantResolver, ApiKeyTenantResolver>()
+            .AddScoped<ITenantResolver, TenantResolver>()
             .AddScoped<ILogWriteRepository, LogWriteRepository>()
             .AddScoped<IMetricWriteRepository, MetricWriteRepository>()
             .AddScoped<ITraceWriteRepository, TraceWriteRepository>();

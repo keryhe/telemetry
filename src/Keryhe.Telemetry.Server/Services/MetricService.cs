@@ -7,6 +7,7 @@ using OpenTelemetry.Proto.Metrics.V1;
 using Keryhe.Telemetry.Data;
 using Keryhe.Telemetry.Core;
 using Keryhe.Telemetry.Core.Models;
+using Keryhe.Telemetry.Server.Services.Helpers;
 
 namespace Keryhe.Telemetry.Server.Services;
 
@@ -50,7 +51,10 @@ public class MetricService : MetricsService.MetricsServiceBase
         var storedDataPointCount = 0;
         try
         {
-            var tenantId = await _tenantResolver.ResolveTenantIdAsync(context, context.CancellationToken);
+            string? keyHash = ApiKeyHelper.GetKeyHash(context);
+            var tenantId = await _tenantResolver.ResolveTenantIdAsync(keyHash, context.CancellationToken);
+            if (tenantId <= 0)
+                throw new RpcException(new Status(StatusCode.Unauthenticated, "Invalid API key."));
 
             _logger.LogDebug("Received metrics export request with {ResourceMetricsCount} resource metrics", 
                 request.ResourceMetrics?.Count ?? 0);

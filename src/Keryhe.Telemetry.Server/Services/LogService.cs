@@ -6,6 +6,9 @@ using OpenTelemetry.Proto.Logs.V1;
 using Keryhe.Telemetry.Data;
 using Keryhe.Telemetry.Core;
 using Keryhe.Telemetry.Core.Models;
+using System.Security.Cryptography;
+using System.Text;
+using Keryhe.Telemetry.Server.Services.Helpers;
 
 namespace Keryhe.Telemetry.Server.Services;
 
@@ -46,7 +49,10 @@ public class LogService : OpenTelemetry.Proto.Collector.Logs.V1.LogsService.Logs
         var storedLogCount = 0;
         try
         {
-            var tenantId = await _tenantResolver.ResolveTenantIdAsync(context, context.CancellationToken);
+            string? keyHash = ApiKeyHelper.GetKeyHash(context);
+            var tenantId = await _tenantResolver.ResolveTenantIdAsync(keyHash, context.CancellationToken);
+            if (tenantId <= 0)
+                throw new RpcException(new Status(StatusCode.Unauthenticated, "Invalid API key."));
 
             _logger.LogDebug("Received logs export request with {ResourceLogsCount} resource logs", request.ResourceLogs?.Count ?? 0);
 

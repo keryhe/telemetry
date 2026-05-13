@@ -16,8 +16,8 @@
     <ItemGroup>
       <PackageReference Include="Blazor-ApexCharts" Version="6.1.0" />
       <PackageReference Include="EFCore.NamingConventions" Version="10.0.1" />
+      <PackageReference Include="Microsoft.EntityFrameworkCore.SqlServer" Version="10.0.5" />
       <PackageReference Include="MudBlazor" Version="9.2.0" />
-      <PackageReference Include="Npgsql.EntityFrameworkCore.PostgreSQL" Version="10.0.1" />
     </ItemGroup>
 
     <ItemGroup>

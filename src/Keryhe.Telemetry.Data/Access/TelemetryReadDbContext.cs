@@ -19,6 +19,7 @@ public class TelemetryReadDbContext : DbContext
 
     public DbSet<Resource> Resources { get; set; }
     public DbSet<Tenant> Tenants { get; set; }
+    public DbSet<ApiKey> ApiKeys { get; set; }
     public DbSet<InstrumentationScope> InstrumentationScopes { get; set; }
 
     public DbSet<Span> Spans { get; set; }
