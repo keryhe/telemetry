@@ -35,6 +35,7 @@ bld/
 [Ll]ogs/
 !src/Keryhe.Telemetry.Server/opentelemetry/proto/logs/
 !src/Keryhe.Telemetry.Server/opentelemetry/proto/collector/logs/
+!src/telemetry-client/src/app/features/logs/
 
 
 # Build results on 'Bin' directories
