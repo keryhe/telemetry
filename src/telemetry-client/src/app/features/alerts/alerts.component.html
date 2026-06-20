@@ -1,0 +1,91 @@
+@if (loading()) {
+  <mat-progress-bar mode="indeterminate" />
+}
+
+<div class="page-container">
+  <!-- Rules -->
+  <mat-card>
+    <mat-card-header>
+      <mat-card-title>Alert Rules</mat-card-title>
+      <span class="spacer"></span>
+      <button mat-flat-button color="primary" (click)="openCreate()">
+        <mat-icon>add</mat-icon> New Rule
+      </button>
+    </mat-card-header>
+    <mat-card-content>
+      @if (rules().length === 0 && !loading()) {
+        <app-empty-state
+          icon="notifications_none"
+          message="No alert rules configured"
+          hint="Create a rule to get notified when telemetry exceeds thresholds" />
+      } @else {
+        <table mat-table [dataSource]="rules()" class="full-width">
+          <ng-container matColumnDef="name">
+            <th mat-header-cell *matHeaderCellDef>Name</th>
+            <td mat-cell *matCellDef="let r"><strong>{{ r.name }}</strong></td>
+          </ng-container>
+          <ng-container matColumnDef="type">
+            <th mat-header-cell *matHeaderCellDef>Type</th>
+            <td mat-cell *matCellDef="let r">{{ ruleTypeLabel(r.ruleType) }}</td>
+          </ng-container>
+          <ng-container matColumnDef="service">
+            <th mat-header-cell *matHeaderCellDef>Service</th>
+            <td mat-cell *matCellDef="let r">{{ r.serviceName || 'All' }}</td>
+          </ng-container>
+          <ng-container matColumnDef="condition">
+            <th mat-header-cell *matHeaderCellDef>Condition</th>
+            <td mat-cell *matCellDef="let r" class="mono">{{ conditionSummary(r) }}</td>
+          </ng-container>
+          <ng-container matColumnDef="enabled">
+            <th mat-header-cell *matHeaderCellDef>Enabled</th>
+            <td mat-cell *matCellDef="let r">
+              <mat-slide-toggle [checked]="r.enabled" (change)="toggleEnabled(r)" />
+            </td>
+          </ng-container>
+          <ng-container matColumnDef="actions">
+            <th mat-header-cell *matHeaderCellDef></th>
+            <td mat-cell *matCellDef="let r" class="actions-cell">
+              <button mat-icon-button matTooltip="Edit" (click)="openEdit(r)">
+                <mat-icon>edit</mat-icon>
+              </button>
+              <button mat-icon-button matTooltip="Delete" color="warn" (click)="deleteRule(r)">
+                <mat-icon>delete</mat-icon>
+              </button>
+            </td>
+          </ng-container>
+          <tr mat-header-row *matHeaderRowDef="ruleCols"></tr>
+          <tr mat-row *matRowDef="let row; columns: ruleCols"></tr>
+        </table>
+      }
+    </mat-card-content>
+  </mat-card>
+
+  <!-- Events -->
+  <mat-card class="events-card">
+    <mat-card-header>
+      <mat-card-title>Recent Events</mat-card-title>
+    </mat-card-header>
+    <mat-card-content>
+      @if (events().length === 0 && !loading()) {
+        <app-empty-state icon="notifications_active" message="No events fired yet" />
+      } @else {
+        <table mat-table [dataSource]="events()" class="full-width">
+          <ng-container matColumnDef="firedAt">
+            <th mat-header-cell *matHeaderCellDef>Fired At</th>
+            <td mat-cell *matCellDef="let e">{{ e.firedAt | date:'short' }}</td>
+          </ng-container>
+          <ng-container matColumnDef="ruleName">
+            <th mat-header-cell *matHeaderCellDef>Rule</th>
+            <td mat-cell *matCellDef="let e">{{ eventRuleName(e) }}</td>
+          </ng-container>
+          <ng-container matColumnDef="details">
+            <th mat-header-cell *matHeaderCellDef>Details</th>
+            <td mat-cell *matCellDef="let e">{{ eventDetails(e) }}</td>
+          </ng-container>
+          <tr mat-header-row *matHeaderRowDef="eventCols"></tr>
+          <tr mat-row *matRowDef="let row; columns: eventCols"></tr>
+        </table>
+      }
+    </mat-card-content>
+  </mat-card>
+</div>

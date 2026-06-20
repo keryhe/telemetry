@@ -1,0 +1,58 @@
+.service-bar {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  margin-bottom: 16px;
+}
+
+.service-select { width: 240px; }
+.metric-count { color: var(--mat-sys-on-surface-variant); font-size: 13px; }
+
+.group-panel { margin-bottom: 12px; }
+
+.spark-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 12px;
+  padding: 12px 0;
+}
+
+.spark-card {
+  padding: 12px;
+  overflow: hidden;
+}
+
+.spark-header {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  margin-bottom: 4px;
+}
+
+.spark-name {
+  font-size: 12px;
+  font-weight: 500;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  flex: 1;
+  font-family: monospace;
+}
+
+.spark-unit {
+  font-size: 10px;
+  color: var(--mat-sys-on-surface-variant);
+}
+
+.spark-chart { margin: 0 -12px; }
+
+.spark-stats {
+  display: flex;
+  justify-content: space-between;
+  margin-top: 8px;
+}
+
+.spark-stat { text-align: center; }
+.spark-label { display: block; font-size: 10px; color: var(--mat-sys-on-surface-variant); }
+.spark-value { font-size: 14px; font-weight: 600; }
+.spark-value.secondary { font-size: 12px; font-weight: 400; color: var(--mat-sys-on-surface-variant); }

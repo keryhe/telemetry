@@ -1,0 +1,31 @@
+.filter-bar {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  flex-wrap: wrap;
+  margin-bottom: 16px;
+}
+
+.service-filter { width: 180px; }
+.search-field { flex: 1; min-width: 200px; }
+
+.tab-card { margin-top: 16px; }
+
+.graph-card mat-card-content { padding: 0 !important; }
+
+.chart-container {
+  width: 100%;
+  height: 500px;
+}
+
+.clickable-row {
+  cursor: pointer;
+  &:hover { background: var(--mat-sys-surface-container-high); }
+}
+
+.mono { font-family: monospace; font-size: 12px; }
+
+.analytics-controls {
+  margin-bottom: 16px;
+  mat-form-field { width: 220px; }
+}

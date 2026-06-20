@@ -1,0 +1,81 @@
+@use '@angular/material' as mat;
+
+html {
+  @include mat.theme((
+    color: (
+      primary: mat.$azure-palette,
+      tertiary: mat.$blue-palette,
+    ),
+    typography: Roboto,
+    density: 0,
+  ));
+}
+
+body {
+  color-scheme: light;
+  background-color: var(--mat-sys-surface);
+  color: var(--mat-sys-on-surface);
+  font: var(--mat-sys-body-medium);
+  margin: 0;
+  font-family: Roboto, 'Helvetica Neue', sans-serif;
+}
+
+html,
+body {
+  height: 100%;
+}
+
+// Theme mode classes applied by ThemeService
+body.theme-dark {
+  color-scheme: dark;
+}
+
+body.theme-system {
+  color-scheme: light dark;
+}
+
+// Global utility styles
+.spacer {
+  flex: 1 1 auto;
+}
+
+.page-container {
+  padding: 16px;
+  max-width: 1600px;
+  margin: 0 auto;
+}
+
+.stat-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 16px;
+  margin-bottom: 16px;
+}
+
+.chart-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px;
+  margin-bottom: 16px;
+
+  @media (max-width: 900px) {
+    grid-template-columns: 1fr;
+  }
+}
+
+.full-width {
+  width: 100%;
+}
+
+.mat-column-actions {
+  width: 120px;
+  text-align: right;
+}
+
+// ApexCharts dark mode support
+body.theme-dark .apexcharts-canvas,
+body.theme-system .apexcharts-canvas {
+  @media (prefers-color-scheme: dark) {
+    background: transparent !important;
+  }
+}

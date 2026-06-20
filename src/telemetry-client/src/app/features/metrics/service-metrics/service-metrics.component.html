@@ -1,0 +1,96 @@
+@if (loading()) {
+  <mat-progress-bar mode="indeterminate" />
+}
+
+<div class="page-container">
+  <div class="service-bar">
+    <mat-form-field appearance="outline" class="service-select">
+      <mat-label>Service</mat-label>
+      <mat-select [value]="selectedService()" (selectionChange)="onServiceChange($event.value)">
+        @for (s of services(); track s) {
+          <mat-option [value]="s">{{ s }}</mat-option>
+        }
+      </mat-select>
+    </mat-form-field>
+    <span class="spacer"></span>
+    <span class="metric-count">{{ sparkCards().length }} metrics</span>
+  </div>
+
+  @if (sparkCards().length === 0 && !loading()) {
+    <app-empty-state icon="analytics" message="No metrics for this service" hint="Select a different service or time range" />
+  }
+
+  @if (gaugeCards().length > 0) {
+    <mat-expansion-panel [expanded]="true" class="group-panel">
+      <mat-expansion-panel-header>
+        <mat-panel-title>Gauges ({{ gaugeCards().length }})</mat-panel-title>
+      </mat-expansion-panel-header>
+      <div class="spark-grid">
+        @for (card of gaugeCards(); track card.name) {
+          <ng-container *ngTemplateOutlet="sparkCard; context: { card }"></ng-container>
+        }
+      </div>
+    </mat-expansion-panel>
+  }
+
+  @if (counterCards().length > 0) {
+    <mat-expansion-panel [expanded]="true" class="group-panel">
+      <mat-expansion-panel-header>
+        <mat-panel-title>Counters ({{ counterCards().length }})</mat-panel-title>
+      </mat-expansion-panel-header>
+      <div class="spark-grid">
+        @for (card of counterCards(); track card.name) {
+          <ng-container *ngTemplateOutlet="sparkCard; context: { card }"></ng-container>
+        }
+      </div>
+    </mat-expansion-panel>
+  }
+
+  @if (otherCards().length > 0) {
+    <mat-expansion-panel [expanded]="true" class="group-panel">
+      <mat-expansion-panel-header>
+        <mat-panel-title>Other ({{ otherCards().length }})</mat-panel-title>
+      </mat-expansion-panel-header>
+      <div class="spark-grid">
+        @for (card of otherCards(); track card.name) {
+          <ng-container *ngTemplateOutlet="sparkCard; context: { card }"></ng-container>
+        }
+      </div>
+    </mat-expansion-panel>
+  }
+</div>
+
+<ng-template #sparkCard let-card="card">
+  <mat-card class="spark-card">
+    <div class="spark-header">
+      <div class="spark-name" [title]="card.name">{{ card.name }}</div>
+      @if (card.unit) { <span class="spark-unit">{{ card.unit }}</span> }
+    </div>
+    <div class="spark-chart">
+      @if (card.chartOptions.series) {
+        <apx-chart
+          [series]="card.chartOptions.series!"
+          [chart]="card.chartOptions.chart!"
+          [xaxis]="card.chartOptions.xaxis!"
+          [stroke]="card.chartOptions.stroke!"
+          [fill]="card.chartOptions.fill!"
+          [theme]="card.chartOptions.theme!"
+          [tooltip]="card.chartOptions.tooltip!" />
+      }
+    </div>
+    <div class="spark-stats">
+      <div class="spark-stat">
+        <span class="spark-label">Now</span>
+        <span class="spark-value">{{ fmt(card.current) }}</span>
+      </div>
+      <div class="spark-stat">
+        <span class="spark-label">Min</span>
+        <span class="spark-value secondary">{{ fmt(card.min) }}</span>
+      </div>
+      <div class="spark-stat">
+        <span class="spark-label">Max</span>
+        <span class="spark-value secondary">{{ fmt(card.max) }}</span>
+      </div>
+    </div>
+  </mat-card>
+</ng-template>

@@ -1,0 +1,130 @@
+@if (loading()) {
+  <mat-progress-bar mode="indeterminate" />
+}
+
+<div class="page-container">
+  <!-- Stat Cards -->
+  <div class="stat-grid">
+    <app-stat-card label="Total Traces" [value]="totalTraces() | number" />
+    <app-stat-card
+      label="Error Rate"
+      [value]="(errorRate() | percent: '1.1-1') ?? '0%'"
+      [color]="errorRate() > 0.05 ? 'error' : 'default'" />
+    <app-stat-card label="Log Events" [value]="logs().length | number" />
+    <app-stat-card label="Services" [value]="serviceCount() | number" />
+  </div>
+
+  <!-- Charts -->
+  <div class="chart-grid">
+    <mat-card>
+      <mat-card-header><mat-card-title>Trace Volume</mat-card-title></mat-card-header>
+      <mat-card-content>
+        @if (traceChartOptions().series) {
+          <apx-chart
+            [series]="traceChartOptions().series!"
+            [chart]="traceChartOptions().chart!"
+            [xaxis]="traceChartOptions().xaxis!"
+            [colors]="traceChartOptions().colors!"
+            [stroke]="traceChartOptions().stroke!"
+            [fill]="traceChartOptions().fill!"
+            [theme]="traceChartOptions().theme!"
+            [legend]="traceChartOptions().legend!"
+            [dataLabels]="traceChartOptions().dataLabels!" />
+        }
+      </mat-card-content>
+    </mat-card>
+
+    <mat-card>
+      <mat-card-header><mat-card-title>Log Severity</mat-card-title></mat-card-header>
+      <mat-card-content>
+        @if (logChartOptions().series) {
+          <apx-chart
+            [series]="logChartOptions().series!"
+            [chart]="logChartOptions().chart!"
+            [xaxis]="logChartOptions().xaxis!"
+            [colors]="logChartOptions().colors!"
+            [theme]="logChartOptions().theme!"
+            [legend]="logChartOptions().legend!"
+            [dataLabels]="logChartOptions().dataLabels!"
+            [plotOptions]="logChartOptions().plotOptions!" />
+        }
+      </mat-card-content>
+    </mat-card>
+  </div>
+
+  <!-- Service Strip -->
+  @if (metricSummaries().length > 0) {
+    <mat-card class="services-card">
+      <mat-card-header><mat-card-title>Services</mat-card-title></mat-card-header>
+      <mat-card-content>
+        <div class="service-strip">
+          @for (s of metricSummaries(); track s.serviceName) {
+            <div class="service-chip">
+              <div class="service-name">{{ s.serviceName }}</div>
+              <div class="service-meta">{{ s.metricCount }} metrics</div>
+            </div>
+          }
+        </div>
+      </mat-card-content>
+    </mat-card>
+  }
+
+  <!-- Tables -->
+  <div class="chart-grid">
+    <!-- Recent Errors -->
+    <mat-card>
+      <mat-card-header><mat-card-title>Recent Errors</mat-card-title></mat-card-header>
+      <mat-card-content>
+        @if (recentErrors().length === 0) {
+          <app-empty-state icon="check_circle" message="No errors" hint="All traces are healthy" />
+        } @else {
+          <table mat-table [dataSource]="recentErrors()" class="full-width">
+            <ng-container matColumnDef="service">
+              <th mat-header-cell *matHeaderCellDef>Service</th>
+              <td mat-cell *matCellDef="let t">{{ t.serviceName }}</td>
+            </ng-container>
+            <ng-container matColumnDef="operation">
+              <th mat-header-cell *matHeaderCellDef>Operation</th>
+              <td mat-cell *matCellDef="let t">{{ t.rootOperationName }}</td>
+            </ng-container>
+            <ng-container matColumnDef="time">
+              <th mat-header-cell *matHeaderCellDef>Time</th>
+              <td mat-cell *matCellDef="let t">{{ t.traceStartTime | date: 'HH:mm:ss' }}</td>
+            </ng-container>
+            <tr mat-header-row *matHeaderRowDef="['service','operation','time']"></tr>
+            <tr mat-row *matRowDef="let row; columns: ['service','operation','time']"
+                class="clickable-row" (click)="navigateToTrace(row.traceIdHex)"></tr>
+          </table>
+        }
+      </mat-card-content>
+    </mat-card>
+
+    <!-- Slow Traces -->
+    <mat-card>
+      <mat-card-header><mat-card-title>Slowest Traces</mat-card-title></mat-card-header>
+      <mat-card-content>
+        @if (slowTraces().length === 0) {
+          <app-empty-state icon="speed" message="No traces" />
+        } @else {
+          <table mat-table [dataSource]="slowTraces()" class="full-width">
+            <ng-container matColumnDef="service">
+              <th mat-header-cell *matHeaderCellDef>Service</th>
+              <td mat-cell *matCellDef="let t">{{ t.serviceName }}</td>
+            </ng-container>
+            <ng-container matColumnDef="duration">
+              <th mat-header-cell *matHeaderCellDef>Duration</th>
+              <td mat-cell *matCellDef="let t">{{ formatDuration(durationMs(t)) }}</td>
+            </ng-container>
+            <ng-container matColumnDef="operation">
+              <th mat-header-cell *matHeaderCellDef>Operation</th>
+              <td mat-cell *matCellDef="let t">{{ t.rootOperationName }}</td>
+            </ng-container>
+            <tr mat-header-row *matHeaderRowDef="['service','duration','operation']"></tr>
+            <tr mat-row *matRowDef="let row; columns: ['service','duration','operation']"
+                class="clickable-row" (click)="navigateToTrace(row.traceIdHex)"></tr>
+          </table>
+        }
+      </mat-card-content>
+    </mat-card>
+  </div>
+</div>

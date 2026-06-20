@@ -1,0 +1,34 @@
+.services-card {
+  margin-bottom: 16px;
+}
+
+.service-strip {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 4px 0;
+}
+
+.service-chip {
+  background: var(--mat-sys-surface-container);
+  border: 1px solid var(--mat-sys-outline-variant);
+  border-radius: 8px;
+  padding: 8px 12px;
+  min-width: 120px;
+}
+
+.service-name {
+  font-weight: 500;
+  font-size: 13px;
+}
+
+.service-meta {
+  font-size: 11px;
+  color: var(--mat-sys-on-surface-variant);
+  margin-top: 2px;
+}
+
+.clickable-row {
+  cursor: pointer;
+  &:hover { background: var(--mat-sys-surface-container-high); }
+}

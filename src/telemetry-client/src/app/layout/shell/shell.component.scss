@@ -1,0 +1,69 @@
+.sidenav-container {
+  height: 100%;
+}
+
+.sidenav {
+  width: 220px;
+  background-color: var(--mat-sys-surface-container-low);
+  border-right: 1px solid var(--mat-sys-outline-variant);
+}
+
+.sidenav-header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 20px 16px 12px;
+  border-bottom: 1px solid var(--mat-sys-outline-variant);
+  margin-bottom: 8px;
+}
+
+.app-icon {
+  color: var(--mat-sys-primary);
+  font-size: 28px;
+  width: 28px;
+  height: 28px;
+}
+
+.app-title {
+  font-size: 18px;
+  font-weight: 600;
+  color: var(--mat-sys-on-surface);
+}
+
+.toolbar {
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  gap: 8px;
+  background-color: var(--mat-sys-surface-container);
+  border-bottom: 1px solid var(--mat-sys-outline-variant);
+  min-height: 56px;
+}
+
+.tenant-select {
+  min-width: 140px;
+  max-width: 200px;
+  font-size: 14px;
+}
+
+.tenant-name {
+  font-size: 14px;
+  color: var(--mat-sys-on-surface-variant);
+  padding: 0 8px;
+}
+
+.content {
+  flex: 1;
+  overflow-y: auto;
+}
+
+::ng-deep .active-link {
+  background-color: var(--mat-sys-secondary-container) !important;
+  color: var(--mat-sys-on-secondary-container) !important;
+  border-radius: 28px;
+  margin: 0 8px;
+
+  .mat-icon {
+    color: var(--mat-sys-on-secondary-container) !important;
+  }
+}

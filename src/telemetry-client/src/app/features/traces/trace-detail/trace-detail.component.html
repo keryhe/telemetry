@@ -1,0 +1,128 @@
+@if (loading()) {
+  <mat-progress-bar mode="indeterminate" />
+}
+
+<div class="page-container">
+  <!-- Breadcrumb -->
+  <div class="breadcrumb">
+    <a mat-button routerLink="/traces"><mat-icon>arrow_back</mat-icon> Traces</a>
+    <span class="mono">{{ id | slice:0:32 }}</span>
+  </div>
+
+  @if (!loading() && spans().length === 0) {
+    <app-empty-state icon="account_tree" message="Trace not found" />
+  } @else if (spans().length > 0) {
+    <!-- Summary -->
+    <div class="stat-grid">
+      <app-stat-card label="Duration" [value]="formatDuration(totalDurationMs())" />
+      <app-stat-card label="Spans" [value]="spans().length" />
+      <app-stat-card label="Services" [value]="serviceNames().length" />
+      <app-stat-card
+        label="Status"
+        [value]="hasErrors() ? 'Error' : 'OK'"
+        [color]="hasErrors() ? 'error' : 'success'" />
+    </div>
+
+    <div class="trace-layout">
+      <!-- Span Timeline -->
+      <mat-card class="timeline-card">
+        <mat-card-header>
+          <mat-card-title>Spans</mat-card-title>
+          <div class="service-legend">
+            @for (svc of serviceNames(); track svc) {
+              <span class="legend-item">
+                <span class="dot" [style.background]="colorFor(svc)"></span>{{ svc }}
+              </span>
+            }
+          </div>
+        </mat-card-header>
+        <mat-card-content class="timeline-content">
+          @for (node of flatTree(); track node.spanIdHex) {
+            <div class="span-row"
+                 [class.selected]="selectedSpan()?.spanIdHex === node.spanIdHex"
+                 [class.error]="isError(node)"
+                 (click)="selectSpan(node)">
+              <!-- Name column -->
+              <div class="span-name" [style.padding-left.px]="node.depth * 16 + 8">
+                @if (node.children.length > 0) {
+                  <mat-icon class="collapse-icon" (click)="$event.stopPropagation(); toggleCollapse(node)">
+                    {{ node.collapsed ? 'chevron_right' : 'expand_more' }}
+                  </mat-icon>
+                } @else {
+                  <span class="leaf-indent"></span>
+                }
+                <span class="service-dot" [style.background]="colorFor(node.serviceName)"></span>
+                <span class="op-name">{{ node.name }}</span>
+              </div>
+              <!-- Gantt bar -->
+              <div class="gantt-track">
+                <div class="gantt-bar"
+                     [style.left.%]="node.leftPct"
+                     [style.width.%]="node.widthPct"
+                     [style.background]="colorFor(node.serviceName)">
+                </div>
+                <span class="duration-label">{{ formatDuration(node.durationMs) }}</span>
+              </div>
+            </div>
+          }
+        </mat-card-content>
+      </mat-card>
+
+      <!-- Span Detail -->
+      @if (selectedSpan()) {
+        <mat-card class="detail-card">
+          <mat-card-header>
+            <mat-card-title>{{ selectedSpan()!.name }}</mat-card-title>
+            <mat-card-subtitle>{{ selectedSpan()!.serviceName }}</mat-card-subtitle>
+          </mat-card-header>
+          <mat-card-content>
+            <mat-tab-group>
+              <mat-tab label="Attributes">
+                @if (selectedSpan()!.attributes) {
+                  <div class="attr-table">
+                    @for (entry of selectedSpan()!.attributes | keyvalue; track entry.key) {
+                      <div class="attr-row">
+                        <span class="attr-key">{{ entry.key }}</span>
+                        <span class="attr-val">{{ entry.value }}</span>
+                      </div>
+                    }
+                  </div>
+                } @else {
+                  <app-empty-state icon="label_off" message="No attributes" />
+                }
+              </mat-tab>
+              <mat-tab label="Events ({{ selectedSpan()!.events.length }})">
+                @for (ev of selectedSpan()!.events; track ev.timeUnixNano) {
+                  <div class="event-row">
+                    <div class="event-name">{{ ev.name }}</div>
+                    @for (attr of ev.attributes | keyvalue; track attr.key) {
+                      <div class="attr-row sub">
+                        <span class="attr-key">{{ attr.key }}</span>
+                        <span class="attr-val">{{ attr.value }}</span>
+                      </div>
+                    }
+                  </div>
+                }
+                @if (selectedSpan()!.events.length === 0) {
+                  <app-empty-state icon="event_note" message="No events" />
+                }
+              </mat-tab>
+              <mat-tab label="Resource">
+                @if (selectedSpan()!.resource?.attributes) {
+                  <div class="attr-table">
+                    @for (entry of selectedSpan()!.resource!.attributes | keyvalue; track entry.key) {
+                      <div class="attr-row">
+                        <span class="attr-key">{{ entry.key }}</span>
+                        <span class="attr-val">{{ entry.value }}</span>
+                      </div>
+                    }
+                  </div>
+                }
+              </mat-tab>
+            </mat-tab-group>
+          </mat-card-content>
+        </mat-card>
+      }
+    </div>
+  }
+</div>

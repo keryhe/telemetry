@@ -1,0 +1,116 @@
+@if (loading()) {
+  <mat-progress-bar mode="indeterminate" />
+}
+
+<div class="page-container">
+  <div class="stat-grid">
+    <app-stat-card label="Unique Metrics" [value]="uniqueMetrics().length" />
+    <app-stat-card label="Gauges" [value]="gaugeCount()" />
+    <app-stat-card label="Counters" [value]="counterCount()" />
+    <app-stat-card label="Histograms" [value]="histogramCount()" />
+  </div>
+
+  <div class="filter-bar">
+    <mat-button-toggle-group [value]="showUnique()" (change)="showUnique.set($event.value)">
+      <mat-button-toggle [value]="true">Unique Names</mat-button-toggle>
+      <mat-button-toggle [value]="false">All Instances</mat-button-toggle>
+    </mat-button-toggle-group>
+
+    <mat-form-field appearance="outline" class="filter-field">
+      <mat-label>Type</mat-label>
+      <mat-select [value]="selectedType()" (selectionChange)="selectedType.set($event.value)">
+        <mat-option [value]="-1">All types</mat-option>
+        @for (t of metricTypes; track t) {
+          <mat-option [value]="t">{{ typeLabel(t) }}</mat-option>
+        }
+      </mat-select>
+    </mat-form-field>
+
+    <mat-form-field appearance="outline" class="filter-field">
+      <mat-label>Service</mat-label>
+      <mat-select [value]="selectedService()" (selectionChange)="selectedService.set($event.value)">
+        <mat-option value="">All services</mat-option>
+        @for (s of services(); track s) {
+          <mat-option [value]="s">{{ s }}</mat-option>
+        }
+      </mat-select>
+    </mat-form-field>
+
+    <mat-form-field appearance="outline" class="search-field">
+      <mat-label>Search metrics</mat-label>
+      <mat-icon matPrefix>search</mat-icon>
+      <input matInput [(ngModel)]="searchText" [ngModelOptions]="{standalone: true}" />
+    </mat-form-field>
+  </div>
+
+  <mat-card>
+    <mat-card-content>
+      @if (filteredUnique().length === 0 && filteredAll().length === 0 && !loading()) {
+        <app-empty-state icon="bar_chart" message="No metrics found" />
+      } @else if (showUnique()) {
+        <table mat-table [dataSource]="filteredUnique()" class="full-width">
+          <ng-container matColumnDef="name">
+            <th mat-header-cell *matHeaderCellDef>Name</th>
+            <td mat-cell *matCellDef="let m">
+              <a class="metric-link" (click)="navigate(m.name)">{{ m.name }}</a>
+              @if (m.description) {
+                <div class="desc">{{ m.description }}</div>
+              }
+            </td>
+          </ng-container>
+          <ng-container matColumnDef="type">
+            <th mat-header-cell *matHeaderCellDef>Type</th>
+            <td mat-cell *matCellDef="let m">
+              <mat-chip [highlighted]="false">{{ typeLabel(m.type) }}</mat-chip>
+            </td>
+          </ng-container>
+          <ng-container matColumnDef="unit">
+            <th mat-header-cell *matHeaderCellDef>Unit</th>
+            <td mat-cell *matCellDef="let m">{{ m.unit || '—' }}</td>
+          </ng-container>
+          <ng-container matColumnDef="instances">
+            <th mat-header-cell *matHeaderCellDef>Instances</th>
+            <td mat-cell *matCellDef="let m">{{ m.instanceCount }}</td>
+          </ng-container>
+          <ng-container matColumnDef="services">
+            <th mat-header-cell *matHeaderCellDef>Services</th>
+            <td mat-cell *matCellDef="let m">{{ m.services.join(', ') }}</td>
+          </ng-container>
+          <ng-container matColumnDef="lastSeen">
+            <th mat-header-cell *matHeaderCellDef>Last Seen</th>
+            <td mat-cell *matCellDef="let m">{{ m.lastSeen | date:'short' }}</td>
+          </ng-container>
+          <tr mat-header-row *matHeaderRowDef="uniqueCols"></tr>
+          <tr mat-row *matRowDef="let row; columns: uniqueCols"></tr>
+        </table>
+      } @else {
+        <table mat-table [dataSource]="filteredAll()" class="full-width">
+          <ng-container matColumnDef="name">
+            <th mat-header-cell *matHeaderCellDef>Name</th>
+            <td mat-cell *matCellDef="let m">
+              <a class="metric-link" (click)="navigate(m.name)">{{ m.name }}</a>
+            </td>
+          </ng-container>
+          <ng-container matColumnDef="type">
+            <th mat-header-cell *matHeaderCellDef>Type</th>
+            <td mat-cell *matCellDef="let m"><mat-chip>{{ typeLabel(m.type) }}</mat-chip></td>
+          </ng-container>
+          <ng-container matColumnDef="unit">
+            <th mat-header-cell *matHeaderCellDef>Unit</th>
+            <td mat-cell *matCellDef="let m">{{ m.unit || '—' }}</td>
+          </ng-container>
+          <ng-container matColumnDef="service">
+            <th mat-header-cell *matHeaderCellDef>Service</th>
+            <td mat-cell *matCellDef="let m">{{ m.serviceName }}</td>
+          </ng-container>
+          <ng-container matColumnDef="lastSeen">
+            <th mat-header-cell *matHeaderCellDef>Last Seen</th>
+            <td mat-cell *matCellDef="let m">{{ m.lastSeen | date:'short' }}</td>
+          </ng-container>
+          <tr mat-header-row *matHeaderRowDef="allCols"></tr>
+          <tr mat-row *matRowDef="let row; columns: allCols"></tr>
+        </table>
+      }
+    </mat-card-content>
+  </mat-card>
+</div>

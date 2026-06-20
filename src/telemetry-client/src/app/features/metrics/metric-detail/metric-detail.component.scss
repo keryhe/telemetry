@@ -1,0 +1,36 @@
+.breadcrumb {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 8px;
+}
+
+.metric-name {
+  font-size: 16px;
+  font-weight: 500;
+  font-family: monospace;
+}
+
+.description {
+  color: var(--mat-sys-on-surface-variant);
+  margin: 0 0 16px;
+  font-size: 14px;
+}
+
+.controls-bar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-bottom: 16px;
+}
+
+.ctrl-field { width: 160px; }
+
+.chart-card {
+  margin-bottom: 16px;
+  mat-card-content { padding-bottom: 0 !important; }
+}
+
+.mono { font-family: monospace; font-size: 12px; }

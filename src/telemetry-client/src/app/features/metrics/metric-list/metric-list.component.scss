@@ -1,0 +1,23 @@
+.filter-bar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-bottom: 16px;
+}
+
+.filter-field { width: 160px; }
+.search-field { flex: 1; min-width: 200px; }
+
+.metric-link {
+  cursor: pointer;
+  color: var(--mat-sys-primary);
+  font-weight: 500;
+  &:hover { text-decoration: underline; }
+}
+
+.desc {
+  font-size: 11px;
+  color: var(--mat-sys-on-surface-variant);
+  margin-top: 2px;
+}

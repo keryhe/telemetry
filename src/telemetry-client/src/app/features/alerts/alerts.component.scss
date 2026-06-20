@@ -1,0 +1,13 @@
+mat-card-header {
+  display: flex;
+  align-items: center;
+}
+
+.events-card { margin-top: 16px; }
+
+.actions-cell {
+  white-space: nowrap;
+  text-align: right;
+}
+
+.mono { font-family: monospace; font-size: 12px; }

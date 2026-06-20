@@ -1,0 +1,70 @@
+<mat-sidenav-container class="sidenav-container">
+  <mat-sidenav
+    #drawer
+    [attr.role]="(isHandset$ | async) ? 'dialog' : 'navigation'"
+    [mode]="(isHandset$ | async) ? 'over' : 'side'"
+    [opened]="!(isHandset$ | async)"
+    class="sidenav">
+    <div class="sidenav-header">
+      <mat-icon class="app-icon">sensors</mat-icon>
+      <span class="app-title">Telemetry</span>
+    </div>
+    <mat-nav-list>
+      @for (item of navItems; track item.route) {
+        <a mat-list-item
+           [routerLink]="item.route"
+           routerLinkActive="active-link"
+           [routerLinkActiveOptions]="{ exact: item.route === '/dashboard' }">
+          <mat-icon matListItemIcon>{{ item.icon }}</mat-icon>
+          <span matListItemTitle>{{ item.label }}</span>
+        </a>
+      }
+    </mat-nav-list>
+  </mat-sidenav>
+
+  <mat-sidenav-content>
+    <mat-toolbar class="toolbar">
+      @if (isHandset$ | async) {
+        <button mat-icon-button (click)="drawer.toggle()">
+          <mat-icon>menu</mat-icon>
+        </button>
+      }
+
+      <span class="spacer"></span>
+
+      <!-- Tenant Picker -->
+      @if (tenantService.tenants().length > 1) {
+        <mat-select
+          class="tenant-select"
+          [value]="tenantService.selectedTenant()"
+          [compareWith]="compareTenants"
+          (selectionChange)="selectTenant($event.value)">
+          @for (tenant of tenantService.tenants(); track tenant.id) {
+            <mat-option [value]="tenant">{{ tenant.name }}</mat-option>
+          }
+        </mat-select>
+      } @else if (tenantService.selectedTenant()) {
+        <span class="tenant-name">{{ tenantService.selectedTenant()!.name }}</span>
+      }
+
+      <app-time-range-picker />
+
+      <!-- Theme Toggle -->
+      <button mat-icon-button [matMenuTriggerFor]="themeMenu" [matTooltip]="'Theme'">
+        <mat-icon>{{ themeIcon }}</mat-icon>
+      </button>
+      <mat-menu #themeMenu="matMenu">
+        @for (tm of themeModes; track tm.value) {
+          <button mat-menu-item (click)="setTheme(tm.value)">
+            <mat-icon>{{ tm.icon }}</mat-icon>
+            {{ tm.label }}
+          </button>
+        }
+      </mat-menu>
+    </mat-toolbar>
+
+    <main class="content">
+      <router-outlet />
+    </main>
+  </mat-sidenav-content>
+</mat-sidenav-container>
