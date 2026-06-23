@@ -1,20 +1,16 @@
-.sidenav-container {
+.shell {
+  display: flex;
+  flex-direction: column;
   height: 100%;
 }
 
-.sidenav {
-  width: 220px;
-  background-color: var(--mat-sys-surface-container-low);
-  border-right: 1px solid var(--mat-sys-outline-variant);
-}
-
-.sidenav-header {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  padding: 20px 16px 12px;
+.toolbar {
+  flex: 0 0 auto;
+  z-index: 10;
+  gap: 8px;
+  height: 56px;
+  background-color: var(--mat-sys-surface-container);
   border-bottom: 1px solid var(--mat-sys-outline-variant);
-  margin-bottom: 8px;
 }
 
 .app-icon {
@@ -22,6 +18,7 @@
   font-size: 28px;
   width: 28px;
   height: 28px;
+  margin-right: 4px;
 }
 
 .app-title {
@@ -30,38 +27,48 @@
   color: var(--mat-sys-on-surface);
 }
 
-.toolbar {
-  position: sticky;
-  top: 0;
-  z-index: 10;
-  gap: 8px;
-  background-color: var(--mat-sys-surface-container);
-  border-bottom: 1px solid var(--mat-sys-outline-variant);
-  min-height: 56px;
+.sidenav-container {
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+.sidenav {
+  width: 248px;
+  background-color: var(--mat-sys-surface-container-low);
+  border-right: 1px solid var(--mat-sys-outline-variant);
+  border-radius: 0;
+  overflow-x: hidden;
+}
+
+// Remove Material's default drawer corner rounding on the right edge.
+::ng-deep .mat-drawer,
+::ng-deep .mat-sidenav {
+  border-radius: 0;
+}
+
+// Inset the nav items so the hover / selected pill never touches the rail edges.
+mat-nav-list {
+  padding: 8px;
+}
+
+::ng-deep .mat-mdc-list-item {
+  border-radius: 28px !important;
+  overflow: hidden; // clip the hover/focus state layer to the rounded corners
 }
 
 .tenant-select {
-  min-width: 140px;
-  max-width: 200px;
+  min-width: 210px;
   font-size: 14px;
-}
-
-.tenant-name {
-  font-size: 14px;
-  color: var(--mat-sys-on-surface-variant);
-  padding: 0 8px;
 }
 
 .content {
-  flex: 1;
+  height: 100%;
   overflow-y: auto;
 }
 
 ::ng-deep .active-link {
   background-color: var(--mat-sys-secondary-container) !important;
   color: var(--mat-sys-on-secondary-container) !important;
-  border-radius: 28px;
-  margin: 0 8px;
 
   .mat-icon {
     color: var(--mat-sys-on-secondary-container) !important;

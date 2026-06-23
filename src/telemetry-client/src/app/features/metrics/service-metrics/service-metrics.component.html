@@ -1,5 +1,10 @@
 @if (loading()) {
-  <mat-progress-bar mode="indeterminate" />
+  @if (loadingTotal() > 0) {
+    <mat-progress-bar mode="determinate" [value]="loadingProgress() / loadingTotal() * 100" />
+    <div class="loading-text">Loading {{ loadingProgress() }} of {{ loadingTotal() }} metrics…</div>
+  } @else {
+    <mat-progress-bar mode="indeterminate" />
+  }
 }
 
 <div class="page-container">

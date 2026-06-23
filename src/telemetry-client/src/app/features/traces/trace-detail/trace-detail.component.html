@@ -7,6 +7,12 @@
   <div class="breadcrumb">
     <a mat-button routerLink="/traces"><mat-icon>arrow_back</mat-icon> Traces</a>
     <span class="mono">{{ id | slice:0:32 }}</span>
+    <button mat-icon-button [matTooltip]="copied() ? 'Copied!' : 'Copy trace ID'" (click)="copyTraceId()">
+      <mat-icon>{{ copied() ? 'check' : 'content_copy' }}</mat-icon>
+    </button>
+    <a mat-stroked-button [routerLink]="['/logs']" [queryParams]="{ traceId: id }">
+      <mat-icon>receipt_long</mat-icon> View Logs
+    </a>
   </div>
 
   @if (!loading() && spans().length === 0) {
@@ -23,78 +29,141 @@
         [color]="hasErrors() ? 'error' : 'success'" />
     </div>
 
-    <div class="trace-layout">
-      <!-- Span Timeline -->
-      <mat-card class="timeline-card">
-        <mat-card-header>
-          <mat-card-title>Spans</mat-card-title>
-          <div class="service-legend">
-            @for (svc of serviceNames(); track svc) {
-              <span class="legend-item">
-                <span class="dot" [style.background]="colorFor(svc)"></span>{{ svc }}
-              </span>
-            }
-          </div>
-        </mat-card-header>
-        <mat-card-content class="timeline-content">
-          @for (node of flatTree(); track node.spanIdHex) {
-            <div class="span-row"
-                 [class.selected]="selectedSpan()?.spanIdHex === node.spanIdHex"
-                 [class.error]="isError(node)"
-                 (click)="selectSpan(node)">
-              <!-- Name column -->
-              <div class="span-name" [style.padding-left.px]="node.depth * 16 + 8">
-                @if (node.children.length > 0) {
-                  <mat-icon class="collapse-icon" (click)="$event.stopPropagation(); toggleCollapse(node)">
-                    {{ node.collapsed ? 'chevron_right' : 'expand_more' }}
-                  </mat-icon>
-                } @else {
-                  <span class="leaf-indent"></span>
-                }
-                <span class="service-dot" [style.background]="colorFor(node.serviceName)"></span>
-                <span class="op-name">{{ node.name }}</span>
-              </div>
-              <!-- Gantt bar -->
-              <div class="gantt-track">
-                <div class="gantt-bar"
-                     [style.left.%]="node.leftPct"
-                     [style.width.%]="node.widthPct"
-                     [style.background]="colorFor(node.serviceName)">
-                </div>
-                <span class="duration-label">{{ formatDuration(node.durationMs) }}</span>
-              </div>
-            </div>
+    <!-- Span Timeline (detail renders inline below the selected row) -->
+    <mat-card class="timeline-card">
+      <mat-card-header>
+        <mat-card-title>Spans</mat-card-title>
+        <div class="service-legend">
+          @for (svc of serviceNames(); track svc) {
+            <span class="legend-item">
+              <span class="dot" [style.background]="colorFor(svc)"></span>{{ svc }}
+            </span>
           }
-        </mat-card-content>
-      </mat-card>
+        </div>
+      </mat-card-header>
+      <mat-card-content class="timeline-content">
+        @for (node of flatTree(); track node.spanIdHex) {
+          <div class="span-row"
+               [class.selected]="selectedSpan()?.spanIdHex === node.spanIdHex"
+               [class.error]="isError(node)"
+               (click)="selectSpan(node)">
+            <!-- Name column -->
+            <div class="span-name" [style.padding-left.px]="node.depth * 16 + 8">
+              @if (node.children.length > 0) {
+                <mat-icon class="collapse-icon" (click)="$event.stopPropagation(); toggleCollapse(node)">
+                  {{ node.collapsed ? 'chevron_right' : 'expand_more' }}
+                </mat-icon>
+              } @else {
+                <span class="leaf-indent"></span>
+              }
+              <span class="service-dot" [style.background]="colorFor(node.serviceName)"></span>
+              <span class="op-name">{{ node.name }}</span>
+            </div>
+            <!-- Gantt bar -->
+            <div class="gantt-track">
+              <div class="gantt-bar"
+                   [style.left.%]="node.leftPct"
+                   [style.width.%]="node.widthPct"
+                   [style.background]="colorFor(node.serviceName)">
+              </div>
+              <span class="duration-label">{{ formatDuration(node.durationMs) }}</span>
+            </div>
+          </div>
 
-      <!-- Span Detail -->
-      @if (selectedSpan()) {
-        <mat-card class="detail-card">
-          <mat-card-header>
-            <mat-card-title>{{ selectedSpan()!.name }}</mat-card-title>
-            <mat-card-subtitle>{{ selectedSpan()!.serviceName }}</mat-card-subtitle>
-          </mat-card-header>
-          <mat-card-content>
-            <mat-tab-group>
-              <mat-tab label="Attributes">
-                @if (selectedSpan()!.attributes) {
-                  <div class="attr-table">
-                    @for (entry of selectedSpan()!.attributes | keyvalue; track entry.key) {
-                      <div class="attr-row">
-                        <span class="attr-key">{{ entry.key }}</span>
-                        <span class="attr-val">{{ entry.value }}</span>
-                      </div>
-                    }
-                  </div>
-                } @else {
-                  <app-empty-state icon="label_off" message="No attributes" />
+          <!-- Inline detail below the selected row -->
+          @if (selectedSpan()?.spanIdHex === node.spanIdHex) {
+            <div class="span-detail-inline" [class.error]="isError(node)">
+              <div class="detail-grid">
+                <!-- Span Info -->
+                <div class="detail-col">
+                  <div class="detail-section-title">Span Info</div>
+                  <table class="info-table">
+                    <tbody>
+                      <tr><td>Span ID</td><td class="mono">{{ node.spanIdHex }}</td></tr>
+                      @if (node.parentSpanIdHex) {
+                        <tr><td>Parent Span</td><td class="mono">{{ node.parentSpanIdHex }}</td></tr>
+                      }
+                      <tr><td>Service</td><td>{{ node.serviceName }}</td></tr>
+                      <tr><td>Kind</td><td>{{ spanKindLabel(node.kind) }}</td></tr>
+                      @if (node.traceState) {
+                        <tr><td>Trace State</td><td class="mono">{{ node.traceState }}</td></tr>
+                      }
+                      @if (node.instrumentationScope) {
+                        <tr>
+                          <td>Library</td>
+                          <td>
+                            {{ node.instrumentationScope.name }}
+                            @if (node.instrumentationScope.version) { <span>v{{ node.instrumentationScope.version }}</span> }
+                          </td>
+                        </tr>
+                      }
+                    </tbody>
+                  </table>
+                </div>
+
+                <!-- Timing & Status -->
+                <div class="detail-col">
+                  <div class="detail-section-title">Timing &amp; Status</div>
+                  <table class="info-table">
+                    <tbody>
+                      <tr><td>Start</td><td>{{ nanoToDate(node.startTimeUnixNano) | date:'yyyy-MM-dd HH:mm:ss.SSS' }}</td></tr>
+                      <tr><td>End</td><td>{{ nanoToDate(node.endTimeUnixNano) | date:'yyyy-MM-dd HH:mm:ss.SSS' }}</td></tr>
+                      <tr><td>Duration</td><td>{{ formatDuration(node.durationMs) }}</td></tr>
+                      <tr>
+                        <td>Status</td>
+                        <td>
+                          <span class="status-chip" [class.err]="isError(node)" [class.ok]="!isError(node)">
+                            {{ statusLabel(node.statusCode) }}
+                          </span>
+                          @if (node.statusMessage) {
+                            <span class="status-message">{{ node.statusMessage }}</span>
+                          }
+                        </td>
+                      </tr>
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+
+              <!-- Attributes -->
+              <div class="detail-section-title with-chip">
+                Attributes ({{ (node.attributes | keyvalue)?.length ?? 0 }})
+                @if (node.droppedAttributesCount > 0) {
+                  <span class="dropped-chip" [matTooltip]="node.droppedAttributesCount + ' attribute(s) dropped due to limits'">
+                    ⚠ {{ node.droppedAttributesCount }} dropped
+                  </span>
                 }
-              </mat-tab>
-              <mat-tab label="Events ({{ selectedSpan()!.events.length }})">
-                @for (ev of selectedSpan()!.events; track ev.timeUnixNano) {
+              </div>
+              @if ((node.attributes | keyvalue)?.length) {
+                <div class="attr-table">
+                  @for (entry of node.attributes | keyvalue; track entry.key) {
+                    <div class="attr-row">
+                      <span class="attr-key">{{ entry.key }}</span>
+                      <span class="attr-val">{{ entry.value }}</span>
+                    </div>
+                  }
+                </div>
+              } @else {
+                <div class="muted">No attributes</div>
+              }
+
+              <!-- Events -->
+              <div class="detail-section-title with-chip">
+                Events ({{ node.events.length }})
+                @if (node.droppedEventsCount > 0) {
+                  <span class="dropped-chip" [matTooltip]="node.droppedEventsCount + ' event(s) dropped due to limits'">
+                    ⚠ {{ node.droppedEventsCount }} dropped
+                  </span>
+                }
+              </div>
+              @if (node.events.length) {
+                @for (ev of sortedEvents(node); track ev.timeUnixNano) {
                   <div class="event-row">
-                    <div class="event-name">{{ ev.name }}</div>
+                    <div class="event-head">
+                      <mat-icon class="event-icon">event</mat-icon>
+                      <span class="event-name">{{ ev.name }}</span>
+                      <span class="event-time mono">{{ nanoToDate(ev.timeUnixNano) | date:'HH:mm:ss.SSS' }}</span>
+                    </div>
                     @for (attr of ev.attributes | keyvalue; track attr.key) {
                       <div class="attr-row sub">
                         <span class="attr-key">{{ attr.key }}</span>
@@ -103,26 +172,32 @@
                     }
                   </div>
                 }
-                @if (selectedSpan()!.events.length === 0) {
-                  <app-empty-state icon="event_note" message="No events" />
-                }
-              </mat-tab>
-              <mat-tab label="Resource">
-                @if (selectedSpan()!.resource?.attributes) {
-                  <div class="attr-table">
-                    @for (entry of selectedSpan()!.resource!.attributes | keyvalue; track entry.key) {
-                      <div class="attr-row">
-                        <span class="attr-key">{{ entry.key }}</span>
-                        <span class="attr-val">{{ entry.value }}</span>
-                      </div>
-                    }
+              } @else {
+                <div class="muted">No events</div>
+              }
+
+              <!-- Links -->
+              @if (node.links.length || node.droppedLinksCount > 0) {
+                <div class="detail-section-title with-chip">
+                  Links ({{ node.links.length }})
+                  @if (node.droppedLinksCount > 0) {
+                    <span class="dropped-chip" [matTooltip]="node.droppedLinksCount + ' link(s) dropped due to limits'">
+                      ⚠ {{ node.droppedLinksCount }} dropped
+                    </span>
+                  }
+                </div>
+                @for (link of node.links; track link.linkedSpanIdHex) {
+                  <div class="link-row">
+                    <mat-icon class="link-icon">link</mat-icon>
+                    <a class="mono" [routerLink]="['/traces', link.linkedTraceIdHex]">{{ link.linkedTraceIdHex }}</a>
+                    <span class="link-span">Span: {{ link.linkedSpanIdHex }}</span>
                   </div>
                 }
-              </mat-tab>
-            </mat-tab-group>
-          </mat-card-content>
-        </mat-card>
-      }
-    </div>
+              }
+            </div>
+          }
+        }
+      </mat-card-content>
+    </mat-card>
   }
 </div>

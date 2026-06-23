@@ -3,6 +3,14 @@
 }
 
 <div class="page-container">
+  <!-- Stats -->
+  <div class="stat-grid">
+    <app-stat-card label="Traces" [value]="totalTraces() | number" />
+    <app-stat-card label="Errors" [value]="errorCount() | number" [color]="errorCount() > 0 ? 'error' : 'default'" />
+    <app-stat-card label="Error Rate" [value]="errorRate()" [color]="errorCount() > 0 ? 'error' : 'default'" />
+    <app-stat-card label="Avg Duration" [value]="avgDuration()" />
+  </div>
+
   <!-- Filters -->
   <div class="filter-bar">
     <mat-button-toggle-group [value]="filterMode()" (change)="filterMode.set($event.value); applyFilter()">
@@ -11,7 +19,16 @@
       <mat-button-toggle value="slow">Slow</mat-button-toggle>
     </mat-button-toggle-group>
 
-    <mat-form-field appearance="outline" class="service-filter">
+    @if (filterMode() === 'slow') {
+      <mat-form-field appearance="outline" subscriptSizing="dynamic" class="min-duration-field">
+        <mat-label>Min Duration (ms)</mat-label>
+        <input matInput type="number" min="1"
+               [(ngModel)]="minDurationMs" [ngModelOptions]="{standalone: true}"
+               (change)="applyFilter()" />
+      </mat-form-field>
+    }
+
+    <mat-form-field appearance="outline" subscriptSizing="dynamic" class="service-filter">
       <mat-label>Service</mat-label>
       <mat-select [value]="selectedService()" (selectionChange)="selectedService.set($event.value); applyFilter()">
         <mat-option value="">All services</mat-option>
@@ -21,20 +38,41 @@
       </mat-select>
     </mat-form-field>
 
-    <mat-form-field appearance="outline" class="search-field">
-      <mat-label>Search traces</mat-label>
+    <mat-form-field appearance="outline" subscriptSizing="dynamic" class="search-field">
+      <mat-label>Search</mat-label>
       <mat-icon matPrefix>search</mat-icon>
-      <input matInput [(ngModel)]="searchText" [ngModelOptions]="{standalone: true}" placeholder="ID, service, operation…" />
+      <input matInput [(ngModel)]="searchText" [ngModelOptions]="{standalone: true}"
+             placeholder='Trace ID OR "operation" OR key=value OR key:value' />
+      @if (isTraceIdSearch()) {
+        <mat-chip-set matSuffix>
+          <mat-chip highlighted color="accent"><mat-icon>link</mat-icon> Trace ID</mat-chip>
+        </mat-chip-set>
+      }
     </mat-form-field>
+
+    <button mat-icon-button color="primary" (click)="openSearchHelp()" matTooltip="Search syntax help">
+      <mat-icon>help_outline</mat-icon>
+    </button>
   </div>
 
-  <!-- Stats -->
-  <div class="stat-grid">
-    <app-stat-card label="Traces" [value]="totalTraces() | number" />
-    <app-stat-card label="Errors" [value]="errorCount() | number" [color]="errorCount() > 0 ? 'error' : 'default'" />
-    <app-stat-card label="Error Rate" [value]="errorRate()" [color]="errorCount() > 0 ? 'error' : 'default'" />
-    <app-stat-card label="Avg Duration" [value]="avgDuration()" />
-  </div>
+  <!-- Trace volume -->
+  @if (traceChartOptions().series) {
+    <mat-card class="chart-card">
+      <mat-card-content>
+        <div class="chart-title">Trace Volume</div>
+        <apx-chart
+          [series]="traceChartOptions().series!"
+          [chart]="traceChartOptions().chart!"
+          [xaxis]="traceChartOptions().xaxis!"
+          [colors]="traceChartOptions().colors!"
+          [stroke]="traceChartOptions().stroke!"
+          [fill]="traceChartOptions().fill!"
+          [theme]="traceChartOptions().theme!"
+          [legend]="traceChartOptions().legend!"
+          [dataLabels]="traceChartOptions().dataLabels!" />
+      </mat-card-content>
+    </mat-card>
+  }
 
   <!-- Tabs -->
   <mat-tab-group>
@@ -61,6 +99,10 @@
               <ng-container matColumnDef="duration">
                 <th mat-header-cell *matHeaderCellDef>Duration</th>
                 <td mat-cell *matCellDef="let t">{{ formatDuration(parseDuration(t.traceDuration)) }}</td>
+              </ng-container>
+              <ng-container matColumnDef="spans">
+                <th mat-header-cell *matHeaderCellDef>Spans</th>
+                <td mat-cell *matCellDef="let t">{{ t.spanCount }}</td>
               </ng-container>
               <ng-container matColumnDef="status">
                 <th mat-header-cell *matHeaderCellDef>Status</th>
@@ -90,6 +132,13 @@
           @if (graphNodes().length === 0) {
             <app-empty-state icon="hub" message="No dependencies found" />
           } @else {
+            <div class="map-legend">
+              <span class="legend-item"><span class="swatch" style="background:var(--mat-sys-outline)"></span> Healthy</span>
+              <span class="legend-item"><span class="swatch" style="background:#ff9800"></span> ≥5% errors</span>
+              <span class="legend-item"><span class="swatch" style="background:#f44336"></span> ≥20% errors</span>
+              <span class="legend-item"><span class="thickness"></span> Thickness = call volume</span>
+              <span class="legend-item">Edge label = avg duration</span>
+            </div>
             <ngx-graph
               class="chart-container"
               [nodes]="graphNodes()"
@@ -110,8 +159,17 @@
               </ng-template>
               <ng-template #linkTemplate let-link>
                 <svg:g class="edge">
-                  <svg:path class="line" stroke="var(--mat-sys-outline)" stroke-width="1.5" fill="none"
-                    [attr.d]="link.line" />
+                  <svg:path class="line" fill="none"
+                    [attr.stroke]="link.color" [attr.stroke-width]="link.width"
+                    [attr.d]="link.line">
+                    <svg:title>{{ link.source }} → {{ link.target }}: {{ link.callCount }} calls, {{ (link.errorRate * 100).toFixed(1) }}% errors, {{ formatDuration(link.avgDurationMs) }} avg</svg:title>
+                  </svg:path>
+                  @if (link.midPoint) {
+                    <svg:text class="edge-label" [attr.x]="link.midPoint.x" [attr.y]="link.midPoint.y"
+                      text-anchor="middle" fill="var(--mat-sys-on-surface-variant)" font-size="10">
+                      {{ link.label }}
+                    </svg:text>
+                  }
                 </svg:g>
               </ng-template>
             </ngx-graph>

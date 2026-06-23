@@ -7,11 +7,43 @@
 }
 
 .service-filter { width: 180px; }
-.search-field { flex: 1; min-width: 200px; }
+.min-duration-field { width: 160px; }
+.search-field { flex: 1; min-width: 240px; }
+
+.search-field mat-chip mat-icon {
+  font-size: 16px;
+  width: 16px;
+  height: 16px;
+  margin-right: 2px;
+}
+
+.chart-card {
+  margin: 16px 0;
+  .chart-title { font-size: 14px; font-weight: 600; margin-bottom: 4px; }
+}
 
 .tab-card { margin-top: 16px; }
 
 .graph-card mat-card-content { padding: 0 !important; }
+
+.map-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 16px;
+  padding: 12px 16px;
+  font-size: 12px;
+  color: var(--mat-sys-on-surface-variant);
+  border-bottom: 1px solid var(--mat-sys-outline-variant);
+
+  .legend-item { display: flex; align-items: center; gap: 6px; }
+  .swatch { width: 18px; height: 4px; border-radius: 2px; display: inline-block; }
+  .thickness {
+    width: 18px; height: 6px; border-radius: 2px; display: inline-block;
+    background: var(--mat-sys-outline);
+  }
+}
+
+.edge-label { pointer-events: none; }
 
 .chart-container {
   width: 100%;

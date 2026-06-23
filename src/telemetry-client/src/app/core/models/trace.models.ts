@@ -36,6 +36,10 @@ export interface SpanModel {
   endTimeUnixNano: number;
   statusCode: SpanStatusCode;
   statusMessage: string | null;
+  traceState: string | null;
+  droppedAttributesCount: number;
+  droppedEventsCount: number;
+  droppedLinksCount: number;
   attributes: Record<string, unknown> | null;
   events: SpanEventModel[];
   links: SpanLinkModel[];

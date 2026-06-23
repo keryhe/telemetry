@@ -33,8 +33,19 @@ export interface MetricDataPoint {
   sum: number | null;
   min: number | null;
   max: number | null;
+  flags: number;
   bucketCounts: number[] | null;
   bucketBounds: number[] | null;
+  // Exponential histogram fields
+  scale: number | null;
+  zeroCount: number | null;
+  positiveOffset: number | null;
+  positiveBucketCounts: number[] | null;
+  negativeOffset: number | null;
+  negativeBucketCounts: number[] | null;
+  // Summary fields
+  quantiles: number[] | null;
+  quantileValues: number[] | null;
   attributes: Record<string, unknown> | null;
   exemplars: ExemplarModel[] | null;
   aggregationTemporality: AggregationTemporality | null;
@@ -43,10 +54,11 @@ export interface MetricDataPoint {
 
 export interface ExemplarModel {
   timeUnixNano: number;
-  doubleValue: number | null;
-  intValue: number | null;
+  valueDouble: number | null;
+  valueInt: number | null;
   spanIdHex: string | null;
   traceIdHex: string | null;
+  filteredAttributes: Record<string, unknown> | null;
 }
 
 export interface MetricSeries {

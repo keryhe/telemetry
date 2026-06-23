@@ -28,9 +28,10 @@ export const SEVERITY_LABELS: Record<number, string> = {
   21: 'Fatal', 22: 'Fatal', 23: 'Fatal', 24: 'Fatal',
 };
 
+// Canonical severity palette (matches the Blazor reference: badges + charts agree).
 export const SEVERITY_COLORS: Record<string, string> = {
-  Trace: '#9e9e9e', Debug: '#2196f3', Info: '#4caf50',
-  Warn: '#ff9800', Error: '#f44336', Fatal: '#9c27b0',
+  Trace: '#9C27B0', Debug: '#2196F3', Info: '#4CAF50',
+  Warn: '#FF9800', Error: '#F44336', Fatal: '#B71C1C',
 };
 
 export function getSeverityLabel(num: number | null): string {

@@ -26,7 +26,7 @@
           </ng-container>
           <ng-container matColumnDef="type">
             <th mat-header-cell *matHeaderCellDef>Type</th>
-            <td mat-cell *matCellDef="let r">{{ ruleTypeLabel(r.ruleType) }}</td>
+            <td mat-cell *matCellDef="let r">{{ ruleTypeLabel(r.type) }}</td>
           </ng-container>
           <ng-container matColumnDef="service">
             <th mat-header-cell *matHeaderCellDef>Service</th>
@@ -34,7 +34,15 @@
           </ng-container>
           <ng-container matColumnDef="condition">
             <th mat-header-cell *matHeaderCellDef>Condition</th>
-            <td mat-cell *matCellDef="let r" class="mono">{{ conditionSummary(r) }}</td>
+            <td mat-cell *matCellDef="let r" class="mono">{{ formatCondition(r) }}</td>
+          </ng-container>
+          <ng-container matColumnDef="cooldown">
+            <th mat-header-cell *matHeaderCellDef>Cooldown</th>
+            <td mat-cell *matCellDef="let r">{{ r.cooldownMinutes }} min</td>
+          </ng-container>
+          <ng-container matColumnDef="lastFired">
+            <th mat-header-cell *matHeaderCellDef>Last Fired</th>
+            <td mat-cell *matCellDef="let r">{{ r.lastFiredAt ? (r.lastFiredAt | date:'short') : 'Never' }}</td>
           </ng-container>
           <ng-container matColumnDef="enabled">
             <th mat-header-cell *matHeaderCellDef>Enabled</th>

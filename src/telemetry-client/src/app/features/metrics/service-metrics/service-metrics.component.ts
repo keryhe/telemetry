@@ -1,6 +1,6 @@
-import { Component, OnInit, computed, inject, signal } from '@angular/core';
+import { Component, computed, effect, inject, signal, untracked } from '@angular/core';
 import { NgTemplateOutlet } from '@angular/common';
-import { concatMap, from, toArray } from 'rxjs';
+import { concatMap, from, tap, toArray } from 'rxjs';
 import { MatCardModule } from '@angular/material/card';
 import { MatExpansionModule } from '@angular/material/expansion';
 import { MatFormFieldModule } from '@angular/material/form-field';
@@ -14,8 +14,9 @@ import { MetricsApiService } from '../../../core/services/api/metrics-api.servic
 import { TracesApiService } from '../../../core/services/api/traces-api.service';
 import { TimeRangeService } from '../../../core/services/time-range.service';
 import { ThemeService } from '../../../core/services/theme.service';
-import { NamedMetricSeries, MetricType } from '../../../core/models/metric.models';
+import { MetricType } from '../../../core/models/metric.models';
 import { EmptyStateComponent } from '../../../shared/components/empty-state/empty-state.component';
+import { computeRateSeries, isCounterMetric } from '../../../shared/utils/chart.utils';
 
 interface SparkCard {
   name: string;
@@ -45,7 +46,7 @@ const TYPE_LABELS: Record<MetricType, string> = {
   templateUrl: './service-metrics.component.html',
   styleUrl: './service-metrics.component.scss',
 })
-export class ServiceMetricsComponent implements OnInit {
+export class ServiceMetricsComponent {
   private readonly api = inject(MetricsApiService);
   private readonly tracesApi = inject(TracesApiService);
   private readonly timeRange = inject(TimeRangeService);
@@ -53,6 +54,7 @@ export class ServiceMetricsComponent implements OnInit {
 
   protected loading = signal(true);
   protected loadingProgress = signal(0);
+  protected loadingTotal = signal(0);
   protected services = signal<string[]>([]);
   protected selectedService = signal(localStorage.getItem('serviceMetrics_service') ?? '');
   protected sparkCards = signal<SparkCard[]>([]);
@@ -66,7 +68,14 @@ export class ServiceMetricsComponent implements OnInit {
   readonly MetricType = MetricType;
   readonly typeLabels = TYPE_LABELS;
 
-  ngOnInit(): void {
+  constructor() {
+    effect(() => {
+      this.timeRange.range();
+      untracked(() => this.load());
+    });
+  }
+
+  private load(): void {
     const { start, end } = this.timeRange.range();
     this.tracesApi.getServices(start, end).subscribe((svcs) => {
       this.services.set(svcs);
@@ -84,12 +93,13 @@ export class ServiceMetricsComponent implements OnInit {
 
   private loadMetrics(serviceName: string): void {
     this.loading.set(true);
+    this.loadingProgress.set(0);
     this.sparkCards.set([]);
     const { start, end } = this.timeRange.range();
 
     this.api.getByService(serviceName, start, end).subscribe((metrics) => {
       const names = [...new Set(metrics.map((m) => m.name))];
-      let done = 0;
+      this.loadingTotal.set(names.length);
 
       from(names).pipe(
         concatMap((name) =>
@@ -98,21 +108,27 @@ export class ServiceMetricsComponent implements OnInit {
             metricId: metrics.find((m) => m.name === name)?.id,
           })
         ),
+        tap(() => this.loadingProgress.update((n) => n + 1)),
         toArray(),
       ).subscribe({
         next: (seriesArray) => {
-          const cards: SparkCard[] = seriesArray.map((s, i) => {
+          const cards: SparkCard[] = seriesArray.map((s) => {
             const metricInfo = metrics.find((m) => m.name === s.name);
-            const vals = s.points.map((p) => p.doubleValue ?? p.intValue ?? 0);
-            const data: [number, number][] = s.points.map((p) => [
-              new Date(p.timestamp).getTime(),
-              p.doubleValue ?? p.intValue ?? 0,
-            ]);
+            const type = metricInfo?.type ?? MetricType.Gauge;
+            const isCounter = isCounterMetric(type, s.points);
+
+            // Counters render as per-second rate (no raw toggle on this page).
+            const data: [number, number][] = isCounter
+              ? computeRateSeries(s.points)
+              : s.points.map((p) => [new Date(p.timestamp).getTime(), p.doubleValue ?? p.intValue ?? 0]);
+            const vals = data.map(([, v]) => v);
+            const unit = isCounter ? `${metricInfo?.unit ?? ''}/s`.replace(/^\/s$/, 'rate/s') : (metricInfo?.unit ?? null);
+
             const isDark = this.theme.isDark();
             return {
               name: s.name,
-              type: metricInfo?.type ?? MetricType.Gauge,
-              unit: metricInfo?.unit ?? null,
+              type,
+              unit,
               current: vals.length ? vals[vals.length - 1] : null,
               min: vals.length ? Math.min(...vals) : null,
               max: vals.length ? Math.max(...vals) : null,

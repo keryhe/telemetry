@@ -16,7 +16,7 @@
       <mat-button-toggle [value]="false">All Instances</mat-button-toggle>
     </mat-button-toggle-group>
 
-    <mat-form-field appearance="outline" class="filter-field">
+    <mat-form-field appearance="outline" subscriptSizing="dynamic" class="filter-field">
       <mat-label>Type</mat-label>
       <mat-select [value]="selectedType()" (selectionChange)="selectedType.set($event.value)">
         <mat-option [value]="-1">All types</mat-option>
@@ -26,7 +26,7 @@
       </mat-select>
     </mat-form-field>
 
-    <mat-form-field appearance="outline" class="filter-field">
+    <mat-form-field appearance="outline" subscriptSizing="dynamic" class="filter-field">
       <mat-label>Service</mat-label>
       <mat-select [value]="selectedService()" (selectionChange)="selectedService.set($event.value)">
         <mat-option value="">All services</mat-option>
@@ -36,7 +36,7 @@
       </mat-select>
     </mat-form-field>
 
-    <mat-form-field appearance="outline" class="search-field">
+    <mat-form-field appearance="outline" subscriptSizing="dynamic" class="search-field">
       <mat-label>Search metrics</mat-label>
       <mat-icon matPrefix>search</mat-icon>
       <input matInput [(ngModel)]="searchText" [ngModelOptions]="{standalone: true}" />

@@ -3,6 +3,7 @@ import { AsyncPipe } from '@angular/common';
 import { Component, inject } from '@angular/core';
 import { MatButtonModule } from '@angular/material/button';
 import { MatIconModule } from '@angular/material/icon';
+import { MatFormFieldModule } from '@angular/material/form-field';
 import { MatListModule } from '@angular/material/list';
 import { MatMenuModule } from '@angular/material/menu';
 import { MatSelectModule } from '@angular/material/select';
@@ -31,7 +32,7 @@ interface NavItem {
     RouterOutlet, RouterLink, RouterLinkActive,
     MatSidenavModule, MatToolbarModule, MatListModule,
     MatIconModule, MatButtonModule, MatTooltipModule,
-    MatMenuModule, MatSelectModule,
+    MatMenuModule, MatSelectModule, MatFormFieldModule,
     TimeRangePickerComponent,
   ],
   templateUrl: './shell.component.html',
@@ -48,10 +49,10 @@ export class ShellComponent {
 
   protected readonly navItems: NavItem[] = [
     { label: 'Dashboard', icon: 'dashboard', route: '/dashboard' },
+    { label: 'Logs', icon: 'article', route: '/logs' },
     { label: 'Traces', icon: 'account_tree', route: '/traces' },
     { label: 'Metrics', icon: 'bar_chart', route: '/metrics' },
     { label: 'Service Metrics', icon: 'monitoring', route: '/metrics/services' },
-    { label: 'Logs', icon: 'article', route: '/logs' },
     { label: 'Alerts', icon: 'notifications', route: '/alerts' },
   ];
 

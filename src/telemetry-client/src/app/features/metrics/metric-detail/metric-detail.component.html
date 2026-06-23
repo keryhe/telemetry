@@ -10,6 +10,10 @@
     @if (instances()[0]?.unit) {
       <mat-chip>{{ instances()[0].unit }}</mat-chip>
     }
+    <span class="spacer"></span>
+    <button mat-stroked-button (click)="exportCsv()" [disabled]="points().length === 0">
+      <mat-icon>download</mat-icon> Export CSV
+    </button>
   </div>
 
   @if (instances()[0]?.description) {
@@ -19,7 +23,7 @@
   <!-- Controls -->
   <div class="controls-bar">
     @if (services().length > 1) {
-      <mat-form-field appearance="outline" class="ctrl-field">
+      <mat-form-field appearance="outline" subscriptSizing="dynamic" class="ctrl-field">
         <mat-label>Service</mat-label>
         <mat-select [value]="selectedService()" (selectionChange)="selectedService.set($event.value); reloadSeries()">
           <mat-option value="">All</mat-option>
@@ -29,7 +33,7 @@
     }
 
     @for (key of labelKeys(); track key) {
-      <mat-form-field appearance="outline" class="ctrl-field">
+      <mat-form-field appearance="outline" subscriptSizing="dynamic" class="ctrl-field">
         <mat-label>{{ key }}</mat-label>
         <mat-select [value]="selectedLabels()[key] ?? ''"
           (selectionChange)="updateLabelFilter(key, $event.value)">
@@ -56,52 +60,139 @@
 
   <!-- Stats -->
   <div class="stat-grid">
-    <app-stat-card label="Current" [value]="fmt(currentValue())" />
-    <app-stat-card label="Min" [value]="fmt(minValue())" />
-    <app-stat-card label="Max" [value]="fmt(maxValue())" />
-    <app-stat-card label="Average" [value]="fmt(avgValue())" />
+    <app-stat-card [label]="statsAreRates() ? 'Current Rate' : 'Current'" [value]="fmtStat(currentValue())" />
+    <app-stat-card label="Min" [value]="fmtStat(minValue())" />
+    <app-stat-card label="Max" [value]="fmtStat(maxValue())" />
+    <app-stat-card [label]="isHistogram() ? 'Count' : 'Average'" [value]="isHistogram() ? fmt(avgValue()) : fmtStat(avgValue())" />
   </div>
 
-  <!-- Chart -->
-  <mat-card class="chart-card">
-    <mat-card-content>
-      @if (chartOptions().series) {
-        <apx-chart
-          [series]="chartOptions().series!"
-          [chart]="chartOptions().chart!"
-          [xaxis]="chartOptions().xaxis!"
-          [stroke]="chartOptions().stroke!"
-          [fill]="chartOptions().fill!"
-          [theme]="chartOptions().theme!"
-          [dataLabels]="chartOptions().dataLabels!"
-          [yaxis]="chartOptions().yaxis!"
-          [legend]="chartOptions().legend!" />
-      } @else if (!loading()) {
-        <app-empty-state icon="show_chart" message="No data for selected range" />
-      }
-    </mat-card-content>
-  </mat-card>
+  <mat-tab-group [selectedIndex]="activeTab()" (selectedIndexChange)="activeTab.set($event)">
+    <!-- Chart -->
+    <mat-tab label="Chart">
+      <mat-card class="chart-card">
+        <mat-card-content>
+          @if (chartOptions().series) {
+            <apx-chart
+              [series]="chartOptions().series!"
+              [chart]="chartOptions().chart!"
+              [xaxis]="chartOptions().xaxis!"
+              [stroke]="chartOptions().stroke!"
+              [fill]="chartOptions().fill!"
+              [theme]="chartOptions().theme!"
+              [dataLabels]="chartOptions().dataLabels!"
+              [yaxis]="chartOptions().yaxis!"
+              [legend]="chartOptions().legend!" />
+          } @else if (!loading()) {
+            <app-empty-state icon="show_chart" message="No data for selected range" />
+          }
 
-  <!-- Exemplars -->
-  @if (exemplars().length > 0) {
-    <mat-card>
-      <mat-card-header><mat-card-title>Exemplars</mat-card-title></mat-card-header>
-      <mat-card-content>
-        <table mat-table [dataSource]="exemplars()" class="full-width">
-          <ng-container matColumnDef="traceId">
-            <th mat-header-cell *matHeaderCellDef>Trace ID</th>
-            <td mat-cell *matCellDef="let e" class="mono">
-              <a [routerLink]="['/traces', e.traceIdHex]">{{ e.traceIdHex | slice:0:16 }}…</a>
-            </td>
-          </ng-container>
-          <ng-container matColumnDef="value">
-            <th mat-header-cell *matHeaderCellDef>Value</th>
-            <td mat-cell *matCellDef="let e">{{ e.doubleValue ?? e.intValue }}</td>
-          </ng-container>
-          <tr mat-header-row *matHeaderRowDef="['traceId','value']"></tr>
-          <tr mat-row *matRowDef="let row; columns: ['traceId','value']"></tr>
-        </table>
-      </mat-card-content>
-    </mat-card>
-  }
+          <!-- Histogram Min / Max -->
+          @if (minMaxChartOptions(); as mm) {
+            <div class="sub-chart-title">Min / Max</div>
+            <apx-chart
+              [series]="mm.series!"
+              [chart]="mm.chart!"
+              [xaxis]="mm.xaxis!"
+              [stroke]="mm.stroke!"
+              [theme]="mm.theme!"
+              [dataLabels]="mm.dataLabels!"
+              [yaxis]="mm.yaxis!"
+              [legend]="mm.legend!" />
+          }
+
+          <!-- Summary quantile snapshot -->
+          @if (isSummary() && summarySnapshot().length) {
+            <div class="sub-chart-title">Latest quantile snapshot</div>
+            <table class="snapshot-table">
+              <thead><tr><th>Quantile</th><th>Value</th></tr></thead>
+              <tbody>
+                @for (q of summarySnapshot(); track q.label) {
+                  <tr><td>{{ q.label }}</td><td>{{ q.value | number:'1.0-2' }}</td></tr>
+                }
+              </tbody>
+            </table>
+          }
+        </mat-card-content>
+      </mat-card>
+    </mat-tab>
+
+    <!-- Metadata -->
+    <mat-tab label="Metadata">
+      <mat-card class="chart-card">
+        <mat-card-content>
+          <table class="meta-table">
+            <tbody>
+              @for (row of metadataRows(); track row.label) {
+                <tr><td class="meta-key">{{ row.label }}</td><td>{{ row.value }}</td></tr>
+              }
+            </tbody>
+          </table>
+        </mat-card-content>
+      </mat-card>
+    </mat-tab>
+
+    <!-- Labels -->
+    <mat-tab label="Labels">
+      <mat-card class="chart-card">
+        <mat-card-content>
+          @if (labelKeys().length === 0) {
+            <app-empty-state icon="label_off" message="No labels" />
+          } @else {
+            @for (key of labelKeys(); track key) {
+              <div class="label-group">
+                <div class="label-key">{{ key }} <span class="label-count">({{ labels()[key].length }})</span></div>
+                <mat-chip-set>
+                  @for (v of labels()[key]; track v) { <mat-chip>{{ v }}</mat-chip> }
+                </mat-chip-set>
+              </div>
+            }
+          }
+        </mat-card-content>
+      </mat-card>
+    </mat-tab>
+
+    <!-- Exemplars -->
+    <mat-tab label="Exemplars ({{ exemplars().length }})">
+      <mat-card class="chart-card">
+        <mat-card-content class="table-content">
+          @if (exemplars().length === 0) {
+            <app-empty-state icon="scatter_plot" message="No exemplars" />
+          } @else {
+            <table mat-table [dataSource]="exemplars()" class="full-width">
+              <ng-container matColumnDef="time">
+                <th mat-header-cell *matHeaderCellDef>Time</th>
+                <td mat-cell *matCellDef="let e" class="mono">{{ (e.timeUnixNano / 1000000) | date:'HH:mm:ss.SSS' }}</td>
+              </ng-container>
+              <ng-container matColumnDef="value">
+                <th mat-header-cell *matHeaderCellDef>Value</th>
+                <td mat-cell *matCellDef="let e">{{ e.valueDouble ?? e.valueInt }}</td>
+              </ng-container>
+              <ng-container matColumnDef="traceId">
+                <th mat-header-cell *matHeaderCellDef>Trace ID</th>
+                <td mat-cell *matCellDef="let e" class="mono">
+                  <a [routerLink]="['/traces', e.traceIdHex]">{{ e.traceIdHex | slice:0:16 }}…</a>
+                </td>
+              </ng-container>
+              <ng-container matColumnDef="spanId">
+                <th mat-header-cell *matHeaderCellDef>Span ID</th>
+                <td mat-cell *matCellDef="let e" class="mono">{{ e.spanIdHex | slice:0:16 }}</td>
+              </ng-container>
+              <ng-container matColumnDef="attrs">
+                <th mat-header-cell *matHeaderCellDef>Filtered Attributes</th>
+                <td mat-cell *matCellDef="let e" class="mono attrs-cell">
+                  @if (e.filteredAttributes) {
+                    @for (a of e.filteredAttributes | keyvalue; track a.key) {
+                      <span class="attr-pill">{{ a.key }}={{ a.value }}</span>
+                    }
+                  }
+                </td>
+              </ng-container>
+              <tr mat-header-row *matHeaderRowDef="['time','value','traceId','spanId','attrs']"></tr>
+              <tr mat-row *matRowDef="let row; columns: ['time','value','traceId','spanId','attrs']"></tr>
+            </table>
+          }
+        </mat-card-content>
+      </mat-card>
+    </mat-tab>
+  </mat-tab-group>
 </div>

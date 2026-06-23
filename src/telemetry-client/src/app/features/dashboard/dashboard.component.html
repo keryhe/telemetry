@@ -3,6 +3,32 @@
 }
 
 <div class="page-container">
+  <!-- Refresh controls -->
+  <div class="dashboard-header">
+    <mat-form-field appearance="outline" subscriptSizing="dynamic" class="service-filter">
+      <mat-label>Service</mat-label>
+      <mat-select [value]="selectedService()" (selectionChange)="selectedService.set($event.value)">
+        <mat-option [value]="''">All Services</mat-option>
+        @for (svc of availableServices(); track svc) {
+          <mat-option [value]="svc">{{ svc }}</mat-option>
+        }
+      </mat-select>
+    </mat-form-field>
+
+    <span class="header-spacer"></span>
+
+    <button mat-icon-button (click)="refresh()" matTooltip="Refresh">
+      <mat-icon>refresh</mat-icon>
+    </button>
+    <mat-slide-toggle
+      [checked]="autoRefresh()"
+      [disabled]="preset() === 'custom'"
+      (change)="autoRefresh.set($event.checked)"
+      [matTooltip]="preset() === 'custom' ? 'Auto-refresh is paused for custom ranges' : 'Auto-refresh'">
+      Auto-refresh
+    </mat-slide-toggle>
+  </div>
+
   <!-- Stat Cards -->
   <div class="stat-grid">
     <app-stat-card label="Total Traces" [value]="totalTraces() | number" />
@@ -53,15 +79,20 @@
   </div>
 
   <!-- Service Strip -->
-  @if (metricSummaries().length > 0) {
+  @if (serviceSummaries().length > 0) {
     <mat-card class="services-card">
       <mat-card-header><mat-card-title>Services</mat-card-title></mat-card-header>
       <mat-card-content>
         <div class="service-strip">
-          @for (s of metricSummaries(); track s.serviceName) {
-            <div class="service-chip">
-              <div class="service-name">{{ s.serviceName }}</div>
-              <div class="service-meta">{{ s.metricCount }} metrics</div>
+          @for (s of serviceSummaries(); track s.name; let i = $index) {
+            <div class="service-chip clickable"
+                 [style.border-left-color]="accentColor(i)"
+                 (click)="navigateToServiceMetrics(s.name)">
+              <div class="service-chip-head">
+                <span class="service-name">{{ s.name }}</span>
+                <span class="error-chip" [class.has-errors]="s.errorCount > 0">{{ s.errorCount }} err</span>
+              </div>
+              <div class="service-meta">{{ s.traceCount }} traces &middot; {{ s.metricCount }} metrics</div>
             </div>
           }
         </div>
@@ -101,7 +132,7 @@
 
     <!-- Slow Traces -->
     <mat-card>
-      <mat-card-header><mat-card-title>Slowest Traces</mat-card-title></mat-card-header>
+      <mat-card-header><mat-card-title>Slowest Traces (&gt;500ms)</mat-card-title></mat-card-header>
       <mat-card-content>
         @if (slowTraces().length === 0) {
           <app-empty-state icon="speed" message="No traces" />

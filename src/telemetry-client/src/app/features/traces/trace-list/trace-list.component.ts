@@ -1,8 +1,9 @@
-import { Component, OnInit, computed, inject, signal } from '@angular/core';
+import { Component, computed, effect, inject, signal, untracked } from '@angular/core';
 import { DatePipe, DecimalPipe, SlicePipe } from '@angular/common';
 import { Router } from '@angular/router';
 import { forkJoin } from 'rxjs';
 import { MatButtonToggleModule } from '@angular/material/button-toggle';
+import { MatButtonModule } from '@angular/material/button';
 import { MatCardModule } from '@angular/material/card';
 import { MatFormFieldModule } from '@angular/material/form-field';
 import { MatIconModule } from '@angular/material/icon';
@@ -12,18 +13,29 @@ import { MatSelectModule } from '@angular/material/select';
 import { MatTableModule } from '@angular/material/table';
 import { MatTabsModule } from '@angular/material/tabs';
 import { MatChipsModule } from '@angular/material/chips';
+import { MatTooltipModule } from '@angular/material/tooltip';
+import { MatDialog, MatDialogModule } from '@angular/material/dialog';
 import { FormsModule } from '@angular/forms';
 import { NgxGraphModule } from '@swimlane/ngx-graph';
+import { NgApexchartsModule } from 'ng-apexcharts';
+import type { ApexOptions } from 'ng-apexcharts';
 
 import { TracesApiService } from '../../../core/services/api/traces-api.service';
 import { TimeRangeService } from '../../../core/services/time-range.service';
+import { ThemeService } from '../../../core/services/theme.service';
 import { TraceInfo, ServiceDependency } from '../../../core/models/trace.models';
 import { StatCardComponent } from '../../../shared/components/stat-card/stat-card.component';
 import { EmptyStateComponent } from '../../../shared/components/empty-state/empty-state.component';
-import { formatDuration, parseDotnetTimespan } from '../../../shared/utils/chart.utils';
+import { bucketTraces, formatDuration, parseDotnetTimespan } from '../../../shared/utils/chart.utils';
+import { parseSearchQuery, ParsedSearchQuery, SearchTerm } from '../../../shared/utils/search-query.parser';
+import { TraceSearchHelpDialogComponent } from '../trace-search-help-dialog/trace-search-help-dialog.component';
 
 interface GraphNode { id: string; label: string; }
-interface GraphLink { id: string; source: string; target: string; label: string; }
+interface GraphLink {
+  id: string; source: string; target: string; label: string;
+  callCount: number; errorRate: number; avgDurationMs: number;
+  color: string; width: number;
+}
 
 @Component({
   selector: 'app-trace-list',
@@ -31,17 +43,20 @@ interface GraphLink { id: string; source: string; target: string; label: string;
   imports: [
     DatePipe, DecimalPipe, SlicePipe, FormsModule,
     MatCardModule, MatTableModule, MatTabsModule, MatIconModule,
-    MatButtonToggleModule, MatSelectModule, MatFormFieldModule,
-    MatInputModule, MatProgressBarModule, MatChipsModule,
-    NgxGraphModule, StatCardComponent, EmptyStateComponent,
+    MatButtonToggleModule, MatButtonModule, MatSelectModule, MatFormFieldModule,
+    MatInputModule, MatProgressBarModule, MatChipsModule, MatTooltipModule,
+    MatDialogModule, NgxGraphModule, NgApexchartsModule,
+    StatCardComponent, EmptyStateComponent,
   ],
   templateUrl: './trace-list.component.html',
   styleUrl: './trace-list.component.scss',
 })
-export class TraceListComponent implements OnInit {
+export class TraceListComponent {
   private readonly api = inject(TracesApiService);
   private readonly timeRange = inject(TimeRangeService);
+  private readonly theme = inject(ThemeService);
   private readonly router = inject(Router);
+  private readonly dialog = inject(MatDialog);
 
   protected loading = signal(true);
   protected traces = signal<TraceInfo[]>([]);
@@ -56,15 +71,21 @@ export class TraceListComponent implements OnInit {
   protected minDurationMs = signal(500);
   protected analyticsService = signal('');
 
+  protected parsedQuery = computed<ParsedSearchQuery>(() => parseSearchQuery(this.searchText()));
+  protected isTraceIdSearch = computed(() => this.parsedQuery().isTraceIdSearch);
+
   protected filteredTraces = computed(() => {
-    const text = this.searchText().toLowerCase();
-    if (!text) return this.traces();
-    return this.traces().filter(
-      (t) =>
-        t.traceIdHex.toLowerCase().includes(text) ||
-        t.serviceName?.toLowerCase().includes(text) ||
-        t.rootOperationName?.toLowerCase().includes(text)
-    );
+    const query = this.parsedQuery();
+    const traces = this.traces();
+
+    if (query.isTraceIdSearch) {
+      const id = query.traceId!.toLowerCase();
+      return traces.filter((t) => t.traceIdHex.toLowerCase() === id);
+    }
+    if (query.terms.length > 0) {
+      return this.applyParsedSearch(traces, query.terms);
+    }
+    return traces;
   });
 
   protected totalTraces = computed(() => this.traces().length);
@@ -84,27 +105,49 @@ export class TraceListComponent implements OnInit {
     ])].map((s) => ({ id: s, label: s }))
   );
 
-  protected graphLinks = computed<GraphLink[]>(() =>
-    this.dependencies().map((d, i) => ({
+  protected graphLinks = computed<GraphLink[]>(() => {
+    const deps = this.dependencies();
+    const maxCalls = Math.max(1, ...deps.map((d) => d.callCount));
+    return deps.map((d, i) => ({
       id: `link-${i}`,
       source: d.parentService,
       target: d.childService,
-      label: `${d.callCount}`,
-    }))
-  );
+      // Label encodes avg duration; tooltip-style detail is in the legend.
+      label: formatDuration(d.avgDurationMs),
+      callCount: d.callCount,
+      errorRate: d.errorRate,
+      avgDurationMs: d.avgDurationMs,
+      color: this.edgeColor(d.errorRate),
+      // Thickness encodes call volume (1.5–6px).
+      width: 1.5 + (d.callCount / maxCalls) * 4.5,
+    }));
+  });
 
+  // Cap analytics to the top 10 operations, matching Blazor.
   protected operationRows = computed(() =>
     Object.entries(this.operationCounts())
       .map(([op, count]) => ({ op, count, avgMs: this.latencies()[op] ?? 0 }))
       .sort((a, b) => b.count - a.count)
+      .slice(0, 10)
   );
 
-  protected readonly displayedColumns = ['traceId', 'service', 'operation', 'duration', 'status', 'time'];
+  protected traceChartOptions = signal<ApexOptions>({});
+
+  protected readonly displayedColumns = ['traceId', 'service', 'operation', 'duration', 'spans', 'status', 'time'];
   protected readonly formatDuration = formatDuration;
   protected readonly parseDuration = parseDotnetTimespan;
 
-  ngOnInit(): void {
-    this.load();
+  private edgeColor(errorRate: number): string {
+    if (errorRate >= 0.2) return '#f44336';   // high errors
+    if (errorRate >= 0.05) return '#ff9800';  // some errors
+    return 'var(--mat-sys-outline)';          // healthy
+  }
+
+  constructor() {
+    effect(() => {
+      this.timeRange.range();
+      untracked(() => this.load());
+    });
   }
 
   private load(): void {
@@ -125,14 +168,78 @@ export class TraceListComponent implements OnInit {
         this.traces.set(traces);
         this.services.set(services);
         this.dependencies.set(dependencies);
+        this.buildChart(start, end);
         this.loading.set(false);
       },
       error: () => this.loading.set(false),
     });
   }
 
+  private buildChart(start: Date, end: Date): void {
+    const isDark = this.theme.isDark();
+    const buckets = bucketTraces(this.traces(), start, end);
+    const timestamps = buckets.map((b) => b.timestamp.getTime());
+
+    this.traceChartOptions.set({
+      chart: {
+        type: 'area', height: 150, background: 'transparent',
+        toolbar: { show: false },
+        zoom: { enabled: true, type: 'x' },
+        events: {
+          zoomed: (_ctx, opts) => {
+            const xaxis = opts?.xaxis;
+            if (xaxis?.min != null && xaxis?.max != null) {
+              this.timeRange.setCustom(new Date(xaxis.min), new Date(xaxis.max));
+            }
+          },
+        },
+      },
+      theme: { mode: isDark ? 'dark' : 'light' },
+      series: [
+        { name: 'Total', data: buckets.map((b, i) => [timestamps[i], b.count]) },
+        { name: 'Errors', data: buckets.map((b, i) => [timestamps[i], b.errorCount]) },
+      ],
+      xaxis: { type: 'datetime' },
+      colors: ['#2196f3', '#f44336'],
+      stroke: { curve: 'smooth', width: 2 },
+      fill: { opacity: 0.2 },
+      legend: { position: 'top' },
+      dataLabels: { enabled: false },
+    });
+  }
+
+  private applyParsedSearch(traces: TraceInfo[], terms: SearchTerm[]): TraceInfo[] {
+    let result = traces;
+    for (const term of terms) {
+      if (term.isAttributeFilter) {
+        const key = term.key!;
+        const value = (term.value ?? '').toLowerCase();
+        const exact = term.isExactMatch;
+        result = result.filter((t) => {
+          const attrs = t.rootSpanAttributes;
+          if (attrs && Object.prototype.hasOwnProperty.call(attrs, key)) {
+            const v = String(attrs[key] ?? '').toLowerCase();
+            return exact ? v === value : v.includes(value);
+          }
+          return false;
+        });
+      } else {
+        const text = (term.freeText ?? '').toLowerCase();
+        result = result.filter((t) =>
+          (t.rootOperationName?.toLowerCase().includes(text) ?? false) ||
+          (t.serviceName?.toLowerCase().includes(text) ?? false)
+        );
+      }
+    }
+    return result;
+  }
+
   protected applyFilter(): void {
     this.load();
+  }
+
+  protected openSearchHelp(): void {
+    this.dialog.open(TraceSearchHelpDialogComponent, { maxWidth: '720px', width: '90vw' });
   }
 
   protected loadAnalytics(): void {

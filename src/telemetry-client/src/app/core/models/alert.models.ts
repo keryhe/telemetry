@@ -39,21 +39,67 @@ export interface AlertEvent {
   rule: AlertRule | null;
 }
 
-// Condition shapes stored in conditionJson per rule type
+// Condition shapes stored in conditionJson per rule type.
+// NOTE: keys are PascalCase to match the server's System.Text.Json (case-sensitive)
+// deserialization into Keryhe.Telemetry.Alerting.Models.*Condition.
 export interface MetricThresholdCondition {
-  metricName: string;
-  operator: string;
-  threshold: number;
+  MetricName: string;
+  Operator: string; // ">", "<", ">=", "<="
+  Threshold: number;
 }
 
-export interface ThresholdCondition {
-  threshold: number;
+export interface ErrorRateCondition {
+  ThresholdPercent: number;
+  WindowMinutes: number;
 }
 
-export function parseCondition(rule: AlertRule): MetricThresholdCondition | ThresholdCondition | null {
+export interface SlowTraceCondition {
+  MinDurationMs: number;
+  WindowMinutes: number;
+}
+
+export interface LogSeveritySpikeCondition {
+  MinSeverity: number;
+  CountThreshold: number;
+  WindowMinutes: number;
+}
+
+export type AlertCondition =
+  | MetricThresholdCondition
+  | ErrorRateCondition
+  | SlowTraceCondition
+  | LogSeveritySpikeCondition;
+
+export function parseCondition(rule: AlertRule): Record<string, unknown> | null {
   try {
     return JSON.parse(rule.conditionJson);
   } catch {
     return null;
   }
+}
+
+function severityLabel(minSeverity: number): string {
+  if (minSeverity <= 5) return 'DEBUG';
+  if (minSeverity <= 9) return 'INFO';
+  if (minSeverity <= 13) return 'WARN';
+  if (minSeverity <= 17) return 'ERROR';
+  return 'FATAL';
+}
+
+/** Human-readable condition summary per rule type. Mirrors Blazor's FormatCondition. */
+export function formatCondition(rule: AlertRule): string {
+  try {
+    const c = JSON.parse(rule.conditionJson) as Record<string, unknown>;
+    switch (rule.type) {
+      case AlertRuleType.MetricThreshold:
+        return `${c['MetricName']} ${c['Operator']} ${c['Threshold']}`;
+      case AlertRuleType.ErrorRate:
+        return `Error rate > ${c['ThresholdPercent']}% in ${c['WindowMinutes']} min`;
+      case AlertRuleType.SlowTrace:
+        return `Duration > ${c['MinDurationMs']}ms in ${c['WindowMinutes']} min`;
+      case AlertRuleType.LogSeveritySpike:
+        return `> ${c['CountThreshold']} ${severityLabel(Number(c['MinSeverity']))}+ logs in ${c['WindowMinutes']} min`;
+    }
+  } catch { /* fall through */ }
+  return rule.conditionJson || '—';
 }

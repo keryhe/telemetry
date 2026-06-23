@@ -1,15 +1,16 @@
 import { Component, Input, OnInit, computed, inject, signal } from '@angular/core';
-import { KeyValuePipe, SlicePipe } from '@angular/common';
+import { DatePipe, KeyValuePipe, SlicePipe } from '@angular/common';
 import { RouterLink } from '@angular/router';
+import { Title } from '@angular/platform-browser';
 import { MatButtonModule } from '@angular/material/button';
 import { MatCardModule } from '@angular/material/card';
 import { MatChipsModule } from '@angular/material/chips';
 import { MatIconModule } from '@angular/material/icon';
 import { MatProgressBarModule } from '@angular/material/progress-bar';
-import { MatTabsModule } from '@angular/material/tabs';
+import { MatTooltipModule } from '@angular/material/tooltip';
 
 import { TracesApiService } from '../../../core/services/api/traces-api.service';
-import { SpanModel, SpanStatusCode } from '../../../core/models/trace.models';
+import { SpanModel, SpanStatusCode, SpanKind } from '../../../core/models/trace.models';
 import { EmptyStateComponent } from '../../../shared/components/empty-state/empty-state.component';
 import { StatCardComponent } from '../../../shared/components/stat-card/stat-card.component';
 import { formatDuration } from '../../../shared/utils/chart.utils';
@@ -34,8 +35,8 @@ const SERVICE_COLORS = [
   selector: 'app-trace-detail',
   standalone: true,
   imports: [
-    KeyValuePipe, SlicePipe, RouterLink,
-    MatCardModule, MatButtonModule, MatIconModule, MatTabsModule,
+    DatePipe, KeyValuePipe, SlicePipe, RouterLink,
+    MatCardModule, MatButtonModule, MatIconModule, MatTooltipModule,
     MatChipsModule, MatProgressBarModule, EmptyStateComponent, StatCardComponent,
   ],
   templateUrl: './trace-detail.component.html',
@@ -45,6 +46,9 @@ export class TraceDetailComponent implements OnInit {
   @Input() id!: string;
 
   private readonly api = inject(TracesApiService);
+  private readonly title = inject(Title);
+
+  protected copied = signal(false);
 
   protected loading = signal(true);
   protected spans = signal<SpanModel[]>([]);
@@ -77,7 +81,25 @@ export class TraceDetailComponent implements OnInit {
   readonly formatDuration = formatDuration;
   readonly SpanStatusCode = SpanStatusCode;
 
+  protected spanKindLabel(kind: SpanKind): string {
+    return SpanKind[kind] ?? 'Unspecified';
+  }
+
+  protected statusLabel(code: SpanStatusCode): string {
+    return SpanStatusCode[code] ?? 'Unset';
+  }
+
+  /** Convert OTLP unix-nanos to a JS Date (for the DatePipe). */
+  protected nanoToDate(ns: number): Date {
+    return new Date(ns / 1_000_000);
+  }
+
+  protected sortedEvents(node: SpanNode) {
+    return [...node.events].sort((a, b) => a.timeUnixNano - b.timeUnixNano);
+  }
+
   ngOnInit(): void {
+    this.title.setTitle(`Trace: ${this.id.slice(0, 16)}`);
     this.api.getSpans(this.id).subscribe({
       next: (spans) => {
         this.spans.set(spans);
@@ -143,6 +165,13 @@ export class TraceDetailComponent implements OnInit {
 
   protected selectSpan(node: SpanNode): void {
     this.selectedSpan.set(node);
+  }
+
+  protected copyTraceId(): void {
+    navigator.clipboard?.writeText(this.id).then(() => {
+      this.copied.set(true);
+      setTimeout(() => this.copied.set(false), 1500);
+    });
   }
 
   protected colorFor(serviceName: string): string {

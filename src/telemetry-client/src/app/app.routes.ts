@@ -9,11 +9,13 @@ export const routes: Routes = [
     children: [
       {
         path: 'dashboard',
+        title: 'Dashboard',
         loadComponent: () =>
           import('./features/dashboard/dashboard.component').then((m) => m.DashboardComponent),
       },
       {
         path: 'traces',
+        title: 'Traces',
         loadComponent: () =>
           import('./features/traces/trace-list/trace-list.component').then((m) => m.TraceListComponent),
       },
@@ -26,6 +28,7 @@ export const routes: Routes = [
       },
       {
         path: 'metrics',
+        title: 'Metrics',
         loadComponent: () =>
           import('./features/metrics/metric-list/metric-list.component').then(
             (m) => m.MetricListComponent
@@ -34,6 +37,7 @@ export const routes: Routes = [
       {
         // Must be before metrics/:name to avoid shadowing
         path: 'metrics/services',
+        title: 'Service Metrics',
         loadComponent: () =>
           import('./features/metrics/service-metrics/service-metrics.component').then(
             (m) => m.ServiceMetricsComponent
@@ -48,11 +52,13 @@ export const routes: Routes = [
       },
       {
         path: 'logs',
+        title: 'Logs',
         loadComponent: () =>
           import('./features/logs/logs.component').then((m) => m.LogsComponent),
       },
       {
         path: 'alerts',
+        title: 'Alerts',
         loadComponent: () =>
           import('./features/alerts/alerts.component').then((m) => m.AlertsComponent),
       },

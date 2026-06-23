@@ -1,4 +1,4 @@
-import { Component, OnInit, computed, inject, signal } from '@angular/core';
+import { Component, computed, effect, inject, signal, untracked } from '@angular/core';
 import { DatePipe } from '@angular/common';
 import { Router } from '@angular/router';
 import { MatButtonToggleModule } from '@angular/material/button-toggle';
@@ -17,6 +17,9 @@ import { TimeRangeService } from '../../../core/services/time-range.service';
 import { MetricInfo, MetricType } from '../../../core/models/metric.models';
 import { StatCardComponent } from '../../../shared/components/stat-card/stat-card.component';
 import { EmptyStateComponent } from '../../../shared/components/empty-state/empty-state.component';
+import { loadPageState, savePageState } from '../../../shared/utils/page-state';
+
+const STATE_KEY = 'state.metrics';
 
 interface UniqueMetric {
   name: string;
@@ -49,17 +52,21 @@ const TYPE_LABELS: Record<MetricType, string> = {
   templateUrl: './metric-list.component.html',
   styleUrl: './metric-list.component.scss',
 })
-export class MetricListComponent implements OnInit {
+export class MetricListComponent {
   private readonly api = inject(MetricsApiService);
   private readonly timeRange = inject(TimeRangeService);
   private readonly router = inject(Router);
 
+  private readonly saved = loadPageState(STATE_KEY, {
+    searchText: '', selectedService: '', selectedType: -1 as MetricType | -1, showUnique: true,
+  });
+
   protected loading = signal(true);
   protected allMetrics = signal<MetricInfo[]>([]);
-  protected searchText = signal('');
-  protected selectedService = signal('');
-  protected selectedType = signal<MetricType | -1>(-1);
-  protected showUnique = signal(true);
+  protected searchText = signal(this.saved.searchText);
+  protected selectedService = signal(this.saved.selectedService);
+  protected selectedType = signal<MetricType | -1>(this.saved.selectedType);
+  protected showUnique = signal(this.saved.showUnique);
 
   protected readonly typeLabels = TYPE_LABELS;
   protected readonly MetricType = MetricType;
@@ -119,7 +126,25 @@ export class MetricListComponent implements OnInit {
   protected readonly allCols = ['name', 'type', 'unit', 'service', 'lastSeen'];
   protected readonly typeLabel = (t: MetricType) => TYPE_LABELS[t] ?? 'Unknown';
 
-  ngOnInit(): void {
+  constructor() {
+    effect(() => {
+      this.timeRange.range();
+      untracked(() => this.load());
+    });
+
+    // Persist filter/view state on change.
+    effect(() => {
+      savePageState(STATE_KEY, {
+        searchText: this.searchText(),
+        selectedService: this.selectedService(),
+        selectedType: this.selectedType(),
+        showUnique: this.showUnique(),
+      });
+    });
+  }
+
+  private load(): void {
+    this.loading.set(true);
     const { start, end } = this.timeRange.range();
     this.api.getAllMetrics(start, end, 500).subscribe({
       next: (metrics) => { this.allMetrics.set(metrics); this.loading.set(false); },

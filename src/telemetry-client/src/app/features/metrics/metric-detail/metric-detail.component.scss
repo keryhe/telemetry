@@ -28,9 +28,44 @@
 
 .ctrl-field { width: 160px; }
 
+.spacer { flex: 1; }
+
 .chart-card {
+  margin-top: 16px;
   margin-bottom: 16px;
-  mat-card-content { padding-bottom: 0 !important; }
+}
+
+.sub-chart-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--mat-sys-on-surface-variant);
+  margin: 16px 0 4px;
+}
+
+.snapshot-table, .meta-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+  td, th { text-align: left; padding: 6px 12px; border-bottom: 1px solid var(--mat-sys-outline-variant); }
+  th { color: var(--mat-sys-on-surface-variant); font-weight: 600; }
+}
+
+.snapshot-table { max-width: 320px; }
+.meta-key { color: var(--mat-sys-on-surface-variant); font-weight: 600; width: 220px; }
+
+.label-group { margin-bottom: 16px; }
+.label-key { font-weight: 600; font-size: 13px; margin-bottom: 6px; }
+.label-count { color: var(--mat-sys-on-surface-variant); font-weight: 400; }
+
+.table-content { padding: 0 !important; }
+
+.attrs-cell { font-size: 11px; }
+.attr-pill {
+  display: inline-block;
+  background: var(--mat-sys-surface-container-high);
+  border-radius: 4px;
+  padding: 1px 6px;
+  margin: 1px 2px;
 }
 
 .mono { font-family: monospace; font-size: 12px; }

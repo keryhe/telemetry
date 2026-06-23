@@ -13,8 +13,7 @@ import { forkJoin } from 'rxjs';
 
 import { AlertsApiService } from '../../core/services/api/alerts-api.service';
 import {
-  AlertRule, AlertEvent, ALERT_RULE_TYPE_LABELS, AlertRuleType,
-  parseCondition, MetricThresholdCondition,
+  AlertRule, AlertEvent, ALERT_RULE_TYPE_LABELS, formatCondition,
 } from '../../core/models/alert.models';
 import { EmptyStateComponent } from '../../shared/components/empty-state/empty-state.component';
 import { AlertRuleDialogComponent, AlertRuleDialogData } from './alert-rule-dialog/alert-rule-dialog.component';
@@ -41,7 +40,8 @@ export class AlertsComponent implements OnInit {
   protected events = signal<AlertEvent[]>([]);
 
   protected readonly ruleTypeLabel = (type: number): string => ALERT_RULE_TYPE_LABELS[type] ?? 'Unknown';
-  protected readonly ruleCols = ['name', 'type', 'service', 'condition', 'enabled', 'actions'];
+  protected readonly formatCondition = formatCondition;
+  protected readonly ruleCols = ['name', 'type', 'service', 'condition', 'cooldown', 'lastFired', 'enabled', 'actions'];
   protected readonly eventCols = ['firedAt', 'ruleName', 'details'];
 
   ngOnInit(): void {
@@ -105,17 +105,6 @@ export class AlertsComponent implements OnInit {
     this.api.updateRule(rule.id, { ...rule, enabled: !rule.enabled }).subscribe({
       next: () => this.load(),
     });
-  }
-
-  protected conditionSummary(rule: AlertRule): string {
-    try {
-      const cond = parseCondition(rule) as MetricThresholdCondition & { threshold?: number };
-      if (rule.type === AlertRuleType.MetricThreshold && cond?.metricName) {
-        return `${cond.metricName} ${cond.operator ?? '>'} ${cond.threshold}`;
-      }
-      if (cond?.threshold != null) return `threshold: ${cond.threshold}`;
-    } catch { /* */ }
-    return rule.conditionJson || '—';
   }
 
   protected eventRuleName(event: AlertEvent): string {
