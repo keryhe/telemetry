@@ -1,19 +1,21 @@
 # Keryhe Telemetry
 
-A self-hosted OpenTelemetry (OTLP) ingestion and visualization platform for traces, metrics, and logs. Provides a gRPC server for receiving telemetry from any OpenTelemetry SDK and a Blazor UI for querying and visualizing the data.
+A self-hosted OpenTelemetry (OTLP) ingestion and visualization platform for traces, metrics, and logs. Provides a gRPC server for receiving telemetry from any OpenTelemetry SDK, a REST API for querying the data, and an Angular UI for visualization.
 
 ## Overview
 
-This solution receives OpenTelemetry Protocol (OTLP) data via gRPC, stores it in a PostgreSQL database with TimescaleDB for time-series storage, and exposes it through a Blazor Server web application.
+This solution receives OpenTelemetry Protocol (OTLP) data via gRPC, stores it in a relational database (PostgreSQL, TimescaleDB, or SQL Server), and exposes it through a REST API consumed by an Angular single-page application.
 
 ## Features
 
 - **Complete OTLP Support**: Handles traces, metrics, and logs as defined in opentelemetry-proto
-- **Blazor UI**: Web interface for exploring traces, metrics, logs, dashboards, and service metrics
+- **Angular UI**: Web interface (Angular 20) for exploring traces, metrics, logs, dashboards, and alerts
+- **REST API**: ASP.NET Core Web API (`Keryhe.Telemetry.Api`) with Swagger support
 - **Normalized Schema**: Efficient storage with proper relationships and hash-based deduplication
 - **All Metric Types**: Gauge, Sum, Histogram, Exponential Histogram, and Summary
 - **Trace Correlation**: Links logs and metrics to traces via trace and span IDs
 - **Built-in Analytics**: Pre-configured views for service maps, trace summaries, and log analysis
+- **Multiple Database Providers**: Choose between plain PostgreSQL, PostgreSQL + TimescaleDB, or SQL Server
 - **Alerting**: Rule-based alerts (metric threshold, error rate, slow traces, log severity spikes) with configurable cooldowns and webhook delivery
 
 ## Supported Signal Types
@@ -43,35 +45,55 @@ This solution receives OpenTelemetry Protocol (OTLP) data via gRPC, stores it in
 ```
 OpenTelemetry SDKs (any language)
   → OTLP gRPC (port 5117) → Keryhe.Telemetry.Server
-  → PostgreSQL + TimescaleDB
-  → Keryhe.Telemetry.Client (Blazor UI)
-    → background alert evaluation → webhook notifications
+  → PostgreSQL / TimescaleDB / SQL Server
+  → Keryhe.Telemetry.Api (REST API)
+  → Angular SPA (src/telemetry-client, port 4200)
 ```
 
 | Project | Role |
 |---------|------|
 | `Keryhe.Telemetry.Core` | Domain interfaces and models |
-| `Keryhe.Telemetry.Data` | EF Core DbContexts and repository implementations |
+| `Keryhe.Telemetry.Data` | EF Core DbContexts (write path) |
+| `Keryhe.Telemetry.PostgreSQL` | Dapper read repositories for plain PostgreSQL |
+| `Keryhe.Telemetry.Timescale` | Dapper read repositories for PostgreSQL + TimescaleDB |
+| `Keryhe.Telemetry.SqlServer` | Dapper read repositories for SQL Server |
 | `Keryhe.Telemetry.Server` | gRPC server receiving OTLP telemetry |
-| `Keryhe.Telemetry.Client` | Blazor Server UI for visualization |
+| `Keryhe.Telemetry.Api` | REST API consumed by the Angular client |
 | `Keryhe.Telemetry.Alerting` | Alert rule evaluators and webhook notification delivery |
 | `Keryhe.Telemetry.TestDataGenerator` | Worker service that emits synthetic telemetry |
+| `src/telemetry-client` | Angular 20 SPA (Dashboard, Traces, Metrics, Logs, Alerts) |
 
 ## Prerequisites
 
 - [.NET 10 SDK](https://dotnet.microsoft.com/download)
-- PostgreSQL 14 or higher
-- TimescaleDB extension (required — metrics and log tables are hypertables; install before applying the schema)
+- [Node.js](https://nodejs.org/) (for the Angular client)
+- One of the supported database backends:
+  - PostgreSQL 14+ (plain or with TimescaleDB extension)
+  - SQL Server
 
 ## Setup
 
 **1. Create the database and apply the schema:**
 
-Ensure the TimescaleDB extension is installed and enabled in your PostgreSQL instance (`CREATE EXTENSION IF NOT EXISTS timescaledb;`). The schema script creates hypertables and will fail if TimescaleDB is unavailable.
+Choose the schema file that matches your database provider:
 
 ```bash
 createdb telemetry
+
+# Plain PostgreSQL
 psql -d telemetry -f schema/PostgreSQL-Schema.sql
+
+# PostgreSQL + TimescaleDB (TimescaleDB extension must be installed first)
+psql -d telemetry -f schema/Timescale-Schema.sql
+
+# SQL Server
+sqlcmd -d telemetry -i schema/SqlServer-Schema.sql
+```
+
+Or use the runner script (skips if the target `schema_version` is already applied):
+
+```bash
+schema/apply-schema.sh <postgresql|timescale|sqlserver> [database]
 ```
 
 **2. Configure connection strings:**
@@ -85,14 +107,19 @@ Update `src/Keryhe.Telemetry.Server/appsettings.json`:
 }
 ```
 
-Update `src/Keryhe.Telemetry.Client/appsettings.json`:
+Update `src/Keryhe.Telemetry.Api/appsettings.json`:
 ```json
 {
+  "Database": {
+    "Provider": "Timescale"
+  },
   "ConnectionStrings": {
     "Read": "Host=localhost;Port=5432;Database=telemetry;Username=postgres;Password=<password>"
   }
 }
 ```
+
+Set `Database:Provider` to `PostgreSQL`, `Timescale`, or `SqlServer` to match your chosen backend. For SQL Server use a standard ADO.NET connection string for `ConnectionStrings:Read`.
 
 **3. Build:**
 
@@ -100,12 +127,20 @@ Update `src/Keryhe.Telemetry.Client/appsettings.json`:
 dotnet build Telemetry.sln
 ```
 
-**4. Run the server and client (in separate terminals):**
+**4. Run the server, API, and client (in separate terminals):**
 
 ```bash
+# Terminal 1 — gRPC ingestion server
 dotnet run --project src/Keryhe.Telemetry.Server
-dotnet run --project src/Keryhe.Telemetry.Client
+
+# Terminal 2 — REST API
+dotnet run --project src/Keryhe.Telemetry.Api
+
+# Terminal 3 — Angular dev server
+cd src/telemetry-client && npm install && npm start
 ```
+
+Open `http://localhost:4200` in your browser.
 
 **5. (Optional) Generate test data:**
 
@@ -136,13 +171,15 @@ The server requires an `Authorization` gRPC metadata header with a valid API key
 - `spans` — Trace span data
 - `span_events`, `span_links` — Span child records
 - `metrics` — Base metric metadata
-- `gauge_data_points`, `sum_data_points`, `histogram_data_points`, `exponential_histogram_data_points`, `summary_data_points` — Type-specific metric data (TimescaleDB hypertables)
+- `gauge_data_points`, `sum_data_points`, `histogram_data_points`, `exponential_histogram_data_points`, `summary_data_points` — Type-specific metric data
 - `exemplars` — Metric exemplars with trace correlation
-- `log_records` — Log entries with severity and trace correlation (TimescaleDB hypertable)
+- `log_records` — Log entries with severity and trace correlation
 - `tenants` — Tenant registry (a `default` tenant is seeded on first run)
 - `api_keys` — Hashed API keys scoped to a tenant, used for ingestion auth
 - `alert_rules` — Alert rule definitions (type, condition JSON, webhook URL, cooldown)
 - `alert_events` — Audit log of all fired alert events
+
+When using the TimescaleDB provider, metric data point tables and `log_records` are hypertables (partitioned on `time_unix_nano`). Compression activates at 7 days; retention drops metrics at 180 days and logs at 90 days. A continuous aggregate (`log_severity_stats_daily`) refreshes every 5 minutes.
 
 ### Built-in Views
 
@@ -150,7 +187,7 @@ The server requires an `Authorization` gRPC metadata header with a valid API key
 - `service_map` — Service-to-service relationships
 - `service_map_detailed` — Service map with performance metrics
 - `log_severity_stats` — Log severity distribution (compatibility alias)
-- `log_severity_stats_daily` — TimescaleDB continuous aggregate; daily severity counts, refreshes every 5 minutes
+- `log_severity_stats_daily` — Daily severity counts (TimescaleDB continuous aggregate)
 
 ## Alerting
 
@@ -161,8 +198,6 @@ Alert rules are managed through the **Alerts** page in the UI. Each rule specifi
 - **Condition**: JSON-encoded parameters specific to the rule type
 - **Webhook URL**: receives an HTTP POST payload when the rule fires
 - **Cooldown**: minimum minutes between repeat firings of the same rule
-
-The evaluation loop runs every 60 seconds by default. Configure via `AlertEvaluation:IntervalSeconds` in `src/Keryhe.Telemetry.Client/appsettings.json`.
 
 ## License
 

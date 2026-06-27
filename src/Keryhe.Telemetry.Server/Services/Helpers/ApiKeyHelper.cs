@@ -1,4 +1,5 @@
 using System;
+using System.Linq;
 using System.Security.Cryptography;
 using System.Text;
 using Grpc.Core;
@@ -12,7 +13,7 @@ public class ApiKeyHelper
 
     public static string GetKeyHash(ServerCallContext context)
     {
-        var authorizationHeader = context.RequestHeaders.GetValue(AuthorizationHeaderName);
+        var authorizationHeader = context.RequestHeaders.FirstOrDefault(e => e.Key.Equals(AuthorizationHeaderName, StringComparison.OrdinalIgnoreCase))?.Value;
         if (string.IsNullOrWhiteSpace(authorizationHeader) || !authorizationHeader.StartsWith(BearerPrefix, StringComparison.OrdinalIgnoreCase))
         {
             throw new RpcException(new Status(StatusCode.Unauthenticated, "Missing or invalid Authorization header."));

@@ -1,22 +1,25 @@
--- OpenTelemetry PostgreSQL + TimescaleDB Schema
+-- OpenTelemetry PostgreSQL Schema (plain PostgreSQL, no TimescaleDB)
 -- Supports OTLP logs, metrics, and traces as defined in opentelemetry-proto
--- Requires TimescaleDB extension (https://docs.timescale.com/install/latest/)
+-- Targets a vanilla PostgreSQL instance WITHOUT the timescaledb extension.
 --
 -- Column names use snake_case (double-quoted) while C# models remain PascalCase.
--- Table names use snake_case as configured via ToTable() in OpenTelemetryDbContext.
+--
+-- This script produces the same logical table/column set as Timescale-Schema.sql.
+-- The difference is purely physical storage: the metric data-point tables and
+-- log_records are plain heap tables here (not hypertables). Time-series access is
+-- served by BRIN indexes on "time_unix_nano" plus the natural btree lookup indexes
+-- that hypertable partitioning would otherwise provide. The TimescaleDB continuous
+-- aggregate is replaced by a plain on-demand view.
 --
 -- Usage:
 --   psql -U postgres -c "CREATE DATABASE telemetry;"
 --   psql -U postgres -d telemetry -f PostgreSQL-Schema.sql
 --
+-- For a TimescaleDB-enabled instance (hypertables, compression, retention,
+-- continuous aggregate) use Timescale-Schema.sql instead.
+--
 -- Optional clean reset in an existing local DB before re-running this script:
 --   psql -U postgres -d telemetry -c "DROP SCHEMA public CASCADE; CREATE SCHEMA public;"
-
--- =============================================================================
--- EXTENSIONS
--- =============================================================================
-
-CREATE EXTENSION IF NOT EXISTS timescaledb;
 
 -- =============================================================================
 -- COMMON TABLES (shared across signals)
@@ -72,9 +75,7 @@ CREATE INDEX idx_name_version ON instrumentation_scopes ("name", "version");
 -- TRACES TABLES
 -- =============================================================================
 
--- Trace spans: regular PostgreSQL table (not a hypertable).
--- span_events and span_links hold FK references to spans("id"), which requires
--- a simple primary key. Use idx_start_time for time-range queries instead.
+-- Trace spans. span_events and span_links hold FK references to spans("id").
 CREATE TABLE spans (
     "id"                     BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     "trace_id"                CHAR(32)     NOT NULL,
@@ -142,7 +143,7 @@ CREATE INDEX idx_span_link ON span_links ("span_id", "linked_trace_id", "linked_
 -- METRICS TABLES
 -- =============================================================================
 
--- Base metrics table (regular table  referenced by FK from data point tables)
+-- Base metrics table (referenced by FK from data point tables)
 CREATE TABLE metrics (
     "id"          BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     "resource_id"  BIGINT       NOT NULL,
@@ -160,22 +161,9 @@ CREATE INDEX idx_metrics_name  ON metrics ("name");
 CREATE INDEX idx_type          ON metrics ("type");
 CREATE INDEX idx_resource_name ON metrics ("resource_id", "name");
 
--- TimescaleDB chunk sizing baseline (nanoseconds):
---   1 hour  =  3600000000000
---   6 hours = 21600000000000
---   12 hours= 43200000000000
---   1 day   = 86400000000000
---
--- Initial Phase 1 target:
--- - Keep chunks in the ~256 MB to 1 GB range under normal ingest.
--- - Use shorter chunks for higher-volume signals (logs), longer chunks for
---   lower-volume metric point tables until real ingest data is available.
-
--- Gauge data points (TimescaleDB hypertable on TimeUnixNano)
--- No PRIMARY KEY: TimescaleDB requires unique constraints to include the partition
--- column; since nothing FK-references this table's Id, a DB-level PK is not needed.
+-- Gauge data points (plain table; BRIN on time + btree natural lookup)
 CREATE TABLE gauge_data_points (
-    "id"                BIGINT GENERATED ALWAYS AS IDENTITY,
+    "id"                BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     "metric_id"          BIGINT           NOT NULL,
     "start_time_unix_nano" BIGINT,
     "time_unix_nano"      BIGINT           NOT NULL,
@@ -186,16 +174,12 @@ CREATE TABLE gauge_data_points (
     "attributes_json"    JSONB,
     CONSTRAINT fk_gauge_data_points_metrics FOREIGN KEY ("metric_id") REFERENCES metrics ("id") ON DELETE CASCADE
 );
-SELECT create_hypertable('gauge_data_points', 'time_unix_nano',
-    chunk_time_interval => 43200000000000,
-    if_not_exists => TRUE
-);
 CREATE INDEX idx_gauge_metric_time ON gauge_data_points ("metric_id", "time_unix_nano" DESC);
-CREATE INDEX idx_gauge_time        ON gauge_data_points ("time_unix_nano" DESC);
+CREATE INDEX idx_gauge_time_brin   ON gauge_data_points USING BRIN ("time_unix_nano");
 
--- Sum data points (TimescaleDB hypertable on TimeUnixNano)
+-- Sum data points (plain table; BRIN on time + btree natural lookup)
 CREATE TABLE sum_data_points (
-    "id"                     BIGINT GENERATED ALWAYS AS IDENTITY,
+    "id"                     BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     "metric_id"               BIGINT           NOT NULL,
     "start_time_unix_nano"      BIGINT,
     "time_unix_nano"           BIGINT           NOT NULL,
@@ -209,16 +193,13 @@ CREATE TABLE sum_data_points (
     "attributes_json"         JSONB,
     CONSTRAINT fk_sum_data_points_metrics FOREIGN KEY ("metric_id") REFERENCES metrics ("id") ON DELETE CASCADE
 );
-SELECT create_hypertable('sum_data_points', 'time_unix_nano',
-    chunk_time_interval => 43200000000000,
-    if_not_exists => TRUE
-);
 CREATE INDEX idx_sum_metric_time ON sum_data_points ("metric_id", "time_unix_nano" DESC);
+CREATE INDEX idx_sum_time_brin   ON sum_data_points USING BRIN ("time_unix_nano");
 CREATE INDEX idx_temporality     ON sum_data_points ("aggregation_temporality");
 
--- Histogram data points (TimescaleDB hypertable on TimeUnixNano)
+-- Histogram data points (plain table; BRIN on time + btree natural lookup)
 CREATE TABLE histogram_data_points (
-    "id"                     BIGINT GENERATED ALWAYS AS IDENTITY,
+    "id"                     BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     "metric_id"               BIGINT           NOT NULL,
     "start_time_unix_nano"      BIGINT,
     "time_unix_nano"           BIGINT           NOT NULL,
@@ -235,15 +216,12 @@ CREATE TABLE histogram_data_points (
     "attributes_json"         JSONB,
     CONSTRAINT fk_histogram_data_points_metrics FOREIGN KEY ("metric_id") REFERENCES metrics ("id") ON DELETE CASCADE
 );
-SELECT create_hypertable('histogram_data_points', 'time_unix_nano',
-    chunk_time_interval => 86400000000000,
-    if_not_exists => TRUE
-);
 CREATE INDEX idx_histogram_metric_time ON histogram_data_points ("metric_id", "time_unix_nano" DESC);
+CREATE INDEX idx_histogram_time_brin   ON histogram_data_points USING BRIN ("time_unix_nano");
 
--- Exponential histogram data points (TimescaleDB hypertable on TimeUnixNano)
+-- Exponential histogram data points (plain table; BRIN on time + btree natural lookup)
 CREATE TABLE exponential_histogram_data_points (
-    "id"                     BIGINT GENERATED ALWAYS AS IDENTITY,
+    "id"                     BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     "metric_id"               BIGINT           NOT NULL,
     "start_time_unix_nano"      BIGINT,
     "time_unix_nano"           BIGINT           NOT NULL,
@@ -264,15 +242,12 @@ CREATE TABLE exponential_histogram_data_points (
     "attributes_json"         JSONB,
     CONSTRAINT fk_exponential_histogram_data_points_metrics FOREIGN KEY ("metric_id") REFERENCES metrics ("id") ON DELETE CASCADE
 );
-SELECT create_hypertable('exponential_histogram_data_points', 'time_unix_nano',
-    chunk_time_interval => 86400000000000,
-    if_not_exists => TRUE
-);
 CREATE INDEX idx_exp_histogram_metric_time ON exponential_histogram_data_points ("metric_id", "time_unix_nano" DESC);
+CREATE INDEX idx_exp_histogram_time_brin   ON exponential_histogram_data_points USING BRIN ("time_unix_nano");
 
--- Summary data points (TimescaleDB hypertable on TimeUnixNano)
+-- Summary data points (plain table; BRIN on time + btree natural lookup)
 CREATE TABLE summary_data_points (
-    "id"                BIGINT GENERATED ALWAYS AS IDENTITY,
+    "id"                BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     "metric_id"          BIGINT           NOT NULL,
     "start_time_unix_nano" BIGINT,
     "time_unix_nano"      BIGINT           NOT NULL,
@@ -283,13 +258,10 @@ CREATE TABLE summary_data_points (
     "attributes_json"    JSONB,
     CONSTRAINT fk_summary_data_points_metrics FOREIGN KEY ("metric_id") REFERENCES metrics ("id") ON DELETE CASCADE
 );
-SELECT create_hypertable('summary_data_points', 'time_unix_nano',
-    chunk_time_interval => 86400000000000,
-    if_not_exists => TRUE
-);
 CREATE INDEX idx_summary_metric_time ON summary_data_points ("metric_id", "time_unix_nano" DESC);
+CREATE INDEX idx_summary_time_brin   ON summary_data_points USING BRIN ("time_unix_nano");
 
--- Exemplars (for metrics  regular table, referenced by FK from data point tables)
+-- Exemplars (for metrics; referenced by FK from data point tables)
 CREATE TABLE exemplars (
     "id"                 BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     "filtered_attributes" JSONB,
@@ -306,11 +278,10 @@ CREATE INDEX idx_exemplar_trace_span ON exemplars ("trace_id", "span_id");
 -- LOGS TABLES
 -- =============================================================================
 
--- Log records (TimescaleDB hypertable on TimeUnixNano)
--- TimeUnixNano is NOT NULL (required for hypertable partition column).
--- Default 0 handles any edge-case OTLP records where TimeUnixNano is absent.
+-- Log records (plain table; BRIN on time + btree natural lookup).
+-- TimeUnixNano is NOT NULL with DEFAULT 0 to handle edge-case OTLP records.
 CREATE TABLE log_records (
-    "id"                     BIGINT GENERATED ALWAYS AS IDENTITY,
+    "id"                     BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     "resource_id"             BIGINT       NOT NULL,
     "scope_id"                BIGINT       NOT NULL,
     "time_unix_nano"           BIGINT       NOT NULL DEFAULT 0,
@@ -329,91 +300,14 @@ CREATE TABLE log_records (
     CONSTRAINT fk_log_records_resources FOREIGN KEY ("resource_id") REFERENCES resources ("id"),
     CONSTRAINT fk_log_records_scopes    FOREIGN KEY ("scope_id")    REFERENCES instrumentation_scopes ("id")
 );
-SELECT create_hypertable('log_records', 'time_unix_nano',
-    chunk_time_interval => 21600000000000,
-    if_not_exists => TRUE
-);
 CREATE INDEX idx_log_time          ON log_records ("time_unix_nano"         DESC);
+CREATE INDEX idx_log_time_brin     ON log_records USING BRIN ("time_unix_nano");
 CREATE INDEX idx_observed_time     ON log_records ("observed_time_unix_nano" DESC);
 CREATE INDEX idx_severity          ON log_records ("severity_number");
 CREATE INDEX idx_log_severity_time ON log_records ("severity_number", "time_unix_nano" DESC);
 CREATE INDEX idx_log_trace_span    ON log_records ("trace_id", "span_id");
 CREATE INDEX idx_log_resource_time ON log_records ("resource_id", "time_unix_nano" DESC);
 CREATE INDEX idx_log_attributes_gin ON log_records USING GIN ("attributes_json");
-
--- =============================================================================
--- TIMESCALEDB LIFECYCLE POLICIES (PHASE 2)
--- =============================================================================
-
--- Integer-time policy constants (nanoseconds)
---   7 days   =   604800000000000
---   90 days  =  7776000000000000
---   180 days = 15552000000000000
-
--- Integer time source for BIGINT nanosecond hypertables.
-CREATE OR REPLACE FUNCTION telemetry_now_ns()
-RETURNS BIGINT
-LANGUAGE SQL
-STABLE
-AS $$
-    SELECT (EXTRACT(EPOCH FROM NOW()) * 1000000000)::BIGINT;
-$$;
-
--- Register integer-now function for each hypertable.
-SELECT set_integer_now_func('gauge_data_points', 'telemetry_now_ns');
-SELECT set_integer_now_func('sum_data_points', 'telemetry_now_ns');
-SELECT set_integer_now_func('histogram_data_points', 'telemetry_now_ns');
-SELECT set_integer_now_func('exponential_histogram_data_points', 'telemetry_now_ns');
-SELECT set_integer_now_func('summary_data_points', 'telemetry_now_ns');
-SELECT set_integer_now_func('log_records', 'telemetry_now_ns');
-
--- Enable compression with segment/order strategy tuned for common query paths.
-ALTER TABLE gauge_data_points SET (
-    timescaledb.compress,
-    timescaledb.compress_segmentby = '"metric_id"',
-    timescaledb.compress_orderby = '"time_unix_nano" DESC'
-);
-ALTER TABLE sum_data_points SET (
-    timescaledb.compress,
-    timescaledb.compress_segmentby = '"metric_id"',
-    timescaledb.compress_orderby = '"time_unix_nano" DESC'
-);
-ALTER TABLE histogram_data_points SET (
-    timescaledb.compress,
-    timescaledb.compress_segmentby = '"metric_id"',
-    timescaledb.compress_orderby = '"time_unix_nano" DESC'
-);
-ALTER TABLE exponential_histogram_data_points SET (
-    timescaledb.compress,
-    timescaledb.compress_segmentby = '"metric_id"',
-    timescaledb.compress_orderby = '"time_unix_nano" DESC'
-);
-ALTER TABLE summary_data_points SET (
-    timescaledb.compress,
-    timescaledb.compress_segmentby = '"metric_id"',
-    timescaledb.compress_orderby = '"time_unix_nano" DESC'
-);
-ALTER TABLE log_records SET (
-    timescaledb.compress,
-    timescaledb.compress_segmentby = '"resource_id", "scope_id"',
-    timescaledb.compress_orderby = '"time_unix_nano" DESC'
-);
-
--- Compression policies (cold data).
-SELECT add_compression_policy('gauge_data_points', BIGINT '604800000000000', if_not_exists => TRUE);
-SELECT add_compression_policy('sum_data_points', BIGINT '604800000000000', if_not_exists => TRUE);
-SELECT add_compression_policy('histogram_data_points', BIGINT '604800000000000', if_not_exists => TRUE);
-SELECT add_compression_policy('exponential_histogram_data_points', BIGINT '604800000000000', if_not_exists => TRUE);
-SELECT add_compression_policy('summary_data_points', BIGINT '604800000000000', if_not_exists => TRUE);
-SELECT add_compression_policy('log_records', BIGINT '604800000000000', if_not_exists => TRUE);
-
--- Retention policies (drop old data).
-SELECT add_retention_policy('log_records', BIGINT '7776000000000000', if_not_exists => TRUE);
-SELECT add_retention_policy('gauge_data_points', BIGINT '15552000000000000', if_not_exists => TRUE);
-SELECT add_retention_policy('sum_data_points', BIGINT '15552000000000000', if_not_exists => TRUE);
-SELECT add_retention_policy('histogram_data_points', BIGINT '15552000000000000', if_not_exists => TRUE);
-SELECT add_retention_policy('exponential_histogram_data_points', BIGINT '15552000000000000', if_not_exists => TRUE);
-SELECT add_retention_policy('summary_data_points', BIGINT '15552000000000000', if_not_exists => TRUE);
 
 -- =============================================================================
 -- UTILITY TABLES
@@ -463,7 +357,6 @@ CREATE INDEX idx_alert_events_fired_at ON alert_events ("fired_at" DESC);
 -- =============================================================================
 
 DROP VIEW IF EXISTS log_severity_stats;
-DROP MATERIALIZED VIEW IF EXISTS log_severity_stats_daily;
 DROP VIEW IF EXISTS service_map_detailed;
 DROP VIEW IF EXISTS service_map;
 DROP VIEW IF EXISTS trace_summary;
@@ -534,144 +427,54 @@ GROUP BY
     child_res."attributes_json"  ->> 'service.name',
     child."kind";
 
--- Log severity distribution by day (continuous aggregate on log_records hypertable)
-CREATE MATERIALIZED VIEW log_severity_stats_daily
-WITH (timescaledb.continuous) AS
-SELECT
-    to_timestamp(time_bucket(86400000000000::BIGINT, "time_unix_nano") / 1000000000.0) AS "bucket_day",
-    "severity_text",
-    "severity_number",
-    COUNT(*) AS "count"
-FROM log_records
-WHERE "time_unix_nano" > 0
-GROUP BY
-    time_bucket(86400000000000::BIGINT, "time_unix_nano"),
-    "severity_text",
-    "severity_number"
-WITH NO DATA;
-
-CREATE INDEX idx_log_severity_stats_daily_bucket
-    ON log_severity_stats_daily ("bucket_day" DESC, "severity_number");
-
-SELECT add_continuous_aggregate_policy(
-    'log_severity_stats_daily',
-    start_offset => 3024000000000000::BIGINT,
-    end_offset => 300000000000::BIGINT,
-    schedule_interval => INTERVAL '5 minutes',
-    if_not_exists => TRUE
-);
-
-ALTER MATERIALIZED VIEW log_severity_stats_daily SET (
-    timescaledb.compress,
-    timescaledb.compress_segmentby = '"severity_number", "severity_text"',
-    timescaledb.compress_orderby = '"bucket_day" DESC'
-);
-
-SELECT add_compression_policy('log_severity_stats_daily', 1209600000000000::BIGINT, if_not_exists => TRUE);
-SELECT add_retention_policy('log_severity_stats_daily', 34560000000000000::BIGINT, if_not_exists => TRUE);
-
--- Backward-compatible view name retained for existing query surfaces.
+-- Log severity distribution by day.
+-- The TimescaleDB schema uses a continuous aggregate (log_severity_stats_daily) and
+-- exposes log_severity_stats as a compatibility alias over it. Plain PostgreSQL has no
+-- continuous aggregate, so log_severity_stats is computed on demand here. Same column
+-- shape (severity_text, severity_number, count, log_date) so read repos don't branch.
+-- The day bucket is computed by truncating nanoseconds-since-epoch to a DATE.
 CREATE VIEW log_severity_stats AS
 SELECT
     "severity_text",
     "severity_number",
-    "count",
-    CAST("bucket_day" AS DATE) AS "log_date"
-FROM log_severity_stats_daily;
+    COUNT(*)                                              AS "count",
+    CAST(to_timestamp("time_unix_nano" / 1000000000.0) AS DATE) AS "log_date"
+FROM log_records
+WHERE "time_unix_nano" > 0
+GROUP BY
+    "severity_text",
+    "severity_number",
+    CAST(to_timestamp("time_unix_nano" / 1000000000.0) AS DATE);
 
 -- =============================================================================
 -- NOTES
 -- =============================================================================
 --
--- Key conversion notes from SQL Server to PostgreSQL + TimescaleDB:
+-- Differences from Timescale-Schema.sql (same logical table/column set):
 --
--- 1.  BIGINT IDENTITY(1,1)   BIGINT GENERATED ALWAYS AS IDENTITY
--- 2.  NVARCHAR(n)            VARCHAR(n)  (PostgreSQL is Unicode by default)
--- 3.  NVARCHAR(MAX)          TEXT
--- 4.  FLOAT                  DOUBLE PRECISION
--- 5.  BIT                    BOOLEAN
--- 6.  DATETIME2              TIMESTAMPTZ
--- 7.  SYSDATETIME()          NOW()
--- 8.  ISJSON(col) = 1        Removed; JSONB type enforces valid JSON natively
--- 9.  JSON columns           JSONB for efficient operator-based querying
--- 10. JSON_VALUE(col, '$."key"')  col ->> 'key'
--- 11. DATEADD(SECOND, ns/1e9, '1970-01-01')  to_timestamp(ns / 1000000000.0)
--- 12. CONVERT(NVARCHAR, col)      col::TEXT
--- 13. CAST(x AS FLOAT)     CAST(x AS DOUBLE PRECISION)
--- 14. GO batch separator    Removed (not used in PostgreSQL)
--- 15. uk_trace_span         (TraceId, SpanId)  spans is a regular table;
---                            hypertable requirement was removed for spans
--- 16. Index names are globally unique (prefixed by table abbreviation where needed)
+-- 1.  No CREATE EXTENSION timescaledb.
+-- 2.  Metric data-point tables and log_records are plain heap tables with a
+--     PRIMARY KEY on "id" (no create_hypertable, no partition column constraint).
+-- 3.  No set_integer_now_func / telemetry_now_ns: lifecycle is not policy-driven.
+-- 4.  No compression or retention policies. Manage data lifecycle externally
+--     (e.g. scheduled DELETE jobs) if needed.
+-- 5.  log_severity_stats is a plain on-demand view rather than a compatibility
+--     alias over a continuous aggregate. Column shape is identical.
+-- 6.  Time-series access uses a BRIN index on "time_unix_nano" (cheap, append-
+--     friendly, what hypertable chunk exclusion approximated) plus the existing
+--     (metric_id|resource_id|severity, time) btree indexes for point lookups.
 --
--- TimescaleDB hypertables (partitioned by TimeUnixNano):
---   log_records                        = 6-hour chunks
---   gauge_data_points, sum_data_points = 12-hour chunks
---   histogram_data_points,
---   exponential_histogram_data_points,
---   summary_data_points                = 1-day chunks
+-- jsonb columns, ON CONFLICT upserts, and all UNIQUE constraints (resource_hash,
+-- scope_hash, api_keys.key_hash, uk_trace_span) are preserved exactly.
 --
--- Why spans is NOT a hypertable:
---   span_events and span_links hold FK references to spans("id"). TimescaleDB
---   requires all unique/PK constraints to include the partition column, which
---   would break these normalized FK relationships. spans uses idx_start_time
---   for time-range query performance instead.
---
--- Hypertable leaf tables have no PRIMARY KEY constraint (only GENERATED ALWAYS
--- AS IDENTITY). TimescaleDB disallows unique constraints that exclude the
--- partition column. Since nothing FK-references these tables by Id, a DB-level
--- PK is not needed. EF Core uses Id as the logical primary key and reads the
--- generated value via RETURNING on INSERT.
---
--- Scaling considerations:
--- 1. Adjust chunk_time_interval based on ingestion volume
---    (e.g., 1 hour = 3600000000000 ns for very high-volume environments)
--- 2. Compression defaults are enabled at 7 days for all hypertables.
--- 3. Retention defaults are enabled:
---    - logs: 90 days
---    - metric point hypertables: 180 days
--- 4. Integer-time now function (telemetry_now_ns) is registered for each
---    hypertable so policy jobs operate correctly with BIGINT nanosecond time.
--- 5. Phase 3 query-path indexes include:
---    - resources(service.name expression)
---    - spans(trace,parent-span) and spans/log_records JSONB GIN
---    - log_records(severity,time)
--- 6. Phase 4 adds a continuous aggregate for daily log severity trends with
---    refresh/compression/retention policies and a compatibility view.
--- 7. Phase 5 hardening:
---    - create_hypertable uses if_not_exists => TRUE
---    - views/continuous aggregate are dropped and recreated safely
---    - schema_version write is idempotent via ON CONFLICT
--- 8. Consider continuous aggregates for pre-computed service map metrics
-
 -- =============================================================================
 -- POST-APPLY VERIFICATION (MANUAL SQL CHECKS)
 -- =============================================================================
--- 1) Hypertables and chunk interval overview
---    SELECT hypertable_name, chunk_interval
---    FROM timescaledb_information.dimensions
---    WHERE hypertable_name IN (
---      'log_records', 'gauge_data_points', 'sum_data_points',
---      'histogram_data_points', 'exponential_histogram_data_points',
---      'summary_data_points'
---    )
---    ORDER BY hypertable_name;
+-- 1) List all user tables created
+--    SELECT tablename FROM pg_tables WHERE schemaname = 'public' ORDER BY tablename;
 --
--- 2) Compression and policy jobs
---    SELECT hypertable_name, compression_enabled
---    FROM timescaledb_information.hypertables
---    WHERE hypertable_name IN (
---      'log_records', 'gauge_data_points', 'sum_data_points',
---      'histogram_data_points', 'exponential_histogram_data_points',
---      'summary_data_points'
---    )
---    ORDER BY hypertable_name;
+-- 2) Confirm no hypertables exist (timescaledb not required/installed)
+--    -- This schema intentionally creates plain tables only.
 --
---    SELECT proc_name, hypertable_name, schedule_interval
---    FROM timescaledb_information.jobs
---    ORDER BY proc_name, hypertable_name;
---
--- 3) Continuous aggregate status
---    SELECT view_name, materialized_only, compression_enabled
---    FROM timescaledb_information.continuous_aggregates
---    WHERE view_name = 'log_severity_stats_daily';
-
+-- 3) Schema version
+--    SELECT * FROM schema_version;

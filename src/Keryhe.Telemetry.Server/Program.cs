@@ -1,9 +1,6 @@
-using Keryhe.Telemetry.Data.Access;
 using Keryhe.Telemetry.Data;
 using Keryhe.Telemetry.Server.Services;
-using Microsoft.EntityFrameworkCore;
 using Keryhe.Telemetry.Core;
-using Keryhe.Telemetry.SqlServer.Services;
 
 namespace Keryhe.Telemetry.Server;
 
@@ -23,28 +20,25 @@ public class Program
         builder.Services.AddGrpc();
         builder.Services.AddLogging();
 
-        var writeConnectionString = builder.Configuration.GetConnectionString("Write")!;
-
-        // DbContextPool reuses DbContext instances across requests (delete operations only).
-        builder.Services.AddDbContextPool<TelemetryWriteDbContext>(options =>
-        {
-            options.UseSqlServer(writeConnectionString);
-            options.UseSnakeCaseNamingConvention();
-
-            if (builder.Environment.IsDevelopment())
-            {
-                options.EnableSensitiveDataLogging();
-                options.EnableDetailedErrors();
-            }
-        });
-
         // Singletons shared across all gRPC requests and the background worker.
         builder.Services.AddSingleton<TelemetryIngestionChannel>();
         builder.Services.AddSingleton<ResourceScopeCache>();
+
+        // Write path: the generic worker drains the ingestion channel and delegates each
+        // batch flush to the active provider's ITelemetryBulkWriter. The provider — and with
+        // it ITelemetryBulkWriter, ITenantResolver, and ITelemetryWriteStore — is selected by
+        // the Database:Provider config key.
+        switch (builder.Configuration["Database:Provider"])
+        {
+            case "SqlServer":  builder.Services.AddSqlServerWriteServices(builder.Configuration);  break;
+            case "PostgreSQL": builder.Services.AddPostgreSqlWriteServices(builder.Configuration); break;
+            case "Timescale":  builder.Services.AddTimescaleWriteServices(builder.Configuration);  break;
+            default: throw new InvalidOperationException("Unknown or missing Database:Provider (expected SqlServer, PostgreSQL, or Timescale).");
+        }
+
         builder.Services.AddHostedService<TelemetryIngestionWorker>();
 
         builder.Services
-            .AddScoped<ITenantResolver, TenantResolver>()
             .AddScoped<ILogWriteRepository, LogWriteRepository>()
             .AddScoped<IMetricWriteRepository, MetricWriteRepository>()
             .AddScoped<ITraceWriteRepository, TraceWriteRepository>();

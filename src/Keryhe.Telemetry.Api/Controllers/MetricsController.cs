@@ -27,12 +27,15 @@ public class MetricsController : ControllerBase
         return Ok(metrics);
     }
 
-    // GET /api/metrics/summaries
-    [HttpGet("summaries")]
-    public async Task<ActionResult<List<ServiceMetricSummary>>> GetServiceMetricSummaries(CancellationToken ct = default)
+    // GET /api/metrics/services?start=&end=
+    [HttpGet("services")]
+    public async Task<ActionResult<List<string>>> GetDistinctServices(
+        [FromQuery] DateTime? start,
+        [FromQuery] DateTime? end,
+        CancellationToken ct = default)
     {
-        var summaries = await _metrics.GetServiceMetricSummariesAsync(ct);
-        return Ok(summaries);
+        var services = await _metrics.GetDistinctServicesAsync(start, end, ct);
+        return Ok(services);
     }
 
     // GET /api/metrics/by-name/{name}
@@ -40,18 +43,6 @@ public class MetricsController : ControllerBase
     public async Task<ActionResult<List<MetricInfo>>> GetMetricsByName(string name, CancellationToken ct = default)
     {
         var metrics = await _metrics.GetMetricsByNameAsync(name, ct);
-        return Ok(metrics);
-    }
-
-    // GET /api/metrics/by-service/{serviceName}?start=&end=
-    [HttpGet("by-service/{serviceName}")]
-    public async Task<ActionResult<List<MetricInfo>>> GetMetricsByService(
-        string serviceName,
-        [FromQuery] DateTime? start,
-        [FromQuery] DateTime? end,
-        CancellationToken ct = default)
-    {
-        var metrics = await _metrics.GetMetricsByServiceAsync(serviceName, start, end, ct);
         return Ok(metrics);
     }
 
@@ -83,6 +74,26 @@ public class MetricsController : ControllerBase
         if (series == null)
             return NotFound();
         return Ok(series);
+    }
+
+    // GET /api/metrics/series-grouped?metricName=&start=&end=&metricId=&labelFilter=key:value
+    [HttpGet("series-grouped")]
+    public async Task<ActionResult<MultiSeriesMetricData>> GetGroupedMetricSeries(
+        [FromQuery] string metricName,
+        [FromQuery] DateTime? start,
+        [FromQuery] DateTime? end,
+        [FromQuery] long? metricId,
+        [FromQuery(Name = "labelFilter")] List<string>? labelFilter,
+        CancellationToken ct = default)
+    {
+        if (string.IsNullOrWhiteSpace(metricName))
+            return BadRequest("metricName query parameter is required.");
+
+        var filters = ParseLabelFilters(labelFilter);
+        var data = await _metrics.GetGroupedMetricSeriesAsync(metricName, start, end, metricId, filters, ct);
+        if (data == null)
+            return NotFound();
+        return Ok(data);
     }
 
     // GET /api/metrics/series-by-service/{metricName}?start=&end=

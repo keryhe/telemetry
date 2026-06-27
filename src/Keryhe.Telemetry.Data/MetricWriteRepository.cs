@@ -1,24 +1,22 @@
-using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
 using Keryhe.Telemetry.Core.Models;
-using Keryhe.Telemetry.Data.Access;
 using Keryhe.Telemetry.Core;
 
 namespace Keryhe.Telemetry.Data;
 
 public class MetricWriteRepository : IMetricWriteRepository
 {
-    private readonly TelemetryWriteDbContext _context;
     private readonly TelemetryIngestionChannel _channel;
+    private readonly ITelemetryWriteStore _store;
     private readonly ILogger<MetricWriteRepository> _logger;
 
     public MetricWriteRepository(
-        TelemetryWriteDbContext context,
         TelemetryIngestionChannel channel,
+        ITelemetryWriteStore store,
         ILogger<MetricWriteRepository> logger)
     {
-        _context = context;
         _channel = channel;
+        _store = store;
         _logger = logger;
     }
 
@@ -42,55 +40,18 @@ public class MetricWriteRepository : IMetricWriteRepository
         return Enumerable.Empty<long>();
     }
 
-    public async Task<bool> DeleteMetricAsync(long id, CancellationToken cancellationToken = default)
-    {
-        var metric = await _context.Metrics.FindAsync([id], cancellationToken);
-        if (metric == null) return false;
-        _context.Metrics.Remove(metric);
-        await _context.SaveChangesAsync(cancellationToken);
-        return true;
-    }
+    public Task<bool> DeleteMetricAsync(long id, CancellationToken cancellationToken = default)
+        => _store.DeleteMetricAsync(id, cancellationToken);
 
-    public async Task<int> DeleteMetricsByNameAsync(string name, CancellationToken cancellationToken = default)
-    {
-        if (string.IsNullOrEmpty(name))
-            throw new ArgumentException("Metric name cannot be null or empty", nameof(name));
+    public Task<int> DeleteMetricsByNameAsync(string name, CancellationToken cancellationToken = default)
+        => _store.DeleteMetricsByNameAsync(name, cancellationToken);
 
-        var metrics = await _context.Metrics
-            .Where(m => m.Name == name)
-            .ToListAsync(cancellationToken);
-
-        _context.Metrics.RemoveRange(metrics);
-        await _context.SaveChangesAsync(cancellationToken);
-        return metrics.Count;
-    }
-
-    public async Task<int> DeleteMetricsByTimeRangeAsync(
+    public Task<int> DeleteMetricsByTimeRangeAsync(
         DateTime startTime,
         DateTime endTime,
         CancellationToken cancellationToken = default)
-    {
-        if (startTime >= endTime)
-            throw new ArgumentException("Start time must be before end time");
+        => _store.DeleteMetricsByTimeRangeAsync(startTime, endTime, cancellationToken);
 
-        var metrics = await _context.Metrics
-            .Where(m => m.CreatedAt >= startTime && m.CreatedAt <= endTime)
-            .ToListAsync(cancellationToken);
-
-        _context.Metrics.RemoveRange(metrics);
-        await _context.SaveChangesAsync(cancellationToken);
-        return metrics.Count;
-    }
-
-    public async Task<int> DeleteOldMetricsAsync(TimeSpan retentionPeriod, CancellationToken cancellationToken = default)
-    {
-        var cutoff = DateTime.UtcNow - retentionPeriod;
-        var metrics = await _context.Metrics
-            .Where(m => m.CreatedAt < cutoff)
-            .ToListAsync(cancellationToken);
-
-        _context.Metrics.RemoveRange(metrics);
-        await _context.SaveChangesAsync(cancellationToken);
-        return metrics.Count;
-    }
+    public Task<int> DeleteOldMetricsAsync(TimeSpan retentionPeriod, CancellationToken cancellationToken = default)
+        => _store.DeleteOldMetricsAsync(retentionPeriod, cancellationToken);
 }

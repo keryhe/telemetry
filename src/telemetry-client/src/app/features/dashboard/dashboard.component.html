@@ -3,6 +3,18 @@
 }
 
 <div class="page-container">
+  <!-- Stat Cards -->
+  <div class="stat-grid">
+    <app-stat-card label="Total Traces" icon="account_tree" [value]="totalTraces() | number" />
+    <app-stat-card
+      label="Error Rate"
+      icon="percent"
+      [value]="(errorRate() | percent: '1.1-1') ?? '0%'"
+      [color]="errorRate() > 0.05 ? 'error' : 'default'" />
+    <app-stat-card label="Log Events" icon="article" [value]="logs().length | number" />
+    <app-stat-card label="Services" icon="cloud" [value]="serviceCount() | number" />
+  </div>
+
   <!-- Refresh controls -->
   <div class="dashboard-header">
     <mat-form-field appearance="outline" subscriptSizing="dynamic" class="service-filter">
@@ -27,17 +39,6 @@
       [matTooltip]="preset() === 'custom' ? 'Auto-refresh is paused for custom ranges' : 'Auto-refresh'">
       Auto-refresh
     </mat-slide-toggle>
-  </div>
-
-  <!-- Stat Cards -->
-  <div class="stat-grid">
-    <app-stat-card label="Total Traces" [value]="totalTraces() | number" />
-    <app-stat-card
-      label="Error Rate"
-      [value]="(errorRate() | percent: '1.1-1') ?? '0%'"
-      [color]="errorRate() > 0.05 ? 'error' : 'default'" />
-    <app-stat-card label="Log Events" [value]="logs().length | number" />
-    <app-stat-card label="Services" [value]="serviceCount() | number" />
   </div>
 
   <!-- Charts -->
@@ -78,28 +79,6 @@
     </mat-card>
   </div>
 
-  <!-- Service Strip -->
-  @if (serviceSummaries().length > 0) {
-    <mat-card class="services-card">
-      <mat-card-header><mat-card-title>Services</mat-card-title></mat-card-header>
-      <mat-card-content>
-        <div class="service-strip">
-          @for (s of serviceSummaries(); track s.name; let i = $index) {
-            <div class="service-chip clickable"
-                 [style.border-left-color]="accentColor(i)"
-                 (click)="navigateToServiceMetrics(s.name)">
-              <div class="service-chip-head">
-                <span class="service-name">{{ s.name }}</span>
-                <span class="error-chip" [class.has-errors]="s.errorCount > 0">{{ s.errorCount }} err</span>
-              </div>
-              <div class="service-meta">{{ s.traceCount }} traces &middot; {{ s.metricCount }} metrics</div>
-            </div>
-          }
-        </div>
-      </mat-card-content>
-    </mat-card>
-  }
-
   <!-- Tables -->
   <div class="chart-grid">
     <!-- Recent Errors -->
@@ -120,7 +99,7 @@
             </ng-container>
             <ng-container matColumnDef="time">
               <th mat-header-cell *matHeaderCellDef>Time</th>
-              <td mat-cell *matCellDef="let t">{{ t.traceStartTime | date: 'HH:mm:ss' }}</td>
+              <td mat-cell *matCellDef="let t">{{ t.traceStartTime | date:'MM/dd/yyyy, h:mm:ss a' }}</td>
             </ng-container>
             <tr mat-header-row *matHeaderRowDef="['service','operation','time']"></tr>
             <tr mat-row *matRowDef="let row; columns: ['service','operation','time']"

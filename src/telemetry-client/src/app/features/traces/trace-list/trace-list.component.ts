@@ -199,7 +199,7 @@ export class TraceListComponent {
         { name: 'Total', data: buckets.map((b, i) => [timestamps[i], b.count]) },
         { name: 'Errors', data: buckets.map((b, i) => [timestamps[i], b.errorCount]) },
       ],
-      xaxis: { type: 'datetime' },
+      xaxis: { type: 'datetime', labels: { datetimeUTC: false } },
       colors: ['#2196f3', '#f44336'],
       stroke: { curve: 'smooth', width: 2 },
       fill: { opacity: 0.2 },

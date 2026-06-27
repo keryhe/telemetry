@@ -20,11 +20,12 @@
   } @else if (spans().length > 0) {
     <!-- Summary -->
     <div class="stat-grid">
-      <app-stat-card label="Duration" [value]="formatDuration(totalDurationMs())" />
-      <app-stat-card label="Spans" [value]="spans().length" />
-      <app-stat-card label="Services" [value]="serviceNames().length" />
+      <app-stat-card label="Duration" icon="timer" [value]="formatDuration(totalDurationMs())" />
+      <app-stat-card label="Spans" icon="account_tree" [value]="spans().length" />
+      <app-stat-card label="Services" icon="cloud" [value]="serviceNames().length" />
       <app-stat-card
         label="Status"
+        [icon]="hasErrors() ? 'error' : 'check_circle'"
         [value]="hasErrors() ? 'Error' : 'OK'"
         [color]="hasErrors() ? 'error' : 'success'" />
     </div>
@@ -106,8 +107,8 @@
                   <div class="detail-section-title">Timing &amp; Status</div>
                   <table class="info-table">
                     <tbody>
-                      <tr><td>Start</td><td>{{ nanoToDate(node.startTimeUnixNano) | date:'yyyy-MM-dd HH:mm:ss.SSS' }}</td></tr>
-                      <tr><td>End</td><td>{{ nanoToDate(node.endTimeUnixNano) | date:'yyyy-MM-dd HH:mm:ss.SSS' }}</td></tr>
+                      <tr><td>Start</td><td>{{ nanoToDate(node.startTimeUnixNano) | date:'MM/dd/yyyy, h:mm:ss a' }}</td></tr>
+                      <tr><td>End</td><td>{{ nanoToDate(node.endTimeUnixNano) | date:'MM/dd/yyyy, h:mm:ss a' }}</td></tr>
                       <tr><td>Duration</td><td>{{ formatDuration(node.durationMs) }}</td></tr>
                       <tr>
                         <td>Status</td>
@@ -162,7 +163,7 @@
                     <div class="event-head">
                       <mat-icon class="event-icon">event</mat-icon>
                       <span class="event-name">{{ ev.name }}</span>
-                      <span class="event-time mono">{{ nanoToDate(ev.timeUnixNano) | date:'HH:mm:ss.SSS' }}</span>
+                      <span class="event-time mono">{{ nanoToDate(ev.timeUnixNano) | date:'MM/dd/yyyy, h:mm:ss a' }}</span>
                     </div>
                     @for (attr of ev.attributes | keyvalue; track attr.key) {
                       <div class="attr-row sub">

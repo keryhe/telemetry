@@ -52,18 +52,17 @@ export class ShellComponent {
     { label: 'Logs', icon: 'article', route: '/logs' },
     { label: 'Traces', icon: 'account_tree', route: '/traces' },
     { label: 'Metrics', icon: 'bar_chart', route: '/metrics' },
-    { label: 'Service Metrics', icon: 'monitoring', route: '/metrics/services' },
     { label: 'Alerts', icon: 'notifications', route: '/alerts' },
   ];
 
   protected readonly themeModes: { value: ThemeMode; icon: string; label: string }[] = [
     { value: 'light', icon: 'light_mode', label: 'Light' },
     { value: 'dark', icon: 'dark_mode', label: 'Dark' },
-    { value: 'system', icon: 'brightness_auto', label: 'System' },
+    { value: 'system', icon: 'contrast', label: 'System' },
   ];
 
   protected get themeIcon(): string {
-    return this.themeModes.find((m) => m.value === this.themeService.mode())?.icon ?? 'brightness_auto';
+    return this.themeModes.find((m) => m.value === this.themeService.mode())?.icon ?? 'contrast';
   }
 
   protected setTheme(mode: ThemeMode): void {

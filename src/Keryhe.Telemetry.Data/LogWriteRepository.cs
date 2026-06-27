@@ -1,24 +1,22 @@
-using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
 using Keryhe.Telemetry.Core.Models;
-using Keryhe.Telemetry.Data.Access;
 using Keryhe.Telemetry.Core;
 
 namespace Keryhe.Telemetry.Data;
 
 public class LogWriteRepository : ILogWriteRepository
 {
-    private readonly TelemetryWriteDbContext _context;
     private readonly TelemetryIngestionChannel _channel;
+    private readonly ITelemetryWriteStore _store;
     private readonly ILogger<LogWriteRepository> _logger;
 
     public LogWriteRepository(
-        TelemetryWriteDbContext context,
         TelemetryIngestionChannel channel,
+        ITelemetryWriteStore store,
         ILogger<LogWriteRepository> logger)
     {
-        _context = context;
         _channel = channel;
+        _store = store;
         _logger = logger;
     }
 
@@ -42,32 +40,12 @@ public class LogWriteRepository : ILogWriteRepository
         return Enumerable.Empty<long>();
     }
 
-    public async Task<bool> DeleteLogRecordAsync(long id, CancellationToken cancellationToken = default)
-    {
-        var record = await _context.LogRecords.FindAsync([id], cancellationToken);
-        if (record == null) return false;
-        _context.LogRecords.Remove(record);
-        await _context.SaveChangesAsync(cancellationToken);
-        return true;
-    }
+    public Task<bool> DeleteLogRecordAsync(long id, CancellationToken cancellationToken = default)
+        => _store.DeleteLogRecordAsync(id, cancellationToken);
 
-    public async Task<int> DeleteLogRecordsByTimeRangeAsync(
+    public Task<int> DeleteLogRecordsByTimeRangeAsync(
         DateTime startTime,
         DateTime endTime,
         CancellationToken cancellationToken = default)
-    {
-        if (startTime >= endTime)
-            throw new ArgumentException("Start time must be before end time");
-
-        var startNano = OpenTelemetryDbContextExtensions.DateTimeToUnixNano(startTime);
-        var endNano = OpenTelemetryDbContextExtensions.DateTimeToUnixNano(endTime);
-
-        var records = await _context.LogRecords
-            .Where(lr => lr.TimeUnixNano >= startNano && lr.TimeUnixNano <= endNano)
-            .ToListAsync(cancellationToken);
-
-        _context.LogRecords.RemoveRange(records);
-        await _context.SaveChangesAsync(cancellationToken);
-        return records.Count;
-    }
+        => _store.DeleteLogRecordsByTimeRangeAsync(startTime, endTime, cancellationToken);
 }

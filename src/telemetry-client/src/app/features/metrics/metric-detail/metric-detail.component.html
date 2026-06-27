@@ -43,11 +43,21 @@
       </mat-form-field>
     }
 
-    @if (services().length > 1) {
+    @if (services().length > 1 || labelKeys().length > 0) {
       <mat-button-toggle-group>
-        <mat-button-toggle [checked]="!showPerService()" (change)="showPerService.set(false); reloadSeries()">Single</mat-button-toggle>
-        <mat-button-toggle [checked]="showPerService()" (change)="showPerService.set(true); reloadSeries()">Per Service</mat-button-toggle>
+        <mat-button-toggle [checked]="groupMode() === 'single'" (change)="groupMode.set('single'); reloadSeries()">Single</mat-button-toggle>
+        <mat-button-toggle [checked]="groupMode() === 'service'" (change)="groupMode.set('service'); reloadSeries()">Per Service</mat-button-toggle>
+        <mat-button-toggle [checked]="groupMode() === 'labels'" (change)="groupMode.set('labels'); reloadSeries()">Per Series</mat-button-toggle>
       </mat-button-toggle-group>
+    }
+
+    @if (isGrouped()) {
+      <mat-form-field appearance="outline" subscriptSizing="dynamic" class="ctrl-field">
+        <mat-label>Aggregate</mat-label>
+        <mat-select [value]="aggMode()" (selectionChange)="onAggModeChange($event.value)">
+          @for (m of aggModes; track m.value) { <mat-option [value]="m.value">{{ m.label }}</mat-option> }
+        </mat-select>
+      </mat-form-field>
     }
 
     @if (isCounter()) {
@@ -60,10 +70,10 @@
 
   <!-- Stats -->
   <div class="stat-grid">
-    <app-stat-card [label]="statsAreRates() ? 'Current Rate' : 'Current'" [value]="fmtStat(currentValue())" />
-    <app-stat-card label="Min" [value]="fmtStat(minValue())" />
-    <app-stat-card label="Max" [value]="fmtStat(maxValue())" />
-    <app-stat-card [label]="isHistogram() ? 'Count' : 'Average'" [value]="isHistogram() ? fmt(avgValue()) : fmtStat(avgValue())" />
+    <app-stat-card [label]="statsAreRates() ? 'Current Rate' : 'Current'" icon="show_chart" [value]="fmtStat(currentValue())" />
+    <app-stat-card label="Min" icon="arrow_downward" [value]="fmtStat(minValue())" />
+    <app-stat-card label="Max" icon="arrow_upward" [value]="fmtStat(maxValue())" />
+    <app-stat-card [label]="isHistogram() ? 'Count' : 'Average'" icon="functions" [value]="isHistogram() ? fmt(avgValue()) : fmtStat(avgValue())" />
   </div>
 
   <mat-tab-group [selectedIndex]="activeTab()" (selectedIndexChange)="activeTab.set($event)">
@@ -86,6 +96,20 @@
             <app-empty-state icon="show_chart" message="No data for selected range" />
           }
 
+          <!-- Histogram Count / Sum -->
+          @if (countSumChartOptions(); as cs) {
+            <div class="sub-chart-title">Count / Sum</div>
+            <apx-chart
+              [series]="cs.series!"
+              [chart]="cs.chart!"
+              [xaxis]="cs.xaxis!"
+              [stroke]="cs.stroke!"
+              [theme]="cs.theme!"
+              [dataLabels]="cs.dataLabels!"
+              [yaxis]="cs.yaxis!"
+              [legend]="cs.legend!" />
+          }
+
           <!-- Histogram Min / Max -->
           @if (minMaxChartOptions(); as mm) {
             <div class="sub-chart-title">Min / Max</div>
@@ -98,6 +122,19 @@
               [dataLabels]="mm.dataLabels!"
               [yaxis]="mm.yaxis!"
               [legend]="mm.legend!" />
+          }
+
+          <!-- Histogram bucket-distribution heatmap -->
+          @if (heatmapOptions(); as hm) {
+            <div class="sub-chart-title">Bucket distribution</div>
+            <apx-chart
+              [series]="hm.series!"
+              [chart]="hm.chart!"
+              [xaxis]="hm.xaxis!"
+              [theme]="hm.theme!"
+              [dataLabels]="hm.dataLabels!"
+              [legend]="hm.legend!"
+              [plotOptions]="hm.plotOptions!" />
           }
 
           <!-- Summary quantile snapshot -->
@@ -161,7 +198,7 @@
             <table mat-table [dataSource]="exemplars()" class="full-width">
               <ng-container matColumnDef="time">
                 <th mat-header-cell *matHeaderCellDef>Time</th>
-                <td mat-cell *matCellDef="let e" class="mono">{{ (e.timeUnixNano / 1000000) | date:'HH:mm:ss.SSS' }}</td>
+                <td mat-cell *matCellDef="let e" class="mono">{{ (e.timeUnixNano / 1000000) | date:'MM/dd/yyyy, h:mm:ss a' }}</td>
               </ng-container>
               <ng-container matColumnDef="value">
                 <th mat-header-cell *matHeaderCellDef>Value</th>

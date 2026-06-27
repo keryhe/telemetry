@@ -6,8 +6,6 @@ Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Keryhe.Telemetry.Server", "
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Keryhe.Telemetry.Core", "src\Keryhe.Telemetry.Core\Keryhe.Telemetry.Core.csproj", "{3527A5C9-A9B7-4040-80CC-C612A2A8D640}"
 EndProject
-Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Keryhe.Telemetry.Client", "src\Keryhe.Telemetry.Client\Keryhe.Telemetry.Client.csproj", "{DD276D82-7F62-472A-8009-180D8288BD6E}"
-EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Keryhe.Telemetry.TestDataGenerator", "src\Keryhe.Telemetry.TestDataGenerator\Keryhe.Telemetry.TestDataGenerator.csproj", "{E5A8C1B9-8F7D-4E2C-9A1B-C5D7E2F9A3B1}"
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Keryhe.Telemetry.Alerting", "src\Keryhe.Telemetry.Alerting\Keryhe.Telemetry.Alerting.csproj", "{C4D5E6F7-A8B9-4C0D-1E2F-3A4B5C6D7E8F}"
@@ -17,6 +15,8 @@ EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Keryhe.Telemetry.SqlServer", "src\Keryhe.Telemetry.SqlServer\Keryhe.Telemetry.SqlServer.csproj", "{698C7947-BE83-4F4F-A402-AC121EEC00EF}"
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Keryhe.Telemetry.Api", "src\Keryhe.Telemetry.Api\Keryhe.Telemetry.Api.csproj", "{39B94C70-2F19-4DA7-8999-79FC403D4851}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Keryhe.Telemetry.PostgreSQL", "src\Keryhe.Telemetry.PostgreSQL\Keryhe.Telemetry.PostgreSQL.csproj", "{1270F29C-8187-4F91-A4FD-12144135511A}"
 EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
@@ -64,18 +64,6 @@ Global
 		{3527A5C9-A9B7-4040-80CC-C612A2A8D640}.Release|x64.Build.0 = Release|Any CPU
 		{3527A5C9-A9B7-4040-80CC-C612A2A8D640}.Release|x86.ActiveCfg = Release|Any CPU
 		{3527A5C9-A9B7-4040-80CC-C612A2A8D640}.Release|x86.Build.0 = Release|Any CPU
-		{DD276D82-7F62-472A-8009-180D8288BD6E}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
-		{DD276D82-7F62-472A-8009-180D8288BD6E}.Debug|Any CPU.Build.0 = Debug|Any CPU
-		{DD276D82-7F62-472A-8009-180D8288BD6E}.Debug|x64.ActiveCfg = Debug|Any CPU
-		{DD276D82-7F62-472A-8009-180D8288BD6E}.Debug|x64.Build.0 = Debug|Any CPU
-		{DD276D82-7F62-472A-8009-180D8288BD6E}.Debug|x86.ActiveCfg = Debug|Any CPU
-		{DD276D82-7F62-472A-8009-180D8288BD6E}.Debug|x86.Build.0 = Debug|Any CPU
-		{DD276D82-7F62-472A-8009-180D8288BD6E}.Release|Any CPU.ActiveCfg = Release|Any CPU
-		{DD276D82-7F62-472A-8009-180D8288BD6E}.Release|Any CPU.Build.0 = Release|Any CPU
-		{DD276D82-7F62-472A-8009-180D8288BD6E}.Release|x64.ActiveCfg = Release|Any CPU
-		{DD276D82-7F62-472A-8009-180D8288BD6E}.Release|x64.Build.0 = Release|Any CPU
-		{DD276D82-7F62-472A-8009-180D8288BD6E}.Release|x86.ActiveCfg = Release|Any CPU
-		{DD276D82-7F62-472A-8009-180D8288BD6E}.Release|x86.Build.0 = Release|Any CPU
 		{E5A8C1B9-8F7D-4E2C-9A1B-C5D7E2F9A3B1}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
 		{E5A8C1B9-8F7D-4E2C-9A1B-C5D7E2F9A3B1}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{E5A8C1B9-8F7D-4E2C-9A1B-C5D7E2F9A3B1}.Debug|x64.ActiveCfg = Debug|Any CPU
@@ -136,6 +124,18 @@ Global
 		{39B94C70-2F19-4DA7-8999-79FC403D4851}.Release|x64.Build.0 = Release|Any CPU
 		{39B94C70-2F19-4DA7-8999-79FC403D4851}.Release|x86.ActiveCfg = Release|Any CPU
 		{39B94C70-2F19-4DA7-8999-79FC403D4851}.Release|x86.Build.0 = Release|Any CPU
+		{1270F29C-8187-4F91-A4FD-12144135511A}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{1270F29C-8187-4F91-A4FD-12144135511A}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{1270F29C-8187-4F91-A4FD-12144135511A}.Debug|x64.ActiveCfg = Debug|Any CPU
+		{1270F29C-8187-4F91-A4FD-12144135511A}.Debug|x64.Build.0 = Debug|Any CPU
+		{1270F29C-8187-4F91-A4FD-12144135511A}.Debug|x86.ActiveCfg = Debug|Any CPU
+		{1270F29C-8187-4F91-A4FD-12144135511A}.Debug|x86.Build.0 = Debug|Any CPU
+		{1270F29C-8187-4F91-A4FD-12144135511A}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{1270F29C-8187-4F91-A4FD-12144135511A}.Release|Any CPU.Build.0 = Release|Any CPU
+		{1270F29C-8187-4F91-A4FD-12144135511A}.Release|x64.ActiveCfg = Release|Any CPU
+		{1270F29C-8187-4F91-A4FD-12144135511A}.Release|x64.Build.0 = Release|Any CPU
+		{1270F29C-8187-4F91-A4FD-12144135511A}.Release|x86.ActiveCfg = Release|Any CPU
+		{1270F29C-8187-4F91-A4FD-12144135511A}.Release|x86.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE

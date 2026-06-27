@@ -173,17 +173,6 @@ public class UniqueMetricSummary
     public DateTime LastSeen { get; set; }
 }
 
-public class ServiceMetricSummary
-{
-    public string ServiceName { get; set; } = null!;
-    public int MetricCount { get; set; }
-    public int GaugeCount { get; set; }
-    public int CounterCount { get; set; }
-    public int HistogramCount { get; set; }
-    public int SummaryCount { get; set; }
-    public DateTime LastUpdated { get; set; }
-}
-
 public class MultiSeriesMetricData
 {
     public string Name { get; set; } = "";
@@ -193,7 +182,12 @@ public class MultiSeriesMetricData
 
 public class NamedMetricSeries
 {
+    /// <summary>Human-readable display label for the series, e.g. "svc | method=GET, route=/api".</summary>
     public string SeriesName { get; set; } = "";
     public long MetricId { get; set; }
+    /// <summary>The series' originating service (service.name from the metric's resource attributes).</summary>
+    public string ServiceName { get; set; } = "";
+    /// <summary>The data point attribute (label) set that defines this series' identity.</summary>
+    public Dictionary<string, string> Labels { get; set; } = new();
     public List<MetricDataPoint> Points { get; set; } = new();
 }

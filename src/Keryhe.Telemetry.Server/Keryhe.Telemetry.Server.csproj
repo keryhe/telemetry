@@ -8,9 +8,7 @@
   </PropertyGroup>
 
     <ItemGroup>
-        <PackageReference Include="EFCore.NamingConventions" Version="10.0.1" />
         <PackageReference Include="Grpc.AspNetCore" Version="2.76.0" />
-        <PackageReference Include="Microsoft.EntityFrameworkCore.SqlServer" Version="10.0.5" />
         <PackageReference Include="Microsoft.Extensions.Hosting.WindowsServices" Version="10.0.5" />
     </ItemGroup>
 
@@ -48,7 +46,10 @@
     </ItemGroup>
 
     <ItemGroup>
+      <!-- All three providers are referenced; the active one is chosen at runtime via Database:Provider. -->
       <ProjectReference Include="..\Keryhe.Telemetry.SqlServer\Keryhe.Telemetry.SqlServer.csproj" />
+      <ProjectReference Include="..\Keryhe.Telemetry.PostgreSQL\Keryhe.Telemetry.PostgreSQL.csproj" />
+      <ProjectReference Include="..\Keryhe.Telemetry.Timescale\Keryhe.Telemetry.Timescale.csproj" />
     </ItemGroup>
 
     <ItemGroup>

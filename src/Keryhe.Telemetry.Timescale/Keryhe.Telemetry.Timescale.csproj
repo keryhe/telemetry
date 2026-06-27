@@ -4,14 +4,17 @@
     <TargetFramework>net10.0</TargetFramework>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
+    <UserSecretsId>fb731189-e1e1-48bf-8f37-58b437a58893</UserSecretsId>
   </PropertyGroup>
 
   <ItemGroup>
     <ProjectReference Include="../Keryhe.Telemetry.Data/Keryhe.Telemetry.Data.csproj" />
+    <!-- Timescale read repositories derive from the PostgreSQL reference implementations. -->
+    <ProjectReference Include="../Keryhe.Telemetry.PostgreSQL/Keryhe.Telemetry.PostgreSQL.csproj" />
   </ItemGroup>
 
   <ItemGroup>
-    <PackageReference Include="Microsoft.Extensions.Hosting" Version="10.0.5" />
+    <PackageReference Include="Dapper" Version="2.1.72" />
     <PackageReference Include="Npgsql" Version="9.0.3" />
   </ItemGroup>
 

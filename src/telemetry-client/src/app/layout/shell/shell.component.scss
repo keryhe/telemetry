@@ -1,3 +1,5 @@
+@use '@angular/material' as mat;
+
 .shell {
   display: flex;
   flex-direction: column;
@@ -8,23 +10,38 @@
   flex: 0 0 auto;
   z-index: 10;
   gap: 8px;
-  height: 56px;
+  height: 60px;
   background-color: var(--mat-sys-surface-container);
   border-bottom: 1px solid var(--mat-sys-outline-variant);
 }
 
 .app-icon {
   color: var(--mat-sys-primary);
-  font-size: 28px;
-  width: 28px;
-  height: 28px;
+  font-size: 48px;
+  width: 48px;
+  height: 48px;
   margin-right: 4px;
 }
 
+.app-title-block {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  line-height: 1;
+  gap: 2px;
+}
+
 .app-title {
-  font-size: 18px;
+  font-size: 22px;
   font-weight: 600;
   color: var(--mat-sys-on-surface);
+}
+
+.app-subtitle {
+  font-size: 12px;
+  font-weight: 400;
+  color: var(--mat-sys-on-surface-variant);
+  letter-spacing: 0.02em;
 }
 
 .sidenav-container {
@@ -33,7 +50,7 @@
 }
 
 .sidenav {
-  width: 248px;
+  width: 175px;
   background-color: var(--mat-sys-surface-container-low);
   border-right: 1px solid var(--mat-sys-outline-variant);
   border-radius: 0;
@@ -57,8 +74,9 @@ mat-nav-list {
 }
 
 .tenant-select {
-  min-width: 210px;
-  font-size: 14px;
+  min-width: 180px;
+  font-size: 13px;
+  @include mat.form-field-density(-3);
 }
 
 .content {

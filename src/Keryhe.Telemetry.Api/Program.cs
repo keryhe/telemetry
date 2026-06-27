@@ -1,9 +1,6 @@
 using Keryhe.Telemetry.Api.Middleware;
 using Keryhe.Telemetry.Api.Services;
 using Keryhe.Telemetry.Core;
-using Keryhe.Telemetry.Data;
-using Keryhe.Telemetry.Data.Access;
-using Microsoft.EntityFrameworkCore;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -30,37 +27,16 @@ builder.Services.AddSwaggerGen();
 builder.Services.AddScoped<ApiTenantContext>();
 builder.Services.AddScoped<ITenantContext>(sp => sp.GetRequiredService<ApiTenantContext>());
 
-// ── EF CORE: READ CONTEXT FACTORY ────────────────────────────────────────────
-// Scoped factory so each CreateDbContextAsync() call uses the current request's
-// ITenantContext (already populated by TenantMiddleware).
-builder.Services.AddDbContextFactory<TelemetryReadDbContext>(options =>
-{
-    var connectionString = builder.Configuration.GetConnectionString("Read");
-    options.UseSqlServer(connectionString);
-    options.UseSnakeCaseNamingConvention();
-    options.UseQueryTrackingBehavior(QueryTrackingBehavior.NoTracking);
-
-    if (builder.Environment.IsDevelopment())
-    {
-        options.EnableSensitiveDataLogging();
-        options.EnableDetailedErrors();
-    }
-}, ServiceLifetime.Scoped);
-
-// ── EF CORE: ALERT CONTEXT ───────────────────────────────────────────────────
-builder.Services.AddDbContext<AlertDbContext>(options =>
-{
-    var connectionString = builder.Configuration.GetConnectionString("Read");
-    options.UseSqlServer(connectionString);
-    options.UseSnakeCaseNamingConvention();
-});
-
 // ── REPOSITORIES ─────────────────────────────────────────────────────────────
-builder.Services
-    .AddScoped<ITraceReadRepository, TraceReadRepository>()
-    .AddScoped<IMetricReadRepository, MetricReadRepository>()
-    .AddScoped<ILogReadRepository, LogReadRepository>()
-    .AddScoped<IAlertRuleRepository, AlertRuleRepository>();
+// Read path: the active provider's Dapper read/alert repositories are selected by the
+// Database:Provider config key (connection string comes from ConnectionStrings:Read).
+switch (builder.Configuration["Database:Provider"])
+{
+    case "SqlServer":  builder.Services.AddSqlServerReadServices(builder.Configuration);  break;
+    case "PostgreSQL": builder.Services.AddPostgreSqlReadServices(builder.Configuration); break;
+    case "Timescale":  builder.Services.AddTimescaleReadServices(builder.Configuration);  break;
+    default: throw new InvalidOperationException("Unknown or missing Database:Provider (expected SqlServer, PostgreSQL, or Timescale).");
+}
 
 var app = builder.Build();
 

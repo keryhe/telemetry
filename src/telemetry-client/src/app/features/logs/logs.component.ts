@@ -1,4 +1,4 @@
-import { Component, computed, effect, inject, signal, untracked } from '@angular/core';
+import { Component, computed, effect, inject, signal, untracked, viewChild } from '@angular/core';
 import { DatePipe, KeyValuePipe } from '@angular/common';
 import { ActivatedRoute, RouterLink } from '@angular/router';
 import { MatCardModule } from '@angular/material/card';
@@ -7,7 +7,7 @@ import { MatIconModule } from '@angular/material/icon';
 import { MatInputModule } from '@angular/material/input';
 import { MatProgressBarModule } from '@angular/material/progress-bar';
 import { MatSelectModule } from '@angular/material/select';
-import { MatTableModule } from '@angular/material/table';
+import { MatTable, MatTableModule } from '@angular/material/table';
 import { MatButtonModule } from '@angular/material/button';
 import { MatPaginatorModule, PageEvent } from '@angular/material/paginator';
 import { MatChipsModule } from '@angular/material/chips';
@@ -58,6 +58,10 @@ export class LogsComponent {
   protected selectedSeverity = signal(-1);
   protected traceIdFilter = signal('');
   protected expandedRow = signal<LogRecord | null>(null);
+
+  // multiTemplateDataRows only re-evaluates its `when` predicate when the table
+  // re-renders its rows, so we must call renderRows() after toggling expansion.
+  private readonly table = viewChild(MatTable<LogRecord>);
 
   protected pageIndex = signal(0);
   protected pageSize = signal(100);
@@ -192,7 +196,9 @@ export class LogsComponent {
     const { start, end } = this.timeRange.range();
     const isDark = this.theme.isDark();
     const buckets = bucketLogs(this.logs(), start, end, BUCKET_COUNT);
-    const base = buildLogSeriesOptions(buckets, isDark, 100);
+    // Use the shared base as-is (datetime axis, legend, visible grid) so this
+    // matches the Dashboard log chart, then layer on drag-to-select zoom.
+    const base = buildLogSeriesOptions(buckets, isDark, 180);
 
     this.chartOptions.set({
       ...base,
@@ -208,19 +214,15 @@ export class LogsComponent {
           },
         },
       },
-      xaxis: {
-        ...base.xaxis!,
-        labels: { show: false },
-        axisBorder: { show: false },
-        axisTicks: { show: false },
-      },
       legend: { show: false },
-      grid: { show: false },
+      grid: { show: true },
     });
   }
 
   protected toggleRow(row: LogRecord): void {
     this.expandedRow.update((cur) => (cur === row ? null : row));
+    // Force the table to re-evaluate the detail row's `when` predicate.
+    this.table()?.renderRows();
   }
 
   protected isExpanded(row: LogRecord): boolean {

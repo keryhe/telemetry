@@ -9,13 +9,13 @@ export const routes: Routes = [
     children: [
       {
         path: 'dashboard',
-        title: 'Dashboard',
+        title: 'MELT - Dashboard',
         loadComponent: () =>
           import('./features/dashboard/dashboard.component').then((m) => m.DashboardComponent),
       },
       {
         path: 'traces',
-        title: 'Traces',
+        title: 'MELT - Traces',
         loadComponent: () =>
           import('./features/traces/trace-list/trace-list.component').then((m) => m.TraceListComponent),
       },
@@ -28,19 +28,10 @@ export const routes: Routes = [
       },
       {
         path: 'metrics',
-        title: 'Metrics',
+        title: 'MELT - Metrics',
         loadComponent: () =>
           import('./features/metrics/metric-list/metric-list.component').then(
             (m) => m.MetricListComponent
-          ),
-      },
-      {
-        // Must be before metrics/:name to avoid shadowing
-        path: 'metrics/services',
-        title: 'Service Metrics',
-        loadComponent: () =>
-          import('./features/metrics/service-metrics/service-metrics.component').then(
-            (m) => m.ServiceMetricsComponent
           ),
       },
       {
@@ -52,13 +43,13 @@ export const routes: Routes = [
       },
       {
         path: 'logs',
-        title: 'Logs',
+        title: 'MELT - Logs',
         loadComponent: () =>
           import('./features/logs/logs.component').then((m) => m.LogsComponent),
       },
       {
         path: 'alerts',
-        title: 'Alerts',
+        title: 'MELT - Alerts',
         loadComponent: () =>
           import('./features/alerts/alerts.component').then((m) => m.AlertsComponent),
       },

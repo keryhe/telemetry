@@ -1,7 +1,8 @@
 import { Component, DestroyRef, OnInit, computed, effect, inject, signal, untracked } from '@angular/core';
 import { DatePipe, DecimalPipe, PercentPipe } from '@angular/common';
 import { Router } from '@angular/router';
-import { Subscription, forkJoin, interval } from 'rxjs';
+import { Subscription, forkJoin, interval, of } from 'rxjs';
+import { catchError } from 'rxjs/operators';
 import { MatCardModule } from '@angular/material/card';
 import { MatTableModule } from '@angular/material/table';
 import { MatIconModule } from '@angular/material/icon';
@@ -22,7 +23,6 @@ import { TimeRangeService, recommendedRefreshIntervalMs } from '../../core/servi
 import { ThemeService } from '../../core/services/theme.service';
 import { TraceInfo } from '../../core/models/trace.models';
 import { LogRecord, getServiceName } from '../../core/models/log.models';
-import { ServiceMetricSummary } from '../../core/models/metric.models';
 import { StatCardComponent } from '../../shared/components/stat-card/stat-card.component';
 import { EmptyStateComponent } from '../../shared/components/empty-state/empty-state.component';
 import { bucketTraces, bucketLogs, buildLogSeriesOptions, formatDuration, parseDotnetTimespan } from '../../shared/utils/chart.utils';
@@ -55,7 +55,6 @@ export class DashboardComponent {
   private refreshSub?: Subscription;
   protected traces = signal<TraceInfo[]>([]);
   protected logs = signal<LogRecord[]>([]);
-  protected metricSummaries = signal<ServiceMetricSummary[]>([]);
   protected availableServices = signal<string[]>([]);
   protected selectedService = signal('');
 
@@ -74,29 +73,6 @@ export class DashboardComponent {
       .sort((a, b) => parseDotnetTimespan(b.traceDuration) - parseDotnetTimespan(a.traceDuration))
       .slice(0, 5)
   );
-
-  protected serviceSummaries = computed(() => {
-    const traces = this.traces();
-    const metricDict = new Map(this.metricSummaries().map((m) => [m.serviceName, m.metricCount]));
-    return this.availableServices().map((svc) => {
-      const group = traces.filter((t) => (t.serviceName ?? 'unknown') === svc);
-      return {
-        name: svc,
-        traceCount: group.length,
-        errorCount: group.filter((t) => t.hasErrors).length,
-        metricCount: metricDict.get(svc) ?? 0,
-      };
-    });
-  });
-
-  private readonly accentColors = [
-    'var(--mat-sys-primary)',
-    'var(--mat-sys-secondary)',
-    'var(--mat-sys-tertiary)',
-    '#FF9800',
-    '#2196F3',
-    '#4CAF50',
-  ];
 
   protected traceChartOptions = signal<ApexOptions>({});
   protected logChartOptions = signal<ApexOptions>({});
@@ -137,15 +113,16 @@ export class DashboardComponent {
     const svc = this.selectedService();
 
     forkJoin({
-      traces: this.tracesApi.getTraces({ start, end, limit: 500, service: svc || undefined }),
-      logs: this.logsApi.getLogs(start, end),
-      summaries: this.metricsApi.getSummaries(),
-      services: this.tracesApi.getServices(start, end),
+      traces:     this.tracesApi.getTraces({ start, end, limit: 500, service: svc || undefined }),
+      logs:       this.logsApi.getLogs(start, end),
+      traceSvcs:  this.tracesApi.getServices(start, end).pipe(catchError(() => of([]))),
+      logSvcs:    this.logsApi.getServices(start, end).pipe(catchError(() => of([]))),
+      metricSvcs: this.metricsApi.getServices(start, end).pipe(catchError(() => of([]))),
     }).subscribe({
-      next: ({ traces, logs, summaries, services }) => {
+      next: ({ traces, logs, traceSvcs, logSvcs, metricSvcs }) => {
         this.traces.set(traces);
         this.logs.set(svc ? logs.filter((l) => getServiceName(l) === svc) : logs);
-        this.metricSummaries.set(summaries);
+        const services = [...new Set([...traceSvcs, ...logSvcs, ...metricSvcs])].sort();
         if (services.length > 0) this.availableServices.set(services);
         this.buildCharts(start, end);
         this.loading.set(false);
@@ -166,7 +143,7 @@ export class DashboardComponent {
         { name: 'Total', data: buckets.map((b, i) => [timestamps[i], b.count]) },
         { name: 'Errors', data: buckets.map((b, i) => [timestamps[i], b.errorCount]) },
       ],
-      xaxis: { type: 'datetime' },
+      xaxis: { type: 'datetime', labels: { datetimeUTC: false } },
       colors: ['#2196f3', '#f44336'],
       stroke: { curve: 'smooth', width: 2 },
       fill: { opacity: 0.2 },
@@ -180,15 +157,6 @@ export class DashboardComponent {
 
   protected navigateToTrace(traceId: string): void {
     this.router.navigate(['/traces', traceId]);
-  }
-
-  protected navigateToServiceMetrics(service: string): void {
-    localStorage.setItem('serviceMetrics_service', service);
-    this.router.navigate(['/metrics/services']);
-  }
-
-  protected accentColor(index: number): string {
-    return this.accentColors[index % this.accentColors.length];
   }
 
   protected durationMs(trace: TraceInfo): number {

@@ -20,14 +20,30 @@ import { MetricsApiService } from '../../../core/services/api/metrics-api.servic
 import { TimeRangeService } from '../../../core/services/time-range.service';
 import { ThemeService } from '../../../core/services/theme.service';
 import {
-  AggregationTemporality, MetricDataPoint, MetricInfo, MetricSeries, MetricType, MultiSeriesMetricData,
+  AggregationTemporality, MetricDataPoint, MetricInfo, MetricSeries, MetricType,
+  MultiSeriesMetricData, NamedMetricSeries,
 } from '../../../core/models/metric.models';
 import { StatCardComponent } from '../../../shared/components/stat-card/stat-card.component';
 import { EmptyStateComponent } from '../../../shared/components/empty-state/empty-state.component';
-import { computeRateSeries, isCounterMetric, isDeltaSum } from '../../../shared/utils/chart.utils';
+import {
+  AggregateFn, aggregateSeries, buildHistogramHeatmap, computeRateSeries, histogramQuantile,
+  isCounterMetric, isDeltaSum, toExplicitBuckets,
+} from '../../../shared/utils/chart.utils';
 import { loadPageState, savePageState } from '../../../shared/utils/page-state';
 
 const STATE_KEY = 'state.metricDetail';
+
+type GroupMode = 'single' | 'service' | 'labels';
+type AggMode = 'none' | AggregateFn;
+
+/** Aggregation choices for the grouped-series control. */
+const AGG_MODES: { value: AggMode; label: string }[] = [
+  { value: 'none', label: 'None' }, { value: 'sum', label: 'Sum' },
+  { value: 'avg', label: 'Avg' }, { value: 'min', label: 'Min' }, { value: 'max', label: 'Max' },
+];
+
+/** Series rendered individually before the rest are folded into an "others" line. */
+const MAX_SERIES = 8;
 
 const TYPE_LABELS: Record<MetricType, string> = {
   [MetricType.Gauge]: 'Gauge', [MetricType.Sum]: 'Counter',
@@ -73,12 +89,31 @@ export class MetricDetailComponent implements OnInit {
 
   protected selectedService = signal('');
   protected selectedLabels = signal<Record<string, string>>({});
-  protected showPerService = signal(false);
+  /** 'single' = one merged series, 'service' = one per service, 'labels' = one per full label set. */
+  protected groupMode = signal<GroupMode>('single');
+  /** Cross-series aggregation applied in a grouping mode; 'none' keeps per-series lines. */
+  protected aggMode = signal<AggMode>('none');
   protected showRaw = signal(false);
   protected activeTab = signal(0);
 
+  protected readonly aggModes = AGG_MODES;
+
+  protected isGrouped = computed(() => this.groupMode() !== 'single');
   protected metricType = computed(() => this.instances()[0]?.type ?? MetricType.Gauge);
-  protected points = computed(() => this.series()?.points ?? []);
+
+  /**
+   * Points feeding the stat cards / metadata / exemplars / export. In a grouping mode this is
+   * the largest grouped series (a real single time series) rather than the interleaved merge,
+   * so counter rates and min/max stay meaningful.
+   */
+  protected points = computed(() => {
+    if (this.isGrouped()) {
+      const grouped = this.multiSeries()?.series ?? [];
+      if (!grouped.length) return [];
+      return grouped.reduce((a, b) => (b.points.length > a.points.length ? b : a)).points;
+    }
+    return this.series()?.points ?? [];
+  });
   protected isCounter = computed(() => isCounterMetric(this.metricType(), this.points()));
   protected isDelta = computed(() => isDeltaSum(this.metricType(), this.points()));
   protected isHistogram = computed(() => this.metricType() === MetricType.Histogram);
@@ -97,6 +132,15 @@ export class MetricDetailComponent implements OnInit {
 
   protected chartOptions = signal<ApexOptions>({});
   protected minMaxChartOptions = signal<ApexOptions | null>(null);
+  /** Secondary Count/Sum trend for histograms (the primary chart shows percentiles). */
+  protected countSumChartOptions = signal<ApexOptions | null>(null);
+  /** Bucket-distribution heatmap for histogram / exponential-histogram metrics. */
+  protected heatmapOptions = signal<ApexOptions | null>(null);
+
+  /** Percentiles plotted for histogram metrics. */
+  private static readonly PERCENTILES: { q: number; label: string }[] = [
+    { q: 0.5, label: 'p50' }, { q: 0.95, label: 'p95' }, { q: 0.99, label: 'p99' },
+  ];
 
   /** Latest-point quantile snapshot for summary metrics. */
   protected summarySnapshot = computed(() => {
@@ -204,7 +248,8 @@ export class MetricDetailComponent implements OnInit {
         metricName: this.metricName(),
         selectedService: this.selectedService(),
         selectedLabels: this.selectedLabels(),
-        showPerService: this.showPerService(),
+        groupMode: this.groupMode(),
+        aggMode: this.aggMode(),
         showRaw: this.showRaw(),
         activeTab: this.activeTab(),
       });
@@ -217,12 +262,13 @@ export class MetricDetailComponent implements OnInit {
     // Restore state only if it belongs to the metric we're now viewing.
     const saved = loadPageState(STATE_KEY, {
       metricName: '', selectedService: '', selectedLabels: {} as Record<string, string>,
-      showPerService: false, showRaw: false, activeTab: 0,
+      groupMode: 'single' as GroupMode, aggMode: 'none' as AggMode, showRaw: false, activeTab: 0,
     });
     if (saved.metricName === this.metricName()) {
       this.selectedService.set(saved.selectedService);
       this.selectedLabels.set(saved.selectedLabels);
-      this.showPerService.set(saved.showPerService);
+      this.groupMode.set(saved.groupMode);
+      this.aggMode.set(saved.aggMode);
       this.showRaw.set(saved.showRaw);
       this.activeTab.set(saved.activeTab);
     }
@@ -243,7 +289,7 @@ export class MetricDetailComponent implements OnInit {
         this.labels.set(labels);
         this.series.set(series);
         // Honor restored filters/view rather than showing the unfiltered series.
-        if (this.showPerService() || this.selectedService() || Object.keys(this.selectedLabels()).length > 0) {
+        if (this.isGrouped() || this.selectedService() || Object.keys(this.selectedLabels()).length > 0) {
           this.reloadSeries();
         } else {
           this.buildChart();
@@ -261,8 +307,9 @@ export class MetricDetailComponent implements OnInit {
     const metricId = svc
       ? this.instances().find((i) => i.serviceName === svc)?.id
       : undefined;
+    const labelFilters = Object.keys(this.selectedLabels()).length > 0 ? this.selectedLabels() : undefined;
 
-    if (this.showPerService()) {
+    if (this.groupMode() === 'service') {
       this.api.getSeriesByService(name, start, end).subscribe((multi) => {
         this.multiSeries.set(multi);
         this.buildMultiChart(multi);
@@ -270,11 +317,15 @@ export class MetricDetailComponent implements OnInit {
       return;
     }
 
-    this.api.getSeries({
-      metricName: name, start, end,
-      metricId,
-      labelFilters: Object.keys(this.selectedLabels()).length > 0 ? this.selectedLabels() : undefined,
-    }).subscribe((s) => {
+    if (this.groupMode() === 'labels') {
+      this.api.getGroupedSeries({ metricName: name, start, end, metricId, labelFilters }).subscribe((multi) => {
+        this.multiSeries.set(multi);
+        this.buildMultiChart(multi);
+      });
+      return;
+    }
+
+    this.api.getSeries({ metricName: name, start, end, metricId, labelFilters }).subscribe((s) => {
       this.series.set(s);
       this.buildChart();
     });
@@ -286,6 +337,8 @@ export class MetricDetailComponent implements OnInit {
     const isDark = this.theme.isDark();
     const points = s.points;
     this.minMaxChartOptions.set(null);
+    this.countSumChartOptions.set(null);
+    this.heatmapOptions.set(null);
 
     let chartType: 'area' | 'bar' | 'line' = 'area';
     let chartSeries: { name: string; data: [number, number][] }[];
@@ -303,15 +356,13 @@ export class MetricDetailComponent implements OnInit {
         }),
       }));
     } else if (this.isHistogram() || this.isExpHistogram()) {
-      // Count + Sum trend, plus a separate Min/Max chart.
+      // Primary: p50/p95/p99 derived from buckets. Count/Sum, Min/Max and the bucket
+      // heatmap render as secondary detail.
       chartType = 'line';
-      chartSeries = [
-        { name: 'Count', data: points.map((p) => [new Date(p.timestamp).getTime(), p.count ?? 0]) },
-      ];
-      if (points.some((p) => p.sum != null)) {
-        chartSeries.push({ name: 'Sum', data: points.map((p) => [new Date(p.timestamp).getTime(), p.sum ?? 0]) });
-      }
+      chartSeries = this.buildPercentileSeries(points);
+      this.buildCountSumChart(points, isDark);
       this.buildMinMaxChart(points, isDark);
+      this.heatmapOptions.set(buildHistogramHeatmap(points, isDark));
     } else if (this.isDelta()) {
       chartType = 'bar';
       chartSeries = [{ name: s.name, data: points.map((p) => [new Date(p.timestamp).getTime(), val(p)]) }];
@@ -327,7 +378,7 @@ export class MetricDetailComponent implements OnInit {
       chart: { type: chartType, height: 300, toolbar: { show: false }, background: 'transparent' },
       theme: { mode: isDark ? 'dark' : 'light' },
       series: chartSeries,
-      xaxis: { type: 'datetime' },
+      xaxis: { type: 'datetime', labels: { datetimeUTC: false } },
       stroke: { curve: 'smooth', width: 2 },
       fill: { opacity: chartType === 'area' ? 0.15 : 1 },
       dataLabels: { enabled: false },
@@ -350,7 +401,40 @@ export class MetricDetailComponent implements OnInit {
       chart: { type: 'line', height: 220, toolbar: { show: false }, background: 'transparent' },
       theme: { mode: isDark ? 'dark' : 'light' },
       series: minMax,
-      xaxis: { type: 'datetime' },
+      xaxis: { type: 'datetime', labels: { datetimeUTC: false } },
+      stroke: { curve: 'smooth', width: 2 },
+      dataLabels: { enabled: false },
+      legend: { position: 'top' },
+      yaxis: { labels: { formatter: (v: number) => v.toFixed(2) } },
+    });
+  }
+
+  /** One line per percentile (p50/p95/p99), computed from each point's buckets. */
+  private buildPercentileSeries(points: MetricDataPoint[]): { name: string; data: [number, number][] }[] {
+    return MetricDetailComponent.PERCENTILES.map(({ q, label }) => ({
+      name: label,
+      data: points
+        .map((p) => {
+          const b = toExplicitBuckets(p);
+          const v = b ? histogramQuantile(b.counts, b.bounds, q) : NaN;
+          return [new Date(p.timestamp).getTime(), v] as [number, number];
+        })
+        .filter(([, v]) => Number.isFinite(v)),
+    })).filter((s) => s.data.length > 0);
+  }
+
+  private buildCountSumChart(points: MetricDataPoint[], isDark: boolean): void {
+    const series: { name: string; data: [number, number][] }[] = [
+      { name: 'Count', data: points.map((p) => [new Date(p.timestamp).getTime(), p.count ?? 0]) },
+    ];
+    if (points.some((p) => p.sum != null)) {
+      series.push({ name: 'Sum', data: points.map((p) => [new Date(p.timestamp).getTime(), p.sum ?? 0]) });
+    }
+    this.countSumChartOptions.set({
+      chart: { type: 'line', height: 220, toolbar: { show: false }, background: 'transparent' },
+      theme: { mode: isDark ? 'dark' : 'light' },
+      series,
+      xaxis: { type: 'datetime', labels: { datetimeUTC: false } },
       stroke: { curve: 'smooth', width: 2 },
       dataLabels: { enabled: false },
       legend: { position: 'top' },
@@ -363,22 +447,58 @@ export class MetricDetailComponent implements OnInit {
     const first = multi.series[0]?.points ?? [];
     const counter = isCounterMetric(multi.type, first);
     const delta = isDeltaSum(multi.type, first);
+    const asRate = counter && !this.showRaw();
+    const agg = this.aggMode();
     this.minMaxChartOptions.set(null);
+    this.countSumChartOptions.set(null);
+    this.heatmapOptions.set(null);
+
+    let chartSeries: { name: string; data: [number, number][] }[];
+    if (agg !== 'none') {
+      // Collapse all grouped series into one aggregated line (rate-then-aggregate for counters).
+      const { start, end } = this.timeRange.range();
+      const data = aggregateSeries(multi.series, start, end, agg, asRate);
+      chartSeries = [{ name: `${agg} of ${multi.series.length} series`, data }];
+    } else {
+      chartSeries = this.capTopN(multi.series, asRate);
+    }
 
     this.chartOptions.set({
-      chart: { type: delta ? 'bar' : 'line', height: 300, toolbar: { show: false }, background: 'transparent' },
+      chart: {
+        type: delta && agg === 'none' ? 'bar' : 'line',
+        height: 300, toolbar: { show: false }, background: 'transparent',
+      },
       theme: { mode: isDark ? 'dark' : 'light' },
-      series: multi.series.map((s) => ({
-        name: s.seriesName,
-        data: counter && !this.showRaw()
-          ? computeRateSeries(s.points)
-          : s.points.map((p) => [new Date(p.timestamp).getTime(), val(p)] as [number, number]),
-      })),
-      xaxis: { type: 'datetime' },
+      series: chartSeries,
+      xaxis: { type: 'datetime', labels: { datetimeUTC: false } },
       stroke: { curve: 'smooth', width: 2 },
       dataLabels: { enabled: false },
       legend: { position: 'top' },
     });
+  }
+
+  /**
+   * Renders the MAX_SERIES largest series individually and folds the remainder into a single
+   * summed "others" line, keeping the legend readable when a metric has many label sets.
+   */
+  private capTopN(series: NamedMetricSeries[], asRate: boolean): { name: string; data: [number, number][] }[] {
+    const toData = (s: NamedMetricSeries): [number, number][] =>
+      asRate ? computeRateSeries(s.points)
+             : s.points.map((p) => [new Date(p.timestamp).getTime(), val(p)] as [number, number]);
+
+    if (series.length <= MAX_SERIES) {
+      return series.map((s) => ({ name: s.seriesName, data: toData(s) }));
+    }
+
+    const peak = (data: [number, number][]) => data.reduce((m, [, v]) => Math.max(m, Math.abs(v)), 0);
+    const ranked = [...series].sort((a, b) => peak(toData(b)) - peak(toData(a)));
+    const kept = ranked.slice(0, MAX_SERIES);
+    const rest = ranked.slice(MAX_SERIES);
+
+    const out = kept.map((s) => ({ name: s.seriesName, data: toData(s) }));
+    const { start, end } = this.timeRange.range();
+    out.push({ name: `others (${rest.length})`, data: aggregateSeries(rest, start, end, 'sum', asRate) });
+    return out;
   }
 
   protected fmt(v: number | null | undefined): string {
@@ -387,6 +507,13 @@ export class MetricDetailComponent implements OnInit {
 
   protected fmtStat(v: number | null | undefined): string {
     return v != null ? `${v.toFixed(3)}${this.statsUnitSuffix()}` : '—';
+  }
+
+  /** Aggregation/top-N only re-shapes the already-loaded grouped series — no refetch needed. */
+  protected onAggModeChange(mode: AggMode): void {
+    this.aggMode.set(mode);
+    const multi = this.multiSeries();
+    if (multi) this.buildMultiChart(multi);
   }
 
   protected updateLabelFilter(key: string, value: string): void {

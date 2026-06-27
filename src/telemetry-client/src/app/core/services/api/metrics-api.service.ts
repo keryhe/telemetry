@@ -7,7 +7,6 @@ import {
   MetricSeries,
   MetricSeriesParams,
   MultiSeriesMetricData,
-  ServiceMetricSummary,
 } from '../../models/metric.models';
 
 @Injectable({ providedIn: 'root' })
@@ -22,19 +21,8 @@ export class MetricsApiService {
     return this.http.get<MetricInfo[]>(this.base, { params });
   }
 
-  getSummaries(): Observable<ServiceMetricSummary[]> {
-    return this.http.get<ServiceMetricSummary[]>(`${this.base}/summaries`);
-  }
-
   getByName(name: string): Observable<MetricInfo[]> {
     return this.http.get<MetricInfo[]>(`${this.base}/by-name/${encodeURIComponent(name)}`);
-  }
-
-  getByService(serviceName: string, start?: Date, end?: Date): Observable<MetricInfo[]> {
-    let params = new HttpParams();
-    if (start) params = params.set('start', start.toISOString());
-    if (end) params = params.set('end', end.toISOString());
-    return this.http.get<MetricInfo[]>(`${this.base}/by-service/${encodeURIComponent(serviceName)}`, { params });
   }
 
   getLabels(name: string): Observable<Record<string, string[]>> {
@@ -52,6 +40,26 @@ export class MetricsApiService {
       }
     }
     return this.http.get<MetricSeries>(`${this.base}/series`, { params });
+  }
+
+  getGroupedSeries(p: MetricSeriesParams): Observable<MultiSeriesMetricData> {
+    let params = new HttpParams().set('metricName', p.metricName);
+    if (p.start) params = params.set('start', p.start.toISOString());
+    if (p.end) params = params.set('end', p.end.toISOString());
+    if (p.metricId != null) params = params.set('metricId', p.metricId);
+    if (p.labelFilters) {
+      for (const [k, v] of Object.entries(p.labelFilters)) {
+        params = params.append('labelFilter', `${k}:${v}`);
+      }
+    }
+    return this.http.get<MultiSeriesMetricData>(`${this.base}/series-grouped`, { params });
+  }
+
+  getServices(start?: Date, end?: Date): Observable<string[]> {
+    let params = new HttpParams();
+    if (start) params = params.set('start', start.toISOString());
+    if (end)   params = params.set('end',   end.toISOString());
+    return this.http.get<string[]>(`${this.base}/services`, { params });
   }
 
   getSeriesByService(metricName: string, start?: Date, end?: Date): Observable<MultiSeriesMetricData> {

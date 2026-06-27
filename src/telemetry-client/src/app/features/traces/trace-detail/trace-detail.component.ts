@@ -28,7 +28,7 @@ interface SpanNode extends SpanModel {
 
 const SERVICE_COLORS = [
   '#1976d2', '#388e3c', '#f57c00', '#7b1fa2',
-  '#c62828', '#00838f', '#558b2f', '#4527a0',
+  '#5d4037', '#00838f', '#558b2f', '#4527a0',
 ];
 
 @Component({
@@ -164,7 +164,7 @@ export class TraceDetailComponent implements OnInit {
   }
 
   protected selectSpan(node: SpanNode): void {
-    this.selectedSpan.set(node);
+    this.selectedSpan.update((current) => (current === node ? null : node));
   }
 
   protected copyTraceId(): void {

@@ -19,9 +19,22 @@ dotnet run --project src/Keryhe.Telemetry.Client
 # Run test data generator (sends synthetic OTLP data to the server)
 dotnet run --project src/Keryhe.Telemetry.TestDataGenerator
 
-# Apply database schema
+# Apply database schema (per provider)
+# PostgreSQL (plain):
 psql -d telemetry -f schema/PostgreSQL-Schema.sql
+# PostgreSQL + TimescaleDB:
+psql -d telemetry -f schema/Timescale-Schema.sql
+# SqlServer:
+sqlcmd -d telemetry -i schema/SqlServer-Schema.sql
+
+# Or use the runner (skips if the target schema_version is already applied):
+schema/apply-schema.sh <postgresql|timescale|sqlserver> [database]
 ```
+
+There is one schema script per supported provider, all producing the same logical
+table/column set: `schema/PostgreSQL-Schema.sql` (plain Postgres), `schema/Timescale-Schema.sql`
+(Postgres + TimescaleDB hypertables/compression/retention/continuous aggregate), and
+`schema/SqlServer-Schema.sql`.
 
 There are no test projects in the solution.
 

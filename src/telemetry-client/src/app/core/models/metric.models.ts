@@ -68,19 +68,11 @@ export interface MetricSeries {
   points: MetricDataPoint[];
 }
 
-export interface ServiceMetricSummary {
-  serviceName: string;
-  metricCount: number;
-  gaugeCount: number;
-  counterCount: number;
-  histogramCount: number;
-  summaryCount: number;
-  lastUpdated: string;
-}
-
 export interface NamedMetricSeries {
   seriesName: string;
   metricId: number;
+  serviceName: string;
+  labels: Record<string, string>;
   points: MetricDataPoint[];
 }
 

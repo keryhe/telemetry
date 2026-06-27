@@ -1,24 +1,22 @@
-using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
 using Keryhe.Telemetry.Core.Models;
-using Keryhe.Telemetry.Data.Access;
 using Keryhe.Telemetry.Core;
 
 namespace Keryhe.Telemetry.Data;
 
 public class TraceWriteRepository : ITraceWriteRepository
 {
-    private readonly TelemetryWriteDbContext _context;
     private readonly TelemetryIngestionChannel _channel;
+    private readonly ITelemetryWriteStore _store;
     private readonly ILogger<TraceWriteRepository> _logger;
 
     public TraceWriteRepository(
-        TelemetryWriteDbContext context,
         TelemetryIngestionChannel channel,
+        ITelemetryWriteStore store,
         ILogger<TraceWriteRepository> logger)
     {
-        _context = context;
         _channel = channel;
+        _store = store;
         _logger = logger;
     }
 
@@ -76,60 +74,18 @@ public class TraceWriteRepository : ITraceWriteRepository
         return Enumerable.Empty<long>();
     }
 
-    public async Task<bool> DeleteTraceAsync(string traceIdHex, CancellationToken cancellationToken = default)
-    {
-        if (string.IsNullOrEmpty(traceIdHex))
-            throw new ArgumentException("Trace ID cannot be null or empty", nameof(traceIdHex));
+    public Task<bool> DeleteTraceAsync(string traceIdHex, CancellationToken cancellationToken = default)
+        => _store.DeleteTraceAsync(traceIdHex, cancellationToken);
 
-        var spans = await _context.Spans
-            .Where(s => s.TraceId == traceIdHex)
-            .ToListAsync(cancellationToken);
-
-        if (spans.Count == 0) return false;
-
-        _context.Spans.RemoveRange(spans);
-        await _context.SaveChangesAsync(cancellationToken);
-        return true;
-    }
-
-    public async Task<int> DeleteTracesByTimeRangeAsync(
+    public Task<int> DeleteTracesByTimeRangeAsync(
         DateTime startTime,
         DateTime endTime,
         CancellationToken cancellationToken = default)
-    {
-        if (startTime >= endTime)
-            throw new ArgumentException("Start time must be before end time");
+        => _store.DeleteTracesByTimeRangeAsync(startTime, endTime, cancellationToken);
 
-        var startNano = OpenTelemetryDbContextExtensions.DateTimeToUnixNano(startTime);
-        var endNano = OpenTelemetryDbContextExtensions.DateTimeToUnixNano(endTime);
-
-        var spans = await _context.Spans
-            .Where(s => s.StartTimeUnixNano >= startNano && s.StartTimeUnixNano <= endNano)
-            .ToListAsync(cancellationToken);
-
-        var traceCount = spans.GroupBy(s => s.TraceId).Count();
-        _context.Spans.RemoveRange(spans);
-        await _context.SaveChangesAsync(cancellationToken);
-        return traceCount;
-    }
-
-    public async Task<bool> DeleteSpanAsync(
+    public Task<bool> DeleteSpanAsync(
         string traceIdHex,
         string spanIdHex,
         CancellationToken cancellationToken = default)
-    {
-        if (string.IsNullOrEmpty(traceIdHex))
-            throw new ArgumentException("Trace ID cannot be null or empty", nameof(traceIdHex));
-        if (string.IsNullOrEmpty(spanIdHex))
-            throw new ArgumentException("Span ID cannot be null or empty", nameof(spanIdHex));
-
-        var span = await _context.Spans
-            .FirstOrDefaultAsync(s => s.TraceId == traceIdHex && s.SpanId == spanIdHex, cancellationToken);
-
-        if (span == null) return false;
-
-        _context.Spans.Remove(span);
-        await _context.SaveChangesAsync(cancellationToken);
-        return true;
-    }
+        => _store.DeleteSpanAsync(traceIdHex, spanIdHex, cancellationToken);
 }
