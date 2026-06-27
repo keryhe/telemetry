@@ -39,7 +39,10 @@
   align-items: center;
   &:hover { background: var(--mat-sys-surface-container); }
   &.selected { background: var(--mat-sys-secondary-container); }
-  &.error .op-name { color: var(--mat-sys-error); }
+  &.error {
+    background: rgba(244, 67, 54, 0.12);
+    .op-name { color: var(--mat-sys-error); }
+  }
 }
 
 .span-name {

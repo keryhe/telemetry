@@ -20,8 +20,7 @@ import { FormsModule } from '@angular/forms';
 import { LogsApiService } from '../../core/services/api/logs-api.service';
 import { TimeRangeService } from '../../core/services/time-range.service';
 import { ThemeService } from '../../core/services/theme.service';
-import { LogRecord, getSeverityLabel, getSeverityColor, getServiceName, getTimestamp } from '../../core/models/log.models';
-import { SeverityBadgeComponent } from '../../shared/components/severity-badge/severity-badge.component';
+import { LogRecord, getSeverityLabel, getSeverityColor, getSeverityBg, getServiceName, getTimestamp } from '../../core/models/log.models';
 import { StatCardComponent } from '../../shared/components/stat-card/stat-card.component';
 import { EmptyStateComponent } from '../../shared/components/empty-state/empty-state.component';
 import { bucketLogs, buildLogSeriesOptions } from '../../shared/utils/chart.utils';
@@ -39,7 +38,7 @@ const BUCKET_COUNT = 30;
     MatFormFieldModule, MatInputModule, MatSelectModule, MatProgressBarModule,
     MatButtonModule, MatPaginatorModule, MatChipsModule, MatDialogModule,
     MatTooltipModule, NgApexchartsModule,
-    SeverityBadgeComponent, StatCardComponent, EmptyStateComponent,
+    StatCardComponent, EmptyStateComponent,
   ],
   templateUrl: './logs.component.html',
   styleUrl: './logs.component.scss',
@@ -122,6 +121,7 @@ export class LogsComponent {
   protected readonly displayedColumns = ['expand', 'time', 'severity', 'service', 'message'];
   protected readonly getSeverityLabel = getSeverityLabel;
   protected readonly getSeverityColor = getSeverityColor;
+  protected readonly getSeverityBg = getSeverityBg;
   protected readonly getServiceName = getServiceName;
   protected readonly getTimestamp = getTimestamp;
 

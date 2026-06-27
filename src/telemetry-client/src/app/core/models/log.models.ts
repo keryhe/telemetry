@@ -47,3 +47,13 @@ export function getSeverityLabel(num: number | null): string {
 export function getSeverityColor(num: number | null): string {
   return SEVERITY_COLORS[getSeverityLabel(num)] ?? '#9e9e9e';
 }
+
+const SEVERITY_BG: Record<string, string> = {
+  Warn:  'rgba(255, 152, 0,   0.12)',
+  Error: 'rgba(244, 67,  54,  0.12)',
+  Fatal: 'rgba(183, 28,  28,  0.12)',
+};
+
+export function getSeverityBg(num: number | null): string {
+  return SEVERITY_BG[getSeverityLabel(num)] ?? '';
+}

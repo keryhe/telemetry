@@ -19,17 +19,17 @@
   </div>
 
   <div class="filter-bar">
-    <mat-form-field appearance="outline" class="filter-field">
+    <mat-form-field appearance="outline" subscriptSizing="dynamic" class="filter-field">
       <mat-label>Severity</mat-label>
       <mat-select [value]="selectedSeverity()" (selectionChange)="selectedSeverity.set($event.value)">
-        <mat-option [value]="-1">All</mat-option>
+        <mat-option [value]="-1">Trace+</mat-option>
         @for (s of severityOptions; track s.num) {
           <mat-option [value]="s.num">{{ s.label }}+</mat-option>
         }
       </mat-select>
     </mat-form-field>
 
-    <mat-form-field appearance="outline" class="filter-field">
+    <mat-form-field appearance="outline" subscriptSizing="dynamic" class="filter-field">
       <mat-label>Service</mat-label>
       <mat-select [value]="selectedService()" (selectionChange)="selectedService.set($event.value)">
         <mat-option value="">All</mat-option>
@@ -39,7 +39,7 @@
       </mat-select>
     </mat-form-field>
 
-    <mat-form-field appearance="outline" class="search-field">
+    <mat-form-field appearance="outline" subscriptSizing="dynamic" class="search-field">
       <mat-label>Search</mat-label>
       <mat-icon matPrefix>search</mat-icon>
       <input matInput
@@ -88,15 +88,17 @@
             </td>
           </ng-container>
           <ng-container matColumnDef="time">
-            <th mat-header-cell *matHeaderCellDef>Time</th>
+            <th mat-header-cell *matHeaderCellDef>Timestamp</th>
             <td mat-cell *matCellDef="let l" class="time-cell">
               {{ getTimestamp(l) | date:'MM/dd/yyyy h:mm:ss a' }}
             </td>
           </ng-container>
           <ng-container matColumnDef="severity">
             <th mat-header-cell *matHeaderCellDef>Severity</th>
-            <td mat-cell *matCellDef="let l">
-              <app-severity-badge [severity]="l.severityNumber" />
+            <td mat-cell *matCellDef="let l" class="severity-cell">
+              <span [style.color]="getSeverityColor(l.severityNumber)">
+                {{ getSeverityLabel(l.severityNumber) }}
+              </span>
             </td>
           </ng-container>
           <ng-container matColumnDef="service">
@@ -161,7 +163,9 @@
 
           <tr mat-header-row *matHeaderRowDef="displayedColumns; sticky: true"></tr>
           <tr mat-row *matRowDef="let row; columns: displayedColumns" class="log-row"
-              [class.expanded]="isExpanded(row)" (click)="toggleRow(row)"></tr>
+              [class.expanded]="isExpanded(row)"
+              [style.background-color]="getSeverityBg(row.severityNumber)"
+              (click)="toggleRow(row)"></tr>
           <tr mat-row *matRowDef="let row; columns: ['detail']; when: isExpandedRow" class="detail-row"></tr>
         </table>
 

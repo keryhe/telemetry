@@ -69,3 +69,8 @@
   margin-bottom: 16px;
   mat-form-field { width: 220px; }
 }
+
+.mat-mdc-table {
+  --mat-table-row-item-container-height: 32px;
+  --mat-table-header-container-height: 40px;
+}
