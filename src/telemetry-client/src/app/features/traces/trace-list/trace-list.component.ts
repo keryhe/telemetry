@@ -30,6 +30,7 @@ import { EmptyStateComponent } from '../../../shared/components/empty-state/empt
 import { bucketTraces, formatDuration, parseDotnetTimespan } from '../../../shared/utils/chart.utils';
 import { parseSearchQuery, ParsedSearchQuery, SearchTerm } from '../../../shared/utils/search-query.parser';
 import { TraceSearchHelpDialogComponent } from '../trace-search-help-dialog/trace-search-help-dialog.component';
+import { loadPageState, savePageState } from '../../../shared/utils/page-state';
 
 interface GraphNode { id: string; label: string; }
 interface GraphLink {
@@ -52,12 +53,22 @@ interface GraphLink {
   templateUrl: './trace-list.component.html',
   styleUrl: './trace-list.component.scss',
 })
+const STATE_KEY = 'state.traces';
+
 export class TraceListComponent {
   private readonly api = inject(TracesApiService);
   private readonly timeRange = inject(TimeRangeService);
   private readonly theme = inject(ThemeService);
   private readonly router = inject(Router);
   private readonly dialog = inject(MatDialog);
+
+  private readonly saved = loadPageState(STATE_KEY, {
+    filterMode: 'all' as 'all' | 'errors' | 'slow',
+    selectedService: '',
+    searchText: '',
+    minDurationMs: 500,
+    pageSize: 100,
+  });
 
   protected loading = signal(true);
   protected traces = signal<TraceInfo[]>([]);
@@ -66,10 +77,10 @@ export class TraceListComponent {
   protected operationCounts = signal<Record<string, number>>({});
   protected latencies = signal<Record<string, number>>({});
 
-  protected filterMode = signal<'all' | 'errors' | 'slow'>('all');
-  protected selectedService = signal<string>('');
-  protected searchText = signal('');
-  protected minDurationMs = signal(500);
+  protected filterMode = signal<'all' | 'errors' | 'slow'>(this.saved.filterMode);
+  protected selectedService = signal<string>(this.saved.selectedService);
+  protected searchText = signal(this.saved.searchText);
+  protected minDurationMs = signal(this.saved.minDurationMs);
   protected analyticsService = signal('');
 
   protected parsedQuery = computed<ParsedSearchQuery>(() => parseSearchQuery(this.searchText()));
@@ -90,7 +101,7 @@ export class TraceListComponent {
   });
 
   protected pageIndex = signal(0);
-  protected pageSize = signal(100);
+  protected pageSize = signal(this.saved.pageSize);
   protected readonly pageSizeOptions = [100, 250, 500, 1000];
 
   protected pagedTraces = computed(() => {
@@ -166,6 +177,15 @@ export class TraceListComponent {
     effect(() => {
       this.filteredTraces();
       untracked(() => this.pageIndex.set(0));
+    });
+    effect(() => {
+      savePageState(STATE_KEY, {
+        filterMode: this.filterMode(),
+        selectedService: this.selectedService(),
+        searchText: this.searchText(),
+        minDurationMs: this.minDurationMs(),
+        pageSize: this.pageSize(),
+      });
     });
   }
 

@@ -26,6 +26,7 @@ import { LogRecord, getServiceName } from '../../core/models/log.models';
 import { StatCardComponent } from '../../shared/components/stat-card/stat-card.component';
 import { EmptyStateComponent } from '../../shared/components/empty-state/empty-state.component';
 import { bucketTraces, bucketLogs, buildLogSeriesOptions, formatDuration, parseDotnetTimespan } from '../../shared/utils/chart.utils';
+import { loadPageState, savePageState } from '../../shared/utils/page-state';
 
 @Component({
   selector: 'app-dashboard',
@@ -40,6 +41,8 @@ import { bucketTraces, bucketLogs, buildLogSeriesOptions, formatDuration, parseD
   templateUrl: './dashboard.component.html',
   styleUrl: './dashboard.component.scss',
 })
+const STATE_KEY = 'state.dashboard';
+
 export class DashboardComponent {
   private readonly tracesApi = inject(TracesApiService);
   private readonly logsApi = inject(LogsApiService);
@@ -49,14 +52,19 @@ export class DashboardComponent {
   private readonly router = inject(Router);
   private readonly destroyRef = inject(DestroyRef);
 
+  private readonly saved = loadPageState(STATE_KEY, {
+    selectedService: '',
+    autoRefresh: false,
+  });
+
   protected loading = signal(true);
-  protected autoRefresh = signal(false);
+  protected autoRefresh = signal(this.saved.autoRefresh);
   protected readonly preset = computed(() => this.timeRange.range().preset);
   private refreshSub?: Subscription;
   protected traces = signal<TraceInfo[]>([]);
   protected logs = signal<LogRecord[]>([]);
   protected availableServices = signal<string[]>([]);
-  protected selectedService = signal('');
+  protected selectedService = signal(this.saved.selectedService);
 
   protected totalTraces = computed(() => this.traces().length);
   protected errorTraces = computed(() => this.traces().filter((t) => t.hasErrors).length);
@@ -95,6 +103,13 @@ export class DashboardComponent {
         this.refreshSub = interval(recommendedRefreshIntervalMs(preset))
           .subscribe(() => this.timeRange.setPreset(preset));
       }
+    });
+
+    effect(() => {
+      savePageState(STATE_KEY, {
+        selectedService: this.selectedService(),
+        autoRefresh: this.autoRefresh(),
+      });
     });
 
     this.destroyRef.onDestroy(() => this.refreshSub?.unsubscribe());

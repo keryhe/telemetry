@@ -26,6 +26,7 @@ import { EmptyStateComponent } from '../../shared/components/empty-state/empty-s
 import { bucketLogs, buildLogSeriesOptions } from '../../shared/utils/chart.utils';
 import { parseSearchQuery, ParsedSearchQuery, SearchTerm } from '../../shared/utils/search-query.parser';
 import { LogSearchHelpDialogComponent } from './log-search-help-dialog/log-search-help-dialog.component';
+import { loadPageState, savePageState } from '../../shared/utils/page-state';
 
 const BUCKET_COUNT = 30;
 
@@ -43,6 +44,8 @@ const BUCKET_COUNT = 30;
   templateUrl: './logs.component.html',
   styleUrl: './logs.component.scss',
 })
+const STATE_KEY = 'state.logs';
+
 export class LogsComponent {
   private readonly api = inject(LogsApiService);
   private readonly timeRange = inject(TimeRangeService);
@@ -50,11 +53,18 @@ export class LogsComponent {
   private readonly route = inject(ActivatedRoute);
   private readonly dialog = inject(MatDialog);
 
+  private readonly saved = loadPageState(STATE_KEY, {
+    searchText: '',
+    selectedService: '',
+    selectedSeverity: -1,
+    pageSize: 100,
+  });
+
   protected loading = signal(true);
   protected logs = signal<LogRecord[]>([]);
-  protected searchText = signal('');
-  protected selectedService = signal('');
-  protected selectedSeverity = signal(-1);
+  protected searchText = signal(this.saved.searchText);
+  protected selectedService = signal(this.saved.selectedService);
+  protected selectedSeverity = signal(this.saved.selectedSeverity);
   protected traceIdFilter = signal('');
   protected expandedRow = signal<LogRecord | null>(null);
 
@@ -63,7 +73,7 @@ export class LogsComponent {
   private readonly table = viewChild(MatTable<LogRecord>);
 
   protected pageIndex = signal(0);
-  protected pageSize = signal(100);
+  protected pageSize = signal(this.saved.pageSize);
   protected readonly pageSizeOptions = [100, 250, 500, 1000];
 
   protected services = computed(() =>
@@ -145,6 +155,15 @@ export class LogsComponent {
     effect(() => {
       this.filtered();
       untracked(() => this.pageIndex.set(0));
+    });
+
+    effect(() => {
+      savePageState(STATE_KEY, {
+        searchText: this.searchText(),
+        selectedService: this.selectedService(),
+        selectedSeverity: this.selectedSeverity(),
+        pageSize: this.pageSize(),
+      });
     });
   }
 
