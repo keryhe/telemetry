@@ -170,7 +170,7 @@ public abstract class TraceReadRepositoryBase : DapperReadRepository, ITraceRead
             "s.start_time_unix_nano >= @start AND s.start_time_unix_nano <= @end",
             new { tenantId = TenantId, start = startNano, end = endNano }, cancellationToken);
 
-        return raw
+        var groups = raw
             .GroupBy(s => s.TraceId)
             .Select(g => new
             {
@@ -183,6 +183,14 @@ public abstract class TraceReadRepositoryBase : DapperReadRepository, ITraceRead
                 ServiceName = ExtractServiceName(g.OrderBy(s => s.StartTimeUnixNano).FirstOrDefault()?.ResourceAttributes)
             })
             .OrderByDescending(t => t.MinStartTimeNano)
+            .ToList();
+
+        var existingParentIds = await CheckSpanIdsExistAsync(
+            groups.Where(t => t.RootSpan.ParentSpanId != null).Select(t => t.RootSpan.ParentSpanId!).Distinct(),
+            cancellationToken);
+
+        return groups
+            .Where(t => t.RootSpan.ParentSpanId == null || !existingParentIds.Contains(t.RootSpan.ParentSpanId))
             .Take(limit)
             .Select(t => ToTraceInfo(t.TraceIdHex, t.SpanCount, t.MinStartTimeNano, t.MaxEndTimeNano, t.HasErrors, t.ServiceName, t.RootSpan))
             .ToList();
@@ -200,7 +208,7 @@ public abstract class TraceReadRepositoryBase : DapperReadRepository, ITraceRead
                                       s.ResourceAttributes.ContainsKey("service.name") &&
                                       s.ResourceAttributes["service.name"]?.ToString() == serviceName);
 
-        return filtered
+        var groups = filtered
             .GroupBy(s => s.TraceId)
             .Select(g => new
             {
@@ -212,6 +220,14 @@ public abstract class TraceReadRepositoryBase : DapperReadRepository, ITraceRead
                 RootSpan = g.FirstOrDefault(s => s.ParentSpanId == null) ?? g.OrderBy(s => s.StartTimeUnixNano).First()
             })
             .OrderByDescending(t => t.MinStartTimeNano)
+            .ToList();
+
+        var existingParentIds = await CheckSpanIdsExistAsync(
+            groups.Where(t => t.RootSpan.ParentSpanId != null).Select(t => t.RootSpan.ParentSpanId!).Distinct(),
+            cancellationToken);
+
+        return groups
+            .Where(t => t.RootSpan.ParentSpanId == null || !existingParentIds.Contains(t.RootSpan.ParentSpanId))
             .Take(limit)
             .Select(t => ToTraceInfo(t.TraceIdHex, t.SpanCount, t.MinStartTimeNano, t.MaxEndTimeNano, t.HasErrors, serviceName, t.RootSpan))
             .ToList();
@@ -223,7 +239,7 @@ public abstract class TraceReadRepositoryBase : DapperReadRepository, ITraceRead
             extra: "s.status_code = 'ERROR'");
         var raw = await FetchRawSpansAsync(where, p, cancellationToken);
 
-        return raw
+        var groups = raw
             .GroupBy(s => s.TraceId)
             .Select(g => new
             {
@@ -235,6 +251,14 @@ public abstract class TraceReadRepositoryBase : DapperReadRepository, ITraceRead
                 ServiceName = ExtractServiceName(g.OrderBy(s => s.StartTimeUnixNano).FirstOrDefault()?.ResourceAttributes)
             })
             .OrderByDescending(t => t.MinStartTimeNano)
+            .ToList();
+
+        var existingParentIds = await CheckSpanIdsExistAsync(
+            groups.Where(t => t.RootSpan.ParentSpanId != null).Select(t => t.RootSpan.ParentSpanId!).Distinct(),
+            cancellationToken);
+
+        return groups
+            .Where(t => t.RootSpan.ParentSpanId == null || !existingParentIds.Contains(t.RootSpan.ParentSpanId))
             .Take(limit)
             .Select(t => ToTraceInfo(t.TraceIdHex, t.SpanCount, t.MinStartTimeNano, t.MaxEndTimeNano, true, t.ServiceName, t.RootSpan))
             .ToList();
@@ -246,7 +270,7 @@ public abstract class TraceReadRepositoryBase : DapperReadRepository, ITraceRead
         var (where, p) = BuildTimeFilter(startTime, endTime, startBound: "s.start_time_unix_nano", endBound: "s.start_time_unix_nano");
         var raw = await FetchRawSpansAsync(where, p, cancellationToken);
 
-        return raw
+        var groups = raw
             .GroupBy(s => s.TraceId)
             .Select(g => new
             {
@@ -261,6 +285,14 @@ public abstract class TraceReadRepositoryBase : DapperReadRepository, ITraceRead
             })
             .Where(t => t.DurationNano >= minDurationNano)
             .OrderByDescending(t => t.DurationNano)
+            .ToList();
+
+        var existingParentIds = await CheckSpanIdsExistAsync(
+            groups.Where(t => t.RootSpan.ParentSpanId != null).Select(t => t.RootSpan.ParentSpanId!).Distinct(),
+            cancellationToken);
+
+        return groups
+            .Where(t => t.RootSpan.ParentSpanId == null || !existingParentIds.Contains(t.RootSpan.ParentSpanId))
             .Take(limit)
             .Select(t => ToTraceInfo(t.TraceIdHex, t.SpanCount, t.MinStartTimeNano, t.MaxEndTimeNano, t.HasErrors, t.ServiceName, t.RootSpan))
             .ToList();
@@ -377,6 +409,23 @@ public abstract class TraceReadRepositoryBase : DapperReadRepository, ITraceRead
     // =========================================================================
     // HELPERS
     // =========================================================================
+
+    private async Task<HashSet<string>> CheckSpanIdsExistAsync(IEnumerable<string> spanIds, CancellationToken ct)
+    {
+        var ids = spanIds.ToList();
+        if (ids.Count == 0) return [];
+        await using var conn = await OpenConnectionAsync(ct);
+        var existing = await conn.QueryAsync<string>(
+            """
+            SELECT s.span_id
+            FROM spans s
+            JOIN resources r ON s.resource_id = r.id
+            WHERE r.tenant_id = @tenantId
+              AND s.span_id IN @ids
+            """,
+            new { tenantId = TenantId, ids });
+        return [..existing];
+    }
 
     private async Task<List<RawSpan>> FetchRawSpansAsync(string whereClause, object parameters, CancellationToken ct)
     {

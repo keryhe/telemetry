@@ -83,7 +83,7 @@
           @if (filteredTraces().length === 0 && !loading()) {
             <app-empty-state icon="account_tree" message="No traces found" hint="Try adjusting the time range or filters" />
           } @else {
-            <table mat-table [dataSource]="filteredTraces()" class="full-width">
+            <table mat-table [dataSource]="pagedTraces()" class="full-width">
               <ng-container matColumnDef="traceId">
                 <th mat-header-cell *matHeaderCellDef>Trace ID</th>
                 <td mat-cell *matCellDef="let t" class="mono">{{ t.traceIdHex | slice:0:16 }}…</td>
@@ -122,6 +122,13 @@
                   [style.background-color]="row.hasErrors ? 'rgba(244,67,54,0.12)' : ''"
                   (click)="navigate(row.traceIdHex)"></tr>
             </table>
+
+            <mat-paginator
+              [length]="filteredTraces().length"
+              [pageSize]="pageSize()"
+              [pageIndex]="pageIndex()"
+              [pageSizeOptions]="pageSizeOptions"
+              (page)="onPage($event)" />
           }
         </mat-card-content>
       </mat-card>

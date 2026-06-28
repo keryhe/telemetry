@@ -10,6 +10,7 @@ import { MatIconModule } from '@angular/material/icon';
 import { MatInputModule } from '@angular/material/input';
 import { MatProgressBarModule } from '@angular/material/progress-bar';
 import { MatSelectModule } from '@angular/material/select';
+import { MatPaginatorModule, PageEvent } from '@angular/material/paginator';
 import { MatTableModule } from '@angular/material/table';
 import { MatTabsModule } from '@angular/material/tabs';
 import { MatChipsModule } from '@angular/material/chips';
@@ -42,7 +43,7 @@ interface GraphLink {
   standalone: true,
   imports: [
     DatePipe, DecimalPipe, SlicePipe, FormsModule,
-    MatCardModule, MatTableModule, MatTabsModule, MatIconModule,
+    MatCardModule, MatPaginatorModule, MatTableModule, MatTabsModule, MatIconModule,
     MatButtonToggleModule, MatButtonModule, MatSelectModule, MatFormFieldModule,
     MatInputModule, MatProgressBarModule, MatChipsModule, MatTooltipModule,
     MatDialogModule, NgxGraphModule, NgApexchartsModule,
@@ -87,6 +88,20 @@ export class TraceListComponent {
     }
     return traces;
   });
+
+  protected pageIndex = signal(0);
+  protected pageSize = signal(100);
+  protected readonly pageSizeOptions = [100, 250, 500, 1000];
+
+  protected pagedTraces = computed(() => {
+    const start = this.pageIndex() * this.pageSize();
+    return this.filteredTraces().slice(start, start + this.pageSize());
+  });
+
+  protected onPage(e: PageEvent): void {
+    this.pageIndex.set(e.pageIndex);
+    this.pageSize.set(e.pageSize);
+  }
 
   protected totalTraces = computed(() => this.traces().length);
   protected errorCount = computed(() => this.traces().filter((t) => t.hasErrors).length);
@@ -147,6 +162,10 @@ export class TraceListComponent {
     effect(() => {
       this.timeRange.range();
       untracked(() => this.load());
+    });
+    effect(() => {
+      this.filteredTraces();
+      untracked(() => this.pageIndex.set(0));
     });
   }
 
