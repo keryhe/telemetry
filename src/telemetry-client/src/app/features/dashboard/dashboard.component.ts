@@ -28,6 +28,8 @@ import { EmptyStateComponent } from '../../shared/components/empty-state/empty-s
 import { bucketTraces, bucketLogs, buildLogSeriesOptions, formatDuration, parseDotnetTimespan } from '../../shared/utils/chart.utils';
 import { loadPageState, savePageState } from '../../shared/utils/page-state';
 
+const STATE_KEY = 'state.dashboard';
+
 @Component({
   selector: 'app-dashboard',
   standalone: true,
@@ -41,8 +43,6 @@ import { loadPageState, savePageState } from '../../shared/utils/page-state';
   templateUrl: './dashboard.component.html',
   styleUrl: './dashboard.component.scss',
 })
-const STATE_KEY = 'state.dashboard';
-
 export class DashboardComponent {
   private readonly tracesApi = inject(TracesApiService);
   private readonly logsApi = inject(LogsApiService);

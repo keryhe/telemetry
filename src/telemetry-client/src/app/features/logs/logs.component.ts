@@ -29,6 +29,7 @@ import { LogSearchHelpDialogComponent } from './log-search-help-dialog/log-searc
 import { loadPageState, savePageState } from '../../shared/utils/page-state';
 
 const BUCKET_COUNT = 30;
+const STATE_KEY = 'state.logs';
 
 @Component({
   selector: 'app-logs',
@@ -44,8 +45,6 @@ const BUCKET_COUNT = 30;
   templateUrl: './logs.component.html',
   styleUrl: './logs.component.scss',
 })
-const STATE_KEY = 'state.logs';
-
 export class LogsComponent {
   private readonly api = inject(LogsApiService);
   private readonly timeRange = inject(TimeRangeService);

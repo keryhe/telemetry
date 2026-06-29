@@ -39,6 +39,8 @@ interface GraphLink {
   color: string; width: number;
 }
 
+const STATE_KEY = 'state.traces';
+
 @Component({
   selector: 'app-trace-list',
   standalone: true,
@@ -53,8 +55,6 @@ interface GraphLink {
   templateUrl: './trace-list.component.html',
   styleUrl: './trace-list.component.scss',
 })
-const STATE_KEY = 'state.traces';
-
 export class TraceListComponent {
   private readonly api = inject(TracesApiService);
   private readonly timeRange = inject(TimeRangeService);
