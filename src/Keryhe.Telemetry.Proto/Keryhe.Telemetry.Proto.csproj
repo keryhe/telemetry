@@ -1,0 +1,53 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Grpc.AspNetCore" Version="2.76.0" />
+  </ItemGroup>
+
+  <ItemGroup>
+        <Protobuf Include="opentelemetry\proto\collector\logs\v1\logs_service.proto" GrpcServices="Server">
+            <Generator>MSBuild:Compile</Generator>
+        </Protobuf>
+        <Protobuf Include="opentelemetry\proto\collector\metrics\v1\metrics_service.proto" GrpcServices="Server">
+            <Generator>MSBuild:Compile</Generator>
+        </Protobuf>
+        <Protobuf Include="opentelemetry\proto\collector\profiles\v1development\profiles_service.proto" GrpcServices="Server">
+            <Generator>MSBuild:Compile</Generator>
+        </Protobuf>
+        <Protobuf Include="opentelemetry\proto\collector\trace\v1\trace_service.proto" GrpcServices="Server">
+            <Generator>MSBuild:Compile</Generator>
+        </Protobuf>
+        <Protobuf Include="opentelemetry\proto\common\v1\common.proto" GrpcServices="Server">
+            <Generator>MSBuild:Compile</Generator>
+        </Protobuf>
+        <Protobuf Include="opentelemetry\proto\logs\v1\logs.proto" GrpcServices="Server">
+            <Generator>MSBuild:Compile</Generator>
+        </Protobuf>
+        <Protobuf Include="opentelemetry\proto\metrics\v1\metrics.proto" GrpcServices="Server">
+            <Generator>MSBuild:Compile</Generator>
+        </Protobuf>
+        <Protobuf Include="opentelemetry\proto\profiles\v1development\profiles.proto" GrpcServices="Server">
+            <Generator>MSBuild:Compile</Generator>
+        </Protobuf>
+        <Protobuf Include="opentelemetry\proto\resource\v1\resource.proto" GrpcServices="Server">
+            <Generator>MSBuild:Compile</Generator>
+        </Protobuf>
+        <Protobuf Include="opentelemetry\proto\trace\v1\trace.proto" GrpcServices="Server">
+            <Generator>MSBuild:Compile</Generator>
+        </Protobuf>
+    </ItemGroup>
+
+    <ItemGroup>
+      <!-- All three providers are referenced; the active one is chosen at runtime via Database:Provider. -->
+      <ProjectReference Include="../Keryhe.Telemetry.SqlServer/Keryhe.Telemetry.SqlServer.csproj" />
+      <ProjectReference Include="../Keryhe.Telemetry.PostgreSQL/Keryhe.Telemetry.PostgreSQL.csproj" />
+      <ProjectReference Include="../Keryhe.Telemetry.Timescale/Keryhe.Telemetry.Timescale.csproj" />
+    </ItemGroup>
+
+</Project>

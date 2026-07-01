@@ -1,4 +1,5 @@
 using Keryhe.Telemetry.Api.Services;
+using Microsoft.AspNetCore.Http;
 
 namespace Keryhe.Telemetry.Api.Middleware;
 

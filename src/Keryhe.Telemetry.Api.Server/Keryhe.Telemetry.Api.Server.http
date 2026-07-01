@@ -1,0 +1,6 @@
+@Keryhe.Telemetry.Api.Server_HostAddress = http://localhost:5188
+
+GET {{Keryhe.Telemetry.Api.Server_HostAddress}}/weatherforecast/
+Accept: application/json
+
+###

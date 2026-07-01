@@ -1,0 +1,27 @@
+﻿<Project Sdk="Microsoft.NET.Sdk.Web">
+
+    <PropertyGroup>
+        <TargetFramework>net10.0</TargetFramework>
+        <Nullable>enable</Nullable>
+        <ImplicitUsings>enable</ImplicitUsings>
+      <UserSecretsId>bcb0489c-ddac-4259-8b13-a05c1fbd4d7c</UserSecretsId>
+  </PropertyGroup>
+
+    <ItemGroup>
+        <PackageReference Include="Grpc.AspNetCore" Version="2.76.0" />
+        <PackageReference Include="Microsoft.Extensions.Hosting.WindowsServices" Version="10.0.5" />
+    </ItemGroup>
+
+    <ItemGroup>
+      <!-- All three providers are referenced; the active one is chosen at runtime via Database:Provider. -->
+      <ProjectReference Include="../Keryhe.Telemetry.Proto/Keryhe.Telemetry.Proto.csproj" />
+      <ProjectReference Include="../Keryhe.Telemetry.SqlServer/Keryhe.Telemetry.SqlServer.csproj" />
+      <ProjectReference Include="../Keryhe.Telemetry.PostgreSQL/Keryhe.Telemetry.PostgreSQL.csproj" />
+      <ProjectReference Include="../Keryhe.Telemetry.Timescale/Keryhe.Telemetry.Timescale.csproj" />
+    </ItemGroup>
+
+    <ItemGroup>
+      <Folder Include="Services\Helpers\" />
+    </ItemGroup>
+
+</Project>
