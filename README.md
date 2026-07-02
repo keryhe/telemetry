@@ -44,22 +44,29 @@ This solution receives OpenTelemetry Protocol (OTLP) data via gRPC, stores it in
 
 ```
 OpenTelemetry SDKs (any language)
-  → OTLP gRPC (port 5117) → Keryhe.Telemetry.Server
+  → OTLP gRPC (port 5117) → Keryhe.Telemetry.Proto.Server
+  → bounded ingestion channel → background worker → Dapper bulk writer
   → PostgreSQL / TimescaleDB / SQL Server
-  → Keryhe.Telemetry.Api (REST API)
-  → Angular SPA (src/telemetry-client, port 4200)
+  → Keryhe.Telemetry.Api.Server (REST API, port 5188 / 7105)
+  → Angular SPA (src/telemetry-client, port 4201)
 ```
+
+The database provider is chosen at runtime via the `Database:Provider` configuration key
+(`PostgreSQL`, `Timescale`, or `SqlServer`); each provider ships its own read/write
+implementation and is selected by the host at startup. Storage uses Dapper (no EF Core).
 
 | Project | Role |
 |---------|------|
-| `Keryhe.Telemetry.Core` | Domain interfaces and models |
-| `Keryhe.Telemetry.Data` | EF Core DbContexts (write path) |
-| `Keryhe.Telemetry.PostgreSQL` | Dapper read repositories for plain PostgreSQL |
-| `Keryhe.Telemetry.Timescale` | Dapper read repositories for PostgreSQL + TimescaleDB |
-| `Keryhe.Telemetry.SqlServer` | Dapper read repositories for SQL Server |
-| `Keryhe.Telemetry.Server` | gRPC server receiving OTLP telemetry |
-| `Keryhe.Telemetry.Api` | REST API consumed by the Angular client |
-| `Keryhe.Telemetry.Alerting` | Alert rule evaluators and webhook notification delivery |
+| `Keryhe.Telemetry.Core` | Domain interfaces and models shared across projects |
+| `Keryhe.Telemetry.Data` | Provider-agnostic write repositories, ingestion channel + background worker, Dapper read-repository bases |
+| `Keryhe.Telemetry.PostgreSQL` | Plain-PostgreSQL provider (Npgsql + Dapper): read/write repositories and DI registration |
+| `Keryhe.Telemetry.Timescale` | PostgreSQL + TimescaleDB provider (hypertable-aware bulk writes) |
+| `Keryhe.Telemetry.SqlServer` | SQL Server provider (Microsoft.Data.SqlClient + Dapper) |
+| `Keryhe.Telemetry.Proto` | gRPC services + OpenTelemetry proto definitions (class library) |
+| `Keryhe.Telemetry.Proto.Server` | Thin ASP.NET Core host: maps the gRPC services and runs the ingestion worker |
+| `Keryhe.Telemetry.Api` | REST API controllers, tenant middleware, and read-service wiring (class library) |
+| `Keryhe.Telemetry.Api.Server` | Thin ASP.NET Core host: composes the API, OpenAPI, CORS, and the alerting worker |
+| `Keryhe.Telemetry.Alerting` | Alert rule evaluators, webhook delivery, and the periodic evaluation background worker |
 | `Keryhe.Telemetry.TestDataGenerator` | Worker service that emits synthetic telemetry |
 | `src/telemetry-client` | Angular 20 SPA (Dashboard, Traces, Metrics, Logs, Alerts) |
 
@@ -98,16 +105,19 @@ schema/apply-schema.sh <postgresql|timescale|sqlserver> [database]
 
 **2. Configure connection strings:**
 
-Update `src/Keryhe.Telemetry.Server/appsettings.json`:
+Update `src/Keryhe.Telemetry.Proto.Server/appsettings.json` (gRPC ingestion / write path):
 ```json
 {
+  "Database": {
+    "Provider": "Timescale"
+  },
   "ConnectionStrings": {
     "Write": "Host=localhost;Port=5432;Database=telemetry;Username=postgres;Password=<password>"
   }
 }
 ```
 
-Update `src/Keryhe.Telemetry.Api/appsettings.json`:
+Update `src/Keryhe.Telemetry.Api.Server/appsettings.json` (REST API / read path):
 ```json
 {
   "Database": {
@@ -119,7 +129,7 @@ Update `src/Keryhe.Telemetry.Api/appsettings.json`:
 }
 ```
 
-Set `Database:Provider` to `PostgreSQL`, `Timescale`, or `SqlServer` to match your chosen backend. For SQL Server use a standard ADO.NET connection string for `ConnectionStrings:Read`.
+Set `Database:Provider` to `PostgreSQL`, `Timescale`, or `SqlServer` to match your chosen backend (both hosts must agree). For SQL Server use a standard ADO.NET connection string.
 
 **3. Build:**
 
@@ -131,16 +141,16 @@ dotnet build Telemetry.sln
 
 ```bash
 # Terminal 1 — gRPC ingestion server
-dotnet run --project src/Keryhe.Telemetry.Server
+dotnet run --project src/Keryhe.Telemetry.Proto.Server
 
 # Terminal 2 — REST API
-dotnet run --project src/Keryhe.Telemetry.Api
+dotnet run --project src/Keryhe.Telemetry.Api.Server
 
 # Terminal 3 — Angular dev server
 cd src/telemetry-client && npm install && npm start
 ```
 
-Open `http://localhost:4200` in your browser.
+Open `http://localhost:4201` in your browser.
 
 **5. (Optional) Generate test data:**
 
@@ -198,6 +208,24 @@ Alert rules are managed through the **Alerts** page in the UI. Each rule specifi
 - **Condition**: JSON-encoded parameters specific to the rule type
 - **Webhook URL**: receives an HTTP POST payload when the rule fires
 - **Cooldown**: minimum minutes between repeat firings of the same rule
+
+Rules are evaluated by a background worker (`AlertEvaluationWorker`) hosted in
+`Keryhe.Telemetry.Api.Server`. It runs every `AlertEvaluation:IntervalSeconds` (default `60`),
+iterating all tenants with enabled rules and dispatching each to its evaluator. An atomic
+fire-claim guards the cooldown so a rule fires once even across multiple instances. Configure
+it in `src/Keryhe.Telemetry.Api.Server/appsettings.json`:
+
+```json
+{
+  "AlertEvaluation": {
+    "IntervalSeconds": 60,
+    "Enabled": true
+  }
+}
+```
+
+Set `Enabled` to `false` to keep the alert API and rule storage available while disabling
+automatic evaluation.
 
 ## License
 

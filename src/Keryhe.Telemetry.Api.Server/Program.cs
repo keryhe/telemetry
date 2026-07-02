@@ -20,6 +20,11 @@ builder.Services.AddOpenApi();
 // active provider's read services (Database:Provider + ConnectionStrings:Read).
 builder.Services.AddKeryheTelemetryApi(builder.Configuration);
 
+// ── ALERTING ──────────────────────────────────────────────────────────────────
+// Registers alert evaluation and the periodic background worker that drives it.
+// Depends on the read repositories and tenant context registered above.
+builder.Services.AddAlerting(builder.Configuration);
+
 var app = builder.Build();
 
 // ── MIDDLEWARE ────────────────────────────────────────────────────────────────
