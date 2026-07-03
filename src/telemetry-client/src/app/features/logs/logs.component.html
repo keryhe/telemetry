@@ -7,6 +7,7 @@
     <div class="trace-filter-banner">
       <mat-icon>filter_list</mat-icon>
       Filtered to trace: <span class="mono">{{ traceIdFilter() }}</span>
+      <span class="trace-filter-hint">— showing all logs for this trace; the time range doesn't apply</span>
       <button mat-icon-button (click)="clearTrace()"><mat-icon>close</mat-icon></button>
     </div>
   }

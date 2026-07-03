@@ -223,7 +223,7 @@ export class TraceListComponent {
       chart: {
         type: 'area', height: 150, background: 'transparent',
         toolbar: { show: false },
-        zoom: { enabled: true, type: 'x' },
+        zoom: { enabled: true, type: 'x', allowMouseWheelZoom: false },
         events: {
           zoomed: (_ctx, opts) => {
             const xaxis = opts?.xaxis;

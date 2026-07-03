@@ -222,7 +222,7 @@ export class LogsComponent {
       ...base,
       chart: {
         ...base.chart!,
-        zoom: { enabled: true, type: 'x' },
+        zoom: { enabled: true, type: 'x', allowMouseWheelZoom: false },
         events: {
           zoomed: (_ctx, opts) => {
             const xaxis = opts?.xaxis;

@@ -55,7 +55,7 @@ public abstract class LogReadRepositoryBase : DapperReadRepository, ILogReadRepo
 
         await using var conn = await OpenConnectionAsync(cancellationToken);
         var rows = await conn.QueryAsync<LogRow>(new CommandDefinition(
-            BaseSelect + " AND lr.trace_id = @traceId ORDER BY lr.time_unix_nano",
+            BaseSelect + " AND lr.trace_id = @traceId ORDER BY lr.time_unix_nano DESC",
             new { tenantId = TenantId, traceId = traceIdHex }, cancellationToken: cancellationToken));
         return rows.Select(Map).ToList();
     }

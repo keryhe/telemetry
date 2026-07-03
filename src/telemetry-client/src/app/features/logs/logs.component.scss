@@ -9,6 +9,8 @@
   margin-bottom: 16px;
   font-size: 13px;
   .mono { font-family: monospace; }
+  .trace-filter-hint { opacity: 0.75; font-style: italic; }
+  button { margin-left: auto; }
 }
 
 .chart-card {
