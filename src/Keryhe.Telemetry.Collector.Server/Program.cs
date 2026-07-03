@@ -1,8 +1,8 @@
 using Keryhe.Telemetry.Data;
-using Keryhe.Telemetry.Proto.Services;
+using Keryhe.Telemetry.Collector.Services;
 using Keryhe.Telemetry.Core;
 
-namespace Keryhe.Telemetry.Proto.Server;
+namespace Keryhe.Telemetry.Collector.Server;
 
 public class Program
 {

@@ -8,9 +8,9 @@ using Keryhe.Telemetry.Core;
 using Keryhe.Telemetry.Core.Models;
 using System.Security.Cryptography;
 using System.Text;
-using Keryhe.Telemetry.Proto.Services.Helpers;
+using Keryhe.Telemetry.Collector.Services.Helpers;
 
-namespace Keryhe.Telemetry.Proto.Services;
+namespace Keryhe.Telemetry.Collector.Services;
 
 /// <summary>
 /// gRPC service implementation for OpenTelemetry logs collection.

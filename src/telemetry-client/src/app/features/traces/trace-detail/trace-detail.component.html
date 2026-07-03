@@ -10,7 +10,12 @@
     <button mat-icon-button [matTooltip]="copied() ? 'Copied!' : 'Copy trace ID'" (click)="copyTraceId()">
       <mat-icon>{{ copied() ? 'check' : 'content_copy' }}</mat-icon>
     </button>
-    <a mat-stroked-button [routerLink]="['/logs']" [queryParams]="{ traceId: id }">
+    @if (spans().length > 0) {
+      <span class="trace-time">
+        {{ nanoToDate(rootStartNano()) | date:'MM/dd/yyyy, h:mm:ss a' }}
+      </span>
+    }
+    <a mat-stroked-button class="view-logs" [routerLink]="['/logs']" [queryParams]="{ traceId: id }">
       <mat-icon>receipt_long</mat-icon> View Logs
     </a>
   </div>
@@ -34,6 +39,11 @@
     <mat-card class="timeline-card">
       <mat-card-header>
         <mat-card-title>Spans</mat-card-title>
+        <mat-slide-toggle class="crit-toggle"
+                          [checked]="showCriticalPath()"
+                          (change)="showCriticalPath.set($event.checked)">
+          Critical path
+        </mat-slide-toggle>
         <div class="service-legend">
           @for (svc of serviceNames(); track svc) {
             <span class="legend-item">
@@ -42,11 +52,21 @@
           }
         </div>
       </mat-card-header>
-      <mat-card-content class="timeline-content">
+      <mat-card-content class="timeline-content" [class.crit-active]="showCriticalPath()">
+        <!-- Time axis (aligned with the Gantt tracks below) -->
+        <div class="timeline-header">
+          <div class="span-name-spacer"></div>
+          <div class="axis-track" [style.--grid-step]="gridStepPct() + '%'">
+            @for (t of ticks(); track t.pct) {
+              <span class="axis-tick" [class.last]="t.pct > 92" [style.left.%]="t.pct">{{ t.label }}</span>
+            }
+          </div>
+        </div>
         @for (node of flatTree(); track node.spanIdHex) {
           <div class="span-row"
                [class.selected]="selectedSpan()?.spanIdHex === node.spanIdHex"
                [class.error]="isError(node)"
+               [class.on-crit]="node.onCriticalPath"
                (click)="selectSpan(node)">
             <!-- Name column -->
             <div class="span-name" [style.padding-left.px]="node.depth * 16 + 8">
@@ -61,13 +81,40 @@
               <span class="op-name">{{ node.name }}</span>
             </div>
             <!-- Gantt bar -->
-            <div class="gantt-track">
+            <div class="gantt-track" [style.--grid-step]="gridStepPct() + '%'">
+              <!-- Faded base bar = full span extent (wait/child time) -->
               <div class="gantt-bar"
+                   [class.err]="isError(node)"
+                   [matTooltip]="barTooltip(node)"
+                   matTooltipClass="gantt-tooltip"
+                   matTooltipPosition="above"
                    [style.left.%]="node.leftPct"
                    [style.width.%]="node.widthPct"
                    [style.background]="colorFor(node.serviceName)">
               </div>
-              <span class="duration-label">{{ formatDuration(node.durationMs) }}</span>
+              <!-- Saturated self-time segments -->
+              @for (s of node.selfSegments; track $index) {
+                <div class="self-seg"
+                     [style.left.%]="s.leftPct"
+                     [style.width.%]="s.widthPct"
+                     [style.background]="colorFor(node.serviceName)">
+                </div>
+              }
+              <!-- Span-event / error markers -->
+              @for (m of node.eventMarkers; track $index) {
+                <div class="event-marker"
+                     [class.err]="m.isError"
+                     [style.left.%]="m.pct"
+                     [matTooltip]="m.label"
+                     matTooltipClass="gantt-tooltip"
+                     matTooltipPosition="above">
+                </div>
+              }
+              <span class="duration-label"
+                    [class.flip]="node.leftPct + node.widthPct > 82"
+                    [style.left.%]="node.leftPct + node.widthPct">
+                {{ formatDuration(node.durationMs) }}
+              </span>
             </div>
           </div>
 

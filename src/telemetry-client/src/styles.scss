@@ -79,3 +79,10 @@ body.theme-system .apexcharts-canvas {
     background: transparent !important;
   }
 }
+
+// Multi-line Gantt bar tooltip (trace detail waterfall)
+.gantt-tooltip .mdc-tooltip__surface,
+.gantt-tooltip {
+  white-space: pre-line;
+  text-align: left;
+}

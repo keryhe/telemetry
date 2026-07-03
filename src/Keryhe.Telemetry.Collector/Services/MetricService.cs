@@ -7,9 +7,9 @@ using OpenTelemetry.Proto.Metrics.V1;
 using Keryhe.Telemetry.Data;
 using Keryhe.Telemetry.Core;
 using Keryhe.Telemetry.Core.Models;
-using Keryhe.Telemetry.Proto.Services.Helpers;
+using Keryhe.Telemetry.Collector.Services.Helpers;
 
-namespace Keryhe.Telemetry.Proto.Services;
+namespace Keryhe.Telemetry.Collector.Services;
 
 /// <summary>
 /// gRPC service implementation for OpenTelemetry metrics collection.

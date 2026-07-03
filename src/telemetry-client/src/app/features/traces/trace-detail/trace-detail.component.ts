@@ -7,6 +7,7 @@ import { MatCardModule } from '@angular/material/card';
 import { MatChipsModule } from '@angular/material/chips';
 import { MatIconModule } from '@angular/material/icon';
 import { MatProgressBarModule } from '@angular/material/progress-bar';
+import { MatSlideToggleModule } from '@angular/material/slide-toggle';
 import { MatTooltipModule } from '@angular/material/tooltip';
 
 import { TracesApiService } from '../../../core/services/api/traces-api.service';
@@ -24,11 +25,17 @@ interface SpanNode extends SpanModel {
   widthPct: number;
   collapsed: boolean;
   serviceName: string;
+  /** Saturated self-time sub-bars (span interval minus children), trace-relative %. */
+  selfSegments: { leftPct: number; widthPct: number }[];
+  /** True when this span is on the trace's critical path. */
+  onCriticalPath: boolean;
+  /** Span-event ticks positioned on the trace-relative scale. */
+  eventMarkers: { pct: number; isError: boolean; label: string }[];
 }
 
 const SERVICE_COLORS = [
-  '#1976d2', '#388e3c', '#f57c00', '#7b1fa2',
-  '#5d4037', '#00838f', '#558b2f', '#4527a0',
+  '#1976d2', '#f57c00', '#388e3c', '#7b1fa2',
+  '#00838f', '#5d4037', '#558b2f', '#4527a0',
 ];
 
 @Component({
@@ -37,7 +44,8 @@ const SERVICE_COLORS = [
   imports: [
     DatePipe, KeyValuePipe, SlicePipe, RouterLink,
     MatCardModule, MatButtonModule, MatIconModule, MatTooltipModule,
-    MatChipsModule, MatProgressBarModule, EmptyStateComponent, StatCardComponent,
+    MatChipsModule, MatProgressBarModule, MatSlideToggleModule,
+    EmptyStateComponent, StatCardComponent,
   ],
   templateUrl: './trace-detail.component.html',
   styleUrl: './trace-detail.component.scss',
@@ -54,6 +62,7 @@ export class TraceDetailComponent implements OnInit {
   protected spans = signal<SpanModel[]>([]);
   protected selectedSpan = signal<SpanNode | null>(null);
   protected tree = signal<SpanNode[]>([]);
+  protected showCriticalPath = signal(false);
 
   protected traceStart = computed(() => {
     const s = this.spans();
@@ -77,6 +86,51 @@ export class TraceDetailComponent implements OnInit {
 
   protected flatTree = computed<SpanNode[]>(() => this.flattenVisible(this.tree()));
   protected hasErrors = computed(() => this.spans().some((s) => s.statusCode === SpanStatusCode.Error));
+
+  /** Start time (unix-nanos) of the earliest root span. */
+  protected rootStartNano = computed(() => {
+    const roots = this.tree();
+    return roots.length ? Math.min(...roots.map((r) => r.startTimeUnixNano)) : this.traceStart();
+  });
+
+  /** Evenly spaced "nice" time-axis ticks across the trace duration. */
+  protected ticks = computed<{ label: string; pct: number }[]>(() => {
+    const total = this.totalDurationMs();
+    if (!total || !isFinite(total)) return [];
+    const step = this.niceStep(total / 5);
+    const out: { label: string; pct: number }[] = [];
+    for (let v = 0; v <= total + step * 1e-6; v += step) {
+      out.push({ label: formatDuration(v), pct: (v / total) * 100 });
+    }
+    return out;
+  });
+
+  /** Spacing between vertical gridlines, as a percentage of the track width. */
+  protected gridStepPct = computed(() => {
+    const total = this.totalDurationMs();
+    if (!total || !isFinite(total)) return 100;
+    return (this.niceStep(total / 5) / total) * 100;
+  });
+
+  /** Round a raw interval up to a 1/2/5 * 10^n "nice" value. */
+  private niceStep(raw: number): number {
+    if (raw <= 0) return 1;
+    const mag = Math.pow(10, Math.floor(Math.log10(raw)));
+    const norm = raw / mag;
+    const niceNorm = norm < 1.5 ? 1 : norm < 3 ? 2 : norm < 7 ? 5 : 10;
+    return niceNorm * mag;
+  }
+
+  /** Multi-line summary shown when hovering a Gantt bar. */
+  protected barTooltip(node: SpanNode): string {
+    return [
+      node.name,
+      `Service: ${node.serviceName}`,
+      `Start: +${formatDuration(node.startOffsetMs)}`,
+      `Duration: ${formatDuration(node.durationMs)}`,
+      `Status: ${this.statusLabel(node.statusCode)}`,
+    ].join('\n');
+  }
 
   readonly formatDuration = formatDuration;
   readonly SpanStatusCode = SpanStatusCode;
@@ -128,6 +182,9 @@ export class TraceDetailComponent implements OnInit {
         widthPct: Math.max(0.2, ((s.endTimeUnixNano - s.startTimeUnixNano) / durationNs) * 100),
         collapsed: false,
         serviceName: s.resource?.attributes?.['service.name'] as string ?? 'unknown',
+        selfSegments: [],
+        onCriticalPath: false,
+        eventMarkers: [],
       });
     }
 
@@ -146,7 +203,87 @@ export class TraceDetailComponent implements OnInit {
     };
     roots.forEach((r) => setDepth(r, 0));
 
+    this.computeOverlays(roots, traceStartNs, durationNs);
+    this.markCriticalPath(roots);
+
     return roots;
+  }
+
+  /**
+   * Per-node post-pass computing self-time segments and event markers on the
+   * shared trace-relative percentage scale (matching leftPct/widthPct).
+   */
+  private computeOverlays(roots: SpanNode[], traceStartNs: number, durationNs: number): void {
+    const seg = (startNs: number, endNs: number) => {
+      const leftPct = this.clampPct(((startNs - traceStartNs) / durationNs) * 100);
+      const rightPct = this.clampPct(((endNs - traceStartNs) / durationNs) * 100);
+      return { leftPct, widthPct: Math.max(0, rightPct - leftPct) };
+    };
+
+    const walk = (n: SpanNode) => {
+      const start = n.startTimeUnixNano;
+      const end = Math.max(n.endTimeUnixNano, start);
+
+      // Merge child intervals (clipped to the parent) into a coverage union.
+      const merged: [number, number][] = [];
+      const childIntervals = n.children
+        .map((c) => [Math.max(c.startTimeUnixNano, start), Math.min(c.endTimeUnixNano, end)] as [number, number])
+        .filter(([s, e]) => e > s)
+        .sort((a, b) => a[0] - b[0]);
+      for (const iv of childIntervals) {
+        const last = merged[merged.length - 1];
+        if (last && iv[0] <= last[1]) last[1] = Math.max(last[1], iv[1]);
+        else merged.push([iv[0], iv[1]]);
+      }
+
+      // Self-time = the gaps in the span interval not covered by any child.
+      const segs: { leftPct: number; widthPct: number }[] = [];
+      let cursor = start;
+      for (const [s, e] of merged) {
+        if (s > cursor) segs.push(seg(cursor, s));
+        cursor = Math.max(cursor, e);
+      }
+      if (cursor < end) segs.push(seg(cursor, end));
+      // A leaf's self-time is its whole bar; a parent fully covered by children
+      // legitimately has no self-time (stays faded).
+      if (segs.length === 0 && n.children.length === 0) segs.push(seg(start, end));
+      n.selfSegments = segs;
+
+      n.eventMarkers = (n.events ?? []).map((ev) => ({
+        pct: this.clampPct(((ev.timeUnixNano - traceStartNs) / durationNs) * 100),
+        isError: /exception/i.test(ev.name) || n.statusCode === SpanStatusCode.Error,
+        label: `${ev.name} · +${formatDuration((ev.timeUnixNano - traceStartNs) / 1_000_000)}`,
+      }));
+
+      n.children.forEach(walk);
+    };
+    roots.forEach(walk);
+  }
+
+  /**
+   * Marks the critical path from the last-ending root, greedily following the
+   * latest-ending child that finished before the running cursor.
+   */
+  private markCriticalPath(roots: SpanNode[]): void {
+    if (!roots.length) return;
+    const lastRoot = roots.reduce((a, b) => (b.endTimeUnixNano > a.endTimeUnixNano ? b : a));
+
+    const mark = (node: SpanNode) => {
+      node.onCriticalPath = true;
+      let cursor = node.endTimeUnixNano;
+      const kids = [...node.children].sort((a, b) => b.endTimeUnixNano - a.endTimeUnixNano);
+      for (const child of kids) {
+        if (child.startTimeUnixNano < cursor && child.endTimeUnixNano <= cursor) {
+          mark(child);
+          cursor = child.startTimeUnixNano;
+        }
+      }
+    };
+    mark(lastRoot);
+  }
+
+  private clampPct(v: number): number {
+    return Math.min(100, Math.max(0, v));
   }
 
   private flattenVisible(nodes: SpanNode[]): SpanNode[] {

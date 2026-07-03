@@ -4,7 +4,7 @@ using System.Security.Cryptography;
 using System.Text;
 using Grpc.Core;
 
-namespace Keryhe.Telemetry.Proto.Services.Helpers;
+namespace Keryhe.Telemetry.Collector.Services.Helpers;
 
 public class ApiKeyHelper
 {

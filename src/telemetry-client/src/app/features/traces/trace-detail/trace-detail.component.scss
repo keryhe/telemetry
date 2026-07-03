@@ -6,6 +6,17 @@
   .mono { font-family: monospace; font-size: 13px; color: var(--mat-sys-on-surface-variant); }
 }
 
+.trace-time {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 13px;
+  color: var(--mat-sys-on-surface-variant);
+  mat-icon { font-size: 16px; width: 16px; height: 16px; }
+}
+
+.view-logs { margin-left: auto; }
+
 .timeline-card { overflow: hidden; }
 
 .timeline-content { padding: 0 !important; }
@@ -22,6 +33,12 @@
   display: flex;
   align-items: center;
   gap: 4px;
+}
+
+.crit-toggle {
+  margin-left: 16px;
+  font-size: 12px;
+  flex-shrink: 0;
 }
 
 .dot, .service-dot {
@@ -45,10 +62,26 @@
   }
 }
 
+/* Critical-path mode: emphasise the chain, dim everything else */
+.crit-active {
+  .span-row:not(.on-crit) {
+    .gantt-bar, .self-seg, .event-marker { filter: grayscale(0.7); opacity: 0.2; }
+    .span-name { opacity: 0.45; }
+  }
+  .span-row.on-crit {
+    box-shadow: inset 3px 0 0 0 var(--mat-sys-primary);
+    .self-seg { outline: 1px solid var(--mat-sys-primary); }
+  }
+}
+
 .span-name {
   display: flex;
   align-items: center;
   gap: 4px;
+  /* border-box so the per-depth padding-left indent is absorbed inside the
+     fixed width — this keeps every gantt-track starting at the same x, so the
+     time-axis gridlines stay vertically aligned across rows. */
+  box-sizing: border-box;
   width: 280px;
   min-width: 280px;
   overflow: hidden;
@@ -60,29 +93,114 @@
 .leaf-indent { width: 18px; flex-shrink: 0; }
 .op-name { font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
+/* Sticky time axis aligned with the Gantt tracks below */
+.timeline-header {
+  display: flex;
+  height: 26px;
+  position: sticky;
+  top: 0;
+  z-index: 3;
+  background: var(--mat-sys-surface-container-low);
+  border-bottom: 1px solid var(--mat-sys-outline-variant);
+}
+
+.span-name-spacer {
+  box-sizing: border-box;
+  width: 280px;
+  min-width: 280px;
+  border-right: 1px solid var(--mat-sys-outline-variant);
+}
+
+.axis-track {
+  flex: 1;
+  position: relative;
+  background-image: repeating-linear-gradient(
+    to right,
+    var(--mat-sys-outline-variant) 0,
+    var(--mat-sys-outline-variant) 1px,
+    transparent 1px,
+    transparent var(--grid-step, 25%)
+  );
+}
+
+.axis-tick {
+  position: absolute;
+  top: 50%;
+  transform: translate(4px, -50%);
+  font-size: 10px;
+  color: var(--mat-sys-on-surface-variant);
+  white-space: nowrap;
+  pointer-events: none;
+  /* Right-most tick would overflow the track; anchor it inside the edge */
+  &.last { transform: translate(calc(-100% - 4px), -50%); }
+}
+
 .gantt-track {
   flex: 1;
   position: relative;
   height: 100%;
   overflow: hidden;
+  background-image: repeating-linear-gradient(
+    to right,
+    color-mix(in srgb, var(--mat-sys-outline-variant) 55%, transparent) 0,
+    color-mix(in srgb, var(--mat-sys-outline-variant) 55%, transparent) 1px,
+    transparent 1px,
+    transparent var(--grid-step, 25%)
+  );
 }
 
+/* Faded base bar spans the full span extent (time waiting on / spent in children) */
 .gantt-bar {
   position: absolute;
   top: 8px;
   height: 18px;
   border-radius: 3px;
   min-width: 2px;
-  opacity: 0.8;
+  opacity: 0.28;
+  cursor: pointer;
+  z-index: 1;
+  &:hover { opacity: 0.45; }
+  /* In-track error cue: red stripe on the leading edge */
+  &.err { box-shadow: inset 3px 0 0 0 var(--mat-sys-error); }
+}
+
+/* Saturated segments where the span itself was doing work (self-time) */
+.self-seg {
+  position: absolute;
+  top: 8px;
+  height: 18px;
+  border-radius: 3px;
+  min-width: 2px;
+  opacity: 0.95;
+  pointer-events: none;
+  z-index: 2;
+}
+
+/* Thin vertical tick for each span event */
+.event-marker {
+  position: absolute;
+  top: 5px;
+  height: 24px;
+  width: 2px;
+  transform: translateX(-1px);
+  border-radius: 1px;
+  background: var(--mat-sys-tertiary);
+  cursor: default;
+  z-index: 3;
+  &.err { background: var(--mat-sys-error); }
 }
 
 .duration-label {
   position: absolute;
-  right: 4px;
   top: 50%;
-  transform: translateY(-50%);
+  transform: translate(4px, -50%);
   font-size: 10px;
   color: var(--mat-sys-on-surface-variant);
+  white-space: nowrap;
+  pointer-events: none;
+  z-index: 4;
+  /* Bar ends near the right edge: place the label to the left of the bar end */
+  &.flip { transform: translate(calc(-100% - 4px), -50%); }
 }
 
 /* Inline span detail rendered below the selected row */
