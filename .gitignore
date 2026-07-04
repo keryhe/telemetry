@@ -33,8 +33,8 @@ bld/
 [Oo]ut/
 [Ll]og/
 [Ll]ogs/
-!src/Keryhe.Telemetry.Server/opentelemetry/proto/logs/
-!src/Keryhe.Telemetry.Server/opentelemetry/proto/collector/logs/
+!src/Keryhe.Telemetry.Collector/opentelemetry/proto/logs/
+!src/Keryhe.Telemetry.Collector/opentelemetry/proto/collector/logs/
 !src/telemetry-client/src/app/features/logs/
 
 
