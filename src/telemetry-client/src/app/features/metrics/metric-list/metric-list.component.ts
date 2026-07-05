@@ -118,15 +118,19 @@ export class MetricListComponent {
     });
   });
 
-  protected gaugeCount = computed(() => this.allMetrics().filter((m) => m.type === MetricType.Gauge).length);
-  protected counterCount = computed(() => this.allMetrics().filter((m) => m.type === MetricType.Sum).length);
-  protected histogramCount = computed(() => this.allMetrics().filter((m) => m.type === MetricType.Histogram).length);
+  // Count distinct metric names per type, matching the unique-name table (not raw instance rows).
+  protected gaugeCount = computed(() => this.uniqueMetrics().filter((m) => m.type === MetricType.Gauge).length);
+  protected counterCount = computed(() => this.uniqueMetrics().filter((m) => m.type === MetricType.Sum).length);
+  protected histogramCount = computed(() => this.uniqueMetrics().filter((m) => m.type === MetricType.Histogram).length);
 
   protected readonly uniqueCols = ['name', 'type', 'unit', 'instances', 'services', 'lastSeen'];
   protected readonly allCols = ['name', 'type', 'unit', 'service', 'lastSeen'];
   protected readonly typeLabel = (t: MetricType) => TYPE_LABELS[t] ?? 'Unknown';
 
   constructor() {
+    // Slide relative preset windows to "now" on (re)entry so navigating back refreshes.
+    this.timeRange.refreshRelativeWindow();
+
     effect(() => {
       this.timeRange.range();
       untracked(() => this.load());

@@ -43,19 +43,21 @@ public abstract class MetricReadRepositoryBase : DapperReadRepository, IMetricRe
             throw new ArgumentException("Metric name cannot be null or empty", nameof(name));
 
         await using var conn = await OpenConnectionAsync(cancellationToken);
-        var rows = await conn.QueryAsync<MetricRow>(new CommandDefinition(
-            MetricSelect + " AND m.name = @name", new { tenantId = TenantId, name }, cancellationToken: cancellationToken));
+        var rows = (await conn.QueryAsync<MetricRow>(new CommandDefinition(
+            MetricSelect + " AND m.name = @name", new { tenantId = TenantId, name }, cancellationToken: cancellationToken))).ToList();
 
-        return rows.Select(m => ToMetricInfo(m, ExtractServiceName(DeserializeAttributes(m.ResourceAttributesJson)) ?? "")).ToList();
+        var stats = await GetMetricStatsAsync(conn, rows, cancellationToken);
+        return rows.Select(m => ToMetricInfo(m, ExtractServiceName(DeserializeAttributes(m.ResourceAttributesJson)) ?? "", stats.GetValueOrDefault(m.Id))).ToList();
     }
 
     public async Task<List<MetricInfo>> GetMetricsByTypeAsync(MetricType type, CancellationToken cancellationToken = default)
     {
         await using var conn = await OpenConnectionAsync(cancellationToken);
-        var rows = await conn.QueryAsync<MetricRow>(new CommandDefinition(
-            MetricSelect + " AND m.type = @type", new { tenantId = TenantId, type = type.ToString() }, cancellationToken: cancellationToken));
+        var rows = (await conn.QueryAsync<MetricRow>(new CommandDefinition(
+            MetricSelect + " AND m.type = @type", new { tenantId = TenantId, type = type.ToString() }, cancellationToken: cancellationToken))).ToList();
 
-        return rows.Select(m => ToMetricInfo(m, ExtractServiceName(DeserializeAttributes(m.ResourceAttributesJson)) ?? "")).ToList();
+        var stats = await GetMetricStatsAsync(conn, rows, cancellationToken);
+        return rows.Select(m => ToMetricInfo(m, ExtractServiceName(DeserializeAttributes(m.ResourceAttributesJson)) ?? "", stats.GetValueOrDefault(m.Id))).ToList();
     }
 
     public async Task<List<MetricInfo>> GetAllMetricsAsync(int limit = 100, DateTime? startTime = null,
@@ -71,12 +73,14 @@ public abstract class MetricReadRepositoryBase : DapperReadRepository, IMetricRe
         if (metricIdsWithData != null) sql += $" AND m.id IN ({IdInList(metricIdsWithData)})";
         sql += " ORDER BY m.created_at DESC";
 
-        var rows = await conn.QueryAsync<MetricRow>(new CommandDefinition(sql,
-            new { tenantId = TenantId }, cancellationToken: cancellationToken));
-
-        return rows
+        var rows = (await conn.QueryAsync<MetricRow>(new CommandDefinition(sql,
+            new { tenantId = TenantId }, cancellationToken: cancellationToken)))
             .Take(limit)
-            .Select(m => ToMetricInfo(m, ExtractServiceName(DeserializeAttributes(m.ResourceAttributesJson))))
+            .ToList();
+
+        var stats = await GetMetricStatsAsync(conn, rows, cancellationToken);
+        return rows
+            .Select(m => ToMetricInfo(m, ExtractServiceName(DeserializeAttributes(m.ResourceAttributesJson)), stats.GetValueOrDefault(m.Id)))
             .ToList();
     }
 
@@ -115,31 +119,6 @@ public abstract class MetricReadRepositoryBase : DapperReadRepository, IMetricRe
         var series = new MetricSeries { Name = metricName, Type = primaryType };
         series.Points = await GetDataPointsAsync(conn, primaryType, metricIds, labelFilters, startTime, endTime, cancellationToken);
         return series;
-    }
-
-    public async Task<MultiSeriesMetricData?> GetMetricSeriesByServiceAsync(string metricName,
-        DateTime? startTime = null, DateTime? endTime = null, CancellationToken cancellationToken = default)
-    {
-        if (string.IsNullOrEmpty(metricName))
-            throw new ArgumentException("Metric name cannot be null or empty", nameof(metricName));
-
-        await using var conn = await OpenConnectionAsync(cancellationToken);
-        var metrics = (await conn.QueryAsync<MetricRow>(new CommandDefinition(
-            MetricSelect + " AND m.name = @name", new { tenantId = TenantId, name = metricName }, cancellationToken: cancellationToken))).ToList();
-
-        if (metrics.Count == 0) return null;
-
-        var result = new MultiSeriesMetricData { Name = metricName, Type = Enum.Parse<MetricType>(metrics[0].Type) };
-
-        foreach (var metric in metrics)
-        {
-            var serviceName = ExtractServiceName(DeserializeAttributes(metric.ResourceAttributesJson)) ?? "unknown";
-            var type = Enum.Parse<MetricType>(metric.Type);
-            var points = await GetDataPointsAsync(conn, type, new List<long> { metric.Id }, null, startTime, endTime, cancellationToken);
-            result.Series.Add(new NamedMetricSeries { SeriesName = serviceName, MetricId = metric.Id, Points = points });
-        }
-
-        return result;
     }
 
     public async Task<MultiSeriesMetricData?> GetGroupedMetricSeriesAsync(string metricName,
@@ -672,7 +651,7 @@ public abstract class MetricReadRepositoryBase : DapperReadRepository, IMetricRe
     private static T[]? DeserializeArray<T>(string? json)
         => string.IsNullOrEmpty(json) ? null : JsonSerializer.Deserialize<T[]>(json);
 
-    private static MetricInfo ToMetricInfo(MetricRow m, string? serviceName) => new()
+    private static MetricInfo ToMetricInfo(MetricRow m, string? serviceName, MetricStat? stat = null) => new()
     {
         Id = m.Id,
         Name = m.Name,
@@ -680,9 +659,46 @@ public abstract class MetricReadRepositoryBase : DapperReadRepository, IMetricRe
         Unit = m.Unit,
         Type = Enum.Parse<MetricType>(m.Type),
         ServiceName = serviceName,
-        FirstSeen = m.CreatedAt,
-        LastSeen = m.CreatedAt
+        // Real data-point window/count when available; otherwise fall back to registration time / 0.
+        FirstSeen = stat?.First ?? m.CreatedAt,
+        LastSeen = stat?.Last ?? m.CreatedAt,
+        DataPointCount = stat?.Count ?? 0
     };
+
+    /// <summary>
+    /// Computes the all-time first/last data-point timestamp and total point count for each metric,
+    /// keyed by metric id. Each metric's points live in exactly one table (per <see cref="TableFor"/>),
+    /// so rows are grouped by table and one aggregate query is issued per table involved. Not time
+    /// bounded: these represent the metric's full lifetime, independent of any chart time range.
+    /// </summary>
+    private async Task<Dictionary<long, MetricStat>> GetMetricStatsAsync(DbConnection conn, IReadOnlyList<MetricRow> rows, CancellationToken ct)
+    {
+        var result = new Dictionary<long, MetricStat>();
+        if (rows.Count == 0) return result;
+
+        foreach (var group in rows.GroupBy(r => TableFor(Enum.Parse<MetricType>(r.Type))))
+        {
+            var table = group.Key;
+            var ids = group.Select(r => r.Id).ToList();
+            var statRows = await conn.QueryAsync<StatRow>(new CommandDefinition($"""
+                SELECT metric_id AS MetricId, MIN(time_unix_nano) AS MinNano,
+                       MAX(time_unix_nano) AS MaxNano, COUNT(*) AS Cnt
+                FROM {table}
+                WHERE metric_id IN ({IdInList(ids)})
+                GROUP BY metric_id
+                """, cancellationToken: ct));
+
+            foreach (var s in statRows)
+            {
+                result[s.MetricId] = new MetricStat(
+                    TimeConversion.UnixNanoToDateTime(s.MinNano),
+                    TimeConversion.UnixNanoToDateTime(s.MaxNano),
+                    (int)Math.Min(s.Cnt, int.MaxValue));
+            }
+        }
+
+        return result;
+    }
 
     private static object Merge(object a, object b)
     {
@@ -717,6 +733,17 @@ public abstract class MetricReadRepositoryBase : DapperReadRepository, IMetricRe
         public string? ExSpanId { get; set; }
         public string? ExTraceId { get; set; }
         long? IExemplarCarrier.ExemplarId => ExemplarId;
+    }
+
+    /// <summary>All-time data-point window and count for a single metric.</summary>
+    private sealed record MetricStat(DateTime First, DateTime Last, int Count);
+
+    private sealed class StatRow
+    {
+        public long MetricId { get; set; }
+        public long MinNano { get; set; }
+        public long MaxNano { get; set; }
+        public long Cnt { get; set; }
     }
 
     private sealed class MetricRow

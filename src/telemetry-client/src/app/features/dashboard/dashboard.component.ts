@@ -25,7 +25,7 @@ import { TraceInfo } from '../../core/models/trace.models';
 import { LogRecord, getServiceName } from '../../core/models/log.models';
 import { StatCardComponent } from '../../shared/components/stat-card/stat-card.component';
 import { EmptyStateComponent } from '../../shared/components/empty-state/empty-state.component';
-import { bucketTraces, bucketLogs, buildLogSeriesOptions, formatDuration, parseDotnetTimespan } from '../../shared/utils/chart.utils';
+import { bucketTraces, bucketLogs, buildLogSeriesOptions, formatDuration, parseDotnetTimespan, timeRangeZoom } from '../../shared/utils/chart.utils';
 import { loadPageState, savePageState } from '../../shared/utils/page-state';
 
 const STATE_KEY = 'state.dashboard';
@@ -86,6 +86,9 @@ export class DashboardComponent {
   protected logChartOptions = signal<ApexOptions>({});
 
   constructor() {
+    // Slide relative preset windows to "now" on (re)entry so navigating back refreshes.
+    this.timeRange.refreshRelativeWindow();
+
     effect(() => {
       this.timeRange.range();
       this.selectedService();
@@ -151,8 +154,10 @@ export class DashboardComponent {
     const buckets = bucketTraces(this.traces(), start, end);
     const timestamps = buckets.map((b) => b.timestamp.getTime());
 
+    const zoom = timeRangeZoom((from, to) => this.timeRange.setCustom(from, to));
+
     this.traceChartOptions.set({
-      chart: { type: 'area', height: 220, toolbar: { show: false }, background: 'transparent' },
+      chart: { type: 'area', height: 220, toolbar: { show: false }, background: 'transparent', ...zoom },
       theme: { mode: isDark ? 'dark' : 'light' },
       series: [
         { name: 'Total', data: buckets.map((b, i) => [timestamps[i], b.count]) },
@@ -167,7 +172,8 @@ export class DashboardComponent {
     });
 
     const logBuckets = bucketLogs(this.logs(), start, end);
-    this.logChartOptions.set(buildLogSeriesOptions(logBuckets, isDark, 220));
+    const logBase = buildLogSeriesOptions(logBuckets, isDark, 220);
+    this.logChartOptions.set({ ...logBase, chart: { ...logBase.chart!, ...zoom } });
   }
 
   protected navigateToTrace(traceId: string): void {

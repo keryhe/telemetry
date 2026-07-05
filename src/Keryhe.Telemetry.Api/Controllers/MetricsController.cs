@@ -96,20 +96,6 @@ public class MetricsController : ControllerBase
         return Ok(data);
     }
 
-    // GET /api/metrics/series-by-service/{metricName}?start=&end=
-    [HttpGet("series-by-service/{metricName}")]
-    public async Task<ActionResult<MultiSeriesMetricData>> GetMetricSeriesByService(
-        string metricName,
-        [FromQuery] DateTime? start,
-        [FromQuery] DateTime? end,
-        CancellationToken ct = default)
-    {
-        var data = await _metrics.GetMetricSeriesByServiceAsync(metricName, start, end, ct);
-        if (data == null)
-            return NotFound();
-        return Ok(data);
-    }
-
     private static Dictionary<string, string>? ParseLabelFilters(List<string>? labelFilter)
     {
         if (labelFilter == null || labelFilter.Count == 0)

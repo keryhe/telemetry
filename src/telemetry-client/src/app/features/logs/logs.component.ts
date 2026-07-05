@@ -23,7 +23,7 @@ import { ThemeService } from '../../core/services/theme.service';
 import { LogRecord, getSeverityLabel, getSeverityColor, getSeverityBg, getServiceName, getTimestamp } from '../../core/models/log.models';
 import { StatCardComponent } from '../../shared/components/stat-card/stat-card.component';
 import { EmptyStateComponent } from '../../shared/components/empty-state/empty-state.component';
-import { bucketLogs, buildLogSeriesOptions } from '../../shared/utils/chart.utils';
+import { bucketLogs, buildLogSeriesOptions, timeRangeZoom } from '../../shared/utils/chart.utils';
 import { parseSearchQuery, ParsedSearchQuery, SearchTerm } from '../../shared/utils/search-query.parser';
 import { LogSearchHelpDialogComponent } from './log-search-help-dialog/log-search-help-dialog.component';
 import { loadPageState, savePageState } from '../../shared/utils/page-state';
@@ -135,6 +135,9 @@ export class LogsComponent {
   protected readonly getTimestamp = getTimestamp;
 
   constructor() {
+    // Slide relative preset windows to "now" on (re)entry so navigating back refreshes.
+    this.timeRange.refreshRelativeWindow();
+
     const traceId = this.route.snapshot.queryParamMap.get('traceId');
     if (traceId) this.traceIdFilter.set(traceId);
 
@@ -222,15 +225,7 @@ export class LogsComponent {
       ...base,
       chart: {
         ...base.chart!,
-        zoom: { enabled: true, type: 'x', allowMouseWheelZoom: false },
-        events: {
-          zoomed: (_ctx, opts) => {
-            const xaxis = opts?.xaxis;
-            if (xaxis?.min != null && xaxis?.max != null) {
-              this.timeRange.setCustom(new Date(xaxis.min), new Date(xaxis.max));
-            }
-          },
-        },
+        ...timeRangeZoom((start2, end2) => this.timeRange.setCustom(start2, end2)),
       },
       legend: { show: false },
       grid: { show: true },

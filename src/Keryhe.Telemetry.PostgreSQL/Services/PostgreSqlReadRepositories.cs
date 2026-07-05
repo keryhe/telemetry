@@ -15,6 +15,10 @@ public class PostgreSqlTraceReadRepository(NpgsqlDataSource dataSource, ITenantC
 {
     protected override async Task<DbConnection> OpenConnectionAsync(CancellationToken cancellationToken)
         => await dataSource.OpenConnectionAsync(cancellationToken);
+
+    // Npgsql binds a list parameter as a native array, so use = ANY(@ids) rather than
+    // the base's IN @ids (which Dapper only expands for non-array providers like SqlServer).
+    protected override string SpanIdInPredicate => "s.span_id = ANY(@ids)";
 }
 
 public class PostgreSqlMetricReadRepository(NpgsqlDataSource dataSource, ITenantContext tenantContext)

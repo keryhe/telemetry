@@ -2,6 +2,36 @@ import type { ApexOptions } from 'ng-apexcharts';
 import { getSeverityLabel, SEVERITY_COLORS } from '../../core/models/log.models';
 import { AggregationTemporality, MetricDataPoint, MetricType } from '../../core/models/metric.models';
 
+/** Shared grid / separator line color: light gray in light mode, darker gray in dark mode. */
+function gridLineColor(isDark: boolean): string {
+  return isDark ? '#3a3b40' : '#d8d8d8';
+}
+
+/** Shared, theme-aware ApexCharts grid config: muted low-contrast lines in both themes. */
+export function chartGrid(isDark: boolean): ApexOptions['grid'] {
+  return { borderColor: gridLineColor(isDark), strokeDashArray: 0 };
+}
+
+/**
+ * Chart config for a datetime x-axis: disables mouse-wheel zoom and turns a horizontal
+ * drag-select into a time-range update (matching the Traces/Logs charts). Spread into an
+ * ApexCharts `chart: { ... }`. `onSelect` receives the dragged [start, end].
+ */
+export function timeRangeZoom(
+  onSelect: (start: Date, end: Date) => void,
+): Pick<NonNullable<ApexOptions['chart']>, 'zoom' | 'events'> {
+  return {
+    zoom: { enabled: true, type: 'x', allowMouseWheelZoom: false },
+    events: {
+      zoomed: (_ctx, opts) => {
+        const min = opts?.xaxis?.min;
+        const max = opts?.xaxis?.max;
+        if (min != null && max != null) onSelect(new Date(min), new Date(max));
+      },
+    },
+  };
+}
+
 export interface TimeBucket {
   timestamp: Date;
   count: number;
@@ -213,7 +243,7 @@ function fmtBound(v: number): string {
   if (!isFinite(v)) return '∞';
   if (v === 0) return '0';
   const abs = Math.abs(v);
-  if (abs >= 1000 || abs < 0.01) return v.toPrecision(3);
+  if (abs >= 1000 || abs < 0.01) return Number(v.toPrecision(3)).toString();
   return Number(v.toFixed(3)).toString();
 }
 
@@ -258,20 +288,36 @@ export function buildHistogramHeatmap(points: MetricDataPoint[], isDark: boolean
     }
   }
   if (series.every((s) => s.data.length === 0)) return null;
+  return renderHeatmap(series, maxCount, isDark);
+}
 
+/** Shared ApexCharts heatmap config for the bucket-distribution charts. */
+function renderHeatmap(
+  series: { name: string; data: { x: number; y: number }[] }[],
+  maxCount: number,
+  isDark: boolean,
+): ApexOptions {
+  // Scale height with row count so rows never collapse sub-pixel; clamp to a sensible band.
+  const height = Math.min(420, Math.max(180, series.length * 18));
+  // Empty (zero-count) cells blend with the mat-card surface per theme; thin separators just off
+  // that tone keep the grid legible without a heavy dark background in light mode.
+  const zeroColor = isDark ? '#26272b' : '#f4f4f5';
+  const separatorColor = gridLineColor(isDark);
   return {
-    chart: { type: 'heatmap', height: 320, toolbar: { show: false }, background: 'transparent' },
+    chart: { type: 'heatmap', height, toolbar: { show: false }, background: 'transparent' },
     theme: { mode: isDark ? 'dark' : 'light' },
     series,
     xaxis: { type: 'datetime', labels: { datetimeUTC: false } },
     dataLabels: { enabled: false },
     legend: { show: false },
+    stroke: { width: 0.5, colors: [separatorColor] },
+    grid: chartGrid(isDark),
     plotOptions: {
       heatmap: {
         shadeIntensity: 0.5,
         colorScale: {
           ranges: [
-            { from: 0, to: 0, color: '#263238', name: '0' },
+            { from: 0, to: 0, color: zeroColor, name: '0' },
             { from: 0.001, to: maxCount * 0.25, color: '#90CAF9', name: 'Low' },
             { from: maxCount * 0.25, to: maxCount * 0.6, color: '#1976D2', name: 'Medium' },
             { from: maxCount * 0.6, to: Math.max(maxCount, 1), color: '#0D47A1', name: 'High' },
@@ -357,6 +403,367 @@ export function aggregateSeries(
     result.push([grid[i], v]);
   }
   return result;
+}
+
+/** One time window of an explicit-bucket histogram, aggregated across all series. */
+export interface HistogramWindow {
+  /** Window start (epoch ms). */
+  edge: number;
+  /** Summed per-interval bucket counts, aligned to the shared bounds. */
+  counts: number[];
+  /** Σ counts (total observations in the window). */
+  total: number;
+  /** Σ per-interval sum-delta (for computing the mean). */
+  sum: number;
+  /** Min of contributing point minimums (envelope), null if none. */
+  min: number | null;
+  /** Max of contributing point maximums (envelope), null if none. */
+  max: number | null;
+}
+
+/**
+ * Shared windowing core for explicit-bucket histograms. Over a common {@link makeGrid} grid it sums,
+ * per window and across all series, the *per-interval* bucket-count vector, the sum-delta, and a
+ * min/max envelope — the single source the percentile, throughput, mean, min/max and heatmap views
+ * all derive from, so they stay self-consistent.
+ *
+ * Cumulative series are diffed between consecutive scrapes (reset-safe, mirroring
+ * {@link computeRateSeries}); delta series contribute their own values directly. Points whose bucket
+ * schema doesn't match the reference bounds (rare) are skipped.
+ */
+export function aggregateHistogramWindows(
+  seriesList: { points: MetricDataPoint[] }[],
+  start: Date,
+  end: Date,
+  bucketCount = 60,
+): { bounds: number[]; windows: HistogramWindow[] } {
+  const grid = makeGrid(start, end, bucketCount);
+
+  // Reference bucket schema (bounds + counts length) from the first point that carries buckets.
+  let refBounds: number[] | null = null;
+  let refLen = 0;
+  for (const s of seriesList) {
+    for (const p of s.points) {
+      const b = toExplicitBuckets(p);
+      if (b) { refBounds = b.bounds; refLen = b.counts.length; break; }
+    }
+    if (refBounds) break;
+  }
+  if (!refBounds) return { bounds: [], windows: [] };
+
+  const counts: number[][] = Array.from({ length: grid.length }, () => new Array(refLen).fill(0));
+  const sums: number[] = new Array(grid.length).fill(0);
+  const mins: (number | null)[] = new Array(grid.length).fill(null);
+  const maxs: (number | null)[] = new Array(grid.length).fill(null);
+
+  const windowIndex = (t: number): number => {
+    if (t <= grid[0]) return 0;
+    if (t >= grid[grid.length - 1]) return grid.length - 1;
+    const step = (grid[grid.length - 1] - grid[0]) / bucketCount;
+    return Math.min(grid.length - 1, Math.max(0, Math.floor((t - grid[0]) / step)));
+  };
+
+  const add = (t: number, bucket: number[], sumDelta: number, min: number | null, max: number | null): void => {
+    if (bucket.length !== refLen) return; // mismatched schema
+    const idx = windowIndex(t);
+    const c = counts[idx];
+    for (let i = 0; i < refLen; i++) c[i] += bucket[i];
+    sums[idx] += sumDelta;
+    if (min != null) mins[idx] = mins[idx] == null ? min : Math.min(mins[idx]!, min);
+    if (max != null) maxs[idx] = maxs[idx] == null ? max : Math.max(maxs[idx]!, max);
+  };
+
+  for (const s of seriesList) {
+    const pts = [...s.points]
+      .filter((p) => toExplicitBuckets(p) != null)
+      .sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
+    if (!pts.length) continue;
+
+    const isCumulative = pts[0].aggregationTemporality === AggregationTemporality.Cumulative;
+
+    if (!isCumulative) {
+      for (const p of pts) {
+        const b = toExplicitBuckets(p)!;
+        add(new Date(p.timestamp).getTime(), b.counts, p.sum ?? 0, p.min ?? null, p.max ?? null);
+      }
+      continue;
+    }
+
+    // Cumulative: per-interval delta between consecutive scrapes, clamping resets to 0.
+    for (let i = 1; i < pts.length; i++) {
+      const prev = toExplicitBuckets(pts[i - 1])!;
+      const curr = toExplicitBuckets(pts[i])!;
+      if (prev.counts.length !== refLen || curr.counts.length !== refLen) continue;
+      const delta = new Array(refLen);
+      for (let k = 0; k < refLen; k++) delta[k] = Math.max(0, curr.counts[k] - prev.counts[k]);
+      const sumDelta = Math.max(0, (pts[i].sum ?? 0) - (pts[i - 1].sum ?? 0));
+      add(new Date(pts[i].timestamp).getTime(), delta, sumDelta, pts[i].min ?? null, pts[i].max ?? null);
+    }
+  }
+
+  const windows: HistogramWindow[] = grid.map((edge, i) => ({
+    edge,
+    counts: counts[i],
+    total: counts[i].reduce((a, b) => a + b, 0),
+    sum: sums[i],
+    min: mins[i],
+    max: maxs[i],
+  }));
+
+  return { bounds: refBounds, windows };
+}
+
+/**
+ * True aggregate percentile lines for explicit-bucket histograms, computed the Prometheus way:
+ * `histogram_quantile(q, sum by (le) (rate(bucket[window])))` — via {@link aggregateHistogramWindows},
+ * running {@link histogramQuantile} on each window's summed buckets. Empty windows are omitted.
+ */
+export function aggregateHistogramQuantiles(
+  seriesList: { points: MetricDataPoint[] }[],
+  start: Date,
+  end: Date,
+  quantiles: { q: number; label: string }[],
+  bucketCount = 60,
+): { q: number; label: string; data: [number, number][] }[] {
+  const { bounds, windows } = aggregateHistogramWindows(seriesList, start, end, bucketCount);
+  if (!windows.length) return [];
+
+  return quantiles.map(({ q, label }) => ({
+    q,
+    label,
+    data: windows
+      .map((w) => {
+        if (w.total === 0) return null;
+        const v = histogramQuantile(w.counts, bounds, q);
+        return Number.isFinite(v) ? ([w.edge, v] as [number, number]) : null;
+      })
+      .filter((d): d is [number, number] => d != null),
+  })).filter((s) => s.data.length > 0);
+}
+
+/** Upper bound on heatmap Y-rows; finer bucket schemas (exp histograms) are merged down to this. */
+const MAX_HEATMAP_ROWS = 24;
+
+/**
+ * Groups an over-fine bucket schema into at most `maxRows` display bins by merging adjacent buckets.
+ * Returns the group ranges `[start, end)` into the original counts, plus the merged bounds (upper
+ * bound of each group except the final overflow group). Counts are summed per group by the caller.
+ * Schemas already within `maxRows` yield one group per bucket (identity), so explicit histograms are
+ * unchanged.
+ *
+ * Bucket semantics match {@link bucketLabels}/{@link histogramQuantile}: `counts.length ===
+ * bounds.length + 1`; bucket i covers (bounds[i-1], bounds[i]], the first is `< bounds[0]` and the
+ * last is the `≥` overflow. The merged output preserves that invariant.
+ */
+function planBucketGroups(
+  refLen: number,
+  bounds: number[],
+  maxRows: number,
+): { groups: [number, number][]; bounds: number[] } {
+  if (refLen <= maxRows) {
+    return { groups: Array.from({ length: refLen }, (_, i) => [i, i + 1] as [number, number]), bounds };
+  }
+  const g = Math.ceil(refLen / maxRows);
+  const groups: [number, number][] = [];
+  const merged: number[] = [];
+  for (let start = 0; start < refLen; start += g) {
+    const end = Math.min(start + g, refLen);
+    groups.push([start, end]);
+    // Every group except the final overflow contributes its last bucket's upper bound.
+    if (end < refLen) merged.push(bounds[end - 1]);
+  }
+  return { groups, bounds: merged };
+}
+
+/**
+ * Bucket-distribution heatmap built from pre-aggregated {@link HistogramWindow}s (per-window delta
+ * counts → a true histogram-over-time, not cumulative growth). Over-fine schemas (exponential
+ * histograms carry ~100+ buckets) are merged down to {@link MAX_HEATMAP_ROWS} legible rows via
+ * {@link planBucketGroups}; explicit histograms already under the cap are unchanged. Returns null if
+ * there is no data.
+ */
+export function buildHistogramHeatmapFromWindows(
+  bounds: number[],
+  windows: HistogramWindow[],
+  isDark: boolean,
+): ApexOptions | null {
+  if (!windows.length || !windows[0].counts.length) return null;
+  const refLen = windows[0].counts.length;
+  const { groups, bounds: rowBounds } = planBucketGroups(refLen, bounds, MAX_HEATMAP_ROWS);
+  const labels = bucketLabels(new Array(groups.length), rowBounds);
+
+  const series = labels.map((label) => ({ name: label, data: [] as { x: number; y: number }[] }));
+  let maxCount = 0;
+  for (const w of windows) {
+    for (let r = 0; r < groups.length; r++) {
+      const [start, end] = groups[r];
+      let y = 0;
+      for (let i = start; i < end; i++) y += w.counts[i];
+      series[r].data.push({ x: w.edge, y });
+      if (y > maxCount) maxCount = y;
+    }
+  }
+  if (maxCount === 0) return null;
+  return renderHeatmap(series, maxCount, isDark);
+}
+
+/**
+ * Bar chart of a single {@link HistogramWindow}'s bucket distribution: X = bucket range,
+ * Y = observation count. Over-fine schemas (exponential histograms carry ~100+ buckets) are
+ * merged down to at most {@link MAX_HEATMAP_ROWS} bars via {@link planBucketGroups}, summing
+ * counts per group; explicit histograms under the cap are unchanged. Returns null for an
+ * empty/zero window.
+ */
+export function buildHistogramBarFromWindow(
+  bounds: number[],
+  window: HistogramWindow,
+  isDark: boolean,
+): ApexOptions | null {
+  if (!window.counts.length || window.total === 0) return null;
+  const { groups, bounds: barBounds } = planBucketGroups(window.counts.length, bounds, MAX_HEATMAP_ROWS);
+  const counts = groups.map(([start, end]) => {
+    let sum = 0;
+    for (let i = start; i < end; i++) sum += window.counts[i];
+    return sum;
+  });
+  const labels = bucketLabels(new Array(groups.length), barBounds);
+
+  return {
+    chart: {
+      type: 'bar', height: 220, toolbar: { show: false }, background: 'transparent',
+      zoom: { allowMouseWheelZoom: false },
+    },
+    theme: { mode: isDark ? 'dark' : 'light' },
+    series: [{ name: 'Count', data: counts }],
+    xaxis: { categories: labels, labels: { rotate: -45, hideOverlappingLabels: true } },
+    dataLabels: { enabled: false },
+    legend: { show: false },
+    grid: chartGrid(isDark),
+    plotOptions: { bar: { columnWidth: '80%' } },
+  };
+}
+
+/**
+ * Bar chart of the bucket distribution summed across every window in the selected range — the
+ * whole-range "overall shape" view (vs. {@link buildHistogramBarFromWindow}'s single window). Sums
+ * the per-window `counts` vectors element-wise into one aggregate {@link HistogramWindow}, then
+ * reuses the single-window builder so exp-histogram bucket-merging and styling stay in one place.
+ * Returns null if there is no window with observations.
+ */
+export function buildHistogramBarFromWindows(
+  bounds: number[],
+  windows: HistogramWindow[],
+  isDark: boolean,
+): ApexOptions | null {
+  const refLen = windows.find((w) => w.counts.length)?.counts.length ?? 0;
+  if (!refLen) return null;
+
+  const counts = new Array(refLen).fill(0);
+  let total = 0;
+  for (const w of windows) {
+    if (w.counts.length !== refLen) continue;
+    for (let i = 0; i < refLen; i++) counts[i] += w.counts[i];
+    total += w.total;
+  }
+
+  const aggregate: HistogramWindow = { edge: windows[0]?.edge ?? 0, counts, total, sum: 0, min: null, max: null };
+  return buildHistogramBarFromWindow(bounds, aggregate, isDark);
+}
+
+/**
+ * Normalizes exponential-histogram series onto one shared explicit-bucket schema so the standard
+ * histogram windowing/quantile math applies. Every point is downscaled to the coarsest `scale` present
+ * (standard OTLP base-2 downscaling — merging 2^delta adjacent buckets) and re-expressed on a common
+ * exponent-index grid; the synthetic points carry explicit `bucketCounts`/`bucketBounds`, so downstream
+ * code treats them exactly like explicit histograms. Negative buckets are ignored (durations are
+ * non-negative). Non-exponential points pass through unchanged.
+ */
+export function normalizeExpHistogramSeries(
+  seriesList: { points: MetricDataPoint[] }[],
+): { points: MetricDataPoint[] }[] {
+  const isExp = (p: MetricDataPoint) =>
+    p.positiveBucketCounts != null && p.positiveBucketCounts.length > 0 && p.scale != null;
+
+  // Coarsest (smallest) scale across all points = widest buckets everything can merge into.
+  let targetScale = Infinity;
+  for (const s of seriesList) for (const p of s.points) if (isExp(p)) targetScale = Math.min(targetScale, p.scale!);
+  if (!isFinite(targetScale)) return seriesList;
+
+  // Downscale a point's positive buckets to targetScale, keyed by absolute exponent index.
+  const downscale = (p: MetricDataPoint): Map<number, number> => {
+    const m = new Map<number, number>();
+    const factor = Math.pow(2, p.scale! - targetScale); // >= 1
+    const offset = p.positiveOffset ?? 0;
+    const pos = p.positiveBucketCounts!;
+    for (let k = 0; k < pos.length; k++) {
+      if (!pos[k]) continue;
+      const jPrime = Math.floor((offset + k) / factor);
+      m.set(jPrime, (m.get(jPrime) ?? 0) + pos[k]);
+    }
+    return m;
+  };
+
+  let minIdx = Infinity;
+  let maxIdx = -Infinity;
+  const perPoint = new Map<MetricDataPoint, Map<number, number>>();
+  for (const s of seriesList) for (const p of s.points) {
+    if (!isExp(p)) continue;
+    const m = downscale(p);
+    perPoint.set(p, m);
+    for (const j of m.keys()) { minIdx = Math.min(minIdx, j); maxIdx = Math.max(maxIdx, j); }
+  }
+
+  const n = isFinite(minIdx) && isFinite(maxIdx) ? maxIdx - minIdx + 1 : 0;
+  const log2Base = Math.pow(2, -targetScale);
+  const bounds: number[] = [];
+  for (let m = 0; m < n; m++) bounds.push(Math.pow(2, log2Base * (minIdx + m)));
+
+  return seriesList.map((s) => ({
+    points: s.points.map((p) => {
+      if (!isExp(p)) return p;
+      const map = perPoint.get(p)!;
+      const counts = new Array(n + 1).fill(0);
+      counts[0] = p.zeroCount ?? 0;
+      for (const [j, c] of map) counts[j - minIdx + 1] = c;
+      return { ...p, bucketCounts: counts, bucketBounds: bounds } as MetricDataPoint;
+    }),
+  }));
+}
+
+/**
+ * Windowed aggregate of the *additive* summary fields (count & sum) across all series, for the
+ * Throughput/Mean view. Returns bucket-less {@link HistogramWindow}s so it reuses the same chart
+ * builder. Summaries are implicitly cumulative → per-series delta between consecutive points.
+ */
+export function aggregateSummaryWindows(
+  seriesList: { points: MetricDataPoint[] }[],
+  start: Date,
+  end: Date,
+  bucketCount = 60,
+): HistogramWindow[] {
+  const grid = makeGrid(start, end, bucketCount);
+  const totals: number[] = new Array(grid.length).fill(0);
+  const sums: number[] = new Array(grid.length).fill(0);
+
+  const windowIndex = (t: number): number => {
+    if (t <= grid[0]) return 0;
+    if (t >= grid[grid.length - 1]) return grid.length - 1;
+    const step = (grid[grid.length - 1] - grid[0]) / bucketCount;
+    return Math.min(grid.length - 1, Math.max(0, Math.floor((t - grid[0]) / step)));
+  };
+
+  for (const s of seriesList) {
+    const pts = [...s.points]
+      .filter((p) => p.count != null)
+      .sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
+    for (let i = 1; i < pts.length; i++) {
+      const idx = windowIndex(new Date(pts[i].timestamp).getTime());
+      totals[idx] += Math.max(0, (pts[i].count ?? 0) - (pts[i - 1].count ?? 0));
+      sums[idx] += Math.max(0, (pts[i].sum ?? 0) - (pts[i - 1].sum ?? 0));
+    }
+  }
+
+  return grid.map((edge, i) => ({ edge, counts: [], total: totals[i], sum: sums[i], min: null, max: null }));
 }
 
 export function formatDuration(ms: number): string {

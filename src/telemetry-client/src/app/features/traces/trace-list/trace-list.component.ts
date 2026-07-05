@@ -27,7 +27,7 @@ import { ThemeService } from '../../../core/services/theme.service';
 import { TraceInfo, ServiceDependency } from '../../../core/models/trace.models';
 import { StatCardComponent } from '../../../shared/components/stat-card/stat-card.component';
 import { EmptyStateComponent } from '../../../shared/components/empty-state/empty-state.component';
-import { bucketTraces, formatDuration, parseDotnetTimespan } from '../../../shared/utils/chart.utils';
+import { bucketTraces, formatDuration, parseDotnetTimespan, timeRangeZoom } from '../../../shared/utils/chart.utils';
 import { parseSearchQuery, ParsedSearchQuery, SearchTerm } from '../../../shared/utils/search-query.parser';
 import { TraceSearchHelpDialogComponent } from '../trace-search-help-dialog/trace-search-help-dialog.component';
 import { loadPageState, savePageState } from '../../../shared/utils/page-state';
@@ -170,6 +170,9 @@ export class TraceListComponent {
   }
 
   constructor() {
+    // Slide relative preset windows to "now" on (re)entry so navigating back refreshes.
+    this.timeRange.refreshRelativeWindow();
+
     effect(() => {
       this.timeRange.range();
       untracked(() => this.load());
@@ -223,15 +226,7 @@ export class TraceListComponent {
       chart: {
         type: 'area', height: 150, background: 'transparent',
         toolbar: { show: false },
-        zoom: { enabled: true, type: 'x', allowMouseWheelZoom: false },
-        events: {
-          zoomed: (_ctx, opts) => {
-            const xaxis = opts?.xaxis;
-            if (xaxis?.min != null && xaxis?.max != null) {
-              this.timeRange.setCustom(new Date(xaxis.min), new Date(xaxis.max));
-            }
-          },
-        },
+        ...timeRangeZoom((start2, end2) => this.timeRange.setCustom(start2, end2)),
       },
       theme: { mode: isDark ? 'dark' : 'light' },
       series: [

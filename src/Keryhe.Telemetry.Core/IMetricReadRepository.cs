@@ -22,9 +22,6 @@ public interface IMetricReadRepository
     Task<List<MetricSeries>> GetMultipleMetricSeriesAsync(List<string> metricNames,
         Dictionary<string, string>? labelFilters = null, DateTime? startTime = null, DateTime? endTime = null,
         CancellationToken cancellationToken = default);
-    Task<MultiSeriesMetricData?> GetMetricSeriesByServiceAsync(string metricName,
-        DateTime? startTime = null, DateTime? endTime = null,
-        CancellationToken cancellationToken = default);
     Task<MultiSeriesMetricData?> GetGroupedMetricSeriesAsync(string metricName,
         DateTime? startTime = null, DateTime? endTime = null, long? metricId = null,
         Dictionary<string, string>? labelFilters = null,

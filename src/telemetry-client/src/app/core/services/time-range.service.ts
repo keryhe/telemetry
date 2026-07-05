@@ -61,6 +61,17 @@ export class TimeRangeService {
     this.persist(range);
   }
 
+  /**
+   * Re-resolve the current window to "now" for relative presets, so navigating
+   * back to a page slides the window forward. Custom absolute ranges are left as-is.
+   */
+  refreshRelativeWindow(): void {
+    const current = this.range();
+    if (current.preset !== 'custom') {
+      this.setPreset(current.preset);
+    }
+  }
+
   /** Display label for a preset (matches Blazor wording). */
   presetLabel(preset: TimePreset): string {
     return PRESET_LABELS[preset];

@@ -410,18 +410,27 @@ public abstract class TraceReadRepositoryBase : DapperReadRepository, ITraceRead
     // HELPERS
     // =========================================================================
 
+    /// <summary>
+    /// Predicate matching <c>s.span_id</c> against the <c>@ids</c> list parameter. The correct
+    /// form is provider-specific because Dapper handles list parameters differently per client:
+    /// SqlServer (default) expands <c>IN @ids</c> into <c>IN (@ids1, @ids2, …)</c>, whereas Npgsql
+    /// binds the list as a single native array parameter — so Postgres/Timescale override this
+    /// to use <c>= ANY(@ids)</c>.
+    /// </summary>
+    protected virtual string SpanIdInPredicate => "s.span_id IN @ids";
+
     private async Task<HashSet<string>> CheckSpanIdsExistAsync(IEnumerable<string> spanIds, CancellationToken ct)
     {
         var ids = spanIds.ToList();
         if (ids.Count == 0) return [];
         await using var conn = await OpenConnectionAsync(ct);
         var existing = await conn.QueryAsync<string>(
-            """
+            $"""
             SELECT s.span_id
             FROM spans s
             JOIN resources r ON s.resource_id = r.id
             WHERE r.tenant_id = @tenantId
-              AND s.span_id IN @ids
+              AND {SpanIdInPredicate}
             """,
             new { tenantId = TenantId, ids });
         return [..existing];

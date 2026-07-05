@@ -146,6 +146,16 @@ var meterProvider = Sdk.CreateMeterProviderBuilder()
     .SetResourceBuilder(ResourceBuilder.CreateDefault()
         .AddService(config.ServiceName, serviceVersion: config.ServiceVersion))
     .AddMeter(config.ServiceName)
+    // Emit http.request.duration_exp_ms as a base-2 exponential histogram so the exp-histogram
+    // rendering path has real data to exercise.
+    .AddView("http.request.duration_exp_ms", new Base2ExponentialBucketHistogramConfiguration())
+    // Response sizes span ~50 B–50 KB, which overshoots the SDK's default explicit buckets (max
+    // 10,000) and dumps most observations into the +Inf overflow. Give it boundaries that cover the
+    // real range so percentiles and the bucket-distribution charts stay meaningful.
+    .AddView("http.response.size_bytes", new ExplicitBucketHistogramConfiguration
+    {
+        Boundaries = [500, 1000, 2500, 5000, 10000, 20000, 30000, 50000],
+    })
     .AddOtlpExporter((exporterOptions, metricReaderOptions) =>
     {
         exporterOptions.Endpoint = otlpEndpoint;

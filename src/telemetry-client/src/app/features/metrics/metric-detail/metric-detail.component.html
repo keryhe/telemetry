@@ -20,6 +20,14 @@
     <p class="description">{{ instances()[0].description }}</p>
   }
 
+  <!-- Stats -->
+  <div class="stat-grid">
+    <app-stat-card [label]="(isHistogram() || isSummary()) ? 'Mean' : (statsAreRates() ? 'Current Rate' : 'Current')" icon="show_chart" [value]="fmtStat(currentValue())" />
+    <app-stat-card label="Min" icon="arrow_downward" [value]="fmtStat(minValue())" />
+    <app-stat-card label="Max" icon="arrow_upward" [value]="fmtStat(maxValue())" />
+    <app-stat-card [label]="(isHistogram() || isSummary()) ? 'Count' : 'Average'" icon="functions" [value]="(isHistogram() || isSummary()) ? fmt(avgValue()) : fmtStat(avgValue())" />
+  </div>
+
   <!-- Controls -->
   <div class="controls-bar">
     @if (services().length > 1) {
@@ -35,7 +43,7 @@
     @for (key of labelKeys(); track key) {
       <mat-form-field appearance="outline" subscriptSizing="dynamic" class="ctrl-field">
         <mat-label>{{ key }}</mat-label>
-        <mat-select [value]="selectedLabels()[key] ?? ''"
+        <mat-select [value]="labelValue(key)"
           (selectionChange)="updateLabelFilter(key, $event.value)">
           <mat-option value="">All</mat-option>
           @for (v of labels()[key]; track v) { <mat-option [value]="v">{{ v }}</mat-option> }
@@ -43,15 +51,14 @@
       </mat-form-field>
     }
 
-    @if (services().length > 1 || labelKeys().length > 0) {
+    @if (!isDistribution() && (services().length > 1 || labelKeys().length > 0)) {
       <mat-button-toggle-group>
-        <mat-button-toggle [checked]="groupMode() === 'single'" (change)="groupMode.set('single'); reloadSeries()">Single</mat-button-toggle>
-        <mat-button-toggle [checked]="groupMode() === 'service'" (change)="groupMode.set('service'); reloadSeries()">Per Service</mat-button-toggle>
         <mat-button-toggle [checked]="groupMode() === 'labels'" (change)="groupMode.set('labels'); reloadSeries()">Per Series</mat-button-toggle>
+        <mat-button-toggle [checked]="groupMode() === 'service'" (change)="groupMode.set('service'); reloadSeries()">Per Service</mat-button-toggle>
       </mat-button-toggle-group>
     }
 
-    @if (isGrouped()) {
+    @if (!isDistribution() && (services().length > 1 || labelKeys().length > 0)) {
       <mat-form-field appearance="outline" subscriptSizing="dynamic" class="ctrl-field">
         <mat-label>Aggregate</mat-label>
         <mat-select [value]="aggMode()" (selectionChange)="onAggModeChange($event.value)">
@@ -66,14 +73,6 @@
         <mat-button-toggle [checked]="showRaw()" (change)="showRaw.set(true); reloadSeries()">Raw</mat-button-toggle>
       </mat-button-toggle-group>
     }
-  </div>
-
-  <!-- Stats -->
-  <div class="stat-grid">
-    <app-stat-card [label]="statsAreRates() ? 'Current Rate' : 'Current'" icon="show_chart" [value]="fmtStat(currentValue())" />
-    <app-stat-card label="Min" icon="arrow_downward" [value]="fmtStat(minValue())" />
-    <app-stat-card label="Max" icon="arrow_upward" [value]="fmtStat(maxValue())" />
-    <app-stat-card [label]="isHistogram() ? 'Count' : 'Average'" icon="functions" [value]="isHistogram() ? fmt(avgValue()) : fmtStat(avgValue())" />
   </div>
 
   <mat-tab-group [selectedIndex]="activeTab()" (selectedIndexChange)="activeTab.set($event)">
@@ -91,14 +90,22 @@
               [theme]="chartOptions().theme!"
               [dataLabels]="chartOptions().dataLabels!"
               [yaxis]="chartOptions().yaxis!"
+              [grid]="chartOptions().grid!"
               [legend]="chartOptions().legend!" />
           } @else if (!loading()) {
             <app-empty-state icon="show_chart" message="No data for selected range" />
           }
 
-          <!-- Histogram Count / Sum -->
-          @if (countSumChartOptions(); as cs) {
-            <div class="sub-chart-title">Count / Sum</div>
+          @if (isSummary() && (multiSeries()?.series?.length ?? 0) > 1) {
+            <div class="summary-note">
+              Quantiles shown for one series ({{ summarySeries()?.seriesName }}) — summary quantiles can't be
+              aggregated across series. Use the Service / label filters to compare.
+            </div>
+          }
+
+          <!-- Windowed throughput (histogram / exp-histogram / summary) -->
+          @if (throughputChartOptions(); as cs) {
+            <div class="sub-chart-title">Throughput</div>
             <apx-chart
               [series]="cs.series!"
               [chart]="cs.chart!"
@@ -107,32 +114,35 @@
               [theme]="cs.theme!"
               [dataLabels]="cs.dataLabels!"
               [yaxis]="cs.yaxis!"
+              [grid]="cs.grid!"
               [legend]="cs.legend!" />
           }
 
-          <!-- Histogram Min / Max -->
-          @if (minMaxChartOptions(); as mm) {
-            <div class="sub-chart-title">Min / Max</div>
+          <!-- Histogram latest-window bucket distribution (bars) -->
+          @if (bucketBarOptions(); as bar) {
+            <div class="sub-chart-title">Bucket distribution</div>
             <apx-chart
-              [series]="mm.series!"
-              [chart]="mm.chart!"
-              [xaxis]="mm.xaxis!"
-              [stroke]="mm.stroke!"
-              [theme]="mm.theme!"
-              [dataLabels]="mm.dataLabels!"
-              [yaxis]="mm.yaxis!"
-              [legend]="mm.legend!" />
+              [series]="bar.series!"
+              [chart]="bar.chart!"
+              [xaxis]="bar.xaxis!"
+              [theme]="bar.theme!"
+              [dataLabels]="bar.dataLabels!"
+              [grid]="bar.grid!"
+              [legend]="bar.legend!"
+              [plotOptions]="bar.plotOptions!" />
           }
 
           <!-- Histogram bucket-distribution heatmap -->
           @if (heatmapOptions(); as hm) {
-            <div class="sub-chart-title">Bucket distribution</div>
+            <div class="sub-chart-title">Bucket distribution over time</div>
             <apx-chart
               [series]="hm.series!"
               [chart]="hm.chart!"
               [xaxis]="hm.xaxis!"
               [theme]="hm.theme!"
               [dataLabels]="hm.dataLabels!"
+              [stroke]="hm.stroke!"
+              [grid]="hm.grid!"
               [legend]="hm.legend!"
               [plotOptions]="hm.plotOptions!" />
           }
