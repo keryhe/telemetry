@@ -30,6 +30,27 @@
 
 .spacer { flex: 1; }
 
+// Chart-style view switcher above the chart: compact icon-left / label-right tiles.
+// ::ng-deep pierces Material's internally-rendered label content.
+.chart-style-tiles {
+  margin-bottom: 12px;
+
+  ::ng-deep .mat-button-toggle-button { height: auto; }
+
+  ::ng-deep .mat-button-toggle-label-content {
+    display: flex;
+    flex-direction: row;
+    align-items: center;
+    gap: 6px;
+    line-height: 1.15;
+    padding: 4px 14px;
+  }
+
+  mat-icon { margin: 0; }
+
+  .tile-label { font-size: 12px; font-weight: 500; }
+}
+
 .chart-card {
   margin-top: 16px;
   margin-bottom: 16px;

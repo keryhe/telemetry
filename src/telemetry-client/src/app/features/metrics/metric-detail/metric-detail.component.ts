@@ -27,7 +27,8 @@ import { StatCardComponent } from '../../../shared/components/stat-card/stat-car
 import { EmptyStateComponent } from '../../../shared/components/empty-state/empty-state.component';
 import {
   AggregateFn, aggregateHistogramWindows, aggregateSeries, aggregateSummaryWindows,
-  buildHistogramBarFromWindows, buildHistogramHeatmapFromWindows, chartGrid, computeRateSeries,
+  buildHistogramBarFromWindows, buildHistogramHeatmapFromWindows, buildRadialGauge, buildShareDonut,
+  chartGrid, computeRateSeries,
   HistogramWindow, histogramQuantile,
   isCounterMetric, isDeltaSum, normalizeExpHistogramSeries, timeRangeZoom,
 } from '../../../shared/utils/chart.utils';
@@ -37,6 +38,16 @@ const STATE_KEY = 'state.metricDetail';
 
 type GroupMode = 'service' | 'labels';
 type AggMode = 'none' | AggregateFn;
+/** How the scalar (gauge/sum) chart is drawn; distributions ignore this. */
+type ChartStyle = 'timeseries' | 'stacked' | 'share' | 'dial';
+
+/** Icon + label for each chart-style tile (Material glyphs chosen to read distinctly at 24px). */
+const CHART_STYLE_META: Record<ChartStyle, { icon: string; label: string }> = {
+  timeseries: { icon: 'show_chart', label: 'Time series' },
+  stacked: { icon: 'stacked_line_chart', label: 'Stacked' },
+  share: { icon: 'donut_large', label: 'Share' },
+  dial: { icon: 'speed', label: 'Dial' },
+};
 
 /** Aggregation choices for the grouped-series control. */
 const AGG_MODES: { value: AggMode; label: string }[] = [
@@ -97,8 +108,11 @@ export class MetricDetailComponent implements OnInit {
   protected aggMode = signal<AggMode>('none');
   protected showRaw = signal(false);
   protected activeTab = signal(0);
+  /** Chart shape for scalar (gauge/sum) metrics; guarded to a value valid for the current type. */
+  protected chartStyle = signal<ChartStyle>('timeseries');
 
   protected readonly aggModes = AGG_MODES;
+  protected readonly chartStyleMeta = CHART_STYLE_META;
 
   protected metricType = computed(() => this.instances()[0]?.type ?? MetricType.Gauge);
 
@@ -121,6 +135,33 @@ export class MetricDetailComponent implements OnInit {
   protected isSummary = computed(() => this.metricType() === MetricType.Summary);
   /** Distribution metrics render derived percentiles/heatmap (via buildChart), not per-series grouping. */
   protected isDistribution = computed(() => this.isHistogram() || this.isExpHistogram() || this.isSummary());
+
+  /**
+   * A gauge whose unit gives the dial a real 0–100 / 0–1 bound (`%` or the OTLP dimensionless
+   * ratio `1`). Only these get a Dial; unbounded gauges (bytes, temperature, …) have no honest
+   * reference for a radial fill.
+   */
+  protected isBoundedGauge = computed(() => {
+    if (this.metricType() !== MetricType.Gauge) return false;
+    const unit = this.instances()[0]?.unit ?? '';
+    return unit === '%' || unit === '1';
+  });
+
+  /**
+   * Chart-style tiles available for the current metric type. Empty for distributions (selector
+   * hidden). Gauges are instantaneous levels: they don't stack, and share-of-total is a Sum
+   * concept, so they only add a Dial when bounded. Sums get stacked + share composition views.
+   */
+  protected chartStyles = computed<ChartStyle[]>(() => {
+    if (this.isDistribution()) return [];
+    if (this.metricType() === MetricType.Gauge) {
+      return this.isBoundedGauge() ? ['timeseries', 'dial'] : ['timeseries'];
+    }
+    return ['timeseries', 'stacked', 'share'];
+  });
+  /** The per-series grouping / aggregate controls only make sense for the time-series & stacked views. */
+  protected showSeriesControls = computed(() =>
+    this.chartStyle() === 'timeseries' || this.chartStyle() === 'stacked');
 
   /**
    * Single windowed aggregate for an explicit histogram (across all series). Percentiles, throughput,
@@ -321,6 +362,7 @@ export class MetricDetailComponent implements OnInit {
         aggMode: this.aggMode(),
         showRaw: this.showRaw(),
         activeTab: this.activeTab(),
+        chartStyle: this.chartStyle(),
       });
     });
   }
@@ -332,6 +374,7 @@ export class MetricDetailComponent implements OnInit {
     const saved = loadPageState(STATE_KEY, {
       metricName: '', selectedService: '', selectedLabels: {} as Record<string, string>,
       groupMode: 'labels' as GroupMode, aggMode: 'none' as AggMode, showRaw: false, activeTab: 0,
+      chartStyle: 'timeseries' as ChartStyle,
     });
     if (saved.metricName === this.metricName()) {
       this.selectedService.set(saved.selectedService);
@@ -341,6 +384,8 @@ export class MetricDetailComponent implements OnInit {
       this.aggMode.set(saved.aggMode);
       this.showRaw.set(saved.showRaw);
       this.activeTab.set(saved.activeTab);
+      // buildMultiChart guards this against a style invalid for the metric's (not-yet-loaded) type.
+      this.chartStyle.set(saved.chartStyle);
     }
   }
 
@@ -412,6 +457,7 @@ export class MetricDetailComponent implements OnInit {
     if (!s) return;
     const isDark = this.theme.isDark();
     const points = s.points;
+    const { start: rangeStart, end: rangeEnd } = this.timeRange.range();
     this.throughputChartOptions.set(null);
     this.bucketBarOptions.set(null);
     this.heatmapOptions.set(null);
@@ -485,7 +531,8 @@ export class MetricDetailComponent implements OnInit {
       chart: { type: chartType, height: 300, toolbar: { show: false }, background: 'transparent', ...this.zoomChart() },
       theme: { mode: isDark ? 'dark' : 'light' },
       series: chartSeries,
-      xaxis: { type: 'datetime', labels: { datetimeUTC: false } },
+      // Pin the axis to the header-selected window so the chart tracks that range (not the data extent).
+      xaxis: { type: 'datetime', min: rangeStart.getTime(), max: rangeEnd.getTime(), labels: { datetimeUTC: false } },
       stroke,
       fill: { opacity: chartType === 'area' ? 0.15 : 1 },
       dataLabels: { enabled: false },
@@ -508,7 +555,7 @@ export class MetricDetailComponent implements OnInit {
       chart: { type: 'line', height: 220, toolbar: { show: false }, background: 'transparent', ...this.zoomChart() },
       theme: { mode: isDark ? 'dark' : 'light' },
       series: [{ name: 'Throughput (/s)', data: throughput }],
-      xaxis: { type: 'datetime', labels: { datetimeUTC: false } },
+      xaxis: { type: 'datetime', min: start.getTime(), max: end.getTime(), labels: { datetimeUTC: false } },
       stroke: { curve: 'smooth', width: 2 },
       dataLabels: { enabled: false },
       grid: chartGrid(isDark),
@@ -518,56 +565,148 @@ export class MetricDetailComponent implements OnInit {
   }
 
   private buildMultiChart(multi: MultiSeriesMetricData): void {
+    // A restored/foreign style not valid for this metric type falls back to the time-series view.
+    if (!this.chartStyles().includes(this.chartStyle())) this.chartStyle.set('timeseries');
+
     const isDark = this.theme.isDark();
     const first = multi.series[0]?.points ?? [];
     const counter = isCounterMetric(multi.type, first);
     const delta = isDeltaSum(multi.type, first);
     const asRate = counter && !this.showRaw();
-    const agg = this.aggMode();
     this.throughputChartOptions.set(null);
     this.bucketBarOptions.set(null);
     this.heatmapOptions.set(null);
 
+    // Composition views collapse each series to a single value — a different shape entirely.
+    if (this.chartStyle() === 'share') { this.buildShareChart(multi, counter, delta, isDark); return; }
+    if (this.chartStyle() === 'dial') { this.buildDialChart(isDark); return; }
+
+    // Time-series & Stacked share the same series computation; Stacked aligns onto the shared grid
+    // (via aggregateSeries) so the bands sum correctly, and turns on chart.stacked.
+    const stacked = this.chartStyle() === 'stacked';
+    // Stacked ignores the collapse-to-one-line Aggregate (its control is hidden) so bands remain.
+    const agg = stacked ? 'none' : this.aggMode();
+    const { start, end } = this.timeRange.range();
+
     let chartSeries: { name: string; data: [number, number][] }[];
     if (this.groupMode() === 'service') {
       // One line per service, folded by the effective function (sum for counters/rate; avg for
-      // gauges by default; overridable via the Aggregate control).
+      // gauges by default; overridable via the Aggregate control). Already grid-aligned.
       chartSeries = this.foldByService(multi.series, asRate, this.effectiveFold());
     } else if (agg !== 'none') {
       // Collapse all grouped series into one aggregated line (rate-then-aggregate for counters).
-      const { start, end } = this.timeRange.range();
       const data = aggregateSeries(multi.series, start, end, agg, asRate);
       chartSeries = [{ name: `${agg} of ${multi.series.length} series`, data }];
     } else {
-      chartSeries = this.capTopN(multi.series, asRate);
+      chartSeries = this.capTopN(multi.series, asRate, stacked);
     }
 
-    // Delta sums render as bars only in the per-series view; per-service folds them into a line.
+    // Delta sums render as bars only in the per-series time-series view; per-service folds them into
+    // a line. Stacked uses area for rates/levels and bars for delta/raw values.
     const useBar = delta && agg === 'none' && this.groupMode() === 'labels';
+    const chartType = stacked ? (asRate ? 'area' : 'bar') : (useBar ? 'bar' : 'line');
 
     this.chartOptions.set({
       chart: {
-        type: useBar ? 'bar' : 'line',
+        type: chartType,
+        stacked,
         height: 300, toolbar: { show: false }, background: 'transparent',
         ...this.zoomChart(),
       },
       theme: { mode: isDark ? 'dark' : 'light' },
       series: chartSeries,
-      xaxis: { type: 'datetime', labels: { datetimeUTC: false } },
-      stroke: { curve: 'smooth', width: 2 },
+      // Pin the axis to the header-selected window so the chart always reflects that range,
+      // rather than auto-fitting to the data extent (which made sparse/single-series gauges
+      // appear to span a different, narrower time frame than the header).
+      xaxis: { type: 'datetime', min: start.getTime(), max: end.getTime(), labels: { datetimeUTC: false } },
+      stroke: { curve: 'smooth', width: stacked && asRate ? 1 : 2 },
+      fill: { opacity: stacked && asRate ? 0.7 : 1 },
       dataLabels: { enabled: false },
+      yaxis: { labels: { formatter: (v: number) => v.toFixed(2) } },
       grid: chartGrid(isDark),
       legend: { position: 'top' },
     });
   }
 
+  /** Latest-timestamp raw value of a series (for gauge snapshots / dial). */
+  private latestVal(points: MetricDataPoint[]): number {
+    if (!points.length) return 0;
+    const latest = points.reduce((a, b) =>
+      new Date(b.timestamp).getTime() > new Date(a.timestamp).getTime() ? b : a);
+    return val(latest);
+  }
+
+  /** Reset-safe total increase of a cumulative counter over its points (Σ positive consecutive deltas). */
+  private windowIncrease(points: MetricDataPoint[]): number {
+    let sum = 0;
+    for (let i = 1; i < points.length; i++) {
+      const d = val(points[i]) - val(points[i - 1]);
+      if (d > 0) sum += d;
+    }
+    return sum;
+  }
+
+  /** Group raw series by service name (for the per-service slice/band grouping). */
+  private groupByService(series: NamedMetricSeries[]): { name: string; list: NamedMetricSeries[] }[] {
+    const byService = new Map<string, NamedMetricSeries[]>();
+    for (const s of series) {
+      const key = s.serviceName || 'unknown';
+      const list = byService.get(key) ?? [];
+      list.push(s);
+      byService.set(key, list);
+    }
+    return [...byService.entries()].map(([name, list]) => ({ name, list }));
+  }
+
+  /**
+   * Donut of share-of-total, for Sum metrics only (composition of a real total). Uses the window
+   * total: true increase for cumulative counters, Σ values for deltas, latest value for raw/
+   * non-monotonic sums. Slices follow the per-series / per-service grouping; the top MAX_SERIES are
+   * kept and the rest folded into "others".
+   */
+  private buildShareChart(multi: MultiSeriesMetricData, counter: boolean, delta: boolean, isDark: boolean): void {
+    const groups = this.groupMode() === 'service'
+      ? this.groupByService(multi.series)
+      : multi.series.map((s) => ({ name: s.seriesName, list: [s] }));
+
+    const groupValue = (list: NamedMetricSeries[]): number => list.reduce((acc, s) => {
+      if (delta) return acc + s.points.reduce((a, p) => a + val(p), 0);
+      if (counter && !this.showRaw()) return acc + this.windowIncrease(s.points);
+      return acc + this.latestVal(s.points); // raw counter / non-monotonic sum
+    }, 0);
+
+    const slices = groups.map((g) => ({ name: g.name, value: groupValue(g.list) }));
+    const ranked = [...slices].sort((a, b) => b.value - a.value);
+    const kept = ranked.slice(0, MAX_SERIES);
+    const rest = ranked.slice(MAX_SERIES);
+    if (rest.length) {
+      kept.push({ name: `others (${rest.length})`, value: rest.reduce((a, s) => a + s.value, 0) });
+    }
+
+    this.chartOptions.set(buildShareDonut(kept, isDark) ?? {});
+  }
+
+  /**
+   * Radial gauge of the whole-metric current value against its unit's natural bound. Only offered
+   * for bounded gauges (see {@link isBoundedGauge}): `%` → 0–100, ratio `1` → 0–1.
+   */
+  private buildDialChart(isDark: boolean): void {
+    const unit = this.instances()[0]?.unit ?? '';
+    const value = this.stats().current ?? 0;
+    const max = unit === '%' ? 100 : 1; // '1' (dimensionless ratio) or any other bounded unit
+    this.chartOptions.set(buildRadialGauge(value, max, this.metricName(), isDark, unit === '1' ? '' : unit));
+  }
+
   /**
    * Renders the MAX_SERIES largest series individually and folds the remainder into a single
-   * summed "others" line, keeping the legend readable when a metric has many label sets.
+   * summed "others" line, keeping the legend readable when a metric has many label sets. When
+   * `aligned` (stacked view), each series is resampled onto the shared grid so the bands stack.
    */
-  private capTopN(series: NamedMetricSeries[], asRate: boolean): { name: string; data: [number, number][] }[] {
+  private capTopN(series: NamedMetricSeries[], asRate: boolean, aligned = false): { name: string; data: [number, number][] }[] {
+    const { start, end } = this.timeRange.range();
     const toData = (s: NamedMetricSeries): [number, number][] =>
-      asRate ? computeRateSeries(s.points)
+      aligned ? aggregateSeries([s], start, end, 'sum', asRate)
+             : asRate ? computeRateSeries(s.points)
              : s.points.map((p) => [new Date(p.timestamp).getTime(), val(p)] as [number, number]);
 
     if (series.length <= MAX_SERIES) {
@@ -580,7 +719,6 @@ export class MetricDetailComponent implements OnInit {
     const rest = ranked.slice(MAX_SERIES);
 
     const out = kept.map((s) => ({ name: s.seriesName, data: toData(s) }));
-    const { start, end } = this.timeRange.range();
     out.push({ name: `others (${rest.length})`, data: aggregateSeries(rest, start, end, 'sum', asRate) });
     return out;
   }
@@ -630,6 +768,13 @@ export class MetricDetailComponent implements OnInit {
     this.aggMode.set(mode);
     const multi = this.multiSeries();
     if (multi) this.buildMultiChart(multi);
+  }
+
+  /** Chart style only re-draws the already-loaded grouped series — no refetch needed. */
+  protected onChartStyleChange(style: ChartStyle): void {
+    this.chartStyle.set(style);
+    const multi = this.multiSeries();
+    if (multi && !this.isDistribution()) this.buildMultiChart(multi);
   }
 
   /** Current selection for a label key; '' (the "All" option) when no filter is set. */

@@ -334,6 +334,72 @@ function renderHeatmap(
 
 export type AggregateFn = 'sum' | 'avg' | 'min' | 'max';
 
+/**
+ * Shared categorical palette for multi-slice charts (donut share, future grouped views). Slices
+ * are assigned by index modulo the length, matching the per-service coloring used elsewhere.
+ */
+export const CATEGORICAL_COLORS = [
+  '#1976d2', '#f57c00', '#388e3c', '#7b1fa2', '#00838f', '#5d4037', '#558b2f', '#4527a0',
+];
+
+/**
+ * Donut chart of share-of-total across slices (e.g. one slice per service/label set). Slices
+ * arrive pre-reduced to a single value each; zero/negative values are dropped so the ring only
+ * shows real contributions. Returns null if nothing positive remains.
+ */
+export function buildShareDonut(
+  slices: { name: string; value: number }[],
+  isDark: boolean,
+): ApexOptions | null {
+  const positive = slices.filter((s) => s.value > 0);
+  if (!positive.length) return null;
+  return {
+    chart: { type: 'donut', height: 320, toolbar: { show: false }, background: 'transparent' },
+    theme: { mode: isDark ? 'dark' : 'light' },
+    series: positive.map((s) => s.value),
+    labels: positive.map((s) => s.name),
+    colors: positive.map((_, i) => CATEGORICAL_COLORS[i % CATEGORICAL_COLORS.length]),
+    dataLabels: { enabled: true, formatter: (val: number) => `${val.toFixed(1)}%` },
+    legend: { position: 'right' },
+    stroke: { width: 0 },
+    grid: chartGrid(isDark),
+  };
+}
+
+/**
+ * Radial gauge (single value against a max). `value` and `max` are in the metric's own units;
+ * the ring shows the percentage while the center label shows the real value + optional unit.
+ */
+export function buildRadialGauge(
+  value: number,
+  max: number,
+  label: string,
+  isDark: boolean,
+  unit = '',
+): ApexOptions {
+  const pct = max > 0 ? Math.min(100, Math.max(0, (value / max) * 100)) : 0;
+  return {
+    chart: { type: 'radialBar', height: 320, toolbar: { show: false }, background: 'transparent' },
+    theme: { mode: isDark ? 'dark' : 'light' },
+    series: [Number(pct.toFixed(1))],
+    labels: [label],
+    colors: [CATEGORICAL_COLORS[0]],
+    plotOptions: {
+      radialBar: {
+        hollow: { size: '60%' },
+        dataLabels: {
+          name: { offsetY: -8 },
+          value: {
+            offsetY: 4,
+            formatter: () => `${Number(value.toFixed(2))}${unit}`,
+          },
+        },
+      },
+    },
+    grid: chartGrid(isDark),
+  };
+}
+
 /** Raw value of a data point (gauge/sum), independent of histogram fields. */
 function pointValue(p: MetricDataPoint): number {
   return p.doubleValue ?? p.intValue ?? 0;

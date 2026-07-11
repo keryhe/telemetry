@@ -51,14 +51,14 @@
       </mat-form-field>
     }
 
-    @if (!isDistribution() && (services().length > 1 || labelKeys().length > 0)) {
+    @if (!isDistribution() && showSeriesControls() && (services().length > 1 || labelKeys().length > 0)) {
       <mat-button-toggle-group>
         <mat-button-toggle [checked]="groupMode() === 'labels'" (change)="groupMode.set('labels'); reloadSeries()">Per Series</mat-button-toggle>
         <mat-button-toggle [checked]="groupMode() === 'service'" (change)="groupMode.set('service'); reloadSeries()">Per Service</mat-button-toggle>
       </mat-button-toggle-group>
     }
 
-    @if (!isDistribution() && (services().length > 1 || labelKeys().length > 0)) {
+    @if (!isDistribution() && showSeriesControls() && chartStyle() !== 'stacked' && (services().length > 1 || labelKeys().length > 0)) {
       <mat-form-field appearance="outline" subscriptSizing="dynamic" class="ctrl-field">
         <mat-label>Aggregate</mat-label>
         <mat-select [value]="aggMode()" (selectionChange)="onAggModeChange($event.value)">
@@ -80,6 +80,18 @@
     <mat-tab label="Chart">
       <mat-card class="chart-card">
         <mat-card-content>
+          @if (!isDistribution() && chartStyles().length > 1) {
+            <mat-button-toggle-group class="chart-style-tiles" [value]="chartStyle()"
+              (change)="onChartStyleChange($event.value)" aria-label="Chart style">
+              @for (style of chartStyles(); track style) {
+                <mat-button-toggle [value]="style">
+                  <mat-icon>{{ chartStyleMeta[style].icon }}</mat-icon>
+                  <span class="tile-label">{{ chartStyleMeta[style].label }}</span>
+                </mat-button-toggle>
+              }
+            </mat-button-toggle-group>
+          }
+
           @if (chartOptions().series) {
             <apx-chart
               [series]="chartOptions().series!"
@@ -91,6 +103,9 @@
               [dataLabels]="chartOptions().dataLabels!"
               [yaxis]="chartOptions().yaxis!"
               [grid]="chartOptions().grid!"
+              [plotOptions]="chartOptions().plotOptions!"
+              [labels]="chartOptions().labels!"
+              [colors]="chartOptions().colors!"
               [legend]="chartOptions().legend!" />
           } @else if (!loading()) {
             <app-empty-state icon="show_chart" message="No data for selected range" />
