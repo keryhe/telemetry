@@ -3,6 +3,13 @@ import { HttpClient, HttpParams } from '@angular/common/http';
 import { Observable } from 'rxjs';
 import { environment } from '../../../../environments/environment';
 import { ServiceDependency, SpanModel, TraceFilter, TraceInfo } from '../../models/trace.models';
+import { PagedResult } from '../../models/paged.models';
+
+export interface TraceSearchQuery extends TraceFilter {
+  offset: number;
+  sort?: string;
+  dir?: 'asc' | 'desc';
+}
 
 @Injectable({ providedIn: 'root' })
 export class TracesApiService {
@@ -18,6 +25,20 @@ export class TracesApiService {
     if (filter.service) params = params.set('service', filter.service);
     if (filter.minDurationMs != null) params = params.set('minDurationMs', filter.minDurationMs);
     return this.http.get<TraceInfo[]>(this.base, { params });
+  }
+
+  /** Server-side filtered + paged traces for the traces list page (returns the full filtered total). */
+  searchTraces(query: TraceSearchQuery): Observable<PagedResult<TraceInfo>> {
+    let params = new HttpParams()
+      .set('start', query.start.toISOString())
+      .set('end', query.end.toISOString())
+      .set('limit', query.limit ?? 100)
+      .set('offset', query.offset)
+      .set('mode', query.mode ?? 'all');
+    if (query.service) params = params.set('service', query.service);
+    if (query.minDurationMs != null) params = params.set('minDurationMs', query.minDurationMs);
+    if (query.sort) params = params.set('sort', query.sort).set('dir', query.dir ?? 'desc');
+    return this.http.get<PagedResult<TraceInfo>>(`${this.base}/search`, { params });
   }
 
   getSpans(traceId: string): Observable<SpanModel[]> {

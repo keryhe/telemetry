@@ -131,6 +131,21 @@ Update `src/Keryhe.Telemetry.Api.Server/appsettings.json` (REST API / read path)
 
 Set `Database:Provider` to `PostgreSQL`, `Timescale`, or `SqlServer` to match your chosen backend (both hosts must agree). For SQL Server use a standard ADO.NET connection string.
 
+> **Connection strings live in User Secrets, not `appsettings.json`.** Both hosts ship with an
+> empty `ConnectionStrings` value and read the real value from .NET User Secrets so credentials
+> stay out of source control. Set them once per host:
+> ```bash
+> dotnet user-secrets --project src/Keryhe.Telemetry.Api.Server \
+>   set "ConnectionStrings:Read"  "Host=localhost;Port=5432;Database=telemetry;Username=postgres;Password=<password>"
+> dotnet user-secrets --project src/Keryhe.Telemetry.Proto.Server \
+>   set "ConnectionStrings:Write" "Host=localhost;Port=5432;Database=telemetry;Username=postgres;Password=<password>"
+> ```
+> A local TimescaleDB is easy to run via Docker:
+> ```bash
+> docker run -d --name timescaledb -p 5432:5432 \
+>   -e POSTGRES_PASSWORD=<password> -e POSTGRES_DB=telemetry timescale/timescaledb-ha:pg18
+> ```
+
 **3. Build:**
 
 ```bash
@@ -159,6 +174,45 @@ dotnet run --project src/Keryhe.Telemetry.TestDataGenerator
 ```
 
 The test data generator sends synthetic traces, metrics, and logs to the server at `http://localhost:5117` on a configurable interval.
+
+### Running the backend for the Angular UI (local verification)
+
+To exercise a UI change end-to-end you only need the **REST API** (read path) plus the Angular
+dev server — the gRPC ingestion host is only required when generating new data.
+
+```bash
+# Terminal 1 — REST API on https://localhost:7105 (+ http://localhost:5188)
+dotnet run --project src/Keryhe.Telemetry.Api.Server --launch-profile https
+
+# Terminal 2 — Angular dev server on http://localhost:4201
+cd src/telemetry-client && npm start
+```
+
+The Angular dev configuration (`src/telemetry-client/src/environments/environment.ts`) points at
+`https://localhost:7105/api`, so the API **must** be run with the `https` launch profile. Open
+`http://localhost:4201`.
+
+**Tenant scoping.** The read API resolves the active tenant from an `X-Tenant-Id` request header.
+The Angular app sends it automatically (it auto-selects the first tenant), so no manual step is
+needed in the browser. When calling the API directly (e.g. `curl` while verifying), pass the
+header yourself and `-k` for the dev certificate:
+
+```bash
+curl -k -H "X-Tenant-Id: 1" \
+  "https://localhost:7105/api/logs/search?start=2026-01-01T00:00:00Z&end=2026-12-31T00:00:00Z&limit=100&offset=0"
+```
+
+**Row-count parity.** To confirm a read/query change returns the right rows, compare the API
+response against the database directly. With the Docker TimescaleDB above:
+
+```bash
+docker exec timescaledb psql -U postgres -d telemetry -tAc \
+  "select count(*) from log_records lr join resources r on lr.resource_id=r.id where r.tenant_id=1;"
+```
+
+The `search` endpoints (`/api/logs/search`, `/api/traces/search`) return a
+`{ items, total, capped }` envelope, so the `total` field can be checked against a `COUNT(*)`
+of the same filter in SQL.
 
 ## Configuring an OpenTelemetry SDK
 

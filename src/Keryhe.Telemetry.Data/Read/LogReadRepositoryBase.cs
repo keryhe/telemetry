@@ -103,6 +103,82 @@ public abstract class LogReadRepositoryBase : DapperReadRepository, ILogReadRepo
             .ToList();
     }
 
+    public async Task<PagedResult<LogRecordModel>> QueryLogRecordsAsync(LogQuery query, CancellationToken cancellationToken = default)
+    {
+        if (query.Start >= query.End)
+            throw new ArgumentException("Start time must be before end time");
+
+        var limit = Math.Clamp(query.Limit, 1, 5000);
+        var offset = Math.Max(0, query.Offset);
+
+        // Row-level predicates pushed into SQL; COUNT(*) OVER() yields the full filtered total
+        // in the same round-trip (evaluated before LIMIT/OFFSET) on both Postgres and SqlServer.
+        var clauses = new List<string>
+        {
+            "lr.time_unix_nano >= @start",
+            "lr.time_unix_nano <= @end"
+        };
+        if (!string.IsNullOrEmpty(query.Service)) clauses.Add($"{ResourceServiceNameExpr} = @service");
+        if (query.MinSeverity.HasValue) clauses.Add("lr.severity_number >= @minSeverity");
+        if (!string.IsNullOrEmpty(query.Search)) clauses.Add($"lr.body_value {LikeOperator} @search");
+
+        var where = string.Join(" AND ", clauses);
+        var sql = $"""
+            SELECT
+                lr.time_unix_nano            AS TimeUnixNano,
+                lr.observed_time_unix_nano   AS ObservedTimeUnixNano,
+                lr.severity_number           AS SeverityNumber,
+                lr.severity_text             AS SeverityText,
+                lr.body_type                 AS BodyType,
+                lr.body_value                AS BodyValue,
+                lr.dropped_attributes_count  AS DroppedAttributesCount,
+                lr.flags                     AS Flags,
+                lr.trace_id                  AS TraceId,
+                lr.span_id                   AS SpanId,
+                lr.attributes_json           AS AttributesJson,
+                r.schema_url                 AS ResourceSchemaUrl,
+                r.attributes_json            AS ResourceAttributesJson,
+                sc.name                      AS ScopeName,
+                sc.version                   AS ScopeVersion,
+                sc.schema_url                AS ScopeSchemaUrl,
+                sc.attributes_json           AS ScopeAttributesJson,
+                COUNT(*) OVER()              AS TotalCount
+            FROM log_records lr
+            JOIN resources r               ON lr.resource_id = r.id
+            JOIN instrumentation_scopes sc ON lr.scope_id = sc.id
+            WHERE r.tenant_id = @tenantId AND {where}
+            ORDER BY lr.time_unix_nano DESC
+            {PagingClause}
+            """;
+
+        await using var conn = await OpenConnectionAsync(cancellationToken);
+        var rows = (await conn.QueryAsync<LogRow>(new CommandDefinition(sql, new
+        {
+            tenantId = TenantId,
+            start = TimeConversion.DateTimeToUnixNano(query.Start),
+            end = TimeConversion.DateTimeToUnixNano(query.End),
+            service = query.Service,
+            minSeverity = query.MinSeverity,
+            search = string.IsNullOrEmpty(query.Search) ? null : $"%{EscapeLike(query.Search)}%",
+            limit,
+            offset
+        }, cancellationToken: cancellationToken))).ToList();
+
+        var total = rows.Count > 0 ? (int)rows[0].TotalCount : 0;
+        return new PagedResult<LogRecordModel>
+        {
+            Items = rows.Select(Map).ToList(),
+            Total = total
+        };
+    }
+
+    /// <summary>
+    /// Escapes LIKE/ILIKE wildcards in user search text so <c>%</c>/<c>_</c> match literally.
+    /// Postgres/ILIKE default: backslash escape. SqlServer overrides to bracket escaping.
+    /// </summary>
+    protected virtual string EscapeLike(string value)
+        => value.Replace("\\", "\\\\").Replace("%", "\\%").Replace("_", "\\_");
+
     public async Task<IEnumerable<LogRecordModel>> GetLogRecordsBySeverityAsync(int minSeverity, DateTime? startTime = null, DateTime? endTime = null, CancellationToken cancellationToken = default)
     {
         var sql = BaseSelect + " AND lr.severity_number >= @minSeverity";
@@ -167,5 +243,8 @@ public abstract class LogReadRepositoryBase : DapperReadRepository, ILogReadRepo
         public string? ScopeVersion { get; set; }
         public string? ScopeSchemaUrl { get; set; }
         public string? ScopeAttributesJson { get; set; }
+
+        /// <summary>Window-function total from the paged query; 0 for the non-paged reads that don't select it.</summary>
+        public long TotalCount { get; set; }
     }
 }

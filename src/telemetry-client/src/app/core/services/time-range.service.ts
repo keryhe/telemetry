@@ -1,4 +1,6 @@
-import { Injectable, signal } from '@angular/core';
+import { inject, Injectable, signal } from '@angular/core';
+import { Params } from '@angular/router';
+import { UrlStateService } from '../../shared/utils/url-state';
 
 export type TimePreset = '1h' | '6h' | '24h' | '7d' | '30d';
 
@@ -45,20 +47,79 @@ interface StoredTimeRange {
   end: string;
 }
 
+const PRESETS: TimePreset[] = ['1h', '6h', '24h', '7d', '30d'];
+
 @Injectable({ providedIn: 'root' })
 export class TimeRangeService {
+  private readonly urlState = inject(UrlStateService);
+
   readonly range = signal<TimeRange>(this.loadInitial());
+
+  /** Guard: true while we're applying a range that came from the URL, so we don't write it back. */
+  private applyingFromUrl = false;
+  /** On the first reconcile we only adopt params (never write) to avoid racing initial navigation. */
+  private firstReconcile = true;
+
+  constructor() {
+    // Keep the URL in sync app-wide: URL params win on load and on back/forward; otherwise the
+    // current range is pushed into the URL so every view is shareable/deep-linkable.
+    this.urlState.changes().subscribe((params) => this.reconcileFromUrl(params));
+  }
 
   setPreset(preset: TimePreset): void {
     const range = this.fromPreset(preset);
     this.range.set(range);
     this.persist(range);
+    this.writeToUrl(range);
   }
 
   setCustom(start: Date, end: Date): void {
     const range: TimeRange = { preset: 'custom', start, end };
     this.range.set(range);
     this.persist(range);
+    this.writeToUrl(range);
+  }
+
+  /** Adopt time params from the URL (URL wins), or seed the URL from the current range when absent. */
+  private reconcileFromUrl(params: Params): void {
+    const isFirst = this.firstReconcile;
+    this.firstReconcile = false;
+
+    const rangeParam = params['range'] as string | undefined;
+    const from = params['from'] as string | undefined;
+    const to = params['to'] as string | undefined;
+    const current = this.range();
+
+    if (rangeParam && (PRESETS as string[]).includes(rangeParam)) {
+      if (current.preset !== rangeParam) this.applyFromUrl(() => this.setPreset(rangeParam as TimePreset));
+      return;
+    }
+    if (from && to) {
+      const start = new Date(from);
+      const end = new Date(to);
+      const valid = !isNaN(start.getTime()) && !isNaN(end.getTime());
+      const differs = current.preset !== 'custom' ||
+        current.start.getTime() !== start.getTime() || current.end.getTime() !== end.getTime();
+      if (valid && differs) this.applyFromUrl(() => this.setCustom(start, end));
+      return;
+    }
+    // No time params in the URL yet — reflect the current range so the link carries state.
+    // Skip on the very first reconcile so we don't navigate while initial routing is in flight.
+    if (!isFirst) this.writeToUrl(current);
+  }
+
+  private applyFromUrl(action: () => void): void {
+    this.applyingFromUrl = true;
+    try { action(); } finally { this.applyingFromUrl = false; }
+  }
+
+  private writeToUrl(range: TimeRange): void {
+    if (this.applyingFromUrl) return;
+    if (range.preset === 'custom') {
+      this.urlState.patch({ range: null, from: range.start.toISOString(), to: range.end.toISOString() });
+    } else {
+      this.urlState.patch({ range: range.preset, from: null, to: null });
+    }
   }
 
   /**

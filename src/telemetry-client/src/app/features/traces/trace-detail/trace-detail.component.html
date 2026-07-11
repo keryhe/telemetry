@@ -52,6 +52,29 @@
           }
         </div>
       </mat-card-header>
+
+      <!-- Find-in-trace -->
+      <div class="find-bar">
+        <mat-form-field appearance="outline" subscriptSizing="dynamic" class="find-field">
+          <mat-icon matPrefix>search</mat-icon>
+          <input matInput [ngModel]="findText()" (ngModelChange)="findText.set($event)"
+                 (keydown.enter)="nextMatch()"
+                 placeholder='Find spans — name, service:api, http.status_code:500, min-duration:100ms' />
+        </mat-form-field>
+        @if (findText().trim()) {
+          <span class="match-count">{{ matches().length ? currentMatchIndex() + 1 : 0 }} / {{ matches().length }}</span>
+          <button mat-icon-button [disabled]="!matches().length" (click)="prevMatch()" matTooltip="Previous match">
+            <mat-icon>keyboard_arrow_up</mat-icon>
+          </button>
+          <button mat-icon-button [disabled]="!matches().length" (click)="nextMatch()" matTooltip="Next match">
+            <mat-icon>keyboard_arrow_down</mat-icon>
+          </button>
+          <button mat-icon-button (click)="clearFind()" matTooltip="Clear">
+            <mat-icon>close</mat-icon>
+          </button>
+        }
+      </div>
+
       <mat-card-content class="timeline-content" [class.crit-active]="showCriticalPath()">
         <!-- Time axis (aligned with the Gantt tracks below) -->
         <div class="timeline-header">
@@ -64,9 +87,12 @@
         </div>
         @for (node of flatTree(); track node.spanIdHex) {
           <div class="span-row"
+               [attr.data-span-id]="node.spanIdHex"
                [class.selected]="selectedSpan()?.spanIdHex === node.spanIdHex"
                [class.error]="isError(node)"
                [class.on-crit]="node.onCriticalPath"
+               [class.search-match]="matchIds().has(node.spanIdHex)"
+               [class.current-match]="currentMatchId() === node.spanIdHex"
                (click)="selectSpan(node)">
             <!-- Name column -->
             <div class="span-name" [style.padding-left.px]="node.depth * 16 + 8">

@@ -1,5 +1,5 @@
 import { Component, computed, effect, inject, signal, untracked, viewChild } from '@angular/core';
-import { DatePipe, KeyValuePipe } from '@angular/common';
+import { DatePipe, DecimalPipe, KeyValuePipe } from '@angular/common';
 import { ActivatedRoute, RouterLink } from '@angular/router';
 import { MatCardModule } from '@angular/material/card';
 import { MatFormFieldModule } from '@angular/material/form-field';
@@ -27,15 +27,18 @@ import { bucketLogs, buildLogSeriesOptions, timeRangeZoom } from '../../shared/u
 import { parseSearchQuery, ParsedSearchQuery, SearchTerm } from '../../shared/utils/search-query.parser';
 import { LogSearchHelpDialogComponent } from './log-search-help-dialog/log-search-help-dialog.component';
 import { loadPageState, savePageState } from '../../shared/utils/page-state';
+import { UrlStateService } from '../../shared/utils/url-state';
 
 const BUCKET_COUNT = 30;
 const STATE_KEY = 'state.logs';
+/** Upper bound on rows pulled for the chart/stat overview (and shallow client paging). */
+const OVERVIEW_CAP = 1000;
 
 @Component({
   selector: 'app-logs',
   standalone: true,
   imports: [
-    DatePipe, KeyValuePipe, FormsModule, RouterLink,
+    DatePipe, DecimalPipe, KeyValuePipe, FormsModule, RouterLink,
     MatCardModule, MatTableModule, MatIconModule,
     MatFormFieldModule, MatInputModule, MatSelectModule, MatProgressBarModule,
     MatButtonModule, MatPaginatorModule, MatChipsModule, MatDialogModule,
@@ -51,6 +54,7 @@ export class LogsComponent {
   private readonly theme = inject(ThemeService);
   private readonly route = inject(ActivatedRoute);
   private readonly dialog = inject(MatDialog);
+  private readonly urlState = inject(UrlStateService);
 
   private readonly saved = loadPageState(STATE_KEY, {
     searchText: '',
@@ -60,10 +64,16 @@ export class LogsComponent {
   });
 
   protected loading = signal(true);
-  protected logs = signal<LogRecord[]>([]);
-  protected searchText = signal(this.saved.searchText);
-  protected selectedService = signal(this.saved.selectedService);
-  protected selectedSeverity = signal(this.saved.selectedSeverity);
+  /** Bounded, most-recent slice used for the chart, stat cards, and shallow/client paging. */
+  protected overview = signal<LogRecord[]>([]);
+  /** A single server-fetched page, used only when paging beyond the overview window. */
+  private serverPage = signal<LogRecord[]>([]);
+  protected total = signal(0);
+  protected capped = signal(false);
+
+  protected searchText = signal<string>(this.urlState.get('q') ?? this.saved.searchText);
+  protected selectedService = signal<string>(this.urlState.get('service') ?? this.saved.selectedService);
+  protected selectedSeverity = signal<number>(this.readNum('severity') ?? this.saved.selectedSeverity);
   protected traceIdFilter = signal('');
   protected expandedRow = signal<LogRecord | null>(null);
 
@@ -71,13 +81,15 @@ export class LogsComponent {
   // re-renders its rows, so we must call renderRows() after toggling expansion.
   private readonly table = viewChild(MatTable<LogRecord>);
 
-  protected pageIndex = signal(0);
-  protected pageSize = signal(this.saved.pageSize);
+  protected pageIndex = signal(this.readNum('page') ?? 0);
+  protected pageSize = signal(this.readNum('size') ?? this.saved.pageSize);
   protected readonly pageSizeOptions = [100, 250, 500, 1000];
 
-  protected services = computed(() =>
-    [...new Set(this.logs().map((l) => getServiceName(l)))].sort()
-  );
+  /** Distinct services in range for the dropdown — fetched independently of the paged rows. */
+  protected services = signal<string[]>([]);
+
+  /** Suppress the reset-to-page-0 on the very first load so a shared ?page=N is honored. */
+  private firstOverview = true;
 
   protected severityOptions = [
     { num: 9, label: 'Info' },
@@ -97,31 +109,36 @@ export class LogsComponent {
     return q.isTraceIdSearch ? q.traceId! : null;
   });
 
-  protected filtered = computed(() => {
-    let result = this.logs();
-    const svc = this.selectedService();
-    const sev = this.selectedSeverity();
-    const query = this.parsedQuery();
+  /** Free-text portion of the query offloaded to the server (attribute terms stay client-side). */
+  private serverQuery = computed(() =>
+    this.parsedQuery().terms.filter((t) => !t.isAttributeFilter).map((t) => t.freeText ?? '').join(' ').trim()
+  );
+  /** Attribute filters (`key:value`) the API can't express yet — refined client-side over the overview. */
+  private attributeTerms = computed(() => this.parsedQuery().terms.filter((t) => t.isAttributeFilter));
+  /** True when we must page/filter the overview client-side rather than trusting server offsets. */
+  protected clientMode = computed(() => this.activeTraceId() != null || this.attributeTerms().length > 0);
 
-    if (svc) result = result.filter((l) => getServiceName(l) === svc);
-    if (sev >= 0) result = result.filter((l) => (l.severityNumber ?? 0) >= sev);
-
-    // Trace-id searches are already scoped server-side; otherwise apply parsed terms.
-    if (!query.isTraceIdSearch && query.terms.length > 0) {
-      result = this.applyParsedSearch(result, query.terms);
-    }
-
+  /** Client-side refinement (trace mode + attribute terms) applied over the overview set. */
+  private refined = computed(() => {
+    let result = this.overview();
+    const terms = this.attributeTerms();
+    if (terms.length > 0) result = this.applyParsedSearch(result, terms);
     return result;
   });
 
-  protected paged = computed(() => {
+  /** Real length behind the paginator: server total normally, refined length in client mode. */
+  protected effectiveTotal = computed(() => this.clientMode() ? this.refined().length : this.total());
+
+  /** Rows for the current page — a client slice of the overview, or the fetched server page. */
+  protected displayRows = computed(() => {
     const start = this.pageIndex() * this.pageSize();
-    return this.filtered().slice(start, start + this.pageSize());
+    if (this.clientMode()) return this.refined().slice(start, start + this.pageSize());
+    if (this.needsServerPage()) return this.serverPage();
+    return this.overview().slice(start, start + this.pageSize());
   });
 
-  protected totalCount = computed(() => this.logs().length);
-  protected errorCount = computed(() => this.logs().filter((l) => (l.severityNumber ?? 0) >= 17).length);
-  protected warnCount = computed(() => this.logs().filter((l) => {
+  protected errorCount = computed(() => this.overview().filter((l) => (l.severityNumber ?? 0) >= 17).length);
+  protected warnCount = computed(() => this.overview().filter((l) => {
     const s = l.severityNumber ?? 0; return s >= 13 && s < 17;
   }).length);
 
@@ -141,23 +158,43 @@ export class LogsComponent {
     const traceId = this.route.snapshot.queryParamMap.get('traceId');
     if (traceId) this.traceIdFilter.set(traceId);
 
-    // Load on time-range change OR when the active trace id changes. In trace mode
-    // we don't read the range, so range changes won't trigger a redundant refetch.
+    // Overview + services + total: reload when the time range or any server-side filter changes.
     effect(() => {
       const activeTrace = this.activeTraceId();
-      if (activeTrace) {
-        untracked(() => this.loadByTrace(activeTrace));
-        return;
-      }
-      this.timeRange.range();
-      untracked(() => this.load());
+      this.selectedService();
+      this.selectedSeverity();
+      this.serverQuery();
+      if (!activeTrace) this.timeRange.range();
+
+      untracked(() => {
+        if (!this.firstOverview) this.pageIndex.set(0);
+        this.firstOverview = false;
+        if (activeTrace) this.loadByTrace(activeTrace);
+        else { this.loadOverview(); this.loadServices(); }
+      });
     });
 
-    // Reset to the first page whenever the filtered result set changes.
+    // Deep server page: fetch only when paging past the overview window in pure server mode.
     effect(() => {
-      this.filtered();
-      untracked(() => this.pageIndex.set(0));
+      this.pageIndex(); this.pageSize();
+      this.selectedService(); this.selectedSeverity(); this.serverQuery();
+      if (!this.activeTraceId()) this.timeRange.range();
+      untracked(() => { if (this.needsServerPage()) this.loadServerPage(); });
     });
+
+    // Mirror filter/paging state into the URL (shareable/deep-linkable).
+    effect(() => {
+      this.urlState.patch({
+        q: this.searchText() || null,
+        service: this.selectedService() || null,
+        severity: this.selectedSeverity() >= 0 ? this.selectedSeverity() : null,
+        page: this.pageIndex() > 0 ? this.pageIndex() : null,
+        size: this.pageSize() !== 100 ? this.pageSize() : null,
+      });
+    });
+
+    // Adopt filter/paging params on back/forward navigation.
+    this.urlState.changes().subscribe(() => this.readStateFromUrl());
 
     effect(() => {
       savePageState(STATE_KEY, {
@@ -169,19 +206,60 @@ export class LogsComponent {
     });
   }
 
-  private load(): void {
+  /** Whether the current page falls outside the loaded overview and must be fetched from the server. */
+  private needsServerPage(): boolean {
+    if (this.clientMode()) return false;
+    const start = this.pageIndex() * this.pageSize();
+    return this.overview().length < this.total() && start + this.pageSize() > this.overview().length;
+  }
+
+  private loadOverview(): void {
     this.loading.set(true);
     const { start, end } = this.timeRange.range();
-    this.api.getLogs(start, end).subscribe({
-      next: (logs) => { this.logs.set(logs); this.buildChart(); this.loading.set(false); },
+    this.api.searchLogs({
+      start, end,
+      service: this.selectedService() || undefined,
+      minSeverity: this.selectedSeverity() >= 0 ? this.selectedSeverity() : undefined,
+      q: this.serverQuery() || undefined,
+      limit: OVERVIEW_CAP, offset: 0,
+    }).subscribe({
+      next: (res) => {
+        this.overview.set(res.items);
+        this.total.set(res.total);
+        this.capped.set(res.total > res.items.length);
+        this.buildChart();
+        this.loading.set(false);
+      },
       error: () => this.loading.set(false),
     });
+  }
+
+  private loadServerPage(): void {
+    const { start, end } = this.timeRange.range();
+    this.api.searchLogs({
+      start, end,
+      service: this.selectedService() || undefined,
+      minSeverity: this.selectedSeverity() >= 0 ? this.selectedSeverity() : undefined,
+      q: this.serverQuery() || undefined,
+      limit: this.pageSize(), offset: this.pageIndex() * this.pageSize(),
+    }).subscribe({ next: (res) => this.serverPage.set(res.items) });
+  }
+
+  private loadServices(): void {
+    const { start, end } = this.timeRange.range();
+    this.api.getServices(start, end).subscribe({ next: (s) => this.services.set(s) });
   }
 
   private loadByTrace(traceId: string): void {
     this.loading.set(true);
     this.api.getLogsByTrace(traceId).subscribe({
-      next: (logs) => { this.logs.set(logs); this.buildChart(); this.loading.set(false); },
+      next: (logs) => {
+        this.overview.set(logs);
+        this.total.set(logs.length);
+        this.capped.set(false);
+        this.buildChart();
+        this.loading.set(false);
+      },
       error: () => this.loading.set(false),
     });
   }
@@ -216,7 +294,7 @@ export class LogsComponent {
   private buildChart(): void {
     const { start, end } = this.timeRange.range();
     const isDark = this.theme.isDark();
-    const buckets = bucketLogs(this.logs(), start, end, BUCKET_COUNT);
+    const buckets = bucketLogs(this.overview(), start, end, BUCKET_COUNT);
     // Use the shared base as-is (datetime axis, legend, visible grid) so this
     // matches the Dashboard log chart, then layer on drag-to-select zoom.
     const base = buildLogSeriesOptions(buckets, isDark, 180);
@@ -230,6 +308,27 @@ export class LogsComponent {
       legend: { show: false },
       grid: { show: true },
     });
+  }
+
+  private readNum(key: string): number | null {
+    const raw = this.urlState.get(key);
+    if (raw == null) return null;
+    const n = Number(raw);
+    return Number.isFinite(n) ? n : null;
+  }
+
+  /** Pull filter/paging state from the URL (back/forward). Idempotent: only differing values are set. */
+  private readStateFromUrl(): void {
+    const q = this.urlState.get('q') ?? '';
+    const service = this.urlState.get('service') ?? '';
+    const severity = this.readNum('severity') ?? -1;
+    const page = this.readNum('page') ?? 0;
+    const size = this.readNum('size') ?? this.saved.pageSize;
+    if (this.searchText() !== q) this.searchText.set(q);
+    if (this.selectedService() !== service) this.selectedService.set(service);
+    if (this.selectedSeverity() !== severity) this.selectedSeverity.set(severity);
+    if (this.pageSize() !== size) this.pageSize.set(size);
+    if (this.pageIndex() !== page) this.pageIndex.set(page);
   }
 
   protected toggleRow(row: LogRecord): void {
@@ -249,6 +348,11 @@ export class LogsComponent {
     this.pageIndex.set(e.pageIndex);
     this.pageSize.set(e.pageSize);
   }
+
+  // Filter edits reset to the first page (user changes; URL restores keep their page).
+  protected onSearchChange(value: string): void { this.searchText.set(value); this.pageIndex.set(0); }
+  protected onServiceChange(value: string): void { this.selectedService.set(value); this.pageIndex.set(0); }
+  protected onSeverityChange(value: number): void { this.selectedSeverity.set(value); this.pageIndex.set(0); }
 
   protected openSearchHelp(): void {
     this.dialog.open(LogSearchHelpDialogComponent, { maxWidth: '720px', width: '90vw' });

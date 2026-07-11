@@ -84,9 +84,8 @@
             <mat-button-toggle-group class="chart-style-tiles" [value]="chartStyle()"
               (change)="onChartStyleChange($event.value)" aria-label="Chart style">
               @for (style of chartStyles(); track style) {
-                <mat-button-toggle [value]="style">
+                <mat-button-toggle [value]="style" matTooltip="{{ chartStyleMeta[style].label }}">
                   <mat-icon>{{ chartStyleMeta[style].icon }}</mat-icon>
-                  <span class="tile-label">{{ chartStyleMeta[style].label }}</span>
                 </mat-button-toggle>
               }
             </mat-button-toggle-group>

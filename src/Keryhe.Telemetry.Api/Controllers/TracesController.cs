@@ -38,6 +38,36 @@ public class TracesController : ControllerBase
         return Ok(result);
     }
 
+    // GET /api/traces/search?start=&end=&mode=all|errors|slow&service=&minDurationMs=&limit=&offset=
+    // Server-side filtered + paged traces for the traces list page (returns the full filtered total).
+    [HttpGet("search")]
+    public async Task<ActionResult<PagedResult<TraceInfo>>> SearchTraces(
+        [FromQuery] DateTime start,
+        [FromQuery] DateTime end,
+        [FromQuery] string mode = "all",
+        [FromQuery] string? service = null,
+        [FromQuery] double? minDurationMs = null,
+        [FromQuery] string? sort = null,
+        [FromQuery] string dir = "desc",
+        [FromQuery] int limit = 100,
+        [FromQuery] int offset = 0,
+        CancellationToken ct = default)
+    {
+        var result = await _traces.QueryTracesAsync(new TraceQuery
+        {
+            Start = start,
+            End = end,
+            Mode = mode,
+            Service = service,
+            MinDurationMs = minDurationMs,
+            Sort = sort,
+            Dir = dir,
+            Limit = limit,
+            Offset = offset
+        }, ct);
+        return Ok(result);
+    }
+
     // GET /api/traces/{traceId}/spans
     [HttpGet("{traceId}/spans")]
     public async Task<ActionResult<List<SpanModel>>> GetSpans(string traceId, CancellationToken ct = default)

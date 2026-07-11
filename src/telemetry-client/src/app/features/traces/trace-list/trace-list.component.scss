@@ -20,6 +20,30 @@
 .chart-card {
   margin: 16px 0;
   .chart-title { font-size: 14px; font-weight: 600; margin-bottom: 4px; }
+
+  .chart-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 4px;
+  }
+  .chart-toggle {
+    height: 30px;
+    ::ng-deep .mat-button-toggle-button {
+      height: 100%;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+    ::ng-deep .mat-button-toggle-label-content {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      line-height: 1;
+      padding: 0 12px;
+    }
+    .mat-icon { font-size: 18px; width: 18px; height: 18px; }
+  }
 }
 
 .tab-card { margin-top: 16px; }
@@ -73,4 +97,23 @@
 .mat-mdc-table {
   --mat-table-row-item-container-height: 32px;
   --mat-table-header-container-height: 40px;
+}
+
+.capped-notice {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  margin-bottom: 8px;
+  font-size: 13px;
+  color: var(--mat-sys-on-surface-variant);
+  background: var(--mat-sys-surface-container-high);
+  border-radius: 6px;
+
+  mat-icon {
+    font-size: 18px;
+    width: 18px;
+    height: 18px;
+    color: var(--mat-sys-primary);
+  }
 }

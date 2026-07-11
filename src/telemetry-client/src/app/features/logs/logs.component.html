@@ -13,7 +13,7 @@
   }
 
   <div class="stat-grid">
-    <app-stat-card label="Total Logs" icon="article" [value]="totalCount()" />
+    <app-stat-card label="Total Logs" icon="article" [value]="effectiveTotal()" />
     <app-stat-card label="Errors" icon="error" [value]="errorCount()" [color]="errorCount() > 0 ? 'error' : 'default'" />
     <app-stat-card label="Warnings" icon="warning" [value]="warnCount()" [color]="warnCount() > 0 ? 'warn' : 'default'" />
     <app-stat-card label="Services" icon="cloud" [value]="services().length" />
@@ -22,7 +22,7 @@
   <div class="filter-bar">
     <mat-form-field appearance="outline" subscriptSizing="dynamic" class="filter-field">
       <mat-label>Severity</mat-label>
-      <mat-select [value]="selectedSeverity()" (selectionChange)="selectedSeverity.set($event.value)">
+      <mat-select [value]="selectedSeverity()" (selectionChange)="onSeverityChange($event.value)">
         <mat-option [value]="-1">Trace+</mat-option>
         @for (s of severityOptions; track s.num) {
           <mat-option [value]="s.num">{{ s.label }}+</mat-option>
@@ -32,7 +32,7 @@
 
     <mat-form-field appearance="outline" subscriptSizing="dynamic" class="filter-field">
       <mat-label>Service</mat-label>
-      <mat-select [value]="selectedService()" (selectionChange)="selectedService.set($event.value)">
+      <mat-select [value]="selectedService()" (selectionChange)="onServiceChange($event.value)">
         <mat-option value="">All</mat-option>
         @for (s of services(); track s) {
           <mat-option [value]="s">{{ s }}</mat-option>
@@ -44,7 +44,8 @@
       <mat-label>Search</mat-label>
       <mat-icon matPrefix>search</mat-icon>
       <input matInput
-             [(ngModel)]="searchText"
+             [ngModel]="searchText()"
+             (ngModelChange)="onSearchChange($event)"
              [ngModelOptions]="{standalone: true}"
              placeholder='Trace ID OR "error text" OR key=value OR key:value' />
       @if (isTraceIdSearch()) {
@@ -78,10 +79,16 @@
 
   <mat-card>
     <mat-card-content class="table-content">
-      @if (filtered().length === 0 && !loading()) {
+      @if (displayRows().length === 0 && !loading()) {
         <app-empty-state icon="receipt_long" message="No logs found" hint="Adjust the time range or filters" />
       } @else {
-        <table mat-table [dataSource]="paged()" multiTemplateDataRows class="full-width log-table">
+        @if (capped()) {
+          <div class="capped-notice">
+            <mat-icon>info</mat-icon>
+            Showing the most recent {{ overview().length }} of {{ total() | number }} matching logs. Narrow the time range or filters to see the rest.
+          </div>
+        }
+        <table mat-table [dataSource]="displayRows()" multiTemplateDataRows class="full-width log-table">
           <ng-container matColumnDef="expand">
             <th mat-header-cell *matHeaderCellDef class="expand-col"></th>
             <td mat-cell *matCellDef="let l" class="expand-col">
@@ -171,7 +178,7 @@
         </table>
 
         <mat-paginator
-          [length]="filtered().length"
+          [length]="effectiveTotal()"
           [pageSize]="pageSize()"
           [pageIndex]="pageIndex()"
           [pageSizeOptions]="pageSizeOptions"

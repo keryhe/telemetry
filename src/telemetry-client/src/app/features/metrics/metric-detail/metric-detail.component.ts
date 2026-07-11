@@ -13,6 +13,7 @@ import { MatProgressBarModule } from '@angular/material/progress-bar';
 import { MatSelectModule } from '@angular/material/select';
 import { MatTableModule } from '@angular/material/table';
 import { MatTabsModule } from '@angular/material/tabs';
+import { MatTooltipModule } from '@angular/material/tooltip';
 import { NgApexchartsModule } from 'ng-apexcharts';
 import type { ApexOptions } from 'ng-apexcharts';
 
@@ -79,7 +80,7 @@ const val = (p: MetricDataPoint): number => p.doubleValue ?? p.intValue ?? 0;
     DatePipe, DecimalPipe, KeyValuePipe, SlicePipe, RouterLink,
     MatCardModule, MatButtonModule, MatButtonToggleModule, MatIconModule,
     MatTabsModule, MatTableModule, MatChipsModule, MatFormFieldModule,
-    MatSelectModule, MatProgressBarModule, NgApexchartsModule,
+    MatSelectModule, MatProgressBarModule, MatTooltipModule, NgApexchartsModule,
     StatCardComponent, EmptyStateComponent,
   ],
   templateUrl: './metric-detail.component.html',

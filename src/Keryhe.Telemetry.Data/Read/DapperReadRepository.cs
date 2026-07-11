@@ -34,6 +34,19 @@ public abstract class DapperReadRepository
     protected abstract Task<DbConnection> OpenConnectionAsync(CancellationToken cancellationToken);
 
     // =========================================================================
+    // SQL DIALECT HOOKS (defaults are PostgreSQL/Timescale; SqlServer overrides)
+    // =========================================================================
+
+    /// <summary>Case-insensitive LIKE operator. Postgres uses <c>ILIKE</c>; SqlServer uses <c>LIKE</c> (case-insensitive collation).</summary>
+    protected virtual string LikeOperator => "ILIKE";
+
+    /// <summary>Trailing LIMIT/OFFSET clause for a paged query; expects <c>@limit</c> and <c>@offset</c> parameters and a preceding ORDER BY.</summary>
+    protected virtual string PagingClause => "LIMIT @limit OFFSET @offset";
+
+    /// <summary>SQL expression extracting <c>service.name</c> from the <c>r.attributes_json</c> resource column.</summary>
+    protected virtual string ResourceServiceNameExpr => "r.attributes_json ->> 'service.name'";
+
+    // =========================================================================
     // JSON / ATTRIBUTE HELPERS (parity with the former EF [NotMapped] getters)
     // =========================================================================
 

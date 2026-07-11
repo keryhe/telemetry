@@ -1,11 +1,14 @@
-import { Component, Input, OnInit, computed, inject, signal } from '@angular/core';
+import { Component, Input, OnInit, computed, effect, inject, signal, untracked } from '@angular/core';
 import { DatePipe, KeyValuePipe, SlicePipe } from '@angular/common';
 import { RouterLink } from '@angular/router';
 import { Title } from '@angular/platform-browser';
+import { FormsModule } from '@angular/forms';
 import { MatButtonModule } from '@angular/material/button';
 import { MatCardModule } from '@angular/material/card';
 import { MatChipsModule } from '@angular/material/chips';
+import { MatFormFieldModule } from '@angular/material/form-field';
 import { MatIconModule } from '@angular/material/icon';
+import { MatInputModule } from '@angular/material/input';
 import { MatProgressBarModule } from '@angular/material/progress-bar';
 import { MatSlideToggleModule } from '@angular/material/slide-toggle';
 import { MatTooltipModule } from '@angular/material/tooltip';
@@ -15,6 +18,7 @@ import { SpanModel, SpanStatusCode, SpanKind } from '../../../core/models/trace.
 import { EmptyStateComponent } from '../../../shared/components/empty-state/empty-state.component';
 import { StatCardComponent } from '../../../shared/components/stat-card/stat-card.component';
 import { formatDuration } from '../../../shared/utils/chart.utils';
+import { parseSearchQuery, ParsedSearchQuery, SearchTerm } from '../../../shared/utils/search-query.parser';
 
 interface SpanNode extends SpanModel {
   children: SpanNode[];
@@ -42,9 +46,10 @@ const SERVICE_COLORS = [
   selector: 'app-trace-detail',
   standalone: true,
   imports: [
-    DatePipe, KeyValuePipe, SlicePipe, RouterLink,
+    DatePipe, KeyValuePipe, SlicePipe, RouterLink, FormsModule,
     MatCardModule, MatButtonModule, MatIconModule, MatTooltipModule,
     MatChipsModule, MatProgressBarModule, MatSlideToggleModule,
+    MatFormFieldModule, MatInputModule,
     EmptyStateComponent, StatCardComponent,
   ],
   templateUrl: './trace-detail.component.html',
@@ -63,6 +68,29 @@ export class TraceDetailComponent implements OnInit {
   protected selectedSpan = signal<SpanNode | null>(null);
   protected tree = signal<SpanNode[]>([]);
   protected showCriticalPath = signal(false);
+
+  // Find-in-trace: match spans by name/service/attribute/min-duration, highlight, and cycle matches.
+  protected findText = signal('');
+  protected currentMatchIndex = signal(0);
+
+  private readonly parsedFind = computed<ParsedSearchQuery>(() => parseSearchQuery(this.findText()));
+  /** Matching spans, in visible (flattened) order, for highlight + prev/next navigation. */
+  protected matches = computed<SpanNode[]>(() => {
+    if (!this.findText().trim()) return [];
+    const parsed = this.parsedFind();
+    return this.flatTree().filter((n) => this.spanMatches(n, parsed));
+  });
+  protected matchIds = computed(() => new Set(this.matches().map((m) => m.spanIdHex)));
+  protected currentMatch = computed<SpanNode | null>(() => this.matches()[this.currentMatchIndex()] ?? null);
+  protected currentMatchId = computed(() => this.currentMatch()?.spanIdHex ?? null);
+
+  constructor() {
+    // A changed query restarts navigation at the first match.
+    effect(() => {
+      this.findText();
+      untracked(() => this.currentMatchIndex.set(0));
+    });
+  }
 
   protected traceStart = computed(() => {
     const s = this.spans();
@@ -317,5 +345,92 @@ export class TraceDetailComponent implements OnInit {
 
   protected isError(node: SpanNode): boolean {
     return node.statusCode === SpanStatusCode.Error;
+  }
+
+  // ===========================================================================
+  // FIND-IN-TRACE
+  // ===========================================================================
+
+  private spanMatches(node: SpanNode, parsed: ParsedSearchQuery): boolean {
+    // A 32-hex "trace id" query is treated here as a span/trace id substring match.
+    if (parsed.isTraceIdSearch) {
+      const id = parsed.traceId!.toLowerCase();
+      return node.spanIdHex.toLowerCase().includes(id) || node.traceIdHex.toLowerCase().includes(id);
+    }
+    if (!parsed.terms.length) return false;
+    return parsed.terms.every((t) => this.termMatches(node, t));
+  }
+
+  private termMatches(node: SpanNode, term: SearchTerm): boolean {
+    if (term.isAttributeFilter) {
+      const key = (term.key ?? '').toLowerCase();
+      const value = (term.value ?? '').toLowerCase();
+
+      // Special key: min-duration threshold (accepts "500", "500ms", "1.5s").
+      if (key === 'min-duration' || key === 'minduration' || key === 'duration') {
+        const threshold = this.parseDurationMs(value);
+        return threshold != null && node.durationMs >= threshold;
+      }
+
+      let hay: string | null;
+      if (key === 'service' || key === 'service.name') hay = node.serviceName;
+      else if (key === 'name' || key === 'operation' || key === 'op') hay = node.name;
+      else {
+        const v = this.lookupAttr(node, term.key ?? '');
+        hay = v == null ? null : String(v);
+      }
+      if (hay == null) return false;
+      const h = hay.toLowerCase();
+      return term.isExactMatch ? h === value : h.includes(value);
+    }
+
+    const text = (term.freeText ?? '').toLowerCase();
+    return node.name.toLowerCase().includes(text) || node.serviceName.toLowerCase().includes(text);
+  }
+
+  /** Look up an attribute value on the span, then its resource, by exact key. */
+  private lookupAttr(node: SpanNode, key: string): unknown {
+    if (node.attributes && Object.prototype.hasOwnProperty.call(node.attributes, key)) return node.attributes[key];
+    const res = node.resource?.attributes;
+    if (res && Object.prototype.hasOwnProperty.call(res, key)) return res[key];
+    return null;
+  }
+
+  /** Parse a duration threshold in ms (bare number or ms), or seconds when suffixed with s. */
+  private parseDurationMs(value: string): number | null {
+    const m = value.trim().match(/^([\d.]+)\s*(ms|s)?$/);
+    if (!m) return null;
+    const n = parseFloat(m[1]);
+    if (!isFinite(n)) return null;
+    return m[2] === 's' ? n * 1000 : n;
+  }
+
+  protected nextMatch(): void {
+    const n = this.matches().length;
+    if (!n) return;
+    this.currentMatchIndex.update((i) => (i + 1) % n);
+    this.focusCurrentMatch();
+  }
+
+  protected prevMatch(): void {
+    const n = this.matches().length;
+    if (!n) return;
+    this.currentMatchIndex.update((i) => (i - 1 + n) % n);
+    this.focusCurrentMatch();
+  }
+
+  /** Select the current match and scroll its row into view. */
+  private focusCurrentMatch(): void {
+    const node = this.currentMatch();
+    if (!node) return;
+    this.selectedSpan.set(node);
+    setTimeout(() =>
+      document.querySelector(`[data-span-id="${node.spanIdHex}"]`)?.scrollIntoView({ block: 'center', behavior: 'smooth' })
+    );
+  }
+
+  protected clearFind(): void {
+    this.findText.set('');
+    this.currentMatchIndex.set(0);
   }
 }

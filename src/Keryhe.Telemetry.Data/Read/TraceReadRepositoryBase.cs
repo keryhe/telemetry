@@ -299,6 +299,90 @@ public abstract class TraceReadRepositoryBase : DapperReadRepository, ITraceRead
     }
 
     // =========================================================================
+    // PAGED TRACE QUERY (server-side filter + offset/limit + total)
+    // =========================================================================
+
+    public async Task<PagedResult<TraceInfo>> QueryTracesAsync(TraceQuery query, CancellationToken cancellationToken = default)
+    {
+        if (query.Start >= query.End)
+            throw new ArgumentException("Start time must be before end time");
+
+        var limit = Math.Clamp(query.Limit, 1, 1000);
+        var offset = Math.Max(0, query.Offset);
+
+        var ordered = await ComputeTraceInfosAsync(query, cancellationToken);
+
+        return new PagedResult<TraceInfo>
+        {
+            Items = ordered.Skip(offset).Take(limit).ToList(),
+            Total = ordered.Count
+        };
+    }
+
+    /// <summary>
+    /// Fetches the raw spans matching the query's mode/service/time predicates, groups them into the
+    /// same trace-level shape the legacy <c>Get*TracesAsync</c> methods produce, filters out non-root
+    /// traces, and returns the full ordered list (no offset/limit applied — the caller pages it).
+    /// </summary>
+    private async Task<List<TraceInfo>> ComputeTraceInfosAsync(TraceQuery query, CancellationToken ct)
+    {
+        var startNano = TimeConversion.DateTimeToUnixNano(query.Start);
+        var endNano = TimeConversion.DateTimeToUnixNano(query.End);
+        var isSlow = query.Mode == "slow";
+        var minDurationNano = isSlow ? (long)((query.MinDurationMs ?? 500) * 1_000_000) : 0;
+
+        var clauses = new List<string> { "s.start_time_unix_nano >= @start", "s.start_time_unix_nano <= @end" };
+        if (query.Mode == "errors") clauses.Add("s.status_code = 'ERROR'");
+        var where = string.Join(" AND ", clauses);
+
+        var raw = await FetchRawSpansAsync(where, new { tenantId = TenantId, start = startNano, end = endNano }, ct);
+
+        if (!string.IsNullOrEmpty(query.Service))
+        {
+            raw = raw.Where(s => s.ResourceAttributes != null &&
+                                 s.ResourceAttributes.TryGetValue("service.name", out var v) &&
+                                 v?.ToString() == query.Service).ToList();
+        }
+
+        var groups = raw
+            .GroupBy(s => s.TraceId)
+            .Select(g => new
+            {
+                TraceIdHex = g.Key,
+                SpanCount = g.Count(),
+                MinStartTimeNano = g.Min(s => s.StartTimeUnixNano),
+                MaxEndTimeNano = g.Max(s => s.EndTimeUnixNano),
+                HasErrors = g.Any(s => s.StatusCode == "ERROR"),
+                RootSpan = g.FirstOrDefault(s => s.ParentSpanId == null) ?? g.OrderBy(s => s.StartTimeUnixNano).First(),
+                ServiceName = ExtractServiceName(g.OrderBy(s => s.StartTimeUnixNano).FirstOrDefault()?.ResourceAttributes)
+            })
+            .Select(t => new { t.TraceIdHex, t.SpanCount, t.MinStartTimeNano, t.MaxEndTimeNano, t.HasErrors, t.RootSpan, t.ServiceName, DurationNano = t.MaxEndTimeNano - t.MinStartTimeNano })
+            .Where(t => !isSlow || t.DurationNano >= minDurationNano)
+            .ToList();
+
+        // Order: explicit sort key when supplied, otherwise the mode default (slow → worst
+        // duration first; all/errors → most-recent first).
+        var asc = string.Equals(query.Dir, "asc", StringComparison.OrdinalIgnoreCase);
+        groups = ((query.Sort?.ToLowerInvariant()) switch
+        {
+            "duration"  => asc ? groups.OrderBy(t => t.DurationNano)      : groups.OrderByDescending(t => t.DurationNano),
+            "spans"     => asc ? groups.OrderBy(t => t.SpanCount)         : groups.OrderByDescending(t => t.SpanCount),
+            "time"      => asc ? groups.OrderBy(t => t.MinStartTimeNano)  : groups.OrderByDescending(t => t.MinStartTimeNano),
+            "service"   => asc ? groups.OrderBy(t => t.ServiceName)       : groups.OrderByDescending(t => t.ServiceName),
+            "operation" => asc ? groups.OrderBy(t => t.RootSpan.Name)     : groups.OrderByDescending(t => t.RootSpan.Name),
+            _           => isSlow ? groups.OrderByDescending(t => t.DurationNano) : groups.OrderByDescending(t => t.MinStartTimeNano),
+        }).ToList();
+
+        var existingParentIds = await CheckSpanIdsExistAsync(
+            groups.Where(t => t.RootSpan.ParentSpanId != null).Select(t => t.RootSpan.ParentSpanId!).Distinct(), ct);
+
+        return groups
+            .Where(t => t.RootSpan.ParentSpanId == null || !existingParentIds.Contains(t.RootSpan.ParentSpanId))
+            .Select(t => ToTraceInfo(t.TraceIdHex, t.SpanCount, t.MinStartTimeNano, t.MaxEndTimeNano, t.HasErrors, t.ServiceName, t.RootSpan))
+            .ToList();
+    }
+
+    // =========================================================================
     // ANALYSIS READS
     // =========================================================================
 

@@ -49,6 +49,14 @@ public class SqlServerLogReadRepository(IConfiguration configuration, ITenantCon
         await conn.OpenAsync(cancellationToken);
         return conn;
     }
+
+    // SqlServer dialect: LIKE is case-insensitive under the default collation, JSON is read via
+    // JSON_VALUE, paging uses OFFSET/FETCH, and LIKE wildcards escape with square brackets.
+    protected override string LikeOperator => "LIKE";
+    protected override string ResourceServiceNameExpr => "JSON_VALUE(r.attributes_json, '$.\"service.name\"')";
+    protected override string PagingClause => "OFFSET @offset ROWS FETCH NEXT @limit ROWS ONLY";
+    protected override string EscapeLike(string value)
+        => value.Replace("[", "[[]").Replace("%", "[%]").Replace("_", "[_]");
 }
 
 public class SqlServerTenantCatalogRepository(IConfiguration configuration)

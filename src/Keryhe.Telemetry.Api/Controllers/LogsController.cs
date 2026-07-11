@@ -26,6 +26,32 @@ public class LogsController : ControllerBase
         return Ok(logs);
     }
 
+    // GET /api/logs/search?start=&end=&service=&minSeverity=&q=&limit=&offset=
+    // Server-side filtered + paged logs for the logs list page.
+    [HttpGet("search")]
+    public async Task<ActionResult<PagedResult<LogRecordModel>>> SearchLogs(
+        [FromQuery] DateTime start,
+        [FromQuery] DateTime end,
+        [FromQuery] string? service = null,
+        [FromQuery] int? minSeverity = null,
+        [FromQuery] string? q = null,
+        [FromQuery] int limit = 100,
+        [FromQuery] int offset = 0,
+        CancellationToken ct = default)
+    {
+        var result = await _logs.QueryLogRecordsAsync(new LogQuery
+        {
+            Start = start,
+            End = end,
+            Service = service,
+            MinSeverity = minSeverity,
+            Search = q,
+            Limit = limit,
+            Offset = offset
+        }, ct);
+        return Ok(result);
+    }
+
     // GET /api/logs/services?start=&end=
     [HttpGet("services")]
     public async Task<ActionResult<List<string>>> GetDistinctServices(
