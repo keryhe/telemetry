@@ -39,11 +39,36 @@
     <mat-card class="timeline-card">
       <mat-card-header>
         <mat-card-title>Spans</mat-card-title>
-        <mat-slide-toggle class="crit-toggle"
-                          [checked]="showCriticalPath()"
-                          (change)="showCriticalPath.set($event.checked)">
-          Critical path
-        </mat-slide-toggle>
+
+        <!-- View switcher: timeline / statistics / flame / JSON -->
+        <div class="view-switcher">
+          @for (v of views; track v.id) {
+            <button mat-button [class.active]="view() === v.id" (click)="view.set(v.id)" [matTooltip]="v.label">
+              <mat-icon>{{ v.icon }}</mat-icon>
+              <span class="view-label">{{ v.label }}</span>
+            </button>
+          }
+        </div>
+
+        @if (view() === 'timeline') {
+          <!-- Jump-to-error -->
+          @if (errorSpans().length) {
+            <div class="error-nav">
+              <span class="error-count"><mat-icon>error</mat-icon> {{ currentErrorIndex() + 1 }} / {{ errorSpans().length }}</span>
+              <button mat-icon-button (click)="prevError()" matTooltip="Previous error">
+                <mat-icon>keyboard_arrow_up</mat-icon>
+              </button>
+              <button mat-icon-button (click)="nextError()" matTooltip="Next error">
+                <mat-icon>keyboard_arrow_down</mat-icon>
+              </button>
+            </div>
+          }
+          <mat-slide-toggle class="crit-toggle"
+                            [checked]="showCriticalPath()"
+                            (change)="showCriticalPath.set($event.checked)">
+            Critical path
+          </mat-slide-toggle>
+        }
         <div class="service-legend">
           @for (svc of serviceNames(); track svc) {
             <span class="legend-item">
@@ -53,6 +78,7 @@
         </div>
       </mat-card-header>
 
+      @if (view() === 'timeline') {
       <!-- Find-in-trace -->
       <div class="find-bar">
         <mat-form-field appearance="outline" subscriptSizing="dynamic" class="find-field">
@@ -150,6 +176,12 @@
           <!-- Inline detail below the selected row -->
           @if (selectedSpan()?.spanIdHex === node.spanIdHex) {
             <div class="span-detail-inline" [class.error]="isError(node)">
+              <div class="detail-toolbar">
+                <button mat-stroked-button (click)="copySpanLink()">
+                  <mat-icon>{{ linkCopied() ? 'check' : 'link' }}</mat-icon>
+                  {{ linkCopied() ? 'Copied!' : 'Copy link to span' }}
+                </button>
+              </div>
               <div class="detail-grid">
                 <!-- Span Info -->
                 <div class="detail-col">
@@ -275,6 +307,134 @@
           }
         }
       </mat-card-content>
+      }
+
+      <!-- Statistics view: self-time aggregated by service and by operation -->
+      @if (view() === 'statistics') {
+        <mat-card-content class="alt-view">
+          <div class="stats-block">
+            <div class="stats-title">By service</div>
+            <table class="stats-table">
+              <thead>
+                <tr>
+                  <th>Service</th><th class="num">Spans</th><th class="num">Self time</th>
+                  <th class="num">% self</th><th class="num">Avg</th><th class="num">Max</th>
+                </tr>
+              </thead>
+              <tbody>
+                @for (r of serviceStats(); track r.key) {
+                  <tr>
+                    <td><span class="svc-dot" [style.background]="colorFor(r.key)"></span>{{ r.key }}</td>
+                    <td class="num">{{ r.count | number }}</td>
+                    <td class="num">{{ formatDuration(r.selfMs) }}</td>
+                    <td class="num pct-cell">
+                      <span class="pct-bar" [style.width.%]="r.pct"></span>
+                      <span class="pct-text">{{ r.pct | number:'1.0-1' }}%</span>
+                    </td>
+                    <td class="num">{{ formatDuration(r.avgMs) }}</td>
+                    <td class="num">{{ formatDuration(r.maxMs) }}</td>
+                  </tr>
+                }
+              </tbody>
+            </table>
+          </div>
+
+          <div class="stats-block">
+            <div class="stats-title">By operation</div>
+            <table class="stats-table">
+              <thead>
+                <tr>
+                  <th>Operation</th><th class="num">Spans</th><th class="num">Self time</th>
+                  <th class="num">% self</th><th class="num">Avg</th><th class="num">Max</th>
+                </tr>
+              </thead>
+              <tbody>
+                @for (r of operationStats(); track r.key) {
+                  <tr>
+                    <td class="mono">{{ r.key }}</td>
+                    <td class="num">{{ r.count | number }}</td>
+                    <td class="num">{{ formatDuration(r.selfMs) }}</td>
+                    <td class="num pct-cell">
+                      <span class="pct-bar" [style.width.%]="r.pct"></span>
+                      <span class="pct-text">{{ r.pct | number:'1.0-1' }}%</span>
+                    </td>
+                    <td class="num">{{ formatDuration(r.avgMs) }}</td>
+                    <td class="num">{{ formatDuration(r.maxMs) }}</td>
+                  </tr>
+                }
+              </tbody>
+            </table>
+          </div>
+        </mat-card-content>
+      }
+
+      <!-- Flame graph: time-ordered or aggregated-by-call-path icicle, colored by service -->
+      @if (view() === 'flame') {
+        <mat-card-content class="alt-view">
+          <div class="flame-toolbar">
+            <div class="flame-mode">
+              <button mat-button [class.active]="flameMode() === 'time'" (click)="setFlameMode('time')"
+                      matTooltip="Spans positioned on the trace timeline">Time-order</button>
+              <button mat-button [class.active]="flameMode() === 'aggregated'" (click)="setFlameMode('aggregated')"
+                      matTooltip="Merge repeated call-paths, sized by self-time">Aggregated</button>
+            </div>
+            <div class="flame-hint">
+              @if (flameMode() === 'aggregated') {
+                Width = self-time, merged by call-path · Click to zoom · ⌘/Ctrl-click to open span
+              } @else {
+                Width = duration · Depth = call stack · Click a cell to jump to its span
+              }
+            </div>
+          </div>
+
+          @if (flameMode() === 'aggregated' && zoomCrumbs().length) {
+            <div class="flame-breadcrumb">
+              <button mat-button (click)="resetZoom()"><mat-icon>home</mat-icon> Trace</button>
+              @for (crumb of zoomCrumbs(); track $index) {
+                <mat-icon class="sep">chevron_right</mat-icon>
+                <button mat-button (click)="zoomToCrumb($index)">{{ crumb }}</button>
+              }
+            </div>
+          }
+
+          <div class="flame-scroll">
+            <div class="flame" [class.time-mode]="flameMode() === 'time'" [style.height.px]="flameHeight()">
+              @for (c of flameCells(); track c.node.spanIdHex + ':' + c.path) {
+                <div class="flame-cell"
+                     [class.err]="c.isError"
+                     [class.op-match]="hoveredOp() && c.node.name === hoveredOp()"
+                     [style.left.%]="c.x"
+                     [style.width.%]="c.width"
+                     [style.top.px]="c.y"
+                     [style.height.px]="flameRowHeight - 2"
+                     [style.background]="c.color"
+                     [matTooltip]="c.tooltip"
+                     matTooltipClass="gantt-tooltip"
+                     matTooltipPosition="above"
+                     (mouseenter)="hoveredOp.set(c.node.name)"
+                     (mouseleave)="hoveredOp.set(null)"
+                     (click)="onFlameCellClick(c, $event)">
+                  @if (flameMode() === 'time' && c.selfFraction < 0.999) {
+                    <span class="self-underline" [style.width.%]="c.selfFraction * 100"></span>
+                  }
+                  <span class="flame-label">{{ c.label }}</span>
+                </div>
+              }
+            </div>
+          </div>
+        </mat-card-content>
+      }
+
+      <!-- Raw JSON: pretty-printed span array with copy / download -->
+      @if (view() === 'json') {
+        <mat-card-content class="alt-view">
+          <div class="json-toolbar">
+            <button mat-stroked-button (click)="copyJson()"><mat-icon>content_copy</mat-icon> Copy</button>
+            <button mat-stroked-button (click)="downloadJson()"><mat-icon>download</mat-icon> Download</button>
+          </div>
+          <pre class="json-view">{{ spansJson() }}</pre>
+        </mat-card-content>
+      }
     </mat-card>
   }
 </div>

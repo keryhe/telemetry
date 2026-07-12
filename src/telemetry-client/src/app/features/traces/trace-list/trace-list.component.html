@@ -75,7 +75,7 @@
   </div>
 
   <!-- Tabs -->
-  <mat-tab-group>
+  <mat-tab-group [selectedIndex]="selectedTab()" (selectedIndexChange)="selectedTab.set($event)">
     <!-- Traces Table -->
     <mat-tab label="Traces">
       <!-- Trace volume / latency chart -->
@@ -152,7 +152,12 @@
               </ng-container>
               <ng-container matColumnDef="duration">
                 <th mat-header-cell *matHeaderCellDef mat-sort-header>Duration</th>
-                <td mat-cell *matCellDef="let t" class="mono">{{ formatDuration(parseDuration(t.traceDuration)) }}</td>
+                <td mat-cell *matCellDef="let t" class="duration-cell">
+                  <span class="mono dur-text">{{ formatDuration(parseDuration(t.traceDuration)) }}</span>
+                  <span class="dur-bar-track">
+                    <span class="dur-bar" [class.err]="t.hasErrors" [style.width.%]="durationBarPct(t)"></span>
+                  </span>
+                </td>
               </ng-container>
               <ng-container matColumnDef="spans">
                 <th mat-header-cell *matHeaderCellDef mat-sort-header>Spans</th>
@@ -196,6 +201,7 @@
             <app-empty-state icon="hub" message="No dependencies found" />
           } @else {
             <div class="map-legend">
+              <span class="legend-item"><span class="node-swatch" style="border-color:#4caf50"></span> Node = service (click to filter)</span>
               <span class="legend-item"><span class="swatch" style="background:var(--mat-sys-outline)"></span> Healthy</span>
               <span class="legend-item"><span class="swatch" style="background:#ff9800"></span> ≥5% errors</span>
               <span class="legend-item"><span class="swatch" style="background:#f44336"></span> ≥20% errors</span>
@@ -210,14 +216,15 @@
               [autoZoom]="true"
               [autoCenter]="true">
               <ng-template #nodeTemplate let-node>
-                <svg:g class="node">
+                <svg:g class="node clickable" (click)="onNodeClick(node)">
                   <svg:rect [attr.width]="node.dimension?.width ?? 120" [attr.height]="node.dimension?.height ?? 40"
-                    rx="6" ry="6" fill="var(--mat-sys-primary-container)" stroke="var(--mat-sys-primary)" stroke-width="1.5" />
+                    rx="6" ry="6" fill="var(--mat-sys-primary-container)" [attr.stroke]="node.color" stroke-width="2.5" />
                   <svg:text alignment-baseline="central" [attr.x]="(node.dimension?.width ?? 120) / 2"
                     [attr.y]="(node.dimension?.height ?? 40) / 2"
                     text-anchor="middle" fill="var(--mat-sys-on-primary-container)" font-size="12">
                     {{ node.label }}
                   </svg:text>
+                  <svg:title>{{ node.label }}: {{ (node.errorRate * 100).toFixed(1) }}% errors, {{ node.callCount }} calls — click to filter</svg:title>
                 </svg:g>
               </ng-template>
               <ng-template #linkTemplate let-link>

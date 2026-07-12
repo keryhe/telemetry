@@ -33,8 +33,15 @@ import { parseSearchQuery, ParsedSearchQuery, SearchTerm } from '../../../shared
 import { TraceSearchHelpDialogComponent } from '../trace-search-help-dialog/trace-search-help-dialog.component';
 import { loadPageState, savePageState } from '../../../shared/utils/page-state';
 import { UrlStateService } from '../../../shared/utils/url-state';
+import { serviceColor } from '../../../shared/utils/service-colors';
 
-interface GraphNode { id: string; label: string; }
+interface GraphNode {
+  id: string; label: string;
+  /** Aggregate error rate (0–1) of calls involving this service, for health coloring. */
+  errorRate: number;
+  callCount: number;
+  color: string;
+}
 interface GraphLink {
   id: string; source: string; target: string; label: string;
   callCount: number; errorRate: number; avgDurationMs: number;
@@ -112,6 +119,9 @@ export class TraceListComponent {
   protected sortDir = signal<SortDir>((this.urlState.get('dir') as SortDir) ?? this.saved.sortDir);
   protected chartView = signal<ChartView>((this.urlState.get('chart') as ChartView) ?? this.saved.chartView);
 
+  /** Selected tab index (Traces / Service Map / Analytics); driven by service-map node clicks. */
+  protected selectedTab = signal(0);
+
   private firstOverview = true;
 
   protected parsedQuery = computed<ParsedSearchQuery>(() => parseSearchQuery(this.searchText()));
@@ -174,12 +184,37 @@ export class TraceListComponent {
     return ms.length > 0 ? formatDuration(ms.reduce((a, b) => a + b, 0) / ms.length) : '—';
   });
 
-  protected graphNodes = computed<GraphNode[]>(() =>
-    [...new Set([
+  /** Per-service health (error rate + call volume), derived from the dependency edges. */
+  private nodeHealth = computed(() => {
+    const deps = this.dependencies();
+    const map = new Map<string, { errorRate: number; callCount: number }>();
+    const services = new Set<string>([
+      ...deps.map((d) => d.parentService),
+      ...deps.map((d) => d.childService),
+    ]);
+    for (const svc of services) {
+      // Prefer incoming calls (svc as callee) — they reflect errors serving this
+      // service; fall back to outgoing calls for source-only services.
+      let edges = deps.filter((d) => d.childService === svc);
+      if (edges.length === 0) edges = deps.filter((d) => d.parentService === svc);
+      const callCount = edges.reduce((a, d) => a + d.callCount, 0);
+      const errors = edges.reduce((a, d) => a + d.errorCount, 0);
+      map.set(svc, { errorRate: callCount > 0 ? errors / callCount : 0, callCount });
+    }
+    return map;
+  });
+
+  protected graphNodes = computed<GraphNode[]>(() => {
+    const health = this.nodeHealth();
+    return [...new Set([
       ...this.dependencies().map((d) => d.parentService),
       ...this.dependencies().map((d) => d.childService),
-    ])].map((s) => ({ id: s, label: s }))
-  );
+    ])].map((s) => {
+      const h = health.get(s);
+      const errorRate = h?.errorRate ?? 0;
+      return { id: s, label: s, errorRate, callCount: h?.callCount ?? 0, color: this.nodeColor(errorRate) };
+    });
+  });
 
   protected graphLinks = computed<GraphLink[]>(() => {
     const deps = this.dependencies();
@@ -241,6 +276,33 @@ export class TraceListComponent {
     if (errorRate >= 0.2) return '#f44336';   // high errors
     if (errorRate >= 0.05) return '#ff9800';  // some errors
     return 'var(--mat-sys-outline)';          // healthy
+  }
+
+  /** Solid health color for a service node border (green/orange/red by error rate). */
+  private nodeColor(errorRate: number): string {
+    if (errorRate >= 0.2) return '#f44336';
+    if (errorRate >= 0.05) return '#ff9800';
+    return '#4caf50';
+  }
+
+  /** Longest duration among the rows currently shown, for scaling inline duration bars. */
+  protected maxRowDurationMs = computed(() =>
+    Math.max(1, ...this.displayTraces().map((t) => parseDotnetTimespan(t.traceDuration)))
+  );
+
+  /** This trace's duration as a percentage of the slowest visible row (0–100). */
+  protected durationBarPct(t: TraceInfo): number {
+    return Math.min(100, (parseDotnetTimespan(t.traceDuration) / this.maxRowDurationMs()) * 100);
+  }
+
+  protected readonly serviceColor = serviceColor;
+
+  /** Service-map node click → filter the trace table to that service and switch to it. */
+  protected onNodeClick(node: GraphNode): void {
+    this.selectedService.set(node.id);
+    this.selectedOperation.set('');
+    this.pageIndex.set(0);
+    this.selectedTab.set(0);
   }
 
   constructor() {

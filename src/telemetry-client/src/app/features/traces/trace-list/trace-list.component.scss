@@ -61,11 +61,18 @@
 
   .legend-item { display: flex; align-items: center; gap: 6px; }
   .swatch { width: 18px; height: 4px; border-radius: 2px; display: inline-block; }
+  .node-swatch {
+    width: 16px; height: 10px; border-radius: 3px; display: inline-block;
+    border: 2px solid; background: var(--mat-sys-primary-container);
+  }
   .thickness {
     width: 18px; height: 6px; border-radius: 2px; display: inline-block;
     background: var(--mat-sys-outline);
   }
 }
+
+// Service-map nodes are clickable (filter the trace table by service).
+.node.clickable { cursor: pointer; }
 
 .edge-label { pointer-events: none; }
 
@@ -88,6 +95,26 @@
 }
 
 .mono { font-family: monospace; font-size: 12px; }
+
+// Inline relative-duration bar under the duration text.
+.duration-cell {
+  .dur-text { display: block; line-height: 1.4; }
+  .dur-bar-track {
+    display: block;
+    width: 72px;
+    height: 4px;
+    border-radius: 2px;
+    background: var(--mat-sys-surface-container-highest);
+    overflow: hidden;
+  }
+  .dur-bar {
+    display: block;
+    height: 100%;
+    border-radius: 2px;
+    background: var(--mat-sys-primary);
+    &.err { background: #f44336; }
+  }
+}
 
 .analytics-controls {
   margin-bottom: 16px;

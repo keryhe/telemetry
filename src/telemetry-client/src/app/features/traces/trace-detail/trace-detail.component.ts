@@ -1,5 +1,5 @@
 import { Component, Input, OnInit, computed, effect, inject, signal, untracked } from '@angular/core';
-import { DatePipe, KeyValuePipe, SlicePipe } from '@angular/common';
+import { DatePipe, DecimalPipe, KeyValuePipe, SlicePipe } from '@angular/common';
 import { RouterLink } from '@angular/router';
 import { Title } from '@angular/platform-browser';
 import { FormsModule } from '@angular/forms';
@@ -21,6 +21,8 @@ import { EmptyStateComponent } from '../../../shared/components/empty-state/empt
 import { StatCardComponent } from '../../../shared/components/stat-card/stat-card.component';
 import { formatDuration } from '../../../shared/utils/chart.utils';
 import { parseSearchQuery, ParsedSearchQuery, SearchTerm } from '../../../shared/utils/search-query.parser';
+import { SERVICE_COLORS } from '../../../shared/utils/service-colors';
+import { UrlStateService } from '../../../shared/utils/url-state';
 
 interface SpanNode extends SpanModel {
   children: SpanNode[];
@@ -31,6 +33,8 @@ interface SpanNode extends SpanModel {
   widthPct: number;
   collapsed: boolean;
   serviceName: string;
+  /** Self-time (span duration minus time covered by children), in ms. */
+  selfMs: number;
   /** Saturated self-time sub-bars (span interval minus children), trace-relative %. */
   selfSegments: { leftPct: number; widthPct: number }[];
   /** True when this span is on the trace's critical path. */
@@ -39,16 +43,75 @@ interface SpanNode extends SpanModel {
   eventMarkers: { pct: number; isError: boolean; label: string }[];
 }
 
-const SERVICE_COLORS = [
-  '#1976d2', '#f57c00', '#388e3c', '#7b1fa2',
-  '#00838f', '#5d4037', '#558b2f', '#4527a0',
-];
+type DetailView = 'timeline' | 'statistics' | 'flame' | 'json';
+
+/** Aggregated per-service / per-operation timing row for the Statistics view. */
+interface StatRow {
+  key: string;
+  count: number;
+  selfMs: number;
+  totalMs: number;
+  avgMs: number;
+  maxMs: number;
+  /** Share of total self-time across the trace (%). */
+  pct: number;
+}
+
+/** Delimiter for aggregated call-path keys (unlikely to occur in an operation name). */
+const PATH_SEP = '';
+
+/** A rendered flame cell — shared by the time-ordered and aggregated layouts. */
+interface FlameCell {
+  /** Representative span (click → reveal in the timeline). */
+  node: SpanNode;
+  label: string;
+  /** Left edge, as a percentage of the flame width. */
+  x: number;
+  /** Width, as a percentage of the flame width. */
+  width: number;
+  /** Vertical offset in px (depth × row height). */
+  y: number;
+  color: string;
+  isError: boolean;
+  tooltip: string;
+  /** Self-time as a fraction of the cell's own duration (drives the time-mode underline). */
+  selfFraction: number;
+  /** Merged-span count — 1 in time mode. */
+  count: number;
+  /** Call-path key, used as the zoom target in aggregated mode. */
+  path: string;
+}
+
+/** A merged call-path frame in the aggregated flame layout. */
+interface AggFrame {
+  name: string;
+  path: string;
+  /** Summed own self-time across merged spans (ms). */
+  selfMs: number;
+  /** selfMs + summed children totals — the frame's inclusive self-time (ms). */
+  totalMs: number;
+  count: number;
+  node: SpanNode;
+  serviceName: string;
+  children: AggFrame[];
+}
+
+/** Mutable accumulator used while merging spans into the aggregated tree. */
+interface AggBuild {
+  name: string;
+  path: string;
+  selfMs: number;
+  count: number;
+  node: SpanNode;
+  serviceName: string;
+  children: Map<string, AggBuild>;
+}
 
 @Component({
   selector: 'app-trace-detail',
   standalone: true,
   imports: [
-    DatePipe, KeyValuePipe, SlicePipe, RouterLink, FormsModule,
+    DatePipe, DecimalPipe, KeyValuePipe, SlicePipe, RouterLink, FormsModule,
     MatCardModule, MatButtonModule, MatIconModule, MatTooltipModule,
     MatChipsModule, MatProgressBarModule, MatSlideToggleModule,
     MatFormFieldModule, MatInputModule, MatDialogModule,
@@ -63,14 +126,28 @@ export class TraceDetailComponent implements OnInit {
   private readonly api = inject(TracesApiService);
   private readonly title = inject(Title);
   private readonly dialog = inject(MatDialog);
+  private readonly urlState = inject(UrlStateService);
 
   protected copied = signal(false);
+  protected linkCopied = signal(false);
 
   protected loading = signal(true);
   protected spans = signal<SpanModel[]>([]);
   protected selectedSpan = signal<SpanNode | null>(null);
   protected tree = signal<SpanNode[]>([]);
   protected showCriticalPath = signal(false);
+
+  /** Active detail view: waterfall timeline, aggregate statistics, flame graph, or raw JSON. */
+  protected view = signal<DetailView>('timeline');
+  protected readonly views: { id: DetailView; label: string; icon: string }[] = [
+    { id: 'timeline', label: 'Timeline', icon: 'view_timeline' },
+    { id: 'statistics', label: 'Statistics', icon: 'table_chart' },
+    { id: 'flame', label: 'Flame', icon: 'local_fire_department' },
+    { id: 'json', label: 'JSON', icon: 'data_object' },
+  ];
+
+  /** Jump-to-error cursor over the trace's error spans. */
+  protected currentErrorIndex = signal(0);
 
   // Find-in-trace: match spans by name/service/attribute/min-duration, highlight, and cycle matches.
   protected findText = signal('');
@@ -117,6 +194,195 @@ export class TraceDetailComponent implements OnInit {
 
   protected flatTree = computed<SpanNode[]>(() => this.flattenVisible(this.tree()));
   protected hasErrors = computed(() => this.spans().some((s) => s.statusCode === SpanStatusCode.Error));
+
+  /** Every span node in tree order, ignoring collapse (for stats/flame/error nav). */
+  protected allNodes = computed<SpanNode[]>(() => this.flattenAll(this.tree()));
+
+  /** child span id → parent node, for expanding ancestors when revealing a span. */
+  private parentMap = computed<Map<string, SpanNode>>(() => {
+    const map = new Map<string, SpanNode>();
+    const walk = (n: SpanNode) => n.children.forEach((c) => { map.set(c.spanIdHex, n); walk(c); });
+    this.tree().forEach(walk);
+    return map;
+  });
+
+  // --- Statistics view: aggregate self-time by service and by operation. ---
+  protected serviceStats = computed<StatRow[]>(() => this.aggregate((n) => n.serviceName));
+  protected operationStats = computed<StatRow[]>(() => this.aggregate((n) => n.name));
+
+  private aggregate(keyFn: (n: SpanNode) => string): StatRow[] {
+    const nodes = this.allNodes();
+    const totalSelf = nodes.reduce((a, n) => a + n.selfMs, 0) || 1;
+    const groups = new Map<string, { count: number; selfMs: number; totalMs: number; maxMs: number }>();
+    for (const n of nodes) {
+      const key = keyFn(n);
+      const g = groups.get(key) ?? { count: 0, selfMs: 0, totalMs: 0, maxMs: 0 };
+      g.count++;
+      g.selfMs += n.selfMs;
+      g.totalMs += n.durationMs;
+      g.maxMs = Math.max(g.maxMs, n.durationMs);
+      groups.set(key, g);
+    }
+    return [...groups.entries()]
+      .map(([key, g]) => ({
+        key, count: g.count, selfMs: g.selfMs, totalMs: g.totalMs, maxMs: g.maxMs,
+        avgMs: g.totalMs / g.count, pct: (g.selfMs / totalSelf) * 100,
+      }))
+      .sort((a, b) => b.selfMs - a.selfMs);
+  }
+
+  // --- Flame graph ---
+  protected readonly flameRowHeight = 32;
+  /** Time-ordered (1:1 with the timeline) vs. aggregated-by-call-path self-time. */
+  protected flameMode = signal<'time' | 'aggregated'>('aggregated');
+  /** Aggregated-mode drill-down root (a call-path); null = whole trace. */
+  protected zoomPath = signal<string | null>(null);
+  /** Operation hovered in the flame graph, to highlight all its instances. */
+  protected hoveredOp = signal<string | null>(null);
+
+  /** Total self-time across the trace, for %-of-trace tooltips. */
+  private traceSelfMs = computed(() => this.allNodes().reduce((a, n) => a + n.selfMs, 0) || 1);
+
+  /** Cells for the active flame layout. */
+  protected flameCells = computed<FlameCell[]>(() =>
+    this.flameMode() === 'aggregated' ? this.buildAggCells() : this.buildTimeCells()
+  );
+
+  /** Flame height (px), sized to the deepest visible cell. */
+  protected flameHeight = computed(() => {
+    const maxY = this.flameCells().reduce((m, c) => Math.max(m, c.y), 0);
+    return maxY + this.flameRowHeight;
+  });
+
+  /** Breadcrumb segments for the aggregated-mode zoom path. */
+  protected zoomCrumbs = computed<string[]>(() => {
+    const zp = this.zoomPath();
+    return zp ? zp.split(PATH_SEP) : [];
+  });
+
+  /** Time-ordered cells: one per span, positioned on the trace time axis. */
+  private buildTimeCells(): FlameCell[] {
+    const traceSelf = this.traceSelfMs();
+    return this.allNodes().map((n) => ({
+      node: n,
+      label: n.name,
+      x: n.leftPct,
+      width: n.widthPct,
+      y: n.depth * this.flameRowHeight,
+      color: this.colorFor(n.serviceName),
+      isError: this.isError(n),
+      selfFraction: n.durationMs > 0 ? Math.min(1, n.selfMs / n.durationMs) : 1,
+      count: 1,
+      path: '',
+      tooltip: [
+        n.name,
+        `Service: ${n.serviceName}`,
+        `Duration: ${formatDuration(n.durationMs)}`,
+        `Self: ${formatDuration(n.selfMs)} (${((n.selfMs / traceSelf) * 100).toFixed(1)}% of trace)`,
+      ].join('\n'),
+    }));
+  }
+
+  /** Merge the span tree into an aggregated call-path tree (top frames, sorted by total). */
+  private buildAggFrames(): AggFrame[] {
+    const rootMap = new Map<string, AggBuild>();
+    for (const r of this.tree()) this.mergeInto(rootMap, r, '');
+    return [...rootMap.values()].map((b) => this.finalizeFrame(b)).sort((a, b) => b.totalMs - a.totalMs);
+  }
+
+  private mergeInto(map: Map<string, AggBuild>, node: SpanNode, parentPath: string): void {
+    const path = parentPath ? parentPath + PATH_SEP + node.name : node.name;
+    let f = map.get(node.name);
+    if (!f) {
+      f = { name: node.name, path, selfMs: 0, count: 0, node, serviceName: node.serviceName, children: new Map() };
+      map.set(node.name, f);
+    }
+    f.selfMs += node.selfMs;
+    f.count++;
+    for (const c of node.children) this.mergeInto(f.children, c, path);
+  }
+
+  private finalizeFrame(b: AggBuild): AggFrame {
+    const children = [...b.children.values()].map((c) => this.finalizeFrame(c)).sort((x, y) => y.totalMs - x.totalMs);
+    const totalMs = b.selfMs + children.reduce((a, c) => a + c.totalMs, 0);
+    return {
+      name: b.name, path: b.path, selfMs: b.selfMs, totalMs, count: b.count,
+      node: b.node, serviceName: b.serviceName, children,
+    };
+  }
+
+  private findFrame(frames: AggFrame[], path: string): AggFrame | null {
+    for (const f of frames) {
+      if (f.path === path) return f;
+      const found = this.findFrame(f.children, path);
+      if (found) return found;
+    }
+    return null;
+  }
+
+  /** Aggregated icicle cells: width ∝ inclusive self-time, children left-aligned under parents. */
+  private buildAggCells(): FlameCell[] {
+    const all = this.buildAggFrames();
+    const zp = this.zoomPath();
+    let display = all;
+    if (zp) {
+      const target = this.findFrame(all, zp);
+      if (target) display = [target];
+    }
+    const total = display.reduce((a, f) => a + f.totalMs, 0) || 1;
+    const scale = 100 / total;
+    const traceSelf = this.traceSelfMs();
+    const cells: FlameCell[] = [];
+
+    const walk = (f: AggFrame, left: number, depth: number, parentTotal: number): void => {
+      const pctTrace = ((f.totalMs / traceSelf) * 100).toFixed(1);
+      const pctParent = parentTotal > 0 ? ((f.totalMs / parentTotal) * 100).toFixed(1) : null;
+      cells.push({
+        node: f.node,
+        label: f.count > 1 ? `${f.name} ×${f.count}` : f.name,
+        x: left,
+        width: f.totalMs * scale,
+        y: depth * this.flameRowHeight,
+        color: this.colorFor(f.serviceName),
+        isError: this.isError(f.node),
+        selfFraction: 0,
+        count: f.count,
+        path: f.path,
+        tooltip: [
+          f.name,
+          `Service: ${f.serviceName}`,
+          `Calls: ${f.count}`,
+          `Own self: ${formatDuration(f.selfMs)}`,
+          `Subtree: ${formatDuration(f.totalMs)} (${pctTrace}% of trace)`,
+          pctParent ? `${pctParent}% of parent` : '',
+        ].filter(Boolean).join('\n'),
+      });
+      let cursor = left;
+      for (const c of f.children) { walk(c, cursor, depth + 1, f.totalMs); cursor += c.totalMs * scale; }
+    };
+
+    let cursor = 0;
+    for (const f of display) { walk(f, cursor, 0, total); cursor += f.totalMs * scale; }
+    return cells;
+  }
+
+  protected setFlameMode(mode: 'time' | 'aggregated'): void {
+    this.flameMode.set(mode);
+    this.zoomPath.set(null);
+  }
+
+  /** Zoom to the i-th breadcrumb segment (0-based). */
+  protected zoomToCrumb(i: number): void {
+    this.zoomPath.set(this.zoomCrumbs().slice(0, i + 1).join(PATH_SEP));
+  }
+
+  protected resetZoom(): void { this.zoomPath.set(null); }
+
+  // --- Raw JSON view. ---
+  protected spansJson = computed(() => JSON.stringify(this.spans(), null, 2));
+
+  // --- Jump-to-error: all error spans in tree order. ---
+  protected errorSpans = computed<SpanNode[]>(() => this.allNodes().filter((n) => this.isError(n)));
 
   /** Start time (unix-nanos) of the earliest root span. */
   protected rootStartNano = computed(() => {
@@ -190,6 +456,7 @@ export class TraceDetailComponent implements OnInit {
         this.spans.set(spans);
         this.tree.set(this.buildTree(spans));
         this.loading.set(false);
+        this.applyDeepLink();
       },
       error: () => this.loading.set(false),
     });
@@ -213,6 +480,7 @@ export class TraceDetailComponent implements OnInit {
         widthPct: Math.max(0.2, ((s.endTimeUnixNano - s.startTimeUnixNano) / durationNs) * 100),
         collapsed: false,
         serviceName: s.resource?.attributes?.['service.name'] as string ?? 'unknown',
+        selfMs: 0,
         selfSegments: [],
         onCriticalPath: false,
         eventMarkers: [],
@@ -270,15 +538,18 @@ export class TraceDetailComponent implements OnInit {
       // Self-time = the gaps in the span interval not covered by any child.
       const segs: { leftPct: number; widthPct: number }[] = [];
       let cursor = start;
+      let coveredNs = 0;
       for (const [s, e] of merged) {
         if (s > cursor) segs.push(seg(cursor, s));
         cursor = Math.max(cursor, e);
+        coveredNs += e - s;
       }
       if (cursor < end) segs.push(seg(cursor, end));
       // A leaf's self-time is its whole bar; a parent fully covered by children
       // legitimately has no self-time (stays faded).
       if (segs.length === 0 && n.children.length === 0) segs.push(seg(start, end));
       n.selfSegments = segs;
+      n.selfMs = Math.max(0, (end - start - coveredNs) / 1_000_000);
 
       n.eventMarkers = (n.events ?? []).map((ev) => ({
         pct: this.clampPct(((ev.timeUnixNano - traceStartNs) / durationNs) * 100),
@@ -326,13 +597,124 @@ export class TraceDetailComponent implements OnInit {
     return result;
   }
 
+  /** Flatten every node in tree order, regardless of collapse state. */
+  private flattenAll(nodes: SpanNode[]): SpanNode[] {
+    const result: SpanNode[] = [];
+    for (const n of nodes) {
+      result.push(n);
+      result.push(...this.flattenAll(n.children));
+    }
+    return result;
+  }
+
+  /** Expand every collapsed ancestor so `node`'s row is present in the timeline. */
+  private expandAncestors(node: SpanNode): void {
+    const parents = this.parentMap();
+    let changed = false;
+    let cur = parents.get(node.spanIdHex);
+    while (cur) {
+      if (cur.collapsed) { cur.collapsed = false; changed = true; }
+      cur = parents.get(cur.spanIdHex);
+    }
+    if (changed) this.tree.update((t) => [...t]);
+  }
+
+  /** Scroll a span's row into view (after any pending render). */
+  private scrollToSpan(spanId: string): void {
+    setTimeout(() =>
+      document.querySelector(`[data-span-id="${spanId}"]`)?.scrollIntoView({ block: 'center', behavior: 'smooth' })
+    );
+  }
+
+  /** Reveal + select a span in the timeline (used by deep-link, error jump, find). */
+  private revealSpan(node: SpanNode): void {
+    if (this.view() !== 'timeline') this.view.set('timeline');
+    this.expandAncestors(node);
+    this.selectedSpan.set(node);
+    this.writeSpanToUrl(node.spanIdHex);
+    this.scrollToSpan(node.spanIdHex);
+  }
+
   protected toggleCollapse(node: SpanNode): void {
     node.collapsed = !node.collapsed;
     this.tree.update((t) => [...t]);
   }
 
   protected selectSpan(node: SpanNode): void {
-    this.selectedSpan.update((current) => (current === node ? null : node));
+    const next = this.selectedSpan() === node ? null : node;
+    this.selectedSpan.set(next);
+    this.writeSpanToUrl(next?.spanIdHex ?? null);
+  }
+
+  /** Mirror the selected span id into the URL (`span` query param) for deep-linking. */
+  private writeSpanToUrl(spanId: string | null): void {
+    this.urlState.patch({ span: spanId });
+  }
+
+  /** On load, honor a `?span=` deep link: reveal + select that span. */
+  private applyDeepLink(): void {
+    const spanId = this.urlState.get('span');
+    if (!spanId) return;
+    const node = this.allNodes().find((n) => n.spanIdHex === spanId);
+    if (node) this.revealSpan(node);
+  }
+
+  protected copySpanLink(): void {
+    navigator.clipboard?.writeText(window.location.href).then(() => {
+      this.linkCopied.set(true);
+      setTimeout(() => this.linkCopied.set(false), 1500);
+    });
+  }
+
+  // ===========================================================================
+  // JUMP-TO-ERROR
+  // ===========================================================================
+
+  /** Reveal the next error span, cycling through all error spans in order. */
+  protected nextError(): void {
+    const errors = this.errorSpans();
+    if (!errors.length) return;
+    const i = (this.currentErrorIndex() + 1) % errors.length;
+    this.currentErrorIndex.set(i);
+    this.revealSpan(errors[i]);
+  }
+
+  protected prevError(): void {
+    const errors = this.errorSpans();
+    if (!errors.length) return;
+    const i = (this.currentErrorIndex() - 1 + errors.length) % errors.length;
+    this.currentErrorIndex.set(i);
+    this.revealSpan(errors[i]);
+  }
+
+  // ===========================================================================
+  // RAW JSON
+  // ===========================================================================
+
+  protected copyJson(): void {
+    navigator.clipboard?.writeText(this.spansJson());
+  }
+
+  protected downloadJson(): void {
+    const blob = new Blob([this.spansJson()], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `trace-${this.id.slice(0, 16)}.json`;
+    a.click();
+    URL.revokeObjectURL(url);
+  }
+
+  /**
+   * Flame-cell click. Aggregated mode: plain click drills into the frame, ⌘/Ctrl-click reveals
+   * the span in the timeline. Time mode: click reveals the span.
+   */
+  protected onFlameCellClick(cell: FlameCell, ev: MouseEvent): void {
+    if (this.flameMode() === 'aggregated' && !(ev.ctrlKey || ev.metaKey)) {
+      this.zoomPath.set(cell.path);
+    } else {
+      this.revealSpan(cell.node);
+    }
   }
 
   protected copyTraceId(): void {
@@ -426,10 +808,10 @@ export class TraceDetailComponent implements OnInit {
   private focusCurrentMatch(): void {
     const node = this.currentMatch();
     if (!node) return;
+    this.expandAncestors(node);
     this.selectedSpan.set(node);
-    setTimeout(() =>
-      document.querySelector(`[data-span-id="${node.spanIdHex}"]`)?.scrollIntoView({ block: 'center', behavior: 'smooth' })
-    );
+    this.writeSpanToUrl(node.spanIdHex);
+    this.scrollToSpan(node.spanIdHex);
   }
 
   protected clearFind(): void {

@@ -319,3 +319,201 @@
 
 .mono { font-family: monospace; }
 .muted { font-size: 12px; color: var(--mat-sys-on-surface-variant); padding: 4px 0; }
+
+// ===========================================================================
+// View switcher + jump-to-error (card header)
+// ===========================================================================
+.view-switcher {
+  display: flex;
+  gap: 2px;
+  margin-left: 16px;
+
+  button {
+    min-width: 0;
+    line-height: 32px;
+    color: var(--mat-sys-on-surface-variant);
+    .view-label { margin-left: 4px; }
+    &.active { color: var(--mat-sys-primary); background: var(--mat-sys-secondary-container); }
+    mat-icon { font-size: 18px; width: 18px; height: 18px; }
+  }
+}
+
+.error-nav {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  margin-left: 16px;
+
+  .error-count {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--mat-sys-error);
+    font-variant-numeric: tabular-nums;
+    mat-icon { font-size: 16px; width: 16px; height: 16px; }
+  }
+}
+
+.detail-toolbar { margin-bottom: 12px; }
+
+// ===========================================================================
+// Alternate views (statistics / flame / json)
+// ===========================================================================
+.alt-view { padding: 16px !important; }
+
+.stats-block { margin-bottom: 24px; }
+.stats-title { font-size: 13px; font-weight: 600; margin-bottom: 8px; }
+
+.stats-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+
+  th, td {
+    padding: 5px 10px;
+    border-bottom: 1px solid var(--mat-sys-outline-variant);
+    text-align: left;
+  }
+  th {
+    color: var(--mat-sys-on-surface-variant);
+    font-weight: 600;
+  }
+  .num { text-align: right; font-variant-numeric: tabular-nums; font-family: monospace; }
+  th.num { text-align: right; }
+  .mono { font-family: monospace; }
+
+  .svc-dot {
+    display: inline-block;
+    width: 8px; height: 8px; border-radius: 50%;
+    margin-right: 6px; vertical-align: middle;
+  }
+
+  // Inline % bar behind the self-time share.
+  .pct-cell { position: relative; min-width: 90px; }
+  .pct-bar {
+    position: absolute;
+    left: 0; top: 3px; bottom: 3px;
+    background: color-mix(in srgb, var(--mat-sys-primary) 30%, transparent);
+    border-radius: 2px;
+    z-index: 0;
+  }
+  .pct-text { position: relative; z-index: 1; }
+}
+
+.flame-hint, .flame-scroll { width: 100%; }
+.flame-hint {
+  font-size: 12px;
+  color: var(--mat-sys-on-surface-variant);
+}
+.flame-scroll { overflow-x: auto; }
+
+// Mode toggle (Time-order / Aggregated) + hint.
+.flame-toolbar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px 16px;
+  margin-bottom: 8px;
+}
+.flame-mode {
+  display: flex;
+  gap: 2px;
+  flex-shrink: 0;
+
+  button {
+    min-width: 0;
+    line-height: 30px;
+    font-size: 12px;
+    color: var(--mat-sys-on-surface-variant);
+    &.active { color: var(--mat-sys-primary); background: var(--mat-sys-secondary-container); }
+  }
+}
+
+// Drill-down breadcrumb (aggregated mode).
+.flame-breadcrumb {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 2px;
+  margin-bottom: 8px;
+  font-size: 12px;
+
+  button { min-width: 0; line-height: 28px; font-size: 12px; }
+  .sep { font-size: 16px; width: 16px; height: 16px; color: var(--mat-sys-on-surface-variant); }
+}
+
+.flame {
+  position: relative;
+  width: 100%;
+  min-width: 640px;
+}
+
+.flame-cell {
+  position: absolute;
+  box-sizing: border-box;
+  min-width: 2px;
+  display: flex;
+  align-items: center;
+  border-radius: 2px;
+  // Border in the surface color carves an even lane between adjacent cells —
+  // pixel-exact at any width (unlike the old stretched-SVG stroke).
+  border: 1px solid var(--mat-sys-surface);
+  opacity: 0.9;
+  cursor: pointer;
+  overflow: hidden;
+  transition: opacity 0.1s ease;
+
+  &:hover { opacity: 1; }
+  &.err { border: 2px solid var(--mat-sys-error); }
+  // Highlight every instance of the hovered operation.
+  &.op-match {
+    outline: 2px solid var(--mat-sys-primary);
+    outline-offset: -1px;
+    opacity: 1;
+    z-index: 5;
+  }
+
+  // Self-time magnitude bar (time mode): how much of this span was its own work.
+  .self-underline {
+    position: absolute;
+    left: 0;
+    bottom: 0;
+    height: 3px;
+    background: rgba(255, 255, 255, 0.85);
+    border-top-right-radius: 2px;
+    pointer-events: none;
+  }
+
+  .flame-label {
+    position: relative;
+    padding: 0 4px;
+    font-size: 12px;
+    line-height: 1;
+    color: #fff;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    pointer-events: none;
+  }
+}
+
+.json-toolbar {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+.json-view {
+  margin: 0;
+  padding: 12px;
+  max-height: 640px;
+  overflow: auto;
+  font-family: monospace;
+  font-size: 12px;
+  line-height: 1.5;
+  background: var(--mat-sys-surface-container);
+  border: 1px solid var(--mat-sys-outline-variant);
+  border-radius: 6px;
+  white-space: pre;
+}
