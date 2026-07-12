@@ -17,6 +17,7 @@ import { MatTabsModule } from '@angular/material/tabs';
 import { MatChipsModule } from '@angular/material/chips';
 import { MatTooltipModule } from '@angular/material/tooltip';
 import { MatDialog, MatDialogModule } from '@angular/material/dialog';
+import { MatMenuModule } from '@angular/material/menu';
 import { FormsModule } from '@angular/forms';
 import { NgxGraphModule } from '@swimlane/ngx-graph';
 import { NgApexchartsModule } from 'ng-apexcharts';
@@ -34,6 +35,7 @@ import { TraceSearchHelpDialogComponent } from '../trace-search-help-dialog/trac
 import { loadPageState, savePageState } from '../../../shared/utils/page-state';
 import { UrlStateService } from '../../../shared/utils/url-state';
 import { serviceColor } from '../../../shared/utils/service-colors';
+import { downloadCsv, downloadJson, copyPermalink, fileStamp } from '../../../shared/utils/export.utils';
 
 interface GraphNode {
   id: string; label: string;
@@ -64,7 +66,7 @@ const OVERVIEW_CAP = 1000;
     MatCardModule, MatPaginatorModule, MatTableModule, MatSortModule, MatTabsModule, MatIconModule,
     MatButtonToggleModule, MatButtonModule, MatSelectModule, MatFormFieldModule,
     MatInputModule, MatProgressBarModule, MatChipsModule, MatTooltipModule,
-    MatDialogModule, NgxGraphModule, NgApexchartsModule,
+    MatDialogModule, MatMenuModule, NgxGraphModule, NgApexchartsModule,
     StatCardComponent, EmptyStateComponent,
   ],
   templateUrl: './trace-list.component.html',
@@ -121,6 +123,9 @@ export class TraceListComponent {
 
   /** Selected tab index (Traces / Service Map / Analytics); driven by service-map node clicks. */
   protected selectedTab = signal(0);
+
+  /** Transient "Link copied!" affordance for the copy-permalink button. */
+  protected linkCopied = signal(false);
 
   private firstOverview = true;
 
@@ -654,5 +659,46 @@ export class TraceListComponent {
 
   protected navigate(traceId: string): void {
     this.router.navigate(['/traces', traceId]);
+  }
+
+  // =========================================================================
+  // EXPORT / PERMALINK
+  // =========================================================================
+
+  /** The full current filtered result set (all loaded traces matching the active filters). */
+  private exportRows(): TraceInfo[] {
+    return this.refined();
+  }
+
+  /** Download the current filtered traces as CSV (one row per trace). */
+  protected exportCsv(): void {
+    const rows = this.exportRows();
+    if (!rows.length) return;
+    const headers = ['TraceId', 'Service', 'Operation', 'DurationMs', 'Spans', 'Status', 'StartTime'];
+    const data = rows.map((t) => [
+      t.traceIdHex,
+      t.serviceName ?? '',
+      t.rootOperationName ?? '',
+      parseDotnetTimespan(t.traceDuration),
+      t.spanCount,
+      t.hasErrors ? 'ERROR' : 'OK',
+      new Date(t.traceStartTime).toISOString(),
+    ]);
+    downloadCsv(`traces_${fileStamp()}.csv`, headers, data);
+  }
+
+  /** Download the current filtered traces as raw JSON. */
+  protected exportJson(): void {
+    const rows = this.exportRows();
+    if (!rows.length) return;
+    downloadJson(`traces_${fileStamp()}.json`, rows);
+  }
+
+  /** Copy a shareable link to the current view (filters + range live in the URL). */
+  protected copyLink(): void {
+    copyPermalink().then(() => {
+      this.linkCopied.set(true);
+      setTimeout(() => this.linkCopied.set(false), 1500);
+    }).catch(() => {});
   }
 }

@@ -58,7 +58,12 @@
           <a mat-list-item
              [routerLink]="item.route"
              routerLinkActive="active-link"
-             [routerLinkActiveOptions]="{ exact: item.route === '/dashboard' }">
+             [routerLinkActiveOptions]="{
+               paths: item.route === '/dashboard' ? 'exact' : 'subset',
+               queryParams: 'ignored',
+               matrixParams: 'ignored',
+               fragment: 'ignored'
+             }">
             <mat-icon matListItemIcon>{{ item.icon }}</mat-icon>
             <span matListItemTitle>{{ item.label }}</span>
           </a>

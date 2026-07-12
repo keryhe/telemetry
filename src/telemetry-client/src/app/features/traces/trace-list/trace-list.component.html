@@ -72,6 +72,20 @@
     <button mat-icon-button color="primary" (click)="openSearchHelp()" matTooltip="Search syntax help">
       <mat-icon>help_outline</mat-icon>
     </button>
+
+    <button mat-icon-button [matMenuTriggerFor]="exportMenu" matTooltip="Export filtered traces"
+            [disabled]="effectiveTotal() === 0">
+      <mat-icon>download</mat-icon>
+    </button>
+    <mat-menu #exportMenu="matMenu">
+      <button mat-menu-item (click)="exportCsv()"><mat-icon>table_chart</mat-icon> Export CSV</button>
+      <button mat-menu-item (click)="exportJson()"><mat-icon>data_object</mat-icon> Export JSON</button>
+    </mat-menu>
+
+    <button mat-icon-button (click)="copyLink()"
+            [matTooltip]="linkCopied() ? 'Link copied!' : 'Copy link to this view'">
+      <mat-icon>{{ linkCopied() ? 'check' : 'link' }}</mat-icon>
+    </button>
   </div>
 
   <!-- Tabs -->

@@ -13,6 +13,7 @@ import { MatPaginatorModule, PageEvent } from '@angular/material/paginator';
 import { MatChipsModule } from '@angular/material/chips';
 import { MatTooltipModule } from '@angular/material/tooltip';
 import { MatDialog, MatDialogModule } from '@angular/material/dialog';
+import { MatMenuModule } from '@angular/material/menu';
 import { NgApexchartsModule } from 'ng-apexcharts';
 import type { ApexOptions } from 'ng-apexcharts';
 import { FormsModule } from '@angular/forms';
@@ -30,6 +31,7 @@ import { FacetValueType, Facet } from './facet.models';
 import { FacetValuesDialogComponent, FacetValuesDialogData } from './facet-values-dialog/facet-values-dialog.component';
 import { loadPageState, savePageState } from '../../shared/utils/page-state';
 import { UrlStateService } from '../../shared/utils/url-state';
+import { downloadCsv, downloadJson, copyPermalink, fileStamp } from '../../shared/utils/export.utils';
 
 const BUCKET_COUNT = 30;
 const STATE_KEY = 'state.logs';
@@ -66,7 +68,7 @@ function splitTerms(query: string): string[] {
     MatCardModule, MatTableModule, MatIconModule,
     MatFormFieldModule, MatInputModule, MatSelectModule, MatProgressBarModule,
     MatButtonModule, MatPaginatorModule, MatChipsModule, MatDialogModule,
-    MatTooltipModule, NgApexchartsModule,
+    MatMenuModule, MatTooltipModule, NgApexchartsModule,
     StatCardComponent, EmptyStateComponent,
   ],
   templateUrl: './logs.component.html',
@@ -101,6 +103,8 @@ export class LogsComponent {
   protected selectedSeverity = signal<number>(this.readNum('severity') ?? this.saved.selectedSeverity);
   protected traceIdFilter = signal('');
   protected expandedRow = signal<LogRecord | null>(null);
+  /** Transient "Link copied!" affordance for the copy-permalink button. */
+  protected linkCopied = signal(false);
 
   // Faceting sidebar: collapse state + which keys are collapsed (all open by default).
   protected facetsCollapsed = signal<boolean>(this.saved.facetsCollapsed);
@@ -462,6 +466,47 @@ export class LogsComponent {
 
   protected clearTrace(): void {
     this.traceIdFilter.set('');
+  }
+
+  // =========================================================================
+  // EXPORT / PERMALINK
+  // =========================================================================
+
+  /** The full current filtered result set (all loaded rows matching the active filters). */
+  private exportRows(): LogRecord[] {
+    return this.refined();
+  }
+
+  /** Download the current filtered logs as CSV (one row per log; attributes JSON-encoded). */
+  protected exportCsv(): void {
+    const rows = this.exportRows();
+    if (!rows.length) return;
+    const headers = ['Timestamp', 'Severity', 'Service', 'TraceId', 'SpanId', 'Body', 'Attributes'];
+    const data = rows.map((l) => [
+      getTimestamp(l).toISOString(),
+      getSeverityLabel(l.severityNumber),
+      getServiceName(l),
+      l.traceIdHex ?? '',
+      l.spanIdHex ?? '',
+      l.bodyValue ?? '',
+      JSON.stringify(l.attributes ?? {}),
+    ]);
+    downloadCsv(`logs_${fileStamp()}.csv`, headers, data);
+  }
+
+  /** Download the current filtered logs as raw JSON. */
+  protected exportJson(): void {
+    const rows = this.exportRows();
+    if (!rows.length) return;
+    downloadJson(`logs_${fileStamp()}.json`, rows);
+  }
+
+  /** Copy a shareable link to the current view (filters + range live in the URL). */
+  protected copyLink(): void {
+    copyPermalink().then(() => {
+      this.linkCopied.set(true);
+      setTimeout(() => this.linkCopied.set(false), 1500);
+    }).catch(() => {});
   }
 
   // =========================================================================
