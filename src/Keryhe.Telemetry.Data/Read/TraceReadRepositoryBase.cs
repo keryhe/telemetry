@@ -330,6 +330,11 @@ public abstract class TraceReadRepositoryBase : DapperReadRepository, ITraceRead
         var endNano = TimeConversion.DateTimeToUnixNano(query.End);
         var isSlow = query.Mode == "slow";
         var minDurationNano = isSlow ? (long)((query.MinDurationMs ?? 500) * 1_000_000) : 0;
+        var maxDurationNano = isSlow && query.MaxDurationMs.HasValue
+            ? (long)(query.MaxDurationMs.Value * 1_000_000)
+            : long.MaxValue;
+        var operation = string.IsNullOrWhiteSpace(query.Operation) ? null : query.Operation;
+        var tags = query.Tags;
 
         var clauses = new List<string> { "s.start_time_unix_nano >= @start", "s.start_time_unix_nano <= @end" };
         if (query.Mode == "errors") clauses.Add("s.status_code = 'ERROR'");
@@ -346,18 +351,28 @@ public abstract class TraceReadRepositoryBase : DapperReadRepository, ITraceRead
 
         var groups = raw
             .GroupBy(s => s.TraceId)
-            .Select(g => new
+            .Select(g =>
             {
-                TraceIdHex = g.Key,
-                SpanCount = g.Count(),
-                MinStartTimeNano = g.Min(s => s.StartTimeUnixNano),
-                MaxEndTimeNano = g.Max(s => s.EndTimeUnixNano),
-                HasErrors = g.Any(s => s.StatusCode == "ERROR"),
-                RootSpan = g.FirstOrDefault(s => s.ParentSpanId == null) ?? g.OrderBy(s => s.StartTimeUnixNano).First(),
-                ServiceName = ExtractServiceName(g.OrderBy(s => s.StartTimeUnixNano).FirstOrDefault()?.ResourceAttributes)
+                var spans = g.ToList();
+                var first = spans.OrderBy(s => s.StartTimeUnixNano).First();
+                return new
+                {
+                    TraceIdHex = g.Key,
+                    SpanCount = spans.Count,
+                    MinStartTimeNano = spans.Min(s => s.StartTimeUnixNano),
+                    MaxEndTimeNano = spans.Max(s => s.EndTimeUnixNano),
+                    HasErrors = spans.Any(s => s.StatusCode == "ERROR"),
+                    RootSpan = spans.FirstOrDefault(s => s.ParentSpanId == null) ?? first,
+                    ServiceName = ExtractServiceName(first.ResourceAttributes),
+                    Spans = spans,
+                };
             })
-            .Select(t => new { t.TraceIdHex, t.SpanCount, t.MinStartTimeNano, t.MaxEndTimeNano, t.HasErrors, t.RootSpan, t.ServiceName, DurationNano = t.MaxEndTimeNano - t.MinStartTimeNano })
-            .Where(t => !isSlow || t.DurationNano >= minDurationNano)
+            .Select(t => new { t.TraceIdHex, t.SpanCount, t.MinStartTimeNano, t.MaxEndTimeNano, t.HasErrors, t.RootSpan, t.ServiceName, t.Spans, DurationNano = t.MaxEndTimeNano - t.MinStartTimeNano })
+            .Where(t => !isSlow || (t.DurationNano >= minDurationNano && t.DurationNano <= maxDurationNano))
+            // Operation filter: the trace contains a span with this name.
+            .Where(t => operation == null || t.Spans.Any(s => s.Name == operation))
+            // All-span tag search: every predicate must be satisfied by some span in the trace.
+            .Where(t => tags.Count == 0 || tags.All(tag => t.Spans.Any(s => MatchesTag(s, tag))))
             .ToList();
 
         // Order: explicit sort key when supplied, otherwise the mode default (slow → worst
@@ -490,9 +505,89 @@ public abstract class TraceReadRepositoryBase : DapperReadRepository, ITraceRead
             .ToDictionary(g => g.Key, g => g.Average(s => s.EndTimeUnixNano - s.StartTimeUnixNano) / 1_000_000.0);
     }
 
+    public async Task<List<OperationStats>> GetOperationStatsAsync(string serviceName, DateTime startTime, DateTime endTime, CancellationToken cancellationToken = default)
+    {
+        if (string.IsNullOrEmpty(serviceName))
+            throw new ArgumentException("Service name cannot be null or empty", nameof(serviceName));
+
+        var (where, p) = BuildTimeFilter(startTime, endTime, startBound: "s.start_time_unix_nano", endBound: "s.end_time_unix_nano");
+        var sql = $"""
+            SELECT s.name AS Name, s.start_time_unix_nano AS StartTimeUnixNano, s.end_time_unix_nano AS EndTimeUnixNano, s.status_code AS StatusCode, r.attributes_json AS ResourceAttributesJson
+            FROM spans s JOIN resources r ON s.resource_id = r.id
+            WHERE r.tenant_id = @tenantId AND {where}
+            """;
+
+        await using var conn = await OpenConnectionAsync(cancellationToken);
+        var rows = await conn.QueryAsync<StatsRow>(new CommandDefinition(sql, p, cancellationToken: cancellationToken));
+
+        // Rate is calls over the queried window; percentiles are computed in memory from the
+        // per-span durations (portable across providers — no percentile_cont/approx SQL needed).
+        var windowSeconds = Math.Max((endTime - startTime).TotalSeconds, 1);
+
+        return rows
+            .Select(s => new
+            {
+                s.Name,
+                s.StatusCode,
+                DurationMs = (s.EndTimeUnixNano - s.StartTimeUnixNano) / 1_000_000.0,
+                ResourceAttributes = DeserializeAttributes(s.ResourceAttributesJson)
+            })
+            .Where(s => s.ResourceAttributes != null &&
+                        s.ResourceAttributes.ContainsKey("service.name") &&
+                        s.ResourceAttributes["service.name"]?.ToString() == serviceName)
+            .GroupBy(s => s.Name)
+            .Select(g =>
+            {
+                var durations = g.Select(x => x.DurationMs).OrderBy(x => x).ToList();
+                var count = durations.Count;
+                var errorCount = g.Count(x => x.StatusCode == "ERROR");
+                return new OperationStats
+                {
+                    Operation = g.Key,
+                    Count = count,
+                    ErrorCount = errorCount,
+                    ErrorRate = count > 0 ? errorCount / (double)count * 100 : 0,
+                    RatePerSecond = count / windowSeconds,
+                    AvgMs = count > 0 ? durations.Average() : 0,
+                    P50Ms = Percentile(durations, 50),
+                    P95Ms = Percentile(durations, 95),
+                    P99Ms = Percentile(durations, 99),
+                };
+            })
+            .OrderByDescending(o => o.Count)
+            .ToList();
+    }
+
     // =========================================================================
     // HELPERS
     // =========================================================================
+
+    /// <summary>True when a span's own or resource attributes satisfy the tag predicate (case-insensitive).</summary>
+    private static bool MatchesTag(RawSpan span, TagFilter tag)
+    {
+        foreach (var bag in new[] { span.SpanAttributes, span.ResourceAttributes })
+        {
+            if (bag != null && bag.TryGetValue(tag.Key, out var raw))
+            {
+                var value = raw == null ? "" : ConvertAttributeValueToString(raw);
+                if (tag.Exact
+                        ? string.Equals(value, tag.Value, StringComparison.OrdinalIgnoreCase)
+                        : value.Contains(tag.Value, StringComparison.OrdinalIgnoreCase))
+                    return true;
+            }
+        }
+        return false;
+    }
+
+    /// <summary>Nearest-rank percentile over an ascending-sorted list of values.</summary>
+    private static double Percentile(IReadOnlyList<double> sortedAsc, double percentile)
+    {
+        if (sortedAsc.Count == 0) return 0;
+        if (sortedAsc.Count == 1) return sortedAsc[0];
+        var rank = (int)Math.Ceiling(percentile / 100.0 * sortedAsc.Count);
+        var index = Math.Clamp(rank - 1, 0, sortedAsc.Count - 1);
+        return sortedAsc[index];
+    }
 
     /// <summary>
     /// Predicate matching <c>s.span_id</c> against the <c>@ids</c> list parameter. The correct
@@ -675,6 +770,15 @@ public abstract class TraceReadRepositoryBase : DapperReadRepository, ITraceRead
         public string Name { get; set; } = null!;
         public long StartTimeUnixNano { get; set; }
         public long EndTimeUnixNano { get; set; }
+        public string? ResourceAttributesJson { get; set; }
+    }
+
+    private sealed class StatsRow
+    {
+        public string Name { get; set; } = null!;
+        public long StartTimeUnixNano { get; set; }
+        public long EndTimeUnixNano { get; set; }
+        public string StatusCode { get; set; } = null!;
         public string? ResourceAttributesJson { get; set; }
     }
 }

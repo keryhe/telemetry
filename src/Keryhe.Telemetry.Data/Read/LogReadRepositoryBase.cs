@@ -179,6 +179,32 @@ public abstract class LogReadRepositoryBase : DapperReadRepository, ILogReadRepo
     protected virtual string EscapeLike(string value)
         => value.Replace("\\", "\\\\").Replace("%", "\\%").Replace("_", "\\_");
 
+    public async Task<IEnumerable<LogRecordModel>> GetSurroundingLogRecordsAsync(
+        long anchorTimeUnixNano, string? service, int before, int after, CancellationToken cancellationToken = default)
+    {
+        before = Math.Clamp(before, 0, 500);
+        after = Math.Clamp(after, 0, 500);
+
+        var serviceClause = string.IsNullOrEmpty(service) ? "" : $" AND {ResourceServiceNameExpr} = @service";
+
+        await using var conn = await OpenConnectionAsync(cancellationToken);
+
+        // Records strictly before the anchor, newest-first, capped at `before`.
+        var older = (await conn.QueryAsync<LogRow>(new CommandDefinition(
+            $"{BaseSelect}{serviceClause} AND lr.time_unix_nano < @anchor ORDER BY lr.time_unix_nano DESC {PagingClause}",
+            new { tenantId = TenantId, service, anchor = anchorTimeUnixNano, limit = before, offset = 0 },
+            cancellationToken: cancellationToken))).ToList();
+
+        // The anchor row(s) plus records after it, oldest-first (+1 to include the anchor itself).
+        var newer = (await conn.QueryAsync<LogRow>(new CommandDefinition(
+            $"{BaseSelect}{serviceClause} AND lr.time_unix_nano >= @anchor ORDER BY lr.time_unix_nano ASC {PagingClause}",
+            new { tenantId = TenantId, service, anchor = anchorTimeUnixNano, limit = after + 1, offset = 0 },
+            cancellationToken: cancellationToken))).ToList();
+
+        older.Reverse(); // DESC -> ASC so the whole window reads oldest -> newest.
+        return older.Concat(newer).Select(Map).ToList();
+    }
+
     public async Task<IEnumerable<LogRecordModel>> GetLogRecordsBySeverityAsync(int minSeverity, DateTime? startTime = null, DateTime? endTime = null, CancellationToken cancellationToken = default)
     {
         var sql = BaseSelect + " AND lr.severity_number >= @minSeverity";

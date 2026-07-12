@@ -60,6 +60,80 @@
     </button>
   </div>
 
+  <div class="logs-body">
+    <aside class="facet-sidebar" [class.collapsed]="facetsCollapsed()">
+      <div class="facet-toolbar">
+        <div class="facet-header">
+          <button mat-icon-button (click)="toggleFacetsSidebar()"
+                  [matTooltip]="facetsCollapsed() ? 'Show fields' : 'Hide fields'">
+            <mat-icon class="fields-toggle-icon" [class.collapsed]="facetsCollapsed()">list-alt</mat-icon>
+          </button>
+          @if (!facetsCollapsed()) { <span class="facet-title">Fields</span> }
+        </div>
+        @if (!facetsCollapsed()) {
+          <mat-form-field appearance="outline" subscriptSizing="dynamic" class="field-filter">
+            <mat-icon matPrefix>search</mat-icon>
+            <input matInput [ngModel]="fieldFilter()" [ngModelOptions]="{standalone: true}"
+                   (ngModelChange)="fieldFilter.set($event)" placeholder="Filter fields" />
+          </mat-form-field>
+        }
+      </div>
+
+      @if (!facetsCollapsed()) {
+        @if (filteredFacets().length === 0) {
+          <div class="facet-empty">{{ fieldFilter() ? 'No fields match "' + fieldFilter() + '"' : 'No attributes in the current view' }}</div>
+        }
+        @for (f of visibleFacets(); track f.key) {
+          <div class="facet-group" [class.open]="isFacetKeyOpen(f.key)">
+            <button class="facet-key" (click)="toggleFacetKey(f.key)">
+              <mat-icon class="facet-caret">{{ isFacetKeyOpen(f.key) ? 'expand_more' : 'chevron_right' }}</mat-icon>
+              <mat-icon class="facet-type" [matTooltip]="f.type + ' field'" matTooltipPosition="left">{{ facetTypeIcon(f.type) }}</mat-icon>
+              <span class="facet-key-name" [matTooltip]="f.key" matTooltipPosition="left">{{ f.key }}</span>
+              <span class="facet-key-count">{{ f.distinct }}</span>
+            </button>
+            @if (isFacetKeyOpen(f.key)) {
+              <div class="facet-values">
+                @for (v of f.values | slice:0:visibleValueCount(f.key); track v.value) {
+                  <div class="facet-value" [class.active]="v.active" [class.excluded]="v.excluded">
+                    <div class="facet-bar" [class.excluded]="v.excluded" [style.width.%]="v.pct"></div>
+                    <button class="facet-value-main" (click)="toggleFacetValue(f.key, v.value, false)"
+                            [matTooltip]="v.value" matTooltipPosition="left">
+                      <span class="facet-value-text">{{ v.value }}</span>
+                      <span class="facet-value-count">{{ v.count | number }} · {{ v.share | percent:'1.0-1' }}</span>
+                    </button>
+                    <button class="facet-act include" (click)="toggleFacetValue(f.key, v.value, false)"
+                            matTooltip="Include" matTooltipPosition="left">
+                      <mat-icon>add</mat-icon>
+                    </button>
+                    <button class="facet-act exclude" (click)="toggleFacetValue(f.key, v.value, true)"
+                            [matTooltip]="v.excluded ? 'Clear exclude' : 'Exclude'" matTooltipPosition="left">
+                      <mat-icon>block</mat-icon>
+                    </button>
+                  </div>
+                }
+                @if (f.values.length > visibleValueCount(f.key)) {
+                  <div class="facet-more">
+                    <span class="facet-more-caption">top {{ visibleValueCount(f.key) }} of {{ f.distinct }}{{ capped() ? ' in loaded sample' : '' }}</span>
+                    <div class="facet-more-actions">
+                      <button class="facet-more-btn" (click)="showMoreValues(f.key)">Show {{ facetValueStep }} more</button>
+                      <button class="facet-more-btn" (click)="openFacetValues(f)">Show all</button>
+                    </div>
+                  </div>
+                }
+              </div>
+            }
+          </div>
+        }
+        @if (filteredFacets().length > facetKeyLimit()) {
+          <div class="facet-fields-more">
+            <span class="facet-more-caption">showing {{ visibleFacets().length }} of {{ filteredFacets().length }} fields</span>
+            <button class="facet-more-btn" (click)="showMoreFields()">Show {{ facetKeyStep }} more fields</button>
+          </div>
+        }
+      }
+    </aside>
+
+    <div class="logs-main">
   @if (chartOptions().series) {
     <mat-card class="chart-card">
       <mat-card-content>
@@ -116,7 +190,7 @@
           <ng-container matColumnDef="message">
             <th mat-header-cell *matHeaderCellDef>Message</th>
             <td mat-cell *matCellDef="let l" class="message-cell">
-              <span class="message-text">{{ l.bodyValue }}</span>
+              <span class="message-text" [innerHTML]="highlightBody(l.bodyValue)"></span>
             </td>
           </ng-container>
 
@@ -165,6 +239,31 @@
                       }
                     </div>
                   }
+
+                  <button mat-stroked-button class="context-btn"
+                          (click)="toggleContext(l); $event.stopPropagation()">
+                    <mat-icon>{{ isContextAnchor(l) ? 'unfold_less' : 'unfold_more' }}</mat-icon>
+                    Show surrounding logs
+                  </button>
+                  @if (isContextAnchor(l)) {
+                    @if (contextLoading()) {
+                      <div class="context-loading">Loading nearby logs…</div>
+                    } @else if (contextRows().length === 0) {
+                      <div class="context-loading">No surrounding logs found</div>
+                    } @else {
+                      <div class="context-list">
+                        @for (c of contextRows(); track $index) {
+                          <div class="context-row" [class.context-anchor]="isContextAnchor(c)">
+                            <span class="context-time mono">{{ getTimestamp(c) | date:'HH:mm:ss.SSS' }}</span>
+                            <span class="context-sev" [style.color]="getSeverityColor(c.severityNumber)">
+                              {{ getSeverityLabel(c.severityNumber) }}
+                            </span>
+                            <span class="context-msg mono">{{ c.bodyValue }}</span>
+                          </div>
+                        }
+                      </div>
+                    }
+                  }
                 </div>
             </td>
           </ng-container>
@@ -186,4 +285,6 @@
       }
     </mat-card-content>
   </mat-card>
+    </div>
+  </div>
 </div>

@@ -73,6 +73,9 @@
             <mat-icon>close</mat-icon>
           </button>
         }
+        <button mat-icon-button color="primary" (click)="openSpanHelp()" matTooltip="Search syntax help">
+          <mat-icon>help_outline</mat-icon>
+        </button>
       </div>
 
       <mat-card-content class="timeline-content" [class.crit-active]="showCriticalPath()">

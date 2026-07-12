@@ -55,8 +55,17 @@ public sealed class TraceQuery
     /// <summary>Exact <c>service.name</c> match, when set.</summary>
     public string? Service { get; init; }
 
+    /// <summary>Only traces containing a span with this operation (span name), when set.</summary>
+    public string? Operation { get; init; }
+
     /// <summary>Minimum trace duration in milliseconds (only meaningful for <c>slow</c> mode).</summary>
     public double? MinDurationMs { get; init; }
+
+    /// <summary>Maximum trace duration in milliseconds (only meaningful for <c>slow</c> mode).</summary>
+    public double? MaxDurationMs { get; init; }
+
+    /// <summary>All-span tag predicates: a trace matches only if <em>some</em> span satisfies each.</summary>
+    public IReadOnlyList<TagFilter> Tags { get; init; } = Array.Empty<TagFilter>();
 
     /// <summary>Sort key: <c>duration</c> | <c>spans</c> | <c>time</c> | <c>service</c> | <c>operation</c>. Null = mode default.</summary>
     public string? Sort { get; init; }
@@ -66,4 +75,30 @@ public sealed class TraceQuery
 
     public int Limit { get; init; } = 100;
     public int Offset { get; init; }
+}
+
+/// <summary>A single span-tag predicate for all-span trace search (<c>key:value</c> contains / <c>key=value</c> exact).</summary>
+public sealed class TagFilter
+{
+    public string Key { get; init; } = null!;
+    public string Value { get; init; } = "";
+    public bool Exact { get; init; }
+
+    /// <summary>Parses one wire token: <c>key=value</c> (exact) or <c>key:value</c> (contains). Null if malformed.</summary>
+    public static TagFilter? Parse(string token)
+    {
+        if (string.IsNullOrWhiteSpace(token)) return null;
+        var eq = token.IndexOf('=');
+        var colon = token.IndexOf(':');
+        // Whichever delimiter appears first wins (values may legitimately contain the other char).
+        var exact = eq >= 0 && (colon < 0 || eq < colon);
+        var at = exact ? eq : colon;
+        if (at <= 0) return null;
+        return new TagFilter
+        {
+            Key = token[..at].Trim(),
+            Value = token[(at + 1)..].Trim().Trim('"', '\''),
+            Exact = exact
+        };
+    }
 }

@@ -10,9 +10,13 @@ import { MatInputModule } from '@angular/material/input';
 import { MatProgressBarModule } from '@angular/material/progress-bar';
 import { MatSelectModule } from '@angular/material/select';
 import { MatTableModule } from '@angular/material/table';
+import { MatButtonModule } from '@angular/material/button';
+import { MatDialog, MatDialogModule } from '@angular/material/dialog';
+import { MatTooltipModule } from '@angular/material/tooltip';
 import { FormsModule } from '@angular/forms';
 
 import { MetricsApiService } from '../../../core/services/api/metrics-api.service';
+import { MetricSearchHelpDialogComponent } from '../metric-search-help-dialog/metric-search-help-dialog.component';
 import { TimeRangeService } from '../../../core/services/time-range.service';
 import { MetricInfo, MetricType } from '../../../core/models/metric.models';
 import { StatCardComponent } from '../../../shared/components/stat-card/stat-card.component';
@@ -46,7 +50,8 @@ const TYPE_LABELS: Record<MetricType, string> = {
     DatePipe, FormsModule,
     MatCardModule, MatTableModule, MatIconModule, MatButtonToggleModule,
     MatSelectModule, MatFormFieldModule, MatInputModule,
-    MatProgressBarModule, MatChipsModule,
+    MatProgressBarModule, MatChipsModule, MatButtonModule,
+    MatDialogModule, MatTooltipModule,
     StatCardComponent, EmptyStateComponent,
   ],
   templateUrl: './metric-list.component.html',
@@ -56,6 +61,7 @@ export class MetricListComponent {
   private readonly api = inject(MetricsApiService);
   private readonly timeRange = inject(TimeRangeService);
   private readonly router = inject(Router);
+  private readonly dialog = inject(MatDialog);
 
   private readonly saved = loadPageState(STATE_KEY, {
     searchText: '', selectedService: '', selectedType: -1 as MetricType | -1, showUnique: true,
@@ -158,5 +164,9 @@ export class MetricListComponent {
 
   protected navigate(name: string): void {
     this.router.navigate(['/metrics', encodeURIComponent(name)]);
+  }
+
+  protected openSearchHelp(): void {
+    this.dialog.open(MetricSearchHelpDialogComponent, { maxWidth: '720px', width: '90vw' });
   }
 }

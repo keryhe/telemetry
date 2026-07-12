@@ -12,8 +12,10 @@ import { MatInputModule } from '@angular/material/input';
 import { MatProgressBarModule } from '@angular/material/progress-bar';
 import { MatSlideToggleModule } from '@angular/material/slide-toggle';
 import { MatTooltipModule } from '@angular/material/tooltip';
+import { MatDialog, MatDialogModule } from '@angular/material/dialog';
 
 import { TracesApiService } from '../../../core/services/api/traces-api.service';
+import { SpanSearchHelpDialogComponent } from '../span-search-help-dialog/span-search-help-dialog.component';
 import { SpanModel, SpanStatusCode, SpanKind } from '../../../core/models/trace.models';
 import { EmptyStateComponent } from '../../../shared/components/empty-state/empty-state.component';
 import { StatCardComponent } from '../../../shared/components/stat-card/stat-card.component';
@@ -49,7 +51,7 @@ const SERVICE_COLORS = [
     DatePipe, KeyValuePipe, SlicePipe, RouterLink, FormsModule,
     MatCardModule, MatButtonModule, MatIconModule, MatTooltipModule,
     MatChipsModule, MatProgressBarModule, MatSlideToggleModule,
-    MatFormFieldModule, MatInputModule,
+    MatFormFieldModule, MatInputModule, MatDialogModule,
     EmptyStateComponent, StatCardComponent,
   ],
   templateUrl: './trace-detail.component.html',
@@ -60,6 +62,7 @@ export class TraceDetailComponent implements OnInit {
 
   private readonly api = inject(TracesApiService);
   private readonly title = inject(Title);
+  private readonly dialog = inject(MatDialog);
 
   protected copied = signal(false);
 
@@ -432,5 +435,9 @@ export class TraceDetailComponent implements OnInit {
   protected clearFind(): void {
     this.findText.set('');
     this.currentMatchIndex.set(0);
+  }
+
+  protected openSpanHelp(): void {
+    this.dialog.open(SpanSearchHelpDialogComponent, { maxWidth: '720px', width: '90vw' });
   }
 }

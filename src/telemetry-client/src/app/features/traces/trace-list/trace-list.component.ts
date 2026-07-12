@@ -25,7 +25,7 @@ import type { ApexOptions } from 'ng-apexcharts';
 import { TracesApiService } from '../../../core/services/api/traces-api.service';
 import { TimeRangeService } from '../../../core/services/time-range.service';
 import { ThemeService } from '../../../core/services/theme.service';
-import { TraceInfo, ServiceDependency } from '../../../core/models/trace.models';
+import { TraceInfo, ServiceDependency, OperationStats } from '../../../core/models/trace.models';
 import { StatCardComponent } from '../../../shared/components/stat-card/stat-card.component';
 import { EmptyStateComponent } from '../../../shared/components/empty-state/empty-state.component';
 import { bucketTraces, formatDuration, parseDotnetTimespan, timeRangeZoom } from '../../../shared/utils/chart.utils';
@@ -75,8 +75,10 @@ export class TraceListComponent {
   private readonly saved = loadPageState(STATE_KEY, {
     filterMode: 'all' as FilterMode,
     selectedService: '',
+    selectedOperation: '',
     searchText: '',
     minDurationMs: 500,
+    maxDurationMs: 0,
     pageSize: 100,
     sortColumn: '',
     sortDir: '' as SortDir,
@@ -92,14 +94,19 @@ export class TraceListComponent {
   protected capped = signal(false);
   protected services = signal<string[]>([]);
   protected dependencies = signal<ServiceDependency[]>([]);
-  protected operationCounts = signal<Record<string, number>>({});
-  protected latencies = signal<Record<string, number>>({});
+  /** Operations for the selected service, populating the operation dropdown. */
+  protected operations = signal<string[]>([]);
+  /** Per-operation RED metrics for the Analytics tab. */
+  protected operationStats = signal<OperationStats[]>([]);
 
   protected filterMode = signal<FilterMode>((this.urlState.get('mode') as FilterMode) ?? this.saved.filterMode);
   protected selectedService = signal<string>(this.urlState.get('service') ?? this.saved.selectedService);
+  protected selectedOperation = signal<string>(this.urlState.get('op') ?? this.saved.selectedOperation);
   protected searchText = signal<string>(this.urlState.get('q') ?? this.saved.searchText);
   protected minDurationMs = signal<number>(this.readNum('minDur') ?? this.saved.minDurationMs);
+  protected maxDurationMs = signal<number>(this.readNum('maxDur') ?? this.saved.maxDurationMs);
   protected analyticsService = signal('');
+  protected analyticsSort = signal<{ col: string; dir: SortDir }>({ col: 'count', dir: 'desc' });
 
   protected sortColumn = signal<string>(this.urlState.get('sort') ?? this.saved.sortColumn);
   protected sortDir = signal<SortDir>((this.urlState.get('dir') as SortDir) ?? this.saved.sortDir);
@@ -110,10 +117,21 @@ export class TraceListComponent {
   protected parsedQuery = computed<ParsedSearchQuery>(() => parseSearchQuery(this.searchText()));
   protected isTraceIdSearch = computed(() => this.parsedQuery().isTraceIdSearch);
 
-  /** True when a search query is active — traces search is refined client-side over the overview. */
-  protected clientMode = computed(() => this.isTraceIdSearch() || this.parsedQuery().terms.length > 0);
+  /** Attribute (`key:value`) terms → server-side all-span tag search; free text stays client-side. */
+  private attributeTerms = computed(() => this.parsedQuery().terms.filter((t) => t.isAttributeFilter));
+  private freeTextTerms = computed(() => this.parsedQuery().terms.filter((t) => !t.isAttributeFilter));
 
-  /** Client-side refinement (trace-id + operation/service/attribute search) over the overview set. */
+  /** Tag predicates sent to the server, encoded as `key=value` (exact) / `key:value` (contains). */
+  protected serverTags = computed<string[]>(() =>
+    this.attributeTerms().map((t) => `${t.key}${t.isExactMatch ? '=' : ':'}${t.value ?? ''}`)
+  );
+  /** Stable string key so free-text keystrokes don't re-trigger the tag-driven overview reload. */
+  private serverTagsKey = computed(() => this.serverTags().join(''));
+
+  /** True when the result must be paged/refined client-side (trace-id or free-text search). */
+  protected clientMode = computed(() => this.isTraceIdSearch() || this.freeTextTerms().length > 0);
+
+  /** Client-side refinement — trace-id + free-text only; tag terms are applied server-side. */
   private refined = computed(() => {
     const query = this.parsedQuery();
     const traces = this.overview();
@@ -121,7 +139,8 @@ export class TraceListComponent {
       const id = query.traceId!.toLowerCase();
       return traces.filter((t) => t.traceIdHex.toLowerCase() === id);
     }
-    if (query.terms.length > 0) return this.applyParsedSearch(traces, query.terms);
+    const freeText = this.freeTextTerms();
+    if (freeText.length > 0) return this.applyParsedSearch(traces, freeText);
     return traces;
   });
 
@@ -180,13 +199,33 @@ export class TraceListComponent {
     }));
   });
 
-  // Cap analytics to the top 10 operations, matching Blazor.
-  protected operationRows = computed(() =>
-    Object.entries(this.operationCounts())
-      .map(([op, count]) => ({ op, count, avgMs: this.latencies()[op] ?? 0 }))
-      .sort((a, b) => b.count - a.count)
-      .slice(0, 10)
-  );
+  /** RED-metrics rows for the Analytics tab, sorted by the clicked column (default: calls desc). */
+  protected operationRows = computed<OperationStats[]>(() => {
+    const rows = [...this.operationStats()];
+    const { col, dir } = this.analyticsSort();
+    if (!dir) return rows;
+    const sign = dir === 'asc' ? 1 : -1;
+    const key = (r: OperationStats): number | string => {
+      switch (col) {
+        case 'operation': return r.operation;
+        case 'rate': return r.ratePerSecond;
+        case 'errorRate': return r.errorRate;
+        case 'p50': return r.p50Ms;
+        case 'p95': return r.p95Ms;
+        case 'p99': return r.p99Ms;
+        case 'avg': return r.avgMs;
+        default: return r.count;
+      }
+    };
+    return rows.sort((a, b) => {
+      const ka = key(a), kb = key(b);
+      return typeof ka === 'string' || typeof kb === 'string'
+        ? sign * String(ka).localeCompare(String(kb))
+        : sign * (ka - kb);
+    });
+  });
+
+  protected readonly analyticsColumns = ['operation', 'count', 'rate', 'errorRate', 'p50', 'p95', 'p99', 'avg'];
 
   protected traceChartOptions = signal<ApexOptions>({});
   /** Jaeger-style duration-vs-time scatter (latency view). */
@@ -213,7 +252,10 @@ export class TraceListComponent {
       this.timeRange.range();
       this.filterMode();
       this.selectedService();
+      this.selectedOperation();
       this.minDurationMs();
+      this.maxDurationMs();
+      this.serverTagsKey();
       this.sortColumn();
       this.sortDir();
       untracked(() => {
@@ -229,10 +271,18 @@ export class TraceListComponent {
       untracked(() => this.loadMeta());
     });
 
+    // Operation dropdown options: reload when the selected service (or time range) changes.
+    effect(() => {
+      this.selectedService();
+      this.timeRange.range();
+      untracked(() => this.loadOperations());
+    });
+
     // Deep server page: fetch only when paging past the overview window in pure server mode.
     effect(() => {
       this.pageIndex(); this.pageSize();
-      this.timeRange.range(); this.filterMode(); this.selectedService(); this.minDurationMs();
+      this.timeRange.range(); this.filterMode(); this.selectedService(); this.selectedOperation();
+      this.minDurationMs(); this.maxDurationMs(); this.serverTagsKey();
       this.sortColumn(); this.sortDir();
       untracked(() => { if (this.needsServerPage()) this.loadServerPage(); });
     });
@@ -242,8 +292,10 @@ export class TraceListComponent {
       this.urlState.patch({
         mode: this.filterMode() !== 'all' ? this.filterMode() : null,
         service: this.selectedService() || null,
+        op: this.selectedOperation() || null,
         q: this.searchText() || null,
         minDur: this.filterMode() === 'slow' ? this.minDurationMs() : null,
+        maxDur: this.filterMode() === 'slow' && this.maxDurationMs() > 0 ? this.maxDurationMs() : null,
         sort: this.sortColumn() && this.sortDir() ? this.sortColumn() : null,
         dir: this.sortColumn() && this.sortDir() ? this.sortDir() : null,
         chart: this.chartView() !== 'volume' ? this.chartView() : null,
@@ -259,8 +311,10 @@ export class TraceListComponent {
       savePageState(STATE_KEY, {
         filterMode: this.filterMode(),
         selectedService: this.selectedService(),
+        selectedOperation: this.selectedOperation(),
         searchText: this.searchText(),
         minDurationMs: this.minDurationMs(),
+        maxDurationMs: this.maxDurationMs(),
         pageSize: this.pageSize(),
         sortColumn: this.sortColumn(),
         sortDir: this.sortDir(),
@@ -276,16 +330,27 @@ export class TraceListComponent {
     return this.overview().length < this.total() && start + this.pageSize() > this.overview().length;
   }
 
+  /** Shared server-side filter shape for the overview and deep-page fetches. */
+  private serverFilters() {
+    const slow = this.filterMode() === 'slow';
+    const tags = this.serverTags();
+    return {
+      mode: this.filterMode(),
+      service: this.selectedService() || undefined,
+      operation: this.selectedOperation() || undefined,
+      minDurationMs: slow ? this.minDurationMs() : undefined,
+      maxDurationMs: slow && this.maxDurationMs() > 0 ? this.maxDurationMs() : undefined,
+      tags: tags.length ? tags : undefined,
+      sort: this.sortColumn() || undefined,
+      dir: this.sortDir() || undefined,
+    };
+  }
+
   private loadOverview(): void {
     this.loading.set(true);
     const { start, end } = this.timeRange.range();
     this.api.searchTraces({
-      start, end,
-      mode: this.filterMode(),
-      service: this.selectedService() || undefined,
-      minDurationMs: this.filterMode() === 'slow' ? this.minDurationMs() : undefined,
-      sort: this.sortColumn() || undefined,
-      dir: this.sortDir() || undefined,
+      start, end, ...this.serverFilters(),
       limit: OVERVIEW_CAP, offset: 0,
     }).subscribe({
       next: (res) => {
@@ -303,14 +368,23 @@ export class TraceListComponent {
   private loadServerPage(): void {
     const { start, end } = this.timeRange.range();
     this.api.searchTraces({
-      start, end,
-      mode: this.filterMode(),
-      service: this.selectedService() || undefined,
-      minDurationMs: this.filterMode() === 'slow' ? this.minDurationMs() : undefined,
-      sort: this.sortColumn() || undefined,
-      dir: this.sortDir() || undefined,
+      start, end, ...this.serverFilters(),
       limit: this.pageSize(), offset: this.pageIndex() * this.pageSize(),
     }).subscribe({ next: (res) => this.serverPage.set(res.items) });
+  }
+
+  /** Load the operation list for the operation dropdown (only meaningful with a service selected). */
+  private loadOperations(): void {
+    const svc = this.selectedService();
+    if (!svc) {
+      this.operations.set([]);
+      if (this.selectedOperation()) this.selectedOperation.set('');
+      return;
+    }
+    const { start, end } = this.timeRange.range();
+    this.api.getOperationCounts(svc, start, end).subscribe({
+      next: (counts) => this.operations.set(Object.keys(counts).sort()),
+    });
   }
 
   private loadMeta(): void {
@@ -418,24 +492,28 @@ export class TraceListComponent {
   private applyParsedSearch(traces: TraceInfo[], terms: SearchTerm[]): TraceInfo[] {
     let result = traces;
     for (const term of terms) {
+      const negate = term.negate ?? false;
       if (term.isAttributeFilter) {
         const key = term.key!;
         const value = (term.value ?? '').toLowerCase();
         const exact = term.isExactMatch;
         result = result.filter((t) => {
           const attrs = t.rootSpanAttributes;
+          let match = false;
           if (attrs && Object.prototype.hasOwnProperty.call(attrs, key)) {
             const v = String(attrs[key] ?? '').toLowerCase();
-            return exact ? v === value : v.includes(value);
+            match = exact ? v === value : v.includes(value);
           }
-          return false;
+          return match !== negate;
         });
       } else {
         const text = (term.freeText ?? '').toLowerCase();
-        result = result.filter((t) =>
-          (t.rootOperationName?.toLowerCase().includes(text) ?? false) ||
-          (t.serviceName?.toLowerCase().includes(text) ?? false)
-        );
+        result = result.filter((t) => {
+          const match =
+            (t.rootOperationName?.toLowerCase().includes(text) ?? false) ||
+            (t.serviceName?.toLowerCase().includes(text) ?? false);
+          return match !== negate;
+        });
       }
     }
     return result;
@@ -452,8 +530,10 @@ export class TraceListComponent {
   private readStateFromUrl(): void {
     const mode = (this.urlState.get('mode') as FilterMode) ?? 'all';
     const service = this.urlState.get('service') ?? '';
+    const operation = this.urlState.get('op') ?? '';
     const q = this.urlState.get('q') ?? '';
     const minDur = this.readNum('minDur') ?? this.saved.minDurationMs;
+    const maxDur = this.readNum('maxDur') ?? this.saved.maxDurationMs;
     const sortCol = this.urlState.get('sort') ?? '';
     const sortDir = (this.urlState.get('dir') as SortDir) ?? '';
     const chart = (this.urlState.get('chart') as ChartView) ?? 'volume';
@@ -461,8 +541,10 @@ export class TraceListComponent {
     const size = this.readNum('size') ?? this.saved.pageSize;
     if (this.filterMode() !== mode) this.filterMode.set(mode);
     if (this.selectedService() !== service) this.selectedService.set(service);
+    if (this.selectedOperation() !== operation) this.selectedOperation.set(operation);
     if (this.searchText() !== q) this.searchText.set(q);
     if (this.minDurationMs() !== minDur) this.minDurationMs.set(minDur);
+    if (this.maxDurationMs() !== maxDur) this.maxDurationMs.set(maxDur);
     if (this.sortColumn() !== sortCol) this.sortColumn.set(sortCol);
     if (this.sortDir() !== sortDir) this.sortDir.set(sortDir);
     if (this.chartView() !== chart) this.chartView.set(chart);
@@ -472,9 +554,19 @@ export class TraceListComponent {
 
   // Filter edits reset to the first page (user changes; URL restores keep their page).
   protected onModeChange(mode: FilterMode): void { this.filterMode.set(mode); this.pageIndex.set(0); }
-  protected onServiceChange(value: string): void { this.selectedService.set(value); this.pageIndex.set(0); }
+  // Switching service invalidates the operation choice (operations are per-service).
+  protected onServiceChange(value: string): void {
+    this.selectedService.set(value);
+    this.selectedOperation.set('');
+    this.pageIndex.set(0);
+  }
+  protected onOperationChange(value: string): void { this.selectedOperation.set(value); this.pageIndex.set(0); }
   protected onSearchChange(value: string): void { this.searchText.set(value); this.pageIndex.set(0); }
   protected onMinDurationChange(value: number): void { this.minDurationMs.set(value); this.pageIndex.set(0); }
+  protected onMaxDurationChange(value: number): void { this.maxDurationMs.set(value); this.pageIndex.set(0); }
+  protected onAnalyticsSort(s: Sort): void {
+    this.analyticsSort.set({ col: s.active, dir: (s.direction || 'desc') as SortDir });
+  }
 
   /** MatSort header click → server-side sort. Empty direction reverts to the mode default order. */
   protected onSort(s: Sort): void {
@@ -491,14 +583,10 @@ export class TraceListComponent {
 
   protected loadAnalytics(): void {
     const svc = this.analyticsService();
-    if (!svc) return;
+    if (!svc) { this.operationStats.set([]); return; }
     const { start, end } = this.timeRange.range();
-    forkJoin({
-      counts: this.api.getOperationCounts(svc, start, end),
-      latencies: this.api.getLatencies(svc, start, end),
-    }).subscribe(({ counts, latencies }) => {
-      this.operationCounts.set(counts);
-      this.latencies.set(latencies);
+    this.api.getOperationStats(svc, start, end).subscribe({
+      next: (stats) => this.operationStats.set(stats),
     });
   }
 

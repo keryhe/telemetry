@@ -44,6 +44,16 @@ export class LogsApiService {
     return this.http.get<LogRecord[]>(`${this.base}/by-trace/${traceId}`);
   }
 
+  /** Logs immediately before/after an anchor timestamp for one service, ignoring the active filters. */
+  getLogContext(anchorTimeUnixNano: number, service: string | undefined, before = 10, after = 10): Observable<LogRecord[]> {
+    let params = new HttpParams()
+      .set('anchor', anchorTimeUnixNano)
+      .set('before', before)
+      .set('after', after);
+    if (service) params = params.set('service', service);
+    return this.http.get<LogRecord[]>(`${this.base}/context`, { params });
+  }
+
   getServices(start?: Date, end?: Date): Observable<string[]> {
     let params = new HttpParams();
     if (start) params = params.set('start', start.toISOString());

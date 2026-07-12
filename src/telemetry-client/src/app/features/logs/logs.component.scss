@@ -18,6 +18,252 @@
   mat-card-content { padding-bottom: 0 !important; }
 }
 
+// ── Faceting sidebar layout ──────────────────────────────────────────────
+.logs-body {
+  display: flex;
+  align-items: stretch;
+  gap: 16px;
+}
+
+.logs-main {
+  flex: 1;
+  min-width: 0; // let the table/ellipsis shrink instead of overflowing
+}
+
+.facet-sidebar {
+  flex: 0 0 300px;
+  width: 300px;
+  align-self: stretch;
+  background: var(--mat-sys-surface-container-low);
+  border: 1px solid var(--mat-sys-outline-variant);
+  border-radius: 8px;
+  padding: 0 4px 8px;
+  height: 100%;
+  overflow-y: auto;
+
+  &.collapsed {
+    flex-basis: 44px;
+    width: 44px;
+  }
+}
+
+// Sticky header + field-name filter, pinned while the field list scrolls.
+.facet-toolbar {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  background: var(--mat-sys-surface-container-low);
+  padding: 4px 0 6px;
+  border-bottom: 1px solid var(--mat-sys-outline-variant);
+}
+
+.facet-header {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  .facet-title { font-weight: 600; font-size: 16px; }
+}
+
+.fields-toggle-icon {
+  transition: transform 200ms;
+  &.collapsed { transform: rotate(180deg); }
+}
+
+.field-filter {
+  box-sizing: border-box;
+  width: 100%;
+  margin-top: 2px;
+  padding: 0 4px;
+  mat-icon[matPrefix] { margin-right: 6px; opacity: 0.6; font-size: 18px; width: 18px; height: 18px; }
+}
+
+.facet-empty {
+  padding: 12px 8px;
+  font-size: 12px;
+  color: var(--mat-sys-on-surface-variant);
+}
+
+.facet-group {
+  margin-bottom: 2px;
+  border-radius: 6px;
+  // Hairline separator between fields.
+  border-bottom: 1px solid color-mix(in srgb, var(--mat-sys-outline-variant) 45%, transparent);
+
+  &.open {
+    background: color-mix(in srgb, var(--mat-sys-surface-container) 60%, transparent);
+    padding-bottom: 4px;
+  }
+}
+
+.facet-key {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  width: 100%;
+  border: none;
+  background: none;
+  cursor: pointer;
+  padding: 5px 6px;
+  border-radius: 6px;
+  color: var(--mat-sys-on-surface);
+  text-align: left;
+  &:hover { background: var(--mat-sys-surface-container-high); }
+
+  .facet-caret { font-size: 18px; width: 18px; height: 18px; color: var(--mat-sys-on-surface-variant); }
+  .facet-type { font-size: 16px; width: 16px; height: 16px; color: var(--mat-sys-on-surface-variant); opacity: 0.75; }
+  .facet-key-name {
+    flex: 1; min-width: 0;
+    font-size: 12px; font-weight: 600; font-family: monospace;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .facet-key-count {
+    font-size: 11px; color: var(--mat-sys-on-surface-variant);
+    background: var(--mat-sys-surface-container-high);
+    border-radius: 8px; padding: 0 6px;
+    font-variant-numeric: tabular-nums;
+  }
+}
+
+// Indentation guide down the left of an expanded field's values.
+.facet-values {
+  padding: 2px 4px 2px 10px;
+  margin-left: 12px;
+  border-left: 2px solid color-mix(in srgb, var(--mat-sys-primary) 30%, transparent);
+}
+
+.facet-value {
+  position: relative;
+  display: flex;
+  align-items: center;
+  border-radius: 4px;
+  &:hover { background: var(--mat-sys-surface-container-high); }
+  &:hover .facet-act { visibility: visible; }
+
+  // Active value reads as a pill.
+  &.active {
+    background: var(--mat-sys-primary-container);
+    .facet-value-text { color: var(--mat-sys-on-primary-container); font-weight: 600; }
+    .facet-value-count { color: color-mix(in srgb, var(--mat-sys-on-primary-container) 80%, transparent); }
+  }
+  &.excluded .facet-value-text { color: var(--mat-sys-error); text-decoration: line-through; }
+}
+
+// Proportion bar behind each value (width bound to v.pct).
+.facet-bar {
+  position: absolute;
+  left: 0; top: 2px; bottom: 2px;
+  background: color-mix(in srgb, var(--mat-sys-primary) 14%, transparent);
+  border-radius: 3px;
+  pointer-events: none;
+  &.excluded { background: color-mix(in srgb, var(--mat-sys-error) 14%, transparent); }
+}
+
+.facet-value-main {
+  position: relative; z-index: 1;
+  flex: 1; min-width: 0;
+  display: flex; align-items: center; gap: 6px;
+  border: none; background: none; cursor: pointer;
+  padding: 3px 4px;
+  color: var(--mat-sys-on-surface);
+  text-align: left;
+
+  .facet-value-text {
+    flex: 1; min-width: 0;
+    font-size: 12px; font-family: monospace;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .facet-value-count {
+    font-size: 11px; color: var(--mat-sys-on-surface-variant);
+    font-variant-numeric: tabular-nums; white-space: nowrap;
+  }
+}
+
+.facet-act {
+  position: relative; z-index: 1;
+  visibility: hidden;
+  border: none; background: none; cursor: pointer;
+  display: flex; align-items: center;
+  padding: 2px; color: var(--mat-sys-on-surface-variant);
+  mat-icon { font-size: 15px; width: 15px; height: 15px; }
+
+  &.include:hover { color: var(--mat-sys-primary); }
+  &.exclude:hover { color: var(--mat-sys-error); }
+}
+
+// "top N of M" + Show more / Show all (per field), and the field-list show-more footer.
+.facet-more {
+  display: flex; flex-direction: column; gap: 2px;
+  padding: 4px 4px 2px;
+}
+.facet-more-actions { display: flex; gap: 8px; }
+.facet-fields-more {
+  display: flex; flex-direction: column; gap: 2px;
+  padding: 8px 6px 2px;
+  margin-top: 4px;
+  border-top: 1px solid var(--mat-sys-outline-variant);
+}
+.facet-more-caption {
+  font-size: 11px; color: var(--mat-sys-on-surface-variant);
+  font-variant-numeric: tabular-nums;
+}
+.facet-more-btn {
+  border: none; background: none; cursor: pointer;
+  padding: 2px 0;
+  font-size: 12px; font-weight: 600;
+  color: var(--mat-sys-primary);
+  text-align: left;
+  &:hover { text-decoration: underline; }
+}
+
+// ── Search-match highlight ───────────────────────────────────────────────
+.message-text ::ng-deep mark.search-hit,
+mark.search-hit {
+  background: var(--mat-sys-tertiary-container, #ffe082);
+  color: var(--mat-sys-on-tertiary-container, inherit);
+  border-radius: 2px;
+  padding: 0 1px;
+}
+
+// ── Surrounding-logs context ─────────────────────────────────────────────
+.context-btn {
+  margin-top: 16px;
+}
+
+.context-list {
+  margin-top: 8px;
+}
+
+.context-loading {
+  font-size: 12px;
+  color: var(--mat-sys-on-surface-variant);
+  padding: 4px 0;
+}
+
+.context-list {
+  border: 1px solid var(--mat-sys-outline-variant);
+  border-radius: 4px;
+  overflow: hidden;
+}
+
+.context-row {
+  display: flex;
+  gap: 12px;
+  padding: 3px 12px;
+  font-size: 12px;
+  align-items: baseline;
+  &:nth-child(even) { background: var(--mat-sys-surface-container); }
+
+  &.context-anchor {
+    background: var(--mat-sys-primary-container);
+    color: var(--mat-sys-on-primary-container);
+    font-weight: 600;
+  }
+
+  .context-time { white-space: nowrap; color: var(--mat-sys-on-surface-variant); }
+  .context-sev { white-space: nowrap; min-width: 44px; font-weight: 600; }
+  .context-msg { flex: 1; min-width: 0; word-break: break-all; }
+}
+
 .filter-bar {
   display: flex;
   align-items: center;

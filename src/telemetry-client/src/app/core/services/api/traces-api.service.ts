@@ -2,13 +2,17 @@ import { Injectable, inject } from '@angular/core';
 import { HttpClient, HttpParams } from '@angular/common/http';
 import { Observable } from 'rxjs';
 import { environment } from '../../../../environments/environment';
-import { ServiceDependency, SpanModel, TraceFilter, TraceInfo } from '../../models/trace.models';
+import { OperationStats, ServiceDependency, SpanModel, TraceFilter, TraceInfo } from '../../models/trace.models';
 import { PagedResult } from '../../models/paged.models';
 
 export interface TraceSearchQuery extends TraceFilter {
   offset: number;
   sort?: string;
   dir?: 'asc' | 'desc';
+  operation?: string;
+  maxDurationMs?: number;
+  /** All-span tag predicates, each pre-encoded as `key:value` (contains) or `key=value` (exact). */
+  tags?: string[];
 }
 
 @Injectable({ providedIn: 'root' })
@@ -37,7 +41,10 @@ export class TracesApiService {
       .set('mode', query.mode ?? 'all');
     if (query.service) params = params.set('service', query.service);
     if (query.minDurationMs != null) params = params.set('minDurationMs', query.minDurationMs);
+    if (query.maxDurationMs != null) params = params.set('maxDurationMs', query.maxDurationMs);
+    if (query.operation) params = params.set('operation', query.operation);
     if (query.sort) params = params.set('sort', query.sort).set('dir', query.dir ?? 'desc');
+    for (const tag of query.tags ?? []) params = params.append('tag', tag);
     return this.http.get<PagedResult<TraceInfo>>(`${this.base}/search`, { params });
   }
 
@@ -71,5 +78,14 @@ export class TracesApiService {
     if (start) params = params.set('start', start.toISOString());
     if (end) params = params.set('end', end.toISOString());
     return this.http.get<Record<string, number>>(`${this.base}/latencies`, { params });
+  }
+
+  /** Per-operation RED metrics (rate, error%, p50/p95/p99, avg) for a service over the window. */
+  getOperationStats(service: string, start: Date, end: Date): Observable<OperationStats[]> {
+    const params = new HttpParams()
+      .set('service', service)
+      .set('start', start.toISOString())
+      .set('end', end.toISOString());
+    return this.http.get<OperationStats[]>(`${this.base}/operations/stats`, { params });
   }
 }

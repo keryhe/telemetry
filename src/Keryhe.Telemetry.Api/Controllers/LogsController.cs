@@ -72,4 +72,18 @@ public class LogsController : ControllerBase
         var logs = await _logs.GetLogRecordsByTraceIdAsync(traceId, ct);
         return Ok(logs);
     }
+
+    // GET /api/logs/context?anchor=<timeUnixNano>&service=&before=&after=
+    // The N log records before/after the anchor timestamp for the same service, ignoring list filters.
+    [HttpGet("context")]
+    public async Task<ActionResult<IEnumerable<LogRecordModel>>> GetContext(
+        [FromQuery] long anchor,
+        [FromQuery] string? service = null,
+        [FromQuery] int before = 10,
+        [FromQuery] int after = 10,
+        CancellationToken ct = default)
+    {
+        var logs = await _logs.GetSurroundingLogRecordsAsync(anchor, service, before, after, ct);
+        return Ok(logs);
+    }
 }

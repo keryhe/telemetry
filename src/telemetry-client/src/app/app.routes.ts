@@ -9,13 +9,13 @@ export const routes: Routes = [
     children: [
       {
         path: 'dashboard',
-        title: 'MELT - Dashboard',
+        title: 'Watchdog - Dashboard',
         loadComponent: () =>
           import('./features/dashboard/dashboard.component').then((m) => m.DashboardComponent),
       },
       {
         path: 'traces',
-        title: 'MELT - Traces',
+        title: 'Watchdog - Traces',
         loadComponent: () =>
           import('./features/traces/trace-list/trace-list.component').then((m) => m.TraceListComponent),
       },
@@ -28,7 +28,7 @@ export const routes: Routes = [
       },
       {
         path: 'metrics',
-        title: 'MELT - Metrics',
+        title: 'Watchdog - Metrics',
         loadComponent: () =>
           import('./features/metrics/metric-list/metric-list.component').then(
             (m) => m.MetricListComponent
@@ -43,13 +43,13 @@ export const routes: Routes = [
       },
       {
         path: 'logs',
-        title: 'MELT - Logs',
+        title: 'Watchdog - Logs',
         loadComponent: () =>
           import('./features/logs/logs.component').then((m) => m.LogsComponent),
       },
       {
         path: 'alerts',
-        title: 'MELT - Alerts',
+        title: 'Watchdog - Alerts',
         loadComponent: () =>
           import('./features/alerts/alerts.component').then((m) => m.AlertsComponent),
       },

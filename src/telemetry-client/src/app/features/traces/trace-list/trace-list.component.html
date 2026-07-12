@@ -26,6 +26,12 @@
                [ngModel]="minDurationMs()" (ngModelChange)="onMinDurationChange($event)"
                [ngModelOptions]="{standalone: true}" />
       </mat-form-field>
+      <mat-form-field appearance="outline" subscriptSizing="dynamic" class="min-duration-field">
+        <mat-label>Max Duration (ms)</mat-label>
+        <input matInput type="number" min="0"
+               [ngModel]="maxDurationMs()" (ngModelChange)="onMaxDurationChange($event)"
+               [ngModelOptions]="{standalone: true}" placeholder="No max" />
+      </mat-form-field>
     }
 
     <mat-form-field appearance="outline" subscriptSizing="dynamic" class="service-filter">
@@ -37,6 +43,18 @@
         }
       </mat-select>
     </mat-form-field>
+
+    @if (selectedService()) {
+      <mat-form-field appearance="outline" subscriptSizing="dynamic" class="service-filter">
+        <mat-label>Operation</mat-label>
+        <mat-select [value]="selectedOperation()" (selectionChange)="onOperationChange($event.value)">
+          <mat-option value="">All operations</mat-option>
+          @for (o of operations(); track o) {
+            <mat-option [value]="o">{{ o }}</mat-option>
+          }
+        </mat-select>
+      </mat-form-field>
+    }
 
     <mat-form-field appearance="outline" subscriptSizing="dynamic" class="search-field">
       <mat-label>Search</mat-label>
@@ -241,21 +259,44 @@
           @if (operationRows().length === 0) {
             <app-empty-state icon="analytics" message="Select a service to see analytics" />
           } @else {
-            <table mat-table [dataSource]="operationRows()" class="full-width">
-              <ng-container matColumnDef="op">
-                <th mat-header-cell *matHeaderCellDef>Operation</th>
-                <td mat-cell *matCellDef="let r">{{ r.op }}</td>
+            <table mat-table [dataSource]="operationRows()" matSort
+                   [matSortActive]="analyticsSort().col" [matSortDirection]="analyticsSort().dir"
+                   (matSortChange)="onAnalyticsSort($event)" class="full-width red-table">
+              <ng-container matColumnDef="operation">
+                <th mat-header-cell *matHeaderCellDef mat-sort-header>Operation</th>
+                <td mat-cell *matCellDef="let r" class="mono">{{ r.operation }}</td>
               </ng-container>
               <ng-container matColumnDef="count">
-                <th mat-header-cell *matHeaderCellDef>Calls</th>
-                <td mat-cell *matCellDef="let r">{{ r.count | number }}</td>
+                <th mat-header-cell *matHeaderCellDef mat-sort-header>Calls</th>
+                <td mat-cell *matCellDef="let r" class="num">{{ r.count | number }}</td>
               </ng-container>
-              <ng-container matColumnDef="avgMs">
-                <th mat-header-cell *matHeaderCellDef>Avg Latency</th>
-                <td mat-cell *matCellDef="let r">{{ formatDuration(r.avgMs) }}</td>
+              <ng-container matColumnDef="rate">
+                <th mat-header-cell *matHeaderCellDef mat-sort-header matTooltip="Calls per second">Rate/s</th>
+                <td mat-cell *matCellDef="let r" class="num">{{ r.ratePerSecond | number:'1.0-2' }}</td>
               </ng-container>
-              <tr mat-header-row *matHeaderRowDef="['op','count','avgMs']"></tr>
-              <tr mat-row *matRowDef="let row; columns: ['op','count','avgMs']"></tr>
+              <ng-container matColumnDef="errorRate">
+                <th mat-header-cell *matHeaderCellDef mat-sort-header>Err %</th>
+                <td mat-cell *matCellDef="let r" class="num"
+                    [style.color]="r.errorRate > 0 ? '#f44336' : ''">{{ r.errorRate | number:'1.0-1' }}%</td>
+              </ng-container>
+              <ng-container matColumnDef="p50">
+                <th mat-header-cell *matHeaderCellDef mat-sort-header>p50</th>
+                <td mat-cell *matCellDef="let r" class="num">{{ formatDuration(r.p50Ms) }}</td>
+              </ng-container>
+              <ng-container matColumnDef="p95">
+                <th mat-header-cell *matHeaderCellDef mat-sort-header>p95</th>
+                <td mat-cell *matCellDef="let r" class="num">{{ formatDuration(r.p95Ms) }}</td>
+              </ng-container>
+              <ng-container matColumnDef="p99">
+                <th mat-header-cell *matHeaderCellDef mat-sort-header>p99</th>
+                <td mat-cell *matCellDef="let r" class="num">{{ formatDuration(r.p99Ms) }}</td>
+              </ng-container>
+              <ng-container matColumnDef="avg">
+                <th mat-header-cell *matHeaderCellDef mat-sort-header>Avg</th>
+                <td mat-cell *matCellDef="let r" class="num">{{ formatDuration(r.avgMs) }}</td>
+              </ng-container>
+              <tr mat-header-row *matHeaderRowDef="analyticsColumns"></tr>
+              <tr mat-row *matRowDef="let row; columns: analyticsColumns"></tr>
             </table>
           }
         </mat-card-content>

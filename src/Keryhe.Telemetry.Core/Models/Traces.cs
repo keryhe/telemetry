@@ -72,6 +72,25 @@ public class TraceInfo
     public Dictionary<string, object>? RootSpanAttributes { get; set; }
 }
 
+/// <summary>Per-operation RED metrics (Rate, Errors, Duration percentiles) for the Analytics tab.</summary>
+public class OperationStats
+{
+    public string Operation { get; set; } = null!;
+    public int Count { get; set; }
+    public int ErrorCount { get; set; }
+
+    /// <summary>Errors as a percentage of calls (0–100).</summary>
+    public double ErrorRate { get; set; }
+
+    /// <summary>Throughput: calls per second across the queried window.</summary>
+    public double RatePerSecond { get; set; }
+
+    public double AvgMs { get; set; }
+    public double P50Ms { get; set; }
+    public double P95Ms { get; set; }
+    public double P99Ms { get; set; }
+}
+
 public class ServiceDependency
 {
     public string ParentService { get; set; } = null!;

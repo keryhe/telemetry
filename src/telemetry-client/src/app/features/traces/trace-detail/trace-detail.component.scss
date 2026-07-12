@@ -73,9 +73,9 @@
   display: flex;
   align-items: center;
   gap: 4px;
-  padding: 6px 12px 0;
+  padding: 16px 12px;
 
-  .find-field { flex: 1; max-width: 620px; }
+  .find-field { flex: 1; }
   .find-field mat-icon[matPrefix] { margin-right: 6px; opacity: 0.6; }
 
   .match-count {

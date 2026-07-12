@@ -1,5 +1,5 @@
 import { Component, computed, effect, inject, signal, untracked, viewChild } from '@angular/core';
-import { DatePipe, DecimalPipe, KeyValuePipe } from '@angular/common';
+import { DatePipe, DecimalPipe, KeyValuePipe, SlicePipe, PercentPipe } from '@angular/common';
 import { ActivatedRoute, RouterLink } from '@angular/router';
 import { MatCardModule } from '@angular/material/card';
 import { MatFormFieldModule } from '@angular/material/form-field';
@@ -24,8 +24,10 @@ import { LogRecord, getSeverityLabel, getSeverityColor, getSeverityBg, getServic
 import { StatCardComponent } from '../../shared/components/stat-card/stat-card.component';
 import { EmptyStateComponent } from '../../shared/components/empty-state/empty-state.component';
 import { bucketLogs, buildLogSeriesOptions, timeRangeZoom } from '../../shared/utils/chart.utils';
-import { parseSearchQuery, ParsedSearchQuery, SearchTerm } from '../../shared/utils/search-query.parser';
+import { parseSearchQuery, ParsedSearchQuery, SearchTerm, buildAttributeTerm } from '../../shared/utils/search-query.parser';
 import { LogSearchHelpDialogComponent } from './log-search-help-dialog/log-search-help-dialog.component';
+import { FacetValueType, Facet } from './facet.models';
+import { FacetValuesDialogComponent, FacetValuesDialogData } from './facet-values-dialog/facet-values-dialog.component';
 import { loadPageState, savePageState } from '../../shared/utils/page-state';
 import { UrlStateService } from '../../shared/utils/url-state';
 
@@ -33,12 +35,34 @@ const BUCKET_COUNT = 30;
 const STATE_KEY = 'state.logs';
 /** Upper bound on rows pulled for the chart/stat overview (and shallow client paging). */
 const OVERVIEW_CAP = 1000;
+/** Default number of attribute keys / values per key the faceting sidebar shows (raised via "show more"). */
+const FACET_KEY_LIMIT = 15;
+const FACET_VALUE_LIMIT = 8;
+/** How many fields / values each "show more" click reveals. */
+const FACET_KEY_STEP = 15;
+const FACET_VALUE_STEP = 10;
+/** Upper bound on values retained per key (protects the "show all" dialog against pathological cardinality). */
+const FACET_VALUE_HARD_CAP = 500;
+
+function escapeHtml(s: string): string {
+  return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
+function escapeRegExp(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+/** Split a search string into its ` AND `-separated terms (empty when blank). */
+function splitTerms(query: string): string[] {
+  const t = query.trim();
+  return t ? t.split(' AND ').map((s) => s.trim()).filter(Boolean) : [];
+}
 
 @Component({
   selector: 'app-logs',
   standalone: true,
   imports: [
-    DatePipe, DecimalPipe, KeyValuePipe, FormsModule, RouterLink,
+    DatePipe, DecimalPipe, KeyValuePipe, SlicePipe, PercentPipe, FormsModule, RouterLink,
     MatCardModule, MatTableModule, MatIconModule,
     MatFormFieldModule, MatInputModule, MatSelectModule, MatProgressBarModule,
     MatButtonModule, MatPaginatorModule, MatChipsModule, MatDialogModule,
@@ -61,6 +85,7 @@ export class LogsComponent {
     selectedService: '',
     selectedSeverity: -1,
     pageSize: 100,
+    facetsCollapsed: true,
   });
 
   protected loading = signal(true);
@@ -76,6 +101,20 @@ export class LogsComponent {
   protected selectedSeverity = signal<number>(this.readNum('severity') ?? this.saved.selectedSeverity);
   protected traceIdFilter = signal('');
   protected expandedRow = signal<LogRecord | null>(null);
+
+  // Faceting sidebar: collapse state + which keys are collapsed (all open by default).
+  protected facetsCollapsed = signal<boolean>(this.saved.facetsCollapsed);
+  private readonly closedFacetKeys = signal<Set<string>>(new Set());
+  // Ephemeral faceting UI state (not persisted): field-name filter, how many fields to show,
+  // and per-key how many values to show.
+  protected fieldFilter = signal('');
+  protected facetKeyLimit = signal(FACET_KEY_LIMIT);
+  private readonly facetValueLimits = signal<Record<string, number>>({});
+
+  // Surrounding-logs context, keyed by the anchor row currently expanded.
+  protected contextRows = signal<LogRecord[]>([]);
+  protected contextLoading = signal(false);
+  protected contextAnchor = signal<LogRecord | null>(null);
 
   // multiTemplateDataRows only re-evaluates its `when` predicate when the table
   // re-renders its rows, so we must call renderRows() after toggling expansion.
@@ -128,6 +167,67 @@ export class LogsComponent {
 
   /** Real length behind the paginator: server total normally, refined length in client mode. */
   protected effectiveTotal = computed(() => this.clientMode() ? this.refined().length : this.total());
+
+  /**
+   * Attribute facets over the currently-filtered rows: each key's full value list with counts,
+   * inferred type, per-value bar width (pct) and share, marked active/excluded per the search box.
+   * Counts reflect all other active filters (computed over the refined set). Purely client-side
+   * over the loaded overview — the key/value display limits are applied downstream, not here.
+   */
+  protected facets = computed<Facet[]>(() => {
+    const rows = this.refined();
+    const byKey = new Map<string, Map<string, number>>();
+    const keyType = new Map<string, FacetValueType>();
+    for (const l of rows) {
+      const scopeAttrs = (l.instrumentationScope as { attributes?: Record<string, unknown> } | null)?.attributes;
+      for (const bag of [l.attributes, l.resource?.attributes, scopeAttrs]) {
+        if (!bag) continue;
+        for (const [k, raw] of Object.entries(bag)) {
+          if (raw == null || raw === '' || k === 'Timestamp') continue;
+          // First-seen non-null type wins (mixed-type keys are rare); default to 'string'.
+          if (!keyType.has(k)) {
+            const t = typeof raw;
+            keyType.set(k, t === 'number' || t === 'boolean' ? t : 'string');
+          }
+          const value = String(raw);
+          let values = byKey.get(k);
+          if (!values) { values = new Map(); byKey.set(k, values); }
+          values.set(value, (values.get(value) ?? 0) + 1);
+        }
+      }
+    }
+
+    // Mark values already pinned in the search box (include vs exclude).
+    const parts = new Set(splitTerms(this.searchText()));
+
+    return [...byKey.entries()]
+      .map(([key, values]) => {
+        const total = [...values.values()].reduce((a, b) => a + b, 0);
+        const maxCount = Math.max(...values.values());
+        const all = [...values.entries()]
+          .map(([value, count]) => ({
+            value, count,
+            pct: maxCount > 0 ? (count / maxCount) * 100 : 0,
+            share: total > 0 ? count / total : 0,
+            active: parts.has(buildAttributeTerm(key, value, false)),
+            excluded: parts.has(buildAttributeTerm(key, value, true)),
+          }))
+          .sort((a, b) => b.count - a.count)
+          .slice(0, FACET_VALUE_HARD_CAP);
+        return { key, type: keyType.get(key) ?? 'string', values: all, distinct: values.size, total };
+      })
+      // Most-covering keys first; ties broken alphabetically for stable ordering.
+      .sort((a, b) => b.total - a.total || a.key.localeCompare(b.key));
+  });
+
+  /** Facets after the field-name filter — the full matching set before the display key-limit. */
+  protected filteredFacets = computed<Facet[]>(() => {
+    const q = this.fieldFilter().trim().toLowerCase();
+    return q ? this.facets().filter((f) => f.key.toLowerCase().includes(q)) : this.facets();
+  });
+
+  /** Facets actually rendered in the sidebar: filtered, then capped to the current key-limit. */
+  protected visibleFacets = computed<Facet[]>(() => this.filteredFacets().slice(0, this.facetKeyLimit()));
 
   /** Rows for the current page — a client slice of the overview, or the fetched server page. */
   protected displayRows = computed(() => {
@@ -202,6 +302,7 @@ export class LogsComponent {
         selectedService: this.selectedService(),
         selectedSeverity: this.selectedSeverity(),
         pageSize: this.pageSize(),
+        facetsCollapsed: this.facetsCollapsed(),
       });
     });
   }
@@ -267,14 +368,15 @@ export class LogsComponent {
   private applyParsedSearch(logs: LogRecord[], terms: SearchTerm[]): LogRecord[] {
     let result = logs;
     for (const term of terms) {
+      const negate = term.negate ?? false;
       if (term.isAttributeFilter) {
         const key = term.key!;
         const value = (term.value ?? '').toLowerCase();
         const exact = term.isExactMatch;
-        result = result.filter((l) => this.matchesAttribute(l, key, value, exact));
+        result = result.filter((l) => this.matchesAttribute(l, key, value, exact) !== negate);
       } else {
         const text = (term.freeText ?? '').toLowerCase();
-        result = result.filter((l) => (l.bodyValue?.toLowerCase().includes(text)) ?? false);
+        result = result.filter((l) => ((l.bodyValue?.toLowerCase().includes(text)) ?? false) !== negate);
       }
     }
     return result;
@@ -360,5 +462,129 @@ export class LogsComponent {
 
   protected clearTrace(): void {
     this.traceIdFilter.set('');
+  }
+
+  // =========================================================================
+  // FACETING SIDEBAR
+  // =========================================================================
+
+  protected toggleFacetsSidebar(): void { this.facetsCollapsed.update((c) => !c); }
+
+  protected isFacetKeyOpen(key: string): boolean { return !this.closedFacetKeys().has(key); }
+
+  protected toggleFacetKey(key: string): void {
+    this.closedFacetKeys.update((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key); else next.add(key);
+      return next;
+    });
+  }
+
+  /** Toggle a `key:value` (or excluded `-key:value`) facet term in the search box. */
+  protected toggleFacetValue(key: string, value: string, exclude: boolean): void {
+    const term = buildAttributeTerm(key, value, exclude);
+    const opposite = buildAttributeTerm(key, value, !exclude);
+    const parts = splitTerms(this.searchText());
+    const idx = parts.indexOf(term);
+    if (idx >= 0) {
+      parts.splice(idx, 1);            // clicking the active term clears it
+    } else {
+      const oi = parts.indexOf(opposite);
+      if (oi >= 0) parts.splice(oi, 1); // flip include <-> exclude rather than stacking both
+      parts.push(term);
+    }
+    this.onSearchChange(parts.join(' AND '));
+  }
+
+  /** Step sizes surfaced to the template for the "show more" button labels. */
+  protected readonly facetKeyStep = FACET_KEY_STEP;
+  protected readonly facetValueStep = FACET_VALUE_STEP;
+
+  /** Material glyph representing an attribute's inferred type. */
+  protected facetTypeIcon(t: FacetValueType): string {
+    return t === 'number' ? 'tag' : t === 'boolean' ? 'toggle_on' : 'abc';
+  }
+
+  /** How many values to render for a key (default FACET_VALUE_LIMIT, raised by "show more"). */
+  protected visibleValueCount(key: string): number {
+    return this.facetValueLimits()[key] ?? FACET_VALUE_LIMIT;
+  }
+
+  /** Reveal FACET_VALUE_STEP more values for one key. */
+  protected showMoreValues(key: string): void {
+    this.facetValueLimits.update((prev) => ({
+      ...prev,
+      [key]: this.visibleValueCount(key) + FACET_VALUE_STEP,
+    }));
+  }
+
+  /** Reveal FACET_KEY_STEP more fields in the sidebar. */
+  protected showMoreFields(): void {
+    this.facetKeyLimit.update((n) => n + FACET_KEY_STEP);
+  }
+
+  /** Open the searchable, virtualized "show all values" dialog for a field. */
+  protected openFacetValues(facet: Facet): void {
+    this.dialog.open(FacetValuesDialogComponent, {
+      data: {
+        key: facet.key,
+        type: facet.type,
+        values: facet.values,
+        distinct: facet.distinct,
+        total: facet.total,
+        searchText: this.searchText,
+        toggle: (key: string, value: string, exclude: boolean) => this.toggleFacetValue(key, value, exclude),
+      } satisfies FacetValuesDialogData,
+      maxWidth: '720px',
+      width: '90vw',
+    });
+  }
+
+  // =========================================================================
+  // SEARCH-MATCH HIGHLIGHTING (message cell)
+  // =========================================================================
+
+  /** HTML for a log body with free-text search matches wrapped in <mark>. Escaped, so it is safe. */
+  protected highlightBody(body: string | null): string {
+    const escaped = escapeHtml(body ?? '');
+    const needles = this.parsedQuery().terms
+      .filter((t) => !t.isAttributeFilter && !t.negate && t.freeText)
+      .map((t) => escapeHtml(t.freeText!))
+      .filter((n) => n.length > 0);
+    if (needles.length === 0) return escaped;
+
+    const re = new RegExp(needles.map(escapeRegExp).join('|'), 'gi');
+    return escaped.replace(re, (m) => `<mark class="search-hit">${m}</mark>`);
+  }
+
+  // =========================================================================
+  // SURROUNDING-LOGS CONTEXT
+  // =========================================================================
+
+  /** Toggle the surrounding-logs context for a row: show it, or hide it if already shown. */
+  protected toggleContext(row: LogRecord): void {
+    if (this.isContextAnchor(row)) this.hideContext();
+    else this.showContext(row);
+  }
+
+  protected showContext(anchor: LogRecord): void {
+    this.contextAnchor.set(anchor);
+    this.contextRows.set([]);
+    this.contextLoading.set(true);
+    this.api.getLogContext(anchor.timeUnixNano ?? 0, getServiceName(anchor), 10, 10).subscribe({
+      next: (rows) => { this.contextRows.set(rows); this.contextLoading.set(false); },
+      error: () => this.contextLoading.set(false),
+    });
+  }
+
+  protected hideContext(): void {
+    this.contextAnchor.set(null);
+    this.contextRows.set([]);
+  }
+
+  /** True for the row that anchored the context request (same timestamp + service). */
+  protected isContextAnchor(row: LogRecord): boolean {
+    const a = this.contextAnchor();
+    return a != null && row.timeUnixNano === a.timeUnixNano && getServiceName(row) === getServiceName(a);
   }
 }

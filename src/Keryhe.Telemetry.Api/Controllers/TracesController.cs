@@ -38,7 +38,7 @@ public class TracesController : ControllerBase
         return Ok(result);
     }
 
-    // GET /api/traces/search?start=&end=&mode=all|errors|slow&service=&minDurationMs=&limit=&offset=
+    // GET /api/traces/search?start=&end=&mode=all|errors|slow&service=&operation=&minDurationMs=&maxDurationMs=&tag=key:value&limit=&offset=
     // Server-side filtered + paged traces for the traces list page (returns the full filtered total).
     [HttpGet("search")]
     public async Task<ActionResult<PagedResult<TraceInfo>>> SearchTraces(
@@ -46,20 +46,32 @@ public class TracesController : ControllerBase
         [FromQuery] DateTime end,
         [FromQuery] string mode = "all",
         [FromQuery] string? service = null,
+        [FromQuery] string? operation = null,
         [FromQuery] double? minDurationMs = null,
+        [FromQuery] double? maxDurationMs = null,
+        [FromQuery(Name = "tag")] string[]? tag = null,
         [FromQuery] string? sort = null,
         [FromQuery] string dir = "desc",
         [FromQuery] int limit = 100,
         [FromQuery] int offset = 0,
         CancellationToken ct = default)
     {
+        var tags = (tag ?? Array.Empty<string>())
+            .Select(TagFilter.Parse)
+            .Where(t => t != null)
+            .Select(t => t!)
+            .ToList();
+
         var result = await _traces.QueryTracesAsync(new TraceQuery
         {
             Start = start,
             End = end,
             Mode = mode,
             Service = service,
+            Operation = operation,
             MinDurationMs = minDurationMs,
+            MaxDurationMs = maxDurationMs,
+            Tags = tags,
             Sort = sort,
             Dir = dir,
             Limit = limit,
@@ -123,6 +135,21 @@ public class TracesController : ControllerBase
             return BadRequest("service query parameter is required.");
         var counts = await _traces.GetOperationCountsAsync(service, start, end, ct);
         return Ok(counts);
+    }
+
+    // GET /api/traces/operations/stats?service=&start=&end=
+    // Per-operation RED metrics (rate, error%, p50/p95/p99, avg) for the Analytics tab.
+    [HttpGet("operations/stats")]
+    public async Task<ActionResult<List<OperationStats>>> GetOperationStats(
+        [FromQuery] string service,
+        [FromQuery] DateTime start,
+        [FromQuery] DateTime end,
+        CancellationToken ct = default)
+    {
+        if (string.IsNullOrWhiteSpace(service))
+            return BadRequest("service query parameter is required.");
+        var stats = await _traces.GetOperationStatsAsync(service, start, end, ct);
+        return Ok(stats);
     }
 
     // GET /api/traces/latencies?service=&start=&end=

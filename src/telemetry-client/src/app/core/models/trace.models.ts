@@ -70,6 +70,18 @@ export interface InstrumentationScopeModel {
   attributes: Record<string, unknown>;
 }
 
+export interface OperationStats {
+  operation: string;
+  count: number;
+  errorCount: number;
+  errorRate: number;      // 0–100
+  ratePerSecond: number;
+  avgMs: number;
+  p50Ms: number;
+  p95Ms: number;
+  p99Ms: number;
+}
+
 export interface ServiceDependency {
   parentService: string;
   childService: string;

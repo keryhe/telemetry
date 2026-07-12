@@ -117,3 +117,9 @@
     color: var(--mat-sys-primary);
   }
 }
+
+// RED-metrics analytics table: right-align the numeric columns for easy scanning.
+.red-table {
+  .num { text-align: right; font-variant-numeric: tabular-nums; font-family: monospace; font-size: 12px; }
+  th.num, th.mat-mdc-header-cell.num { text-align: right; }
+}
