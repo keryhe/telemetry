@@ -37,9 +37,6 @@ CREATE TABLE IF NOT EXISTS tenants
 ENGINE = ReplacingMergeTree
 ORDER BY id;
 
--- Seed a default tenant (id = 1) so tenant_id = 1 telemetry has a catalog entry.
-INSERT INTO tenants (id, name) VALUES (1, 'default');
-
 CREATE TABLE IF NOT EXISTS api_keys
 (
     id           Int64,

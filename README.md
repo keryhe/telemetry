@@ -4,7 +4,7 @@ A self-hosted OpenTelemetry (OTLP) ingestion and visualization platform for trac
 
 ## Overview
 
-This solution receives OpenTelemetry Protocol (OTLP) data via gRPC, stores it in a database (PostgreSQL, TimescaleDB, SQL Server, or ClickHouse), and exposes it through a REST API consumed by an Angular single-page application.
+This solution receives OpenTelemetry Protocol (OTLP) data via gRPC, stores it in a database (PostgreSQL, TimescaleDB, SQL Server, MySQL, or ClickHouse), and exposes it through a REST API consumed by an Angular single-page application.
 
 ## Features
 
@@ -15,7 +15,7 @@ This solution receives OpenTelemetry Protocol (OTLP) data via gRPC, stores it in
 - **All Metric Types**: Gauge, Sum, Histogram, Exponential Histogram, and Summary
 - **Trace Correlation**: Links logs and metrics to traces via trace and span IDs
 - **Built-in Analytics**: Pre-configured views for service maps, trace summaries, and log analysis
-- **Multiple Database Providers**: Choose between plain PostgreSQL, PostgreSQL + TimescaleDB, SQL Server, or ClickHouse (columnar/OLAP)
+- **Multiple Database Providers**: Choose between plain PostgreSQL, PostgreSQL + TimescaleDB, SQL Server, MySQL, or ClickHouse (columnar/OLAP)
 - **Alerting**: Rule-based alerts (metric threshold, error rate, slow traces, log severity spikes) with configurable cooldowns and webhook delivery
 
 ## Supported Signal Types
@@ -46,16 +46,16 @@ This solution receives OpenTelemetry Protocol (OTLP) data via gRPC, stores it in
 OpenTelemetry SDKs (any language)
   → OTLP gRPC (port 5117) → Keryhe.Telemetry.Collector.Server
   → bounded ingestion channel → background worker → provider bulk writer
-  → PostgreSQL / TimescaleDB / SQL Server / ClickHouse
+  → PostgreSQL / TimescaleDB / SQL Server / MySQL / ClickHouse
   → Keryhe.Telemetry.Api.Server (REST API, port 5188 / 7105)
   → Angular SPA (src/telemetry-client, port 4201)
 ```
 
 The database provider is chosen at runtime via the `Database:Provider` configuration key
-(`PostgreSQL`, `Timescale`, `SqlServer`, or `ClickHouse`); each provider ships its own read/write
-implementation and is selected by the host at startup. Storage uses Dapper for reads across all
-providers (no EF Core); writes use each backend's native bulk path (Npgsql COPY, `SqlBulkCopy`,
-or `ClickHouseBulkCopy`).
+(`PostgreSQL`, `Timescale`, `SqlServer`, `MySql`, or `ClickHouse`); each provider ships its own
+read/write implementation and is selected by the host at startup. Storage uses Dapper for reads
+across all providers (no EF Core); writes use each backend's native bulk path (Npgsql COPY,
+`SqlBulkCopy`, MySQL multi-row `INSERT ... ON DUPLICATE KEY UPDATE`, or `ClickHouseBulkCopy`).
 
 | Project | Role |
 |---------|------|
@@ -64,6 +64,7 @@ or `ClickHouseBulkCopy`).
 | `Keryhe.Telemetry.PostgreSQL` | Plain-PostgreSQL provider (Npgsql + Dapper): read/write repositories and DI registration |
 | `Keryhe.Telemetry.Timescale` | PostgreSQL + TimescaleDB provider (hypertable-aware bulk writes) |
 | `Keryhe.Telemetry.SqlServer` | SQL Server provider (Microsoft.Data.SqlClient + Dapper) |
+| `Keryhe.Telemetry.MySql` | MySQL provider (MySqlConnector + Dapper): multi-row upsert bulk writes |
 | `Keryhe.Telemetry.ClickHouse` | ClickHouse provider (ClickHouse.Client bulk-copy writes + Dapper reads); columnar MergeTree storage |
 | `Keryhe.Telemetry.Collector` | gRPC services + OpenTelemetry proto definitions (class library) |
 | `Keryhe.Telemetry.Collector.Server` | Thin ASP.NET Core host: maps the gRPC services and runs the ingestion worker |
@@ -80,6 +81,7 @@ or `ClickHouseBulkCopy`).
 - One of the supported database backends:
   - PostgreSQL 14+ (plain or with TimescaleDB extension)
   - SQL Server
+  - MySQL 8.0+ (native `JSON` column type)
   - ClickHouse 23.3+ (lightweight `DELETE` support)
 
 ## Setup
@@ -100,6 +102,9 @@ psql -d telemetry -f schema/Timescale-Schema.sql
 # SQL Server
 sqlcmd -d telemetry -i schema/SqlServer-Schema.sql
 
+# MySQL
+mysql telemetry < schema/MySQL-Schema.sql
+
 # ClickHouse (creates the database first if needed)
 clickhouse-client --database telemetry --multiquery < schema/ClickHouse-Schema.sql
 ```
@@ -107,7 +112,7 @@ clickhouse-client --database telemetry --multiquery < schema/ClickHouse-Schema.s
 Or use the runner script (skips if the target `schema_version` is already applied):
 
 ```bash
-schema/apply-schema.sh <postgresql|timescale|sqlserver|clickhouse> [database]
+schema/apply-schema.sh <postgresql|timescale|sqlserver|mysql|clickhouse> [database]
 ```
 
 **2. Configure connection strings:**
@@ -136,9 +141,9 @@ Update `src/Keryhe.Telemetry.Api.Server/appsettings.json` (REST API / read path)
 }
 ```
 
-Set `Database:Provider` to `PostgreSQL`, `Timescale`, `SqlServer`, or `ClickHouse` to match your chosen backend (both hosts must agree). For SQL Server use a standard ADO.NET connection string. For ClickHouse use a ClickHouse.Client connection string over the HTTP interface (port 8123), e.g. `Host=localhost;Port=8123;Username=default;Password=<password>;Database=telemetry`.
+Set `Database:Provider` to `PostgreSQL`, `Timescale`, `SqlServer`, `MySql`, or `ClickHouse` to match your chosen backend (both hosts must agree). For SQL Server use a standard ADO.NET connection string. For MySQL use a MySqlConnector connection string, e.g. `Server=localhost;Port=3306;Database=telemetry;User ID=root;Password=<password>`. For ClickHouse use a ClickHouse.Client connection string over the HTTP interface (port 8123), e.g. `Host=localhost;Port=8123;Username=default;Password=<password>;Database=telemetry`.
 
-> **Connection strings live in User Secrets, not `appsettings.json`.** Both hosts ship with an
+> **During develoment, connection strings should live in User Secrets, not `appsettings.json`.** Both hosts ship with an
 > empty `ConnectionStrings` value and read the real value from .NET User Secrets so credentials
 > stay out of source control. Set them once per host:
 > ```bash
@@ -162,85 +167,88 @@ Set `Database:Provider` to `PostgreSQL`, `Timescale`, `SqlServer`, or `ClickHous
 >    GRANT ALL ON telemetry.* TO keryhe;"
 > ```
 
-**3. Build:**
+**3. Configure an API key for the `Authorization` header:**
+
+Ingestion is multi-tenant: the gRPC server resolves the tenant by hashing the
+`Authorization: Bearer <key>` header against the `api_keys` table, so every OTLP sender
+needs a valid key.
+
+First, create a tenant to attach the key to. On the relational schemas (PostgreSQL,
+TimescaleDB, SQL Server, MySQL) the `id` is auto-generated — insert the row and note the
+returned `id`:
+
+```sql
+INSERT INTO tenants (name) VALUES ('default');
+```
+
+ClickHouse has no auto-increment, so supply an explicit `id`:
+
+```sql
+INSERT INTO tenants (id, name) VALUES (1, 'default');
+```
+
+Then generate a random key and its SHA-256 hash with the helper script in `scripts/`:
+
+```bash
+# macOS / Linux
+scripts/new-api-key.sh          # or pass a length, e.g. scripts/new-api-key.sh 48
+
+# Windows (PowerShell)
+scripts/New-ApiKey.ps1          # or -KeyLength 48
+```
+
+The script prints the plaintext **API Key** (store it — it can't be recovered from the hash)
+and the **Key Hash** to store in the database. Insert the hash into `api_keys`, pointing it at
+an existing tenant (`tenant_id` from the `tenants` table):
+
+```sql
+INSERT INTO api_keys (tenant_id, key_hash, name, is_active)
+VALUES (<tenant_id>, '<key_hash>', '<key_name>', TRUE);
+```
+
+Then include the plaintext key on the `Authorization` header when sending OTLP data. For the
+test data generator, set `GeneratorConfig:OtlpHeaders` in
+`src/Keryhe.Telemetry.TestDataGenerator/appsettings.json`:
+
+```json
+{
+  "GeneratorConfig": {
+    "OtlpHeaders": "Authorization=Bearer <api_key>"
+  }
+}
+```
+
+Any OpenTelemetry SDK follows the same convention — set the OTLP exporter header
+`Authorization=Bearer <api_key>` (e.g. via `OTEL_EXPORTER_OTLP_HEADERS`).
+
+**4. Build:**
 
 ```bash
 dotnet build Telemetry.sln
 ```
 
-**4. Run the server, API, and client (in separate terminals):**
+**5. Run the server, API, and client (in separate terminals):**
 
 ```bash
 # Terminal 1 — gRPC ingestion server
-dotnet run --project src/Keryhe.Telemetry.Collector.Server
+dotnet run --project src/Keryhe.Telemetry.Collector.Server --launch-profile "https"
 
 # Terminal 2 — REST API
-dotnet run --project src/Keryhe.Telemetry.Api.Server
+dotnet run --project src/Keryhe.Telemetry.Api.Server --launch-profile "https"
 
 # Terminal 3 — Angular dev server
-cd src/telemetry-client && npm install && npm start
+cd src/telemetry-client && npm install && npm run start
 ```
 
 Open `http://localhost:4201` in your browser.
 
-**5. (Optional) Generate test data:**
+**6. (Optional) Generate test data:**
 
 ```bash
 dotnet run --project src/Keryhe.Telemetry.TestDataGenerator
 ```
 
 The test data generator sends synthetic traces, metrics, and logs to the server at `http://localhost:5117` on a configurable interval.
-
-### Running the backend for the Angular UI (local verification)
-
-To exercise a UI change end-to-end you only need the **REST API** (read path) plus the Angular
-dev server — the gRPC ingestion host is only required when generating new data.
-
-```bash
-# Terminal 1 — REST API on https://localhost:7105 (+ http://localhost:5188)
-dotnet run --project src/Keryhe.Telemetry.Api.Server --launch-profile https
-
-# Terminal 2 — Angular dev server on http://localhost:4201
-cd src/telemetry-client && npm start
-```
-
-The Angular dev configuration (`src/telemetry-client/src/environments/environment.ts`) points at
-`https://localhost:7105/api`, so the API **must** be run with the `https` launch profile. Open
-`http://localhost:4201`.
-
-**Tenant scoping.** The read API resolves the active tenant from an `X-Tenant-Id` request header.
-The Angular app sends it automatically (it auto-selects the first tenant), so no manual step is
-needed in the browser. When calling the API directly (e.g. `curl` while verifying), pass the
-header yourself and `-k` for the dev certificate:
-
-```bash
-curl -k -H "X-Tenant-Id: 1" \
-  "https://localhost:7105/api/logs/search?start=2026-01-01T00:00:00Z&end=2026-12-31T00:00:00Z&limit=100&offset=0"
-```
-
-**Row-count parity.** To confirm a read/query change returns the right rows, compare the API
-response against the database directly. With the Docker TimescaleDB above:
-
-```bash
-docker exec timescaledb psql -U postgres -d telemetry -tAc \
-  "select count(*) from log_records lr join resources r on lr.resource_id=r.id where r.tenant_id=1;"
-```
-
-The `search` endpoints (`/api/logs/search`, `/api/traces/search`) return a
-`{ items, total, capped }` envelope, so the `total` field can be checked against a `COUNT(*)`
-of the same filter in SQL.
-
-## Configuring an OpenTelemetry SDK
-
-Point your OTLP exporter at the server's gRPC endpoint:
-
-```
-http://localhost:5117
-```
-
-The server accepts gRPC (HTTP/2) connections on this port for all OTLP signal types.
-
-The server requires an `Authorization` gRPC metadata header with a valid API key. Insert a row into the `api_keys` table (SHA-256 hex hash of the key, linked to a tenant) and pass it as `Authorization: Bearer <key>` in your OTLP exporter headers.
 
 ## Database Schema
 
@@ -260,6 +268,8 @@ The server requires an `Authorization` gRPC metadata header with a valid API key
 - `alert_events` — Audit log of all fired alert events
 
 When using the TimescaleDB provider, metric data point tables and `log_records` are hypertables (partitioned on `time_unix_nano`). Compression activates at 7 days; retention drops metrics at 180 days and logs at 90 days. A continuous aggregate (`log_severity_stats_daily`) refreshes every 5 minutes.
+
+When using the MySQL provider (MySQL 8.0+), the schema mirrors the SQL Server relational layout with MySQL-native types (`AUTO_INCREMENT` surrogate keys, `JSON` columns for attributes, `DATETIME(6)` timestamps). Hash-based deduplication of resources/scopes uses `INSERT ... ON DUPLICATE KEY UPDATE`, and writes are batched as multi-row inserts.
 
 When using the ClickHouse provider, tables use the `MergeTree`/`ReplacingMergeTree` family with time-based partitioning. Because ClickHouse has no auto-increment or `RETURNING`, surrogate `id` values are generated by the application (deterministically from the dedup hash for resources/scopes/spans, so `ReplacingMergeTree` collapses re-inserts), and dedup is *eventual* (a merge, or `OPTIMIZE ... FINAL`, resolves duplicates). Control-plane operations are best-effort: alert-rule edits use `ALTER TABLE ... UPDATE` mutations and the cooldown fire-claim is not atomic. See `CLAUDE.md` for the full list of ClickHouse-specific behaviors.
 
