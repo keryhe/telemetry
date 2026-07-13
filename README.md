@@ -4,7 +4,7 @@ A self-hosted OpenTelemetry (OTLP) ingestion and visualization platform for trac
 
 ## Overview
 
-This solution receives OpenTelemetry Protocol (OTLP) data via gRPC, stores it in a relational database (PostgreSQL, TimescaleDB, or SQL Server), and exposes it through a REST API consumed by an Angular single-page application.
+This solution receives OpenTelemetry Protocol (OTLP) data via gRPC, stores it in a database (PostgreSQL, TimescaleDB, SQL Server, or ClickHouse), and exposes it through a REST API consumed by an Angular single-page application.
 
 ## Features
 
@@ -15,7 +15,7 @@ This solution receives OpenTelemetry Protocol (OTLP) data via gRPC, stores it in
 - **All Metric Types**: Gauge, Sum, Histogram, Exponential Histogram, and Summary
 - **Trace Correlation**: Links logs and metrics to traces via trace and span IDs
 - **Built-in Analytics**: Pre-configured views for service maps, trace summaries, and log analysis
-- **Multiple Database Providers**: Choose between plain PostgreSQL, PostgreSQL + TimescaleDB, or SQL Server
+- **Multiple Database Providers**: Choose between plain PostgreSQL, PostgreSQL + TimescaleDB, SQL Server, or ClickHouse (columnar/OLAP)
 - **Alerting**: Rule-based alerts (metric threshold, error rate, slow traces, log severity spikes) with configurable cooldowns and webhook delivery
 
 ## Supported Signal Types
@@ -44,16 +44,18 @@ This solution receives OpenTelemetry Protocol (OTLP) data via gRPC, stores it in
 
 ```
 OpenTelemetry SDKs (any language)
-  → OTLP gRPC (port 5117) → Keryhe.Telemetry.Proto.Server
-  → bounded ingestion channel → background worker → Dapper bulk writer
-  → PostgreSQL / TimescaleDB / SQL Server
+  → OTLP gRPC (port 5117) → Keryhe.Telemetry.Collector.Server
+  → bounded ingestion channel → background worker → provider bulk writer
+  → PostgreSQL / TimescaleDB / SQL Server / ClickHouse
   → Keryhe.Telemetry.Api.Server (REST API, port 5188 / 7105)
   → Angular SPA (src/telemetry-client, port 4201)
 ```
 
 The database provider is chosen at runtime via the `Database:Provider` configuration key
-(`PostgreSQL`, `Timescale`, or `SqlServer`); each provider ships its own read/write
-implementation and is selected by the host at startup. Storage uses Dapper (no EF Core).
+(`PostgreSQL`, `Timescale`, `SqlServer`, or `ClickHouse`); each provider ships its own read/write
+implementation and is selected by the host at startup. Storage uses Dapper for reads across all
+providers (no EF Core); writes use each backend's native bulk path (Npgsql COPY, `SqlBulkCopy`,
+or `ClickHouseBulkCopy`).
 
 | Project | Role |
 |---------|------|
@@ -62,8 +64,9 @@ implementation and is selected by the host at startup. Storage uses Dapper (no E
 | `Keryhe.Telemetry.PostgreSQL` | Plain-PostgreSQL provider (Npgsql + Dapper): read/write repositories and DI registration |
 | `Keryhe.Telemetry.Timescale` | PostgreSQL + TimescaleDB provider (hypertable-aware bulk writes) |
 | `Keryhe.Telemetry.SqlServer` | SQL Server provider (Microsoft.Data.SqlClient + Dapper) |
-| `Keryhe.Telemetry.Proto` | gRPC services + OpenTelemetry proto definitions (class library) |
-| `Keryhe.Telemetry.Proto.Server` | Thin ASP.NET Core host: maps the gRPC services and runs the ingestion worker |
+| `Keryhe.Telemetry.ClickHouse` | ClickHouse provider (ClickHouse.Client bulk-copy writes + Dapper reads); columnar MergeTree storage |
+| `Keryhe.Telemetry.Collector` | gRPC services + OpenTelemetry proto definitions (class library) |
+| `Keryhe.Telemetry.Collector.Server` | Thin ASP.NET Core host: maps the gRPC services and runs the ingestion worker |
 | `Keryhe.Telemetry.Api` | REST API controllers, tenant middleware, and read-service wiring (class library) |
 | `Keryhe.Telemetry.Api.Server` | Thin ASP.NET Core host: composes the API, OpenAPI, CORS, and the alerting worker |
 | `Keryhe.Telemetry.Alerting` | Alert rule evaluators, webhook delivery, and the periodic evaluation background worker |
@@ -77,6 +80,7 @@ implementation and is selected by the host at startup. Storage uses Dapper (no E
 - One of the supported database backends:
   - PostgreSQL 14+ (plain or with TimescaleDB extension)
   - SQL Server
+  - ClickHouse 23.3+ (lightweight `DELETE` support)
 
 ## Setup
 
@@ -95,17 +99,20 @@ psql -d telemetry -f schema/Timescale-Schema.sql
 
 # SQL Server
 sqlcmd -d telemetry -i schema/SqlServer-Schema.sql
+
+# ClickHouse (creates the database first if needed)
+clickhouse-client --database telemetry --multiquery < schema/ClickHouse-Schema.sql
 ```
 
 Or use the runner script (skips if the target `schema_version` is already applied):
 
 ```bash
-schema/apply-schema.sh <postgresql|timescale|sqlserver> [database]
+schema/apply-schema.sh <postgresql|timescale|sqlserver|clickhouse> [database]
 ```
 
 **2. Configure connection strings:**
 
-Update `src/Keryhe.Telemetry.Proto.Server/appsettings.json` (gRPC ingestion / write path):
+Update `src/Keryhe.Telemetry.Collector.Server/appsettings.json` (gRPC ingestion / write path):
 ```json
 {
   "Database": {
@@ -129,7 +136,7 @@ Update `src/Keryhe.Telemetry.Api.Server/appsettings.json` (REST API / read path)
 }
 ```
 
-Set `Database:Provider` to `PostgreSQL`, `Timescale`, or `SqlServer` to match your chosen backend (both hosts must agree). For SQL Server use a standard ADO.NET connection string.
+Set `Database:Provider` to `PostgreSQL`, `Timescale`, `SqlServer`, or `ClickHouse` to match your chosen backend (both hosts must agree). For SQL Server use a standard ADO.NET connection string. For ClickHouse use a ClickHouse.Client connection string over the HTTP interface (port 8123), e.g. `Host=localhost;Port=8123;Username=default;Password=<password>;Database=telemetry`.
 
 > **Connection strings live in User Secrets, not `appsettings.json`.** Both hosts ship with an
 > empty `ConnectionStrings` value and read the real value from .NET User Secrets so credentials
@@ -137,13 +144,22 @@ Set `Database:Provider` to `PostgreSQL`, `Timescale`, or `SqlServer` to match yo
 > ```bash
 > dotnet user-secrets --project src/Keryhe.Telemetry.Api.Server \
 >   set "ConnectionStrings:Read"  "Host=localhost;Port=5432;Database=telemetry;Username=postgres;Password=<password>"
-> dotnet user-secrets --project src/Keryhe.Telemetry.Proto.Server \
+> dotnet user-secrets --project src/Keryhe.Telemetry.Collector.Server \
 >   set "ConnectionStrings:Write" "Host=localhost;Port=5432;Database=telemetry;Username=postgres;Password=<password>"
 > ```
 > A local TimescaleDB is easy to run via Docker:
 > ```bash
 > docker run -d --name timescaledb -p 5432:5432 \
 >   -e POSTGRES_PASSWORD=<password> -e POSTGRES_DB=telemetry timescale/timescaledb-ha:pg18
+> ```
+> Or ClickHouse (the stock image's `default` user is localhost-only, so create a
+> network-accessible user for the app):
+> ```bash
+> docker run -d --name clickhouse -p 8123:8123 -p 9000:9000 \
+>   -e CLICKHOUSE_DB=telemetry clickhouse/clickhouse-server
+> docker exec clickhouse clickhouse-client -q \
+>   "CREATE USER keryhe IDENTIFIED WITH plaintext_password BY '<password>' HOST ANY; \
+>    GRANT ALL ON telemetry.* TO keryhe;"
 > ```
 
 **3. Build:**
@@ -156,7 +172,7 @@ dotnet build Telemetry.sln
 
 ```bash
 # Terminal 1 — gRPC ingestion server
-dotnet run --project src/Keryhe.Telemetry.Proto.Server
+dotnet run --project src/Keryhe.Telemetry.Collector.Server
 
 # Terminal 2 — REST API
 dotnet run --project src/Keryhe.Telemetry.Api.Server
@@ -244,6 +260,8 @@ The server requires an `Authorization` gRPC metadata header with a valid API key
 - `alert_events` — Audit log of all fired alert events
 
 When using the TimescaleDB provider, metric data point tables and `log_records` are hypertables (partitioned on `time_unix_nano`). Compression activates at 7 days; retention drops metrics at 180 days and logs at 90 days. A continuous aggregate (`log_severity_stats_daily`) refreshes every 5 minutes.
+
+When using the ClickHouse provider, tables use the `MergeTree`/`ReplacingMergeTree` family with time-based partitioning. Because ClickHouse has no auto-increment or `RETURNING`, surrogate `id` values are generated by the application (deterministically from the dedup hash for resources/scopes/spans, so `ReplacingMergeTree` collapses re-inserts), and dedup is *eventual* (a merge, or `OPTIMIZE ... FINAL`, resolves duplicates). Control-plane operations are best-effort: alert-rule edits use `ALTER TABLE ... UPDATE` mutations and the cooldown fire-claim is not atomic. See `CLAUDE.md` for the full list of ClickHouse-specific behaviors.
 
 ### Built-in Views
 

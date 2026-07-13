@@ -11,7 +11,7 @@ Requires the .NET 10 SDK and Node.js (Angular 20 for the UI).
 dotnet build Telemetry.sln
 
 # Run the gRPC OTLP ingestion server (write path)
-dotnet run --project src/Keryhe.Telemetry.Proto.Server
+dotnet run --project src/Keryhe.Telemetry.Collector.Server
 
 # Run the REST API (read path, consumed by the Angular UI)
 dotnet run --project src/Keryhe.Telemetry.Api.Server
@@ -26,22 +26,24 @@ dotnet run --project src/Keryhe.Telemetry.TestDataGenerator
 psql -d telemetry -f schema/PostgreSQL-Schema.sql      # PostgreSQL (plain)
 psql -d telemetry -f schema/Timescale-Schema.sql       # PostgreSQL + TimescaleDB
 sqlcmd -d telemetry -i schema/SqlServer-Schema.sql     # SqlServer
+clickhouse-client --database telemetry --multiquery < schema/ClickHouse-Schema.sql  # ClickHouse
 
 # Or use the runner (skips if the target schema_version is already applied):
-schema/apply-schema.sh <postgresql|timescale|sqlserver> [database]
+schema/apply-schema.sh <postgresql|timescale|sqlserver|clickhouse> [database]
 ```
 
 There is one schema script per supported provider, all producing the same logical
 table/column set: `schema/PostgreSQL-Schema.sql` (plain Postgres), `schema/Timescale-Schema.sql`
-(Postgres + TimescaleDB hypertables/compression/retention/continuous aggregate), and
-`schema/SqlServer-Schema.sql`.
+(Postgres + TimescaleDB hypertables/compression/retention/continuous aggregate),
+`schema/SqlServer-Schema.sql`, and `schema/ClickHouse-Schema.sql` (columnar MergeTree family;
+see the ClickHouse notes below).
 
 There are no .NET test projects in the solution. The Angular project has `npm test`
 (Karma/Jasmine) but no meaningful tests are set up.
 
 ### Default ports
 
-- gRPC ingestion (`Keryhe.Telemetry.Proto.Server`): `http://localhost:5117` (h2c), `https://localhost:7057` (HTTP/2)
+- gRPC ingestion (`Keryhe.Telemetry.Collector.Server`): `http://localhost:5117` (h2c), `https://localhost:7057` (HTTP/2)
 - REST API (`Keryhe.Telemetry.Api.Server`): `http://localhost:5188`, `https://localhost:7105`
 - Angular dev server (`src/telemetry-client`): `http://localhost:4201`
 
@@ -51,7 +53,7 @@ The Angular dev config points at `https://localhost:7105/api` (`src/telemetry-cl
 
 This is an **OpenTelemetry (OTLP) ingestion and visualization platform** — a self-hosted
 alternative to tools like Jaeger or Grafana Tempo. It receives telemetry via gRPC, stores it
-in a relational database (PostgreSQL, TimescaleDB, or SQL Server), and exposes it through a
+in a database (PostgreSQL, TimescaleDB, SQL Server, or ClickHouse), and exposes it through a
 REST API consumed by an Angular single-page application.
 
 ### Projects
@@ -63,8 +65,9 @@ REST API consumed by an Angular single-page application.
 | `Keryhe.Telemetry.PostgreSQL` | Plain-Postgres provider implementation (Npgsql + Dapper) |
 | `Keryhe.Telemetry.Timescale` | TimescaleDB provider implementation |
 | `Keryhe.Telemetry.SqlServer` | SQL Server provider implementation (Microsoft.Data.SqlClient + Dapper) |
-| `Keryhe.Telemetry.Proto` | gRPC services + OpenTelemetry proto files → generated stubs (class library) |
-| `Keryhe.Telemetry.Proto.Server` | Thin ASP.NET Core host that maps the gRPC services and runs the ingestion worker |
+| `Keryhe.Telemetry.ClickHouse` | ClickHouse provider implementation (ClickHouse.Client bulk-copy writes + Dapper reads) |
+| `Keryhe.Telemetry.Collector` | gRPC services + OpenTelemetry proto files → generated stubs (class library) |
+| `Keryhe.Telemetry.Collector.Server` | Thin ASP.NET Core host that maps the gRPC services and runs the ingestion worker |
 | `Keryhe.Telemetry.Api` | REST API controllers, tenant middleware, and read-service wiring (class library) |
 | `Keryhe.Telemetry.Api.Server` | Thin ASP.NET Core host that composes the API + OpenAPI + CORS |
 | `Keryhe.Telemetry.Alerting` | Alert rule evaluation with pluggable evaluators and webhook delivery |
@@ -80,7 +83,7 @@ REST API consumed by an Angular single-page application.
 
 ```
 OpenTelemetry SDKs (any language)
-  → OTLP gRPC (port 5117) → Keryhe.Telemetry.Proto (LogService/TraceService/MetricService)
+  → OTLP gRPC (port 5117) → Keryhe.Telemetry.Collector (LogService/TraceService/MetricService)
   → thin write repos (Data) enqueue → TelemetryIngestionChannel (bounded, 10k per signal)
   → TelemetryIngestionWorker (background) → ITelemetryBulkWriter (active provider) → DB
 
@@ -92,7 +95,7 @@ Angular UI (localhost:4201)
 
 Both hosts are thin `Program.cs` shells; the real wiring lives in the class libraries:
 
-- **`Keryhe.Telemetry.Proto.Server`** registers the ingestion channel, `ResourceScopeCache`,
+- **`Keryhe.Telemetry.Collector.Server`** registers the ingestion channel, `ResourceScopeCache`,
   the `TelemetryIngestionWorker`, the write repositories, and the **write-side** provider
   services, then maps the three gRPC services.
 - **`Keryhe.Telemetry.Api.Server`** calls `AddKeryheTelemetryApi(configuration)`
@@ -103,10 +106,29 @@ Both hosts are thin `Program.cs` shells; the real wiring lives in the class libr
 ### Provider abstraction (the central pattern)
 
 The database provider is selected at runtime by the **`Database:Provider`** config key
-(`"PostgreSQL"`, `"Timescale"`, or `"SqlServer"`). Each provider project exposes
+(`"PostgreSQL"`, `"Timescale"`, `"SqlServer"`, or `"ClickHouse"`). Each provider project exposes
 `ServiceCollectionExtensions` with `Add<Provider>WriteServices` / `Add<Provider>ReadServices`,
 and the hosts `switch` on the config key to call the right one. An unknown/missing provider
 throws at startup.
+
+**ClickHouse provider notes.** ClickHouse is columnar/OLAP, so the provider diverges from the
+relational three in a few deliberate ways (all confined to the provider; Core interfaces are
+unchanged):
+- **App-generated ids.** No auto-increment / `RETURNING`. `ClickHouseBulkWriter` computes the
+  `Int64` surrogate keys the read repos join on: resource/scope ids are derived deterministically
+  from the dedup hash, span ids from `(trace_id, span_id)`, and metrics/events/links use a
+  monotonic in-process generator (`ClickHouseIds` / `RowId`).
+- **Dedup via `ReplacingMergeTree`, not `ON CONFLICT`.** resources/scopes/spans collapse on their
+  `ORDER BY` key at merge time, backed by `ResourceScopeCache` + per-batch dedup. Dedup is
+  *eventual* — reads may briefly see a duplicate before a merge (`OPTIMIZE ... FINAL` forces it).
+- **Writes go through `ClickHouseBulkCopy`** (async batched insert); reads reuse the shared Dapper
+  bases unchanged (attributes are JSON text deserialized in C#; `service.name` uses
+  `JSONExtractString`).
+- **Deletes** are lightweight `DELETE FROM` with explicit child-row deletes (no FK cascades),
+  applied as async mutations.
+- **Control-plane is best-effort.** Alert-rule CRUD uses `ALTER TABLE ... UPDATE` mutations and
+  `TryClaimFireAsync` is NON-ATOMIC (read-check-then-update), so under concurrent evaluators a
+  rule could double-fire. Acceptable because no host currently drives scheduled evaluation.
 
 Core interfaces (in `Keryhe.Telemetry.Core`), each implemented once per provider:
 
@@ -132,7 +154,7 @@ delegated to `ITelemetryWriteStore`. `TelemetryIngestionWorker` drains the chann
 the active provider's `ITelemetryBulkWriter`. This isolates gRPC latency from DB write latency
 and provides backpressure.
 
-**gRPC services** (`Keryhe.Telemetry.Proto/Services/`): inherit from protobuf-generated base
+**gRPC services** (`Keryhe.Telemetry.Collector/Services/`): inherit from protobuf-generated base
 classes, convert OTLP protobuf messages to Core domain models, delegate to write repositories,
 return partial-success responses.
 
@@ -184,12 +206,12 @@ Built-in views: `trace_summary`, `service_map`, `service_map_detailed`, `log_sev
 (compatibility alias over the continuous aggregate under Timescale).
 
 Connection strings (both hosts point at the same database):
-- Ingestion server reads `ConnectionStrings:Write` in `Keryhe.Telemetry.Proto.Server/appsettings.json`
+- Ingestion server reads `ConnectionStrings:Write` in `Keryhe.Telemetry.Collector.Server/appsettings.json`
 - API server reads `ConnectionStrings:Read` in `Keryhe.Telemetry.Api.Server/appsettings.json`
 - Both select the provider via the `Database:Provider` key in the same file
 
 ### Proto Files
 
-OpenTelemetry proto files live under `src/Keryhe.Telemetry.Proto/opentelemetry/` and are
+OpenTelemetry proto files live under `src/Keryhe.Telemetry.Collector/opentelemetry/` and are
 compiled to C# gRPC stubs automatically via MSBuild (`Grpc.Tools`). Covers traces, metrics,
 logs, profiles, resources, and common types.

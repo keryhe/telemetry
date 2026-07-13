@@ -56,7 +56,7 @@ public abstract class AlertRuleRepositoryBase : DapperReadRepository, IAlertRule
         return rows.Select(MapToDomain).ToList();
     }
 
-    public async Task<AlertRule> CreateRuleAsync(AlertRule rule, CancellationToken ct = default)
+    public virtual async Task<AlertRule> CreateRuleAsync(AlertRule rule, CancellationToken ct = default)
     {
         var tenantId = TenantId;
         var createdAt = DateTime.UtcNow;
@@ -97,7 +97,7 @@ public abstract class AlertRuleRepositoryBase : DapperReadRepository, IAlertRule
         };
     }
 
-    public async Task<AlertRule> UpdateRuleAsync(AlertRule rule, CancellationToken ct = default)
+    public virtual async Task<AlertRule> UpdateRuleAsync(AlertRule rule, CancellationToken ct = default)
     {
         var tenantId = TenantId;
         var sql = $"""
@@ -130,7 +130,7 @@ public abstract class AlertRuleRepositoryBase : DapperReadRepository, IAlertRule
         return MapToDomain(row);
     }
 
-    public async Task DeleteRuleAsync(int id, CancellationToken ct = default)
+    public virtual async Task DeleteRuleAsync(int id, CancellationToken ct = default)
     {
         await using var conn = await OpenConnectionAsync(ct);
         await conn.ExecuteAsync(new CommandDefinition(
@@ -138,7 +138,7 @@ public abstract class AlertRuleRepositoryBase : DapperReadRepository, IAlertRule
             new { id, tenantId = TenantId }, cancellationToken: ct));
     }
 
-    public async Task<bool> TryClaimFireAsync(int ruleId, long tenantId, int cooldownMinutes, CancellationToken ct = default)
+    public virtual async Task<bool> TryClaimFireAsync(int ruleId, long tenantId, int cooldownMinutes, CancellationToken ct = default)
     {
         await using var conn = await OpenConnectionAsync(ct);
         var rows = await conn.ExecuteAsync(new CommandDefinition(
@@ -146,7 +146,7 @@ public abstract class AlertRuleRepositoryBase : DapperReadRepository, IAlertRule
         return rows > 0;
     }
 
-    public async Task AddAlertEventAsync(AlertEvent alertEvent, CancellationToken ct = default)
+    public virtual async Task AddAlertEventAsync(AlertEvent alertEvent, CancellationToken ct = default)
     {
         var sql = $"""
             INSERT INTO alert_events (rule_id, fired_at, details_json)

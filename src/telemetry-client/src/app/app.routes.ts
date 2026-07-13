@@ -9,13 +9,13 @@ export const routes: Routes = [
     children: [
       {
         path: 'dashboard',
-        title: 'Watchdog - Dashboard',
+        title: 'Sentinel - Dashboard',
         loadComponent: () =>
           import('./features/dashboard/dashboard.component').then((m) => m.DashboardComponent),
       },
       {
         path: 'traces',
-        title: 'Watchdog - Traces',
+        title: 'Sentinel - Traces',
         loadComponent: () =>
           import('./features/traces/trace-list/trace-list.component').then((m) => m.TraceListComponent),
       },
@@ -28,7 +28,7 @@ export const routes: Routes = [
       },
       {
         path: 'metrics',
-        title: 'Watchdog - Metrics',
+        title: 'Sentinel - Metrics',
         loadComponent: () =>
           import('./features/metrics/metric-list/metric-list.component').then(
             (m) => m.MetricListComponent
@@ -43,13 +43,13 @@ export const routes: Routes = [
       },
       {
         path: 'logs',
-        title: 'Watchdog - Logs',
+        title: 'Sentinel - Logs',
         loadComponent: () =>
           import('./features/logs/logs.component').then((m) => m.LogsComponent),
       },
       {
         path: 'alerts',
-        title: 'Watchdog - Alerts',
+        title: 'Sentinel - Alerts',
         loadComponent: () =>
           import('./features/alerts/alerts.component').then((m) => m.AlertsComponent),
       },
