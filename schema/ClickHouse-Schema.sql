@@ -330,8 +330,9 @@ CREATE TABLE IF NOT EXISTS schema_version
 )
 ENGINE = ReplacingMergeTree
 ORDER BY version;
-
-INSERT INTO schema_version (version) VALUES ('2.5.0');
+-- NOTE: the schema_version row is seeded at the very END of this script (after all
+-- tables and views), so a partial/failed apply never records a version that the
+-- apply-schema.sh version gate would wrongly treat as "already applied".
 
 -- =============================================================================
 -- VIEWS (parity with the relational providers; not on the hot read path — the
@@ -394,3 +395,10 @@ SELECT
 FROM log_records
 WHERE time_unix_nano > 0
 GROUP BY severity_text, severity_number, log_date;
+
+-- =============================================================================
+-- SCHEMA VERSION (recorded LAST)
+-- =============================================================================
+-- Only inserted when every statement above succeeded, so a partial apply cannot
+-- leave a false version marker for the apply-schema.sh gate.
+INSERT INTO schema_version (version) VALUES ('2.5.0');

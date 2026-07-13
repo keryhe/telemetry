@@ -48,8 +48,9 @@ public static class TelemetryApiServiceCollectionExtensions
             case "PostgreSQL": services.AddPostgreSqlReadServices(configuration); break;
             case "Timescale":  services.AddTimescaleReadServices(configuration);  break;
             case "ClickHouse": services.AddClickHouseReadServices(configuration); break;
+            case "MySql":      services.AddMySqlReadServices(configuration);      break;
             default: throw new InvalidOperationException(
-                "Unknown or missing telemetry database provider (expected SqlServer, PostgreSQL, Timescale, or ClickHouse).");
+                "Unknown or missing telemetry database provider (expected SqlServer, PostgreSQL, Timescale, ClickHouse, or MySql).");
         }
 
         return services;

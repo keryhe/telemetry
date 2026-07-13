@@ -27,6 +27,16 @@
 -- Usage:
 --   sqlcmd -S <server> -d telemetry -i schema/SqlServer-Schema.sql
 
+-- sqlcmd connects with SET QUOTED_IDENTIFIER OFF by default, but the filtered index
+-- (idx_alert_rules_tenant_enabled) requires it ON — otherwise CREATE INDEX fails with
+-- Msg 1934 and, because schema_version is already committed above the failure, the
+-- apply-schema.sh version gate would wrongly report the schema as applied. Set it (and
+-- ANSI_NULLS) ON for the whole session so the script applies cleanly regardless of
+-- client. (SSMS / ADO.NET already default these ON.)
+SET QUOTED_IDENTIFIER ON;
+SET ANSI_NULLS ON;
+GO
+
 -- =============================================================================
 -- COMMON TABLES (shared across signals)
 -- =============================================================================
@@ -67,7 +77,7 @@ CREATE INDEX idx_created_at ON resources (created_at);
 -- PostgreSQL had a functional index on (attributes_json ->> 'service.name').
 -- SQL Server equivalent requires a persisted computed column; omitted here.
 -- Add one if filtering by service name at scale becomes a bottleneck:
---   ALTER TABLE resources ADD service_name AS JSON_VALUE(attributes_json, '$.service.name') PERSISTED;
+--   ALTER TABLE resources ADD service_name AS JSON_VALUE(attributes_json, '$."service.name"') PERSISTED;
 --   CREATE INDEX idx_resources_service_name ON resources (service_name);
 GO
 
@@ -338,13 +348,10 @@ CREATE TABLE schema_version (
     version    NVARCHAR(20) PRIMARY KEY,
     applied_at DATETIME2    NOT NULL DEFAULT SYSDATETIME()
 );
-
-MERGE schema_version AS target
-USING (VALUES (N'2.5.0')) AS src (version)
-ON target.version = src.version
-WHEN MATCHED     THEN UPDATE SET applied_at = SYSDATETIME()
-WHEN NOT MATCHED THEN INSERT (version, applied_at) VALUES (src.version, SYSDATETIME());
 GO
+-- NOTE: the schema_version row is seeded at the very END of this script (after all
+-- tables and views), so a partial/failed apply never records a version that the
+-- apply-schema.sh version gate would wrongly treat as "already applied".
 
 -- =============================================================================
 -- ALERTING TABLES
@@ -409,8 +416,8 @@ GO
 -- JSON_VALUE replaces PostgreSQL's ->> operator.
 CREATE VIEW service_map AS
 SELECT
-    JSON_VALUE(parent_res.attributes_json, '$.service.name') AS parent_service,
-    JSON_VALUE(child_res.attributes_json,  '$.service.name') AS child_service,
+    JSON_VALUE(parent_res.attributes_json, '$."service.name"') AS parent_service,
+    JSON_VALUE(child_res.attributes_json,  '$."service.name"') AS child_service,
     child.kind                                               AS span_kind,
     COUNT(*)                                                 AS call_count
 FROM spans child
@@ -420,21 +427,21 @@ INNER JOIN spans parent
 INNER JOIN resources parent_res ON parent.resource_id = parent_res.id
 INNER JOIN resources child_res  ON child.resource_id  = child_res.id
 WHERE
-    JSON_VALUE(parent_res.attributes_json, '$.service.name') IS NOT NULL
-    AND JSON_VALUE(child_res.attributes_json,  '$.service.name') IS NOT NULL
-    AND JSON_VALUE(parent_res.attributes_json, '$.service.name') <>
-        JSON_VALUE(child_res.attributes_json,  '$.service.name')
+    JSON_VALUE(parent_res.attributes_json, '$."service.name"') IS NOT NULL
+    AND JSON_VALUE(child_res.attributes_json,  '$."service.name"') IS NOT NULL
+    AND JSON_VALUE(parent_res.attributes_json, '$."service.name"') <>
+        JSON_VALUE(child_res.attributes_json,  '$."service.name"')
 GROUP BY
-    JSON_VALUE(parent_res.attributes_json, '$.service.name'),
-    JSON_VALUE(child_res.attributes_json,  '$.service.name'),
+    JSON_VALUE(parent_res.attributes_json, '$."service.name"'),
+    JSON_VALUE(child_res.attributes_json,  '$."service.name"'),
     child.kind;
 GO
 
 -- Service map with performance metrics.
 CREATE VIEW service_map_detailed AS
 SELECT
-    JSON_VALUE(parent_res.attributes_json, '$.service.name')                               AS parent_service,
-    JSON_VALUE(child_res.attributes_json,  '$.service.name')                               AS child_service,
+    JSON_VALUE(parent_res.attributes_json, '$."service.name"')                               AS parent_service,
+    JSON_VALUE(child_res.attributes_json,  '$."service.name"')                               AS child_service,
     child.kind                                                                             AS span_kind,
     COUNT(*)                                                                               AS call_count,
     AVG(CAST(child.end_time_unix_nano - child.start_time_unix_nano AS FLOAT)) / 1000000   AS avg_duration_ms,
@@ -450,13 +457,13 @@ INNER JOIN spans parent
 INNER JOIN resources parent_res ON parent.resource_id = parent_res.id
 INNER JOIN resources child_res  ON child.resource_id  = child_res.id
 WHERE
-    JSON_VALUE(parent_res.attributes_json, '$.service.name') IS NOT NULL
-    AND JSON_VALUE(child_res.attributes_json,  '$.service.name') IS NOT NULL
-    AND JSON_VALUE(parent_res.attributes_json, '$.service.name') <>
-        JSON_VALUE(child_res.attributes_json,  '$.service.name')
+    JSON_VALUE(parent_res.attributes_json, '$."service.name"') IS NOT NULL
+    AND JSON_VALUE(child_res.attributes_json,  '$."service.name"') IS NOT NULL
+    AND JSON_VALUE(parent_res.attributes_json, '$."service.name"') <>
+        JSON_VALUE(child_res.attributes_json,  '$."service.name"')
 GROUP BY
-    JSON_VALUE(parent_res.attributes_json, '$.service.name'),
-    JSON_VALUE(child_res.attributes_json,  '$.service.name'),
+    JSON_VALUE(parent_res.attributes_json, '$."service.name"'),
+    JSON_VALUE(child_res.attributes_json,  '$."service.name"'),
     child.kind;
 GO
 
@@ -481,6 +488,18 @@ SELECT
     CAST(DATEADD(DAY, day_bucket, '1970-01-01') AS DATE)          AS log_date
 FROM bucketed
 GROUP BY severity_text, severity_number, day_bucket;
+GO
+
+-- =============================================================================
+-- SCHEMA VERSION (recorded LAST)
+-- =============================================================================
+-- Only reached when every statement above succeeded, so a partial apply cannot
+-- leave a false version marker for the apply-schema.sh gate.
+MERGE schema_version AS target
+USING (VALUES (N'2.5.0')) AS src (version)
+ON target.version = src.version
+WHEN MATCHED     THEN UPDATE SET applied_at = SYSDATETIME()
+WHEN NOT MATCHED THEN INSERT (version, applied_at) VALUES (src.version, SYSDATETIME());
 GO
 
 -- =============================================================================

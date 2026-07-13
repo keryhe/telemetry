@@ -14,11 +14,12 @@
     <ProjectReference Include="..\Keryhe.Telemetry.Alerting\Keryhe.Telemetry.Alerting.csproj" />
     <ProjectReference Include="..\Keryhe.Telemetry.Core\Keryhe.Telemetry.Core.csproj" />
     <ProjectReference Include="..\Keryhe.Telemetry.Data\Keryhe.Telemetry.Data.csproj" />
-    <!-- All three providers are referenced; the active one is chosen at runtime via Database:Provider. -->
+    <!-- All providers are referenced; the active one is chosen at runtime via Database:Provider. -->
     <ProjectReference Include="..\Keryhe.Telemetry.SqlServer\Keryhe.Telemetry.SqlServer.csproj" />
     <ProjectReference Include="..\Keryhe.Telemetry.PostgreSQL\Keryhe.Telemetry.PostgreSQL.csproj" />
     <ProjectReference Include="..\Keryhe.Telemetry.Timescale\Keryhe.Telemetry.Timescale.csproj" />
     <ProjectReference Include="..\Keryhe.Telemetry.ClickHouse\Keryhe.Telemetry.ClickHouse.csproj" />
+    <ProjectReference Include="..\Keryhe.Telemetry.MySql\Keryhe.Telemetry.MySql.csproj" />
   </ItemGroup>
 
 </Project>

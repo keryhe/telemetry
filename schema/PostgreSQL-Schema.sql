@@ -317,10 +317,9 @@ CREATE TABLE schema_version (
     "version"   VARCHAR(20) PRIMARY KEY,
     "applied_at" TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
-
-INSERT INTO schema_version ("version") VALUES ('2.5.0')
-ON CONFLICT ("version") DO UPDATE
-SET "applied_at" = NOW();
+-- NOTE: the schema_version row is seeded at the very END of this script (after all
+-- tables and views), so a partial/failed apply never records a version that the
+-- apply-schema.sh version gate would wrongly treat as "already applied".
 
 -- =============================================================================
 -- ALERTING TABLES
@@ -445,6 +444,15 @@ GROUP BY
     "severity_text",
     "severity_number",
     CAST(to_timestamp("time_unix_nano" / 1000000000.0) AS DATE);
+
+-- =============================================================================
+-- SCHEMA VERSION (recorded LAST)
+-- =============================================================================
+-- Only reached when every statement above succeeded, so a partial apply cannot
+-- leave a false version marker for the apply-schema.sh gate.
+INSERT INTO schema_version ("version") VALUES ('2.5.0')
+ON CONFLICT ("version") DO UPDATE
+SET "applied_at" = NOW();
 
 -- =============================================================================
 -- NOTES

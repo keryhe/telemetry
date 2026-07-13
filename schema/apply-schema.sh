@@ -8,18 +8,20 @@
 # Usage:
 #   schema/apply-schema.sh <provider> [database]
 #
-#   <provider>   postgresql | timescale | sqlserver | clickhouse
+#   <provider>   postgresql | timescale | sqlserver | clickhouse | mysql
 #   [database]   target database name (default: telemetry)
 #
 # Connection settings are taken from the standard client environment variables:
 #   postgresql / timescale -> PGHOST, PGPORT, PGUSER, PGPASSWORD (libpq)
 #   sqlserver              -> SQLCMDSERVER, SQLCMDUSER, SQLCMDPASSWORD (sqlcmd)
 #   clickhouse             -> CLICKHOUSE_HOST, CLICKHOUSE_USER, CLICKHOUSE_PASSWORD (clickhouse-client)
+#   mysql                  -> MYSQL_HOST, MYSQL_TCP_PORT, MYSQL_PWD, plus -u via MYSQL_USER (mysql client)
 #
 # Examples:
 #   PGUSER=postgres PGPASSWORD=secret schema/apply-schema.sh timescale
 #   SQLCMDSERVER=localhost SQLCMDUSER=sa SQLCMDPASSWORD=secret schema/apply-schema.sh sqlserver
 #   CLICKHOUSE_HOST=localhost schema/apply-schema.sh clickhouse
+#   MYSQL_HOST=localhost MYSQL_USER=root MYSQL_PWD=secret schema/apply-schema.sh mysql
 
 set -euo pipefail
 
@@ -32,7 +34,7 @@ DATABASE="${2:-telemetry}"
 TARGET_VERSION="2.5.0"
 
 if [[ -z "$PROVIDER" ]]; then
-    echo "usage: $0 <postgresql|timescale|sqlserver|clickhouse> [database]" >&2
+    echo "usage: $0 <postgresql|timescale|sqlserver|clickhouse|mysql> [database]" >&2
     exit 2
 fi
 
@@ -41,8 +43,9 @@ case "$PROVIDER" in
     timescale)  SCRIPT_FILE="$SCRIPT_DIR/Timescale-Schema.sql";  ENGINE="psql" ;;
     sqlserver)  SCRIPT_FILE="$SCRIPT_DIR/SqlServer-Schema.sql";  ENGINE="sqlcmd" ;;
     clickhouse) SCRIPT_FILE="$SCRIPT_DIR/ClickHouse-Schema.sql"; ENGINE="clickhouse" ;;
+    mysql)      SCRIPT_FILE="$SCRIPT_DIR/MySQL-Schema.sql";      ENGINE="mysql" ;;
     *)
-        echo "error: unknown provider '$PROVIDER' (expected postgresql|timescale|sqlserver|clickhouse)" >&2
+        echo "error: unknown provider '$PROVIDER' (expected postgresql|timescale|sqlserver|clickhouse|mysql)" >&2
         exit 2
         ;;
 esac
@@ -70,6 +73,11 @@ current_version() {
                 "SELECT version FROM schema_version WHERE version = '$TARGET_VERSION' LIMIT 1" \
                 2>/dev/null | tr -d '[:space:]' || true
             ;;
+        mysql)
+            mysql -u "${MYSQL_USER:-root}" --batch --skip-column-names "$DATABASE" -e \
+                "SELECT version FROM schema_version WHERE version = '$TARGET_VERSION' LIMIT 1" \
+                2>/dev/null | tr -d '[:space:]' || true
+            ;;
     esac
 }
 
@@ -82,7 +90,8 @@ fi
 echo "applying $PROVIDER schema ($TARGET_VERSION) to '$DATABASE'..."
 case "$ENGINE" in
     psql)       psql   -d "$DATABASE" -v ON_ERROR_STOP=1 -f "$SCRIPT_FILE" ;;
-    sqlcmd)     sqlcmd -d "$DATABASE" -b -i "$SCRIPT_FILE" ;;
+    sqlcmd)     sqlcmd -d "$DATABASE" -b -I -i "$SCRIPT_FILE" ;;
     clickhouse) clickhouse-client --database "$DATABASE" --multiquery < "$SCRIPT_FILE" ;;
+    mysql)      mysql -u "${MYSQL_USER:-root}" "$DATABASE" < "$SCRIPT_FILE" ;;
 esac
 echo "done."

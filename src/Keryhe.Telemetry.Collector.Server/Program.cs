@@ -34,7 +34,8 @@ public class Program
             case "PostgreSQL": builder.Services.AddPostgreSqlWriteServices(builder.Configuration); break;
             case "Timescale":  builder.Services.AddTimescaleWriteServices(builder.Configuration);  break;
             case "ClickHouse": builder.Services.AddClickHouseWriteServices(builder.Configuration); break;
-            default: throw new InvalidOperationException("Unknown or missing Database:Provider (expected SqlServer, PostgreSQL, Timescale, or ClickHouse).");
+            case "MySql":      builder.Services.AddMySqlWriteServices(builder.Configuration);      break;
+            default: throw new InvalidOperationException("Unknown or missing Database:Provider (expected SqlServer, PostgreSQL, Timescale, ClickHouse, or MySql).");
         }
 
         builder.Services.AddHostedService<TelemetryIngestionWorker>();
