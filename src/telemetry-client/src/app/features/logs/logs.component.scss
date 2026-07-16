@@ -362,6 +362,36 @@ mark.search-hit {
 .attr-key { min-width: 200px; color: var(--mat-sys-on-surface-variant); font-family: monospace; font-weight: 500; }
 .attr-val { flex: 1; word-break: break-all; font-family: monospace; }
 
+.json-body-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.json-body-actions {
+  display: flex;
+  gap: 2px;
+  .mat-mdc-icon-button {
+    width: 32px;
+    height: 32px;
+    padding: 4px;
+    mat-icon { font-size: 18px; width: 18px; height: 18px; }
+  }
+}
+.json-body-view {
+  margin: 0;
+  padding: 12px;
+  max-height: 400px;
+  overflow: auto;
+  font-family: monospace;
+  font-size: 12px;
+  line-height: 1.5;
+  background: var(--mat-sys-surface-container);
+  border: 1px solid var(--mat-sys-outline-variant);
+  border-radius: 4px;
+  white-space: pre;
+}
+
 .mat-mdc-table {
   --mat-table-row-item-container-height: 32px;
   --mat-table-header-container-height: 40px;

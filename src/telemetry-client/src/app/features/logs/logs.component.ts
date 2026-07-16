@@ -105,6 +105,10 @@ export class LogsComponent {
   protected expandedRow = signal<LogRecord | null>(null);
   /** Transient "Link copied!" affordance for the copy-permalink button. */
   protected linkCopied = signal(false);
+  /** Whether the pretty-printed JSON body block in the expanded detail is collapsed. */
+  protected bodyCollapsed = signal(false);
+  /** Transient "Copied!" affordance for the copy-JSON-body button. */
+  protected bodyCopied = signal(false);
 
   // Faceting sidebar: collapse state + which keys are collapsed (all open by default).
   protected facetsCollapsed = signal<boolean>(this.saved.facetsCollapsed);
@@ -439,6 +443,7 @@ export class LogsComponent {
 
   protected toggleRow(row: LogRecord): void {
     this.expandedRow.update((cur) => (cur === row ? null : row));
+    this.bodyCollapsed.set(false); // each newly-opened row starts with its JSON body expanded
     // Force the table to re-evaluate the detail row's `when` predicate.
     this.table()?.renderRows();
   }
@@ -583,6 +588,45 @@ export class LogsComponent {
       maxWidth: '720px',
       width: '90vw',
     });
+  }
+
+  // =========================================================================
+  // JSON BODY (expanded detail)
+  // =========================================================================
+
+  /** Parse a log body as a JSON object/array, or null when it isn't structured JSON. */
+  private parseJsonBody(body: string | null): unknown | null {
+    if (!body) return null;
+    const t = body.trim();
+    // Only treat objects/arrays as structured — a bare number/string/bool isn't worth a tree.
+    if (!(t.startsWith('{') || t.startsWith('['))) return null;
+    try {
+      const v = JSON.parse(t);
+      return v !== null && typeof v === 'object' ? v : null;
+    } catch {
+      return null;
+    }
+  }
+
+  /** True when the body is structured JSON worth pretty-printing in the detail. */
+  protected isJsonBody(body: string | null): boolean {
+    return this.parseJsonBody(body) !== null;
+  }
+
+  /** Pretty-printed (2-space) JSON for a structured body; '' when not JSON. */
+  protected prettyJsonBody(body: string | null): string {
+    const v = this.parseJsonBody(body);
+    return v === null ? '' : JSON.stringify(v, null, 2);
+  }
+
+  /** Copy the pretty-printed JSON body to the clipboard with a transient affordance. */
+  protected copyBody(body: string | null): void {
+    const text = this.prettyJsonBody(body);
+    if (!text) return;
+    navigator.clipboard?.writeText(text).then(() => {
+      this.bodyCopied.set(true);
+      setTimeout(() => this.bodyCopied.set(false), 1500);
+    }).catch(() => {});
   }
 
   // =========================================================================

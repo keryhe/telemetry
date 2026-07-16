@@ -242,6 +242,27 @@
                     }
                   </div>
 
+                  @if (isJsonBody(l.bodyValue)) {
+                    <div class="detail-section-title json-body-header">
+                      <span>Body (JSON)</span>
+                      <span class="json-body-actions">
+                        <button mat-icon-button
+                                (click)="bodyCollapsed.set(!bodyCollapsed()); $event.stopPropagation()"
+                                [matTooltip]="bodyCollapsed() ? 'Expand body' : 'Collapse body'">
+                          <mat-icon>{{ bodyCollapsed() ? 'unfold_more' : 'unfold_less' }}</mat-icon>
+                        </button>
+                        <button mat-icon-button
+                                (click)="copyBody(l.bodyValue); $event.stopPropagation()"
+                                [matTooltip]="bodyCopied() ? 'Copied!' : 'Copy JSON'">
+                          <mat-icon>{{ bodyCopied() ? 'check' : 'content_copy' }}</mat-icon>
+                        </button>
+                      </span>
+                    </div>
+                    @if (!bodyCollapsed()) {
+                      <pre class="json-body-view">{{ prettyJsonBody(l.bodyValue) }}</pre>
+                    }
+                  }
+
                   @if (l.attributes && (l.attributes | keyvalue).length) {
                     <div class="detail-section-title">Attributes</div>
                     <div class="attr-table">

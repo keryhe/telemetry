@@ -1,5 +1,6 @@
 using Microsoft.Extensions.Logging;
 using System.Diagnostics;
+using System.Text.Json;
 
 namespace Keryhe.Telemetry.TestDataGenerator.Generators;
 
@@ -215,8 +216,12 @@ public class LogGenerator
         for (int i = 0; i < logCount; i++)
         {
             var severityRoll = _random.Next(0, 100);
-            
-            if (severityRoll < 60)
+
+            if (severityRoll < 15)
+            {
+                LogJsonEvent();
+            }
+            else if (severityRoll < 60)
             {
                 LogInformation();
             }
@@ -283,6 +288,84 @@ public class LogGenerator
             retryCount,
             DateTime.UtcNow
         );
+    }
+
+    /// <summary>
+    /// Emit a log whose body is a structured JSON document. Because the OTLP logging pipeline is
+    /// configured with IncludeFormattedMessage and we use a single "{Payload}" placeholder, the
+    /// rendered body is exactly the serialized JSON — exercising the logs UI's JSON-body rendering.
+    /// </summary>
+    private void LogJsonEvent()
+    {
+        var (payload, severity) = BuildJsonPayload();
+        var json = JsonSerializer.Serialize(payload);
+
+        using var activity = StartLogActivity($"log.{severity}", severity, json);
+
+        if (severity == "error")
+        {
+            _logger.LogError("{Payload}", json);
+        }
+        else
+        {
+            _logger.LogInformation("{Payload}", json);
+        }
+    }
+
+    /// <summary>Pick a random structured event payload and the severity it should be logged at.</summary>
+    private (object Payload, string Severity) BuildJsonPayload()
+    {
+        switch (_random.Next(4))
+        {
+            case 0:
+                return (new
+                {
+                    @event = "order.created",
+                    orderId = _random.Next(10000, 99999),
+                    customerId = $"cust_{_random.Next(100, 999)}",
+                    items = _random.Next(1, 6),
+                    total = Math.Round(_random.NextDouble() * 500, 2),
+                    currency = "USD",
+                    status = "confirmed",
+                }, "info");
+
+            case 1:
+                return (new
+                {
+                    @event = "http.request",
+                    method = new[] { "GET", "POST", "PUT", "DELETE" }[_random.Next(4)],
+                    path = new[] { "/api/orders", "/api/users", "/api/checkout", "/api/products" }[_random.Next(4)],
+                    statusCode = new[] { 200, 201, 204, 400, 404, 500 }[_random.Next(6)],
+                    durationMs = _random.Next(5, 800),
+                    responseBytes = _random.Next(200, 50000),
+                }, "info");
+
+            case 2:
+                return (new
+                {
+                    @event = "payment.failed",
+                    orderId = _random.Next(10000, 99999),
+                    amount = Math.Round(_random.NextDouble() * 500, 2),
+                    currency = "USD",
+                    reason = new[] { "card_declined", "insufficient_funds", "expired_card", "gateway_timeout" }[_random.Next(4)],
+                    retry = _random.Next(0, 2) == 1,
+                    gateway = new { name = "stripe", latencyMs = _random.Next(50, 2000) },
+                }, "error");
+
+            default:
+                return (new
+                {
+                    @event = "user.activity",
+                    userId = $"user_{_random.Next(100, 200)}",
+                    action = new[] { "login", "logout", "update_profile", "add_to_cart" }[_random.Next(4)],
+                    sessionId = Guid.NewGuid().ToString(),
+                    metadata = new
+                    {
+                        ip = $"10.0.{_random.Next(0, 255)}.{_random.Next(0, 255)}",
+                        device = new[] { "mobile", "desktop", "tablet" }[_random.Next(3)],
+                    },
+                }, "info");
+        }
     }
 
     private Activity? StartLogActivity(string name, string severity, string message)
