@@ -254,6 +254,7 @@ public sealed class SqlServerBulkWriter(
         dt.Columns.Add("trace_id",                 typeof(string));
         dt.Columns.Add("span_id",                  typeof(string));
         dt.Columns.Add("attributes_json",          typeof(string));
+        dt.Columns.Add("event_name",               typeof(string));
 
         foreach (var r in records)
         {
@@ -270,7 +271,8 @@ public sealed class SqlServerBulkWriter(
                 r.Flags,
                 (object?)r.TraceIdHex            ?? DBNull.Value,
                 (object?)r.SpanIdHex             ?? DBNull.Value,
-                (object?)SerializeJsonOrNull(r.Attributes) ?? DBNull.Value);
+                (object?)SerializeJsonOrNull(r.Attributes) ?? DBNull.Value,
+                (object?)r.EventName             ?? DBNull.Value);
         }
 
         using var bulk = new SqlBulkCopy(conn) { DestinationTableName = "log_records" };
@@ -309,7 +311,8 @@ public sealed class SqlServerBulkWriter(
                 trace_state              NVARCHAR(MAX),
                 status_code              NVARCHAR(20)  NOT NULL,
                 status_message           NVARCHAR(MAX),
-                attributes_json          NVARCHAR(MAX)
+                attributes_json          NVARCHAR(MAX),
+                flags                    INT           NOT NULL
             )
             """, conn))
         {
@@ -333,6 +336,7 @@ public sealed class SqlServerBulkWriter(
         dt.Columns.Add("status_code",              typeof(string));
         dt.Columns.Add("status_message",           typeof(string));
         dt.Columns.Add("attributes_json",          typeof(string));
+        dt.Columns.Add("flags",                    typeof(int));
 
         foreach (var (span, resource, scope) in spans)
         {
@@ -352,7 +356,8 @@ public sealed class SqlServerBulkWriter(
                 (object?)span.TraceState        ?? DBNull.Value,
                 span.StatusCode.ToString(),
                 (object?)span.StatusMessage     ?? DBNull.Value,
-                (object?)SerializeJsonOrNull(span.Attributes) ?? DBNull.Value);
+                (object?)SerializeJsonOrNull(span.Attributes) ?? DBNull.Value,
+                span.Flags);
         }
 
         using (var bulk = new SqlBulkCopy(conn) { DestinationTableName = "#spans_stage" })
@@ -366,13 +371,13 @@ public sealed class SqlServerBulkWriter(
                 INSERT (trace_id, span_id, parent_span_id, resource_id, scope_id,
                         name, kind, start_time_unix_nano, end_time_unix_nano,
                         dropped_attributes_count, dropped_events_count, dropped_links_count,
-                        trace_state, status_code, status_message, created_at, attributes_json)
+                        trace_state, status_code, status_message, created_at, attributes_json, flags)
                 VALUES (source.trace_id, source.span_id, source.parent_span_id,
                         source.resource_id, source.scope_id,
                         source.name, source.kind, source.start_time_unix_nano, source.end_time_unix_nano,
                         source.dropped_attributes_count, source.dropped_events_count, source.dropped_links_count,
                         source.trace_state, source.status_code, source.status_message,
-                        SYSDATETIME(), source.attributes_json)
+                        SYSDATETIME(), source.attributes_json, source.flags)
             OUTPUT INSERTED.id, INSERTED.trace_id, INSERTED.span_id;
             """;
 
@@ -419,12 +424,14 @@ public sealed class SqlServerBulkWriter(
         dt.Columns.Add("trace_state",               typeof(string));
         dt.Columns.Add("dropped_attributes_count",  typeof(int));
         dt.Columns.Add("attributes_json",           typeof(string));
+        dt.Columns.Add("flags",                     typeof(int));
 
         foreach (var (spanId, l) in links)
             dt.Rows.Add(spanId, l.LinkedTraceIdHex, l.LinkedSpanIdHex,
                 (object?)l.TraceState ?? DBNull.Value,
                 l.DroppedAttributesCount,
-                (object?)SerializeJsonOrNull(l.Attributes) ?? DBNull.Value);
+                (object?)SerializeJsonOrNull(l.Attributes) ?? DBNull.Value,
+                l.Flags);
 
         using var bulk = new SqlBulkCopy(conn) { DestinationTableName = "span_links" };
         foreach (DataColumn col in dt.Columns)

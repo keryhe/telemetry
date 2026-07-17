@@ -24,6 +24,7 @@ public class SpanModel
     public int DroppedEventsCount { get; set; } = 0;
     public int DroppedLinksCount { get; set; } = 0;
     public string? TraceState { get; set; }
+    public int Flags { get; set; } = 0;
     public SpanStatusCode StatusCode { get; set; } = SpanStatusCode.UNSET;
     public string? StatusMessage { get; set; }
     
@@ -50,6 +51,7 @@ public class SpanLinkModel
     public string LinkedTraceIdHex { get; set; } = null!; // 32-char hex string
     public string LinkedSpanIdHex { get; set; } = null!;  // 16-char hex string
     public string? TraceState { get; set; }
+    public int Flags { get; set; } = 0;
     public int DroppedAttributesCount { get; set; } = 0;
     public Dictionary<string, object>? Attributes { get; set; }
 }

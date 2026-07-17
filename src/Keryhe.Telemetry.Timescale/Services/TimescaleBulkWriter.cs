@@ -246,7 +246,7 @@ public sealed class TimescaleBulkWriter(
             INSERT INTO log_records (
                 resource_id, scope_id, time_unix_nano, observed_time_unix_nano,
                 severity_number, severity_text, body_type, body_value,
-                dropped_attributes_count, flags, trace_id, span_id, attributes_json)
+                dropped_attributes_count, flags, trace_id, span_id, attributes_json, event_name)
             SELECT
                 unnest($1::bigint[]), unnest($2::bigint[]),
                 unnest($3::bigint[]), unnest($4::bigint[]),
@@ -254,7 +254,7 @@ public sealed class TimescaleBulkWriter(
                 unnest($7::text[]),   unnest($8::text[]),
                 unnest($9::int[]),    unnest($10::int[]),
                 unnest($11::text[]),  unnest($12::text[]),
-                unnest($13::jsonb[])
+                unnest($13::jsonb[]), unnest($14::text[])
             """;
 
         var n = records.Count;
@@ -271,6 +271,7 @@ public sealed class TimescaleBulkWriter(
         var traceIds = new string?[n];
         var spanIds = new string?[n];
         var attrs = new string?[n];
+        var eventNames = new string?[n];
 
         for (var i = 0; i < n; i++)
         {
@@ -288,6 +289,7 @@ public sealed class TimescaleBulkWriter(
             traceIds[i] = r.TraceIdHex;
             spanIds[i] = r.SpanIdHex;
             attrs[i] = r.Attributes.Count > 0 ? JsonSerializer.Serialize(r.Attributes) : null;
+            eventNames[i] = r.EventName;
         }
 
         await using var cmd = new NpgsqlCommand(sql, conn);
@@ -304,6 +306,7 @@ public sealed class TimescaleBulkWriter(
         cmd.Parameters.Add(new NpgsqlParameter { Value = traceIds, NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Text });
         cmd.Parameters.Add(new NpgsqlParameter { Value = spanIds, NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Text });
         cmd.Parameters.Add(new NpgsqlParameter { Value = attrs, NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Jsonb });
+        cmd.Parameters.Add(new NpgsqlParameter { Value = eventNames, NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Text });
         await cmd.ExecuteNonQueryAsync(ct);
     }
 
@@ -323,7 +326,7 @@ public sealed class TimescaleBulkWriter(
                 trace_id, span_id, parent_span_id, resource_id, scope_id,
                 name, kind, start_time_unix_nano, end_time_unix_nano,
                 dropped_attributes_count, dropped_events_count, dropped_links_count,
-                trace_state, status_code, status_message, attributes_json)
+                trace_state, status_code, status_message, attributes_json, flags)
             SELECT
                 unnest($1::text[]),   unnest($2::text[]),   unnest($3::text[]),
                 unnest($4::bigint[]), unnest($5::bigint[]),
@@ -331,7 +334,7 @@ public sealed class TimescaleBulkWriter(
                 unnest($8::bigint[]), unnest($9::bigint[]),
                 unnest($10::int[]),   unnest($11::int[]),   unnest($12::int[]),
                 unnest($13::text[]),  unnest($14::text[]),  unnest($15::text[]),
-                unnest($16::jsonb[])
+                unnest($16::jsonb[]), unnest($17::int[])
             ON CONFLICT (trace_id, span_id) DO NOTHING
             RETURNING id, trace_id, span_id
             """;
@@ -353,6 +356,7 @@ public sealed class TimescaleBulkWriter(
         var statusCodes = new string[n];
         var statusMsgs = new string?[n];
         var attrs = new string?[n];
+        var flags = new int[n];
 
         for (var i = 0; i < n; i++)
         {
@@ -373,6 +377,7 @@ public sealed class TimescaleBulkWriter(
             statusCodes[i] = span.StatusCode.ToString();
             statusMsgs[i] = span.StatusMessage;
             attrs[i] = span.Attributes?.Count > 0 ? JsonSerializer.Serialize(span.Attributes) : null;
+            flags[i] = span.Flags;
         }
 
         await using var cmd = new NpgsqlCommand(sql, conn);
@@ -392,6 +397,7 @@ public sealed class TimescaleBulkWriter(
         cmd.Parameters.Add(new NpgsqlParameter { Value = statusCodes, NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Text });
         cmd.Parameters.Add(new NpgsqlParameter { Value = statusMsgs, NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Text });
         cmd.Parameters.Add(new NpgsqlParameter { Value = attrs, NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Jsonb });
+        cmd.Parameters.Add(new NpgsqlParameter { Value = flags, NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Integer });
 
         var inserted = new Dictionary<(string, string), long>();
         await using var reader = await cmd.ExecuteReaderAsync(ct);
@@ -443,8 +449,8 @@ public sealed class TimescaleBulkWriter(
         CancellationToken ct)
     {
         const string sql = """
-            INSERT INTO span_links (span_id, linked_trace_id, linked_span_id, trace_state, dropped_attributes_count, attributes_json)
-            SELECT unnest($1::bigint[]), unnest($2::text[]), unnest($3::text[]), unnest($4::text[]), unnest($5::int[]), unnest($6::jsonb[])
+            INSERT INTO span_links (span_id, linked_trace_id, linked_span_id, trace_state, dropped_attributes_count, attributes_json, flags)
+            SELECT unnest($1::bigint[]), unnest($2::text[]), unnest($3::text[]), unnest($4::text[]), unnest($5::int[]), unnest($6::jsonb[]), unnest($7::int[])
             """;
 
         var n = links.Count;
@@ -454,6 +460,7 @@ public sealed class TimescaleBulkWriter(
         var traceStates = new string?[n];
         var dropped = new int[n];
         var attrs = new string?[n];
+        var flags = new int[n];
 
         for (var i = 0; i < n; i++)
         {
@@ -464,6 +471,7 @@ public sealed class TimescaleBulkWriter(
             traceStates[i] = l.TraceState;
             dropped[i] = l.DroppedAttributesCount;
             attrs[i] = l.Attributes?.Count > 0 ? JsonSerializer.Serialize(l.Attributes) : null;
+            flags[i] = l.Flags;
         }
 
         await using var cmd = new NpgsqlCommand(sql, conn);
@@ -473,6 +481,7 @@ public sealed class TimescaleBulkWriter(
         cmd.Parameters.Add(new NpgsqlParameter { Value = traceStates, NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Text });
         cmd.Parameters.Add(new NpgsqlParameter { Value = dropped, NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Integer });
         cmd.Parameters.Add(new NpgsqlParameter { Value = attrs, NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Jsonb });
+        cmd.Parameters.Add(new NpgsqlParameter { Value = flags, NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Integer });
         await cmd.ExecuteNonQueryAsync(ct);
     }
 

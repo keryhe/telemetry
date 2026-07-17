@@ -243,7 +243,7 @@ public sealed class MySqlBulkWriter(
         {
             "resource_id", "scope_id", "time_unix_nano", "observed_time_unix_nano",
             "severity_number", "severity_text", "body_type", "body_value",
-            "dropped_attributes_count", "flags", "trace_id", "span_id", "attributes_json"
+            "dropped_attributes_count", "flags", "trace_id", "span_id", "attributes_json", "event_name"
         };
 
         var rows = new List<object?[]>(records.Count);
@@ -263,7 +263,8 @@ public sealed class MySqlBulkWriter(
                 r.Flags,
                 (object?)r.TraceIdHex           ?? DBNull.Value,
                 (object?)r.SpanIdHex            ?? DBNull.Value,
-                (object?)SerializeJsonOrNull(r.Attributes) ?? DBNull.Value
+                (object?)SerializeJsonOrNull(r.Attributes) ?? DBNull.Value,
+                (object?)r.EventName            ?? DBNull.Value
             });
         }
 
@@ -298,7 +299,7 @@ public sealed class MySqlBulkWriter(
             "trace_id", "span_id", "parent_span_id", "resource_id", "scope_id",
             "name", "kind", "start_time_unix_nano", "end_time_unix_nano",
             "dropped_attributes_count", "dropped_events_count", "dropped_links_count",
-            "trace_state", "status_code", "status_message", "attributes_json"
+            "trace_state", "status_code", "status_message", "attributes_json", "flags"
         };
 
         var rows = new List<object?[]>(keys.Count);
@@ -323,7 +324,8 @@ public sealed class MySqlBulkWriter(
                 (object?)span.TraceState    ?? DBNull.Value,
                 span.StatusCode.ToString(),
                 (object?)span.StatusMessage ?? DBNull.Value,
-                (object?)SerializeJsonOrNull(span.Attributes) ?? DBNull.Value
+                (object?)SerializeJsonOrNull(span.Attributes) ?? DBNull.Value,
+                span.Flags
             });
         }
 
@@ -394,7 +396,7 @@ public sealed class MySqlBulkWriter(
         var columns = new[]
         {
             "span_id", "linked_trace_id", "linked_span_id", "trace_state",
-            "dropped_attributes_count", "attributes_json"
+            "dropped_attributes_count", "attributes_json", "flags"
         };
 
         var rows = new List<object?[]>(links.Count);
@@ -404,7 +406,8 @@ public sealed class MySqlBulkWriter(
                 spanId, l.LinkedTraceIdHex, l.LinkedSpanIdHex,
                 (object?)l.TraceState ?? DBNull.Value,
                 l.DroppedAttributesCount,
-                (object?)SerializeJsonOrNull(l.Attributes) ?? DBNull.Value
+                (object?)SerializeJsonOrNull(l.Attributes) ?? DBNull.Value,
+                l.Flags
             });
 
         await BulkInsertAsync(conn, "span_links", columns, rows, ct);

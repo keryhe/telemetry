@@ -20,6 +20,7 @@ public abstract class LogReadRepositoryBase : DapperReadRepository, ILogReadRepo
             lr.observed_time_unix_nano   AS ObservedTimeUnixNano,
             lr.severity_number           AS SeverityNumber,
             lr.severity_text             AS SeverityText,
+            lr.event_name                AS EventName,
             lr.body_type                 AS BodyType,
             lr.body_value                AS BodyValue,
             lr.dropped_attributes_count  AS DroppedAttributesCount,
@@ -129,6 +130,7 @@ public abstract class LogReadRepositoryBase : DapperReadRepository, ILogReadRepo
                 lr.observed_time_unix_nano   AS ObservedTimeUnixNano,
                 lr.severity_number           AS SeverityNumber,
                 lr.severity_text             AS SeverityText,
+                lr.event_name                AS EventName,
                 lr.body_type                 AS BodyType,
                 lr.body_value                AS BodyValue,
                 lr.dropped_attributes_count  AS DroppedAttributesCount,
@@ -238,6 +240,7 @@ public abstract class LogReadRepositoryBase : DapperReadRepository, ILogReadRepo
             Attributes = DeserializeAttributes(r.ScopeAttributesJson) ?? new Dictionary<string, object>()
         },
         SeverityText = r.SeverityText,
+        EventName = r.EventName,
         SeverityNumber = r.SeverityNumber,
         Attributes = DeserializeAttributes(r.AttributesJson) ?? new Dictionary<string, object>(),
         TraceIdHex = r.TraceId,
@@ -256,6 +259,7 @@ public abstract class LogReadRepositoryBase : DapperReadRepository, ILogReadRepo
         public long? ObservedTimeUnixNano { get; set; }
         public int? SeverityNumber { get; set; }
         public string? SeverityText { get; set; }
+        public string? EventName { get; set; }
         public string? BodyType { get; set; }
         public string? BodyValue { get; set; }
         public int DroppedAttributesCount { get; set; }

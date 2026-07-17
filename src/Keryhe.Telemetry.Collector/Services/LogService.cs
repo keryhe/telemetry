@@ -176,6 +176,7 @@ public class LogService : OpenTelemetry.Proto.Collector.Logs.V1.LogsService.Logs
             ObservedTimeUnixNano = logRecord.ObservedTimeUnixNano == 0 ? null : (long)logRecord.ObservedTimeUnixNano,
             SeverityNumber = logRecord.SeverityNumber == 0 ? null : (int)logRecord.SeverityNumber,
             SeverityText = string.IsNullOrEmpty(logRecord.SeverityText) ? null : logRecord.SeverityText,
+            EventName = string.IsNullOrEmpty(logRecord.EventName) ? null : logRecord.EventName,
             DroppedAttributesCount = (int)logRecord.DroppedAttributesCount,
             Flags = (int)logRecord.Flags,
             TraceIdHex = ConvertTraceId(logRecord.TraceId),

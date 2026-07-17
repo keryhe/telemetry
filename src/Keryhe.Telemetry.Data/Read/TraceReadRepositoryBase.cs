@@ -74,6 +74,7 @@ public abstract class TraceReadRepositoryBase : DapperReadRepository, ITraceRead
                 s.dropped_events_count      AS DroppedEventsCount,
                 s.dropped_links_count       AS DroppedLinksCount,
                 s.trace_state               AS TraceState,
+                s.flags                     AS Flags,
                 s.status_code               AS StatusCode,
                 s.status_message            AS StatusMessage,
                 s.attributes_json           AS AttributesJson,
@@ -103,7 +104,7 @@ public abstract class TraceReadRepositoryBase : DapperReadRepository, ITraceRead
             cancellationToken: ct))).ToLookup(e => e.SpanDbId);
 
         var links = (await conn.QueryAsync<SpanLinkRow>(new CommandDefinition(
-            $"SELECT span_id AS SpanDbId, linked_trace_id AS LinkedTraceId, linked_span_id AS LinkedSpanId, trace_state AS TraceState, dropped_attributes_count AS DroppedAttributesCount, attributes_json AS AttributesJson FROM span_links WHERE span_id IN ({idList}) ORDER BY id",
+            $"SELECT span_id AS SpanDbId, linked_trace_id AS LinkedTraceId, linked_span_id AS LinkedSpanId, trace_state AS TraceState, flags AS Flags, dropped_attributes_count AS DroppedAttributesCount, attributes_json AS AttributesJson FROM span_links WHERE span_id IN ({idList}) ORDER BY id",
             cancellationToken: ct))).ToLookup(l => l.SpanDbId);
 
         return rows.Select(r => MapSpan(r, events[r.Id], links[r.Id])).ToList();
@@ -122,6 +123,7 @@ public abstract class TraceReadRepositoryBase : DapperReadRepository, ITraceRead
         DroppedEventsCount = r.DroppedEventsCount,
         DroppedLinksCount = r.DroppedLinksCount,
         TraceState = r.TraceState,
+        Flags = r.Flags,
         StatusCode = Enum.Parse<SpanStatusCode>(r.StatusCode),
         StatusMessage = r.StatusMessage,
         Attributes = DeserializeAttributes(r.AttributesJson),
@@ -137,6 +139,7 @@ public abstract class TraceReadRepositoryBase : DapperReadRepository, ITraceRead
             LinkedTraceIdHex = l.LinkedTraceId,
             LinkedSpanIdHex = l.LinkedSpanId,
             TraceState = l.TraceState,
+            Flags = l.Flags,
             DroppedAttributesCount = l.DroppedAttributesCount,
             Attributes = DeserializeAttributes(l.AttributesJson)
         }).ToList(),
@@ -720,6 +723,7 @@ public abstract class TraceReadRepositoryBase : DapperReadRepository, ITraceRead
         public int DroppedEventsCount { get; set; }
         public int DroppedLinksCount { get; set; }
         public string? TraceState { get; set; }
+        public int Flags { get; set; }
         public string StatusCode { get; set; } = null!;
         public string? StatusMessage { get; set; }
         public string? AttributesJson { get; set; }
@@ -746,6 +750,7 @@ public abstract class TraceReadRepositoryBase : DapperReadRepository, ITraceRead
         public string LinkedTraceId { get; set; } = null!;
         public string LinkedSpanId { get; set; } = null!;
         public string? TraceState { get; set; }
+        public int Flags { get; set; }
         public int DroppedAttributesCount { get; set; }
         public string? AttributesJson { get; set; }
     }

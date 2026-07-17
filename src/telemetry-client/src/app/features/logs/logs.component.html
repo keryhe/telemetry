@@ -220,6 +220,12 @@
                         <a class="ctx-val mono" [routerLink]="['/traces', l.traceIdHex]">{{ l.traceIdHex }}</a>
                       </div>
                     }
+                    @if (l.eventName) {
+                      <div class="ctx-item">
+                        <span class="ctx-key">Event Name</span>
+                        <span class="ctx-val mono">{{ l.eventName }}</span>
+                      </div>
+                    }
                     <div class="ctx-item">
                       <span class="ctx-key">Timestamp</span>
                       <span class="ctx-val mono">{{ getTimestamp(l) | date:'MM/dd/yyyy, h:mm:ss a' }}</span>

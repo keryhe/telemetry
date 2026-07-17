@@ -98,6 +98,7 @@ CREATE TABLE IF NOT EXISTS spans
     dropped_events_count     Int32 DEFAULT 0,
     dropped_links_count      Int32 DEFAULT 0,
     trace_state              Nullable(String),
+    flags                    Int32 DEFAULT 0,
     status_code              String DEFAULT 'UNSET',
     status_message           Nullable(String),
     created_at               DateTime64(9) DEFAULT now64(9),
@@ -126,6 +127,7 @@ CREATE TABLE IF NOT EXISTS span_links
     linked_trace_id          String,
     linked_span_id           String,
     trace_state              Nullable(String),
+    flags                    Int32 DEFAULT 0,
     dropped_attributes_count Int32 DEFAULT 0,
     attributes_json          Nullable(String)
 )
@@ -272,6 +274,7 @@ CREATE TABLE IF NOT EXISTS log_records
     observed_time_unix_nano  Nullable(Int64),
     severity_number          Nullable(Int32),
     severity_text            Nullable(String),
+    event_name               Nullable(String),
     body_type                Nullable(String),
     body_value               Nullable(String),
     dropped_attributes_count Int32 DEFAULT 0,
@@ -398,4 +401,4 @@ GROUP BY severity_text, severity_number, log_date;
 -- =============================================================================
 -- Only inserted when every statement above succeeded, so a partial apply cannot
 -- leave a false version marker for the apply-schema.sh gate.
-INSERT INTO schema_version (version) VALUES ('2.5.0');
+INSERT INTO schema_version (version) VALUES ('2.6.0');

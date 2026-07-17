@@ -115,6 +115,7 @@ CREATE TABLE spans (
     dropped_events_count     INT           DEFAULT 0,
     dropped_links_count      INT           DEFAULT 0,
     trace_state              NVARCHAR(MAX),
+    flags                    INT           DEFAULT 0,
     status_code              NVARCHAR(20)  NOT NULL DEFAULT 'UNSET'
         CHECK (status_code IN ('UNSET', 'OK', 'ERROR')),
     status_message           NVARCHAR(MAX),
@@ -158,6 +159,7 @@ CREATE TABLE span_links (
     linked_trace_id          CHAR(32) NOT NULL,
     linked_span_id           CHAR(16) NOT NULL,
     trace_state              NVARCHAR(MAX),
+    flags                    INT      DEFAULT 0,
     dropped_attributes_count INT      DEFAULT 0,
     attributes_json          NVARCHAR(MAX),
     CONSTRAINT fk_span_links_spans FOREIGN KEY (span_id) REFERENCES spans (id) ON DELETE CASCADE
@@ -319,6 +321,7 @@ CREATE TABLE log_records (
     observed_time_unix_nano  BIGINT,
     severity_number          INT,
     severity_text            NVARCHAR(MAX),
+    event_name               NVARCHAR(256),
     body_type                NVARCHAR(20) DEFAULT 'STRING'
         CHECK (body_type IN ('STRING', 'BOOL', 'INT', 'DOUBLE', 'BYTES', 'ARRAY', 'KVLIST')),
     body_value               NVARCHAR(MAX),
@@ -496,7 +499,7 @@ GO
 -- Only reached when every statement above succeeded, so a partial apply cannot
 -- leave a false version marker for the apply-schema.sh gate.
 MERGE schema_version AS target
-USING (VALUES (N'2.5.0')) AS src (version)
+USING (VALUES (N'2.6.0')) AS src (version)
 ON target.version = src.version
 WHEN MATCHED     THEN UPDATE SET applied_at = SYSDATETIME()
 WHEN NOT MATCHED THEN INSERT (version, applied_at) VALUES (src.version, SYSDATETIME());

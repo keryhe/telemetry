@@ -97,6 +97,7 @@ CREATE TABLE spans (
     dropped_events_count     INT          DEFAULT 0,
     dropped_links_count      INT          DEFAULT 0,
     trace_state              TEXT,
+    flags                    INT          DEFAULT 0,
     status_code              VARCHAR(20)  NOT NULL DEFAULT 'UNSET'
         CHECK (status_code IN ('UNSET', 'OK', 'ERROR')),
     status_message           TEXT,
@@ -137,6 +138,7 @@ CREATE TABLE span_links (
     linked_trace_id          CHAR(32) NOT NULL,
     linked_span_id           CHAR(16) NOT NULL,
     trace_state              TEXT,
+    flags                    INT      DEFAULT 0,
     dropped_attributes_count INT      DEFAULT 0,
     attributes_json          JSON,
     CONSTRAINT fk_span_links_spans FOREIGN KEY (span_id) REFERENCES spans (id) ON DELETE CASCADE
@@ -286,6 +288,7 @@ CREATE TABLE log_records (
     observed_time_unix_nano  BIGINT,
     severity_number          INT,
     severity_text            VARCHAR(255),
+    event_name               VARCHAR(256),
     body_type                VARCHAR(20) DEFAULT 'STRING'
         CHECK (body_type IN ('STRING', 'BOOL', 'INT', 'DOUBLE', 'BYTES', 'ARRAY', 'KVLIST')),
     body_value               LONGTEXT,
@@ -452,7 +455,7 @@ GROUP BY severity_text, severity_number, day_bucket;
 -- Only inserted when every statement above succeeded, so a partial apply cannot
 -- leave a false version marker for the apply-schema.sh gate.
 INSERT INTO schema_version (version, applied_at)
-VALUES ('2.5.0', CURRENT_TIMESTAMP(6))
+VALUES ('2.6.0', CURRENT_TIMESTAMP(6))
 ON DUPLICATE KEY UPDATE applied_at = CURRENT_TIMESTAMP(6);
 
 -- =============================================================================

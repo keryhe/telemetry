@@ -53,7 +53,8 @@ public sealed class ClickHouseBulkWriter(
             r.Flags,
             r.TraceIdHex,
             r.SpanIdHex,
-            SerializeJsonOrNull(r.Attributes)
+            SerializeJsonOrNull(r.Attributes),
+            r.EventName
         });
 
         await BulkInsertAsync(conn, "log_records", LogColumns, rows, ct);
@@ -64,7 +65,7 @@ public sealed class ClickHouseBulkWriter(
     [
         "id", "resource_id", "scope_id", "time_unix_nano", "observed_time_unix_nano",
         "severity_number", "severity_text", "body_type", "body_value",
-        "dropped_attributes_count", "flags", "trace_id", "span_id", "attributes_json"
+        "dropped_attributes_count", "flags", "trace_id", "span_id", "attributes_json", "event_name"
     ];
 
     // =========================================================================
@@ -111,7 +112,8 @@ public sealed class ClickHouseBulkWriter(
                 span.TraceState,
                 span.StatusCode.ToString(),
                 span.StatusMessage,
-                SerializeJsonOrNull(span.Attributes)
+                SerializeJsonOrNull(span.Attributes),
+                span.Flags
             };
         });
 
@@ -125,7 +127,7 @@ public sealed class ClickHouseBulkWriter(
             foreach (var e in span.Events)
                 events.Add([RowId.Next(), spanDbId, e.Name, e.TimeUnixNano, e.DroppedAttributesCount, SerializeJsonOrNull(e.Attributes)]);
             foreach (var l in span.Links)
-                links.Add([RowId.Next(), spanDbId, l.LinkedTraceIdHex, l.LinkedSpanIdHex, l.TraceState, l.DroppedAttributesCount, SerializeJsonOrNull(l.Attributes)]);
+                links.Add([RowId.Next(), spanDbId, l.LinkedTraceIdHex, l.LinkedSpanIdHex, l.TraceState, l.DroppedAttributesCount, SerializeJsonOrNull(l.Attributes), l.Flags]);
         }
 
         if (events.Count > 0) await BulkInsertAsync(conn, "span_events", SpanEventColumns, events, ct);
@@ -139,14 +141,14 @@ public sealed class ClickHouseBulkWriter(
         "id", "trace_id", "span_id", "parent_span_id", "resource_id", "scope_id",
         "name", "kind", "start_time_unix_nano", "end_time_unix_nano",
         "dropped_attributes_count", "dropped_events_count", "dropped_links_count",
-        "trace_state", "status_code", "status_message", "attributes_json"
+        "trace_state", "status_code", "status_message", "attributes_json", "flags"
     ];
 
     private static readonly string[] SpanEventColumns =
         ["id", "span_id", "name", "time_unix_nano", "dropped_attributes_count", "attributes_json"];
 
     private static readonly string[] SpanLinkColumns =
-        ["id", "span_id", "linked_trace_id", "linked_span_id", "trace_state", "dropped_attributes_count", "attributes_json"];
+        ["id", "span_id", "linked_trace_id", "linked_span_id", "trace_state", "dropped_attributes_count", "attributes_json", "flags"];
 
     // =========================================================================
     // FLUSH: METRICS

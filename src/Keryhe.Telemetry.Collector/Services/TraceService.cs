@@ -216,6 +216,7 @@ public class TraceService : OpenTelemetry.Proto.Collector.Trace.V1.TraceService.
             DroppedEventsCount = (int)span.DroppedEventsCount,
             DroppedLinksCount = (int)span.DroppedLinksCount,
             TraceState = string.IsNullOrEmpty(span.TraceState) ? null : span.TraceState,
+            Flags = (int)span.Flags,
             StatusCode = ConvertSpanStatusCode(span.Status?.Code ?? OpenTelemetry.Proto.Trace.V1.Status.Types.StatusCode.Unset),
             StatusMessage = string.IsNullOrEmpty(span.Status?.Message) ? null : span.Status.Message,
             Attributes = ConvertAttributes(span.Attributes),
@@ -267,6 +268,7 @@ public class TraceService : OpenTelemetry.Proto.Collector.Trace.V1.TraceService.
                     LinkedTraceIdHex = linkedTraceIdHex,
                     LinkedSpanIdHex = linkedSpanIdHex,
                     TraceState = string.IsNullOrEmpty(link.TraceState) ? null : link.TraceState,
+                    Flags = (int)link.Flags,
                     DroppedAttributesCount = (int)link.DroppedAttributesCount,
                     Attributes = ConvertAttributes(link.Attributes)
                 });

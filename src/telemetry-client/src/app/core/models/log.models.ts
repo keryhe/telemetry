@@ -3,6 +3,7 @@ export interface LogRecord {
   observedTimeUnixNano: number | null;
   severityNumber: number | null;
   severityText: string | null;
+  eventName: string | null;
   bodyValue: string | null;
   traceIdHex: string | null;
   spanIdHex: string | null;

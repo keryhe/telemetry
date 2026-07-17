@@ -12,6 +12,7 @@ public class LogRecordModel
     public long? ObservedTimeUnixNano { get; set; }
     public int? SeverityNumber { get; set; }
     public string? SeverityText { get; set; }
+    public string? EventName { get; set; }
     public AttributeType? BodyType { get; set; } = AttributeType.STRING;
     public string? BodyValue { get; set; }
     public int DroppedAttributesCount { get; set; } = 0;

@@ -37,6 +37,7 @@ export interface SpanModel {
   statusCode: SpanStatusCode;
   statusMessage: string | null;
   traceState: string | null;
+  flags: number;
   droppedAttributesCount: number;
   droppedEventsCount: number;
   droppedLinksCount: number;
@@ -56,6 +57,7 @@ export interface SpanEventModel {
 export interface SpanLinkModel {
   linkedTraceIdHex: string;
   linkedSpanIdHex: string;
+  flags: number;
   attributes: Record<string, unknown> | null;
 }
 

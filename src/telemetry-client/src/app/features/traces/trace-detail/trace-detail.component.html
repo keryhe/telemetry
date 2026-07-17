@@ -197,6 +197,9 @@
                       @if (node.traceState) {
                         <tr><td>Trace State</td><td class="mono">{{ node.traceState }}</td></tr>
                       }
+                      @if (node.flags) {
+                        <tr><td>Flags</td><td class="mono">{{ node.flags }}</td></tr>
+                      }
                       @if (node.instrumentationScope) {
                         <tr>
                           <td>Library</td>
