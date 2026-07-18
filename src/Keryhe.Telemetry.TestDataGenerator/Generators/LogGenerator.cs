@@ -221,7 +221,11 @@ public class LogGenerator
             {
                 LogJsonEvent();
             }
-            else if (severityRoll < 60)
+            else if (severityRoll < 30)
+            {
+                LogJsonAttributeEvent();
+            }
+            else if (severityRoll < 65)
             {
                 LogInformation();
             }
@@ -297,7 +301,7 @@ public class LogGenerator
     /// </summary>
     private void LogJsonEvent()
     {
-        var (payload, severity) = BuildJsonPayload();
+        var (payload, severity, _) = BuildJsonPayload();
         var json = JsonSerializer.Serialize(payload);
 
         using var activity = StartLogActivity($"log.{severity}", severity, json);
@@ -312,8 +316,38 @@ public class LogGenerator
         }
     }
 
-    /// <summary>Pick a random structured event payload and the severity it should be logged at.</summary>
-    private (object Payload, string Severity) BuildJsonPayload()
+    /// <summary>
+    /// Emit a log whose body is plain text but which carries the structured event as a JSON-valued
+    /// attribute. Scope values become log-record attributes (IncludeScopes is enabled in Program.cs),
+    /// so the JSON lands in "event.payload" without appearing in the rendered body.
+    /// </summary>
+    private void LogJsonAttributeEvent()
+    {
+        var (payload, severity, eventName) = BuildJsonPayload();
+        var json = JsonSerializer.Serialize(payload);
+        var correlationId = Guid.NewGuid().ToString("N");
+
+        using var activity = StartLogActivity($"log.{severity}", severity, eventName);
+        activity?.SetTag("event.name", eventName);
+
+        using var scope = _logger.BeginScope(new Dictionary<string, object>
+        {
+            ["event.name"] = eventName,
+            ["event.payload"] = json,
+        });
+
+        if (severity == "error")
+        {
+            _logger.LogError("Event {EventName} failed | Correlation: {CorrelationId}", eventName, correlationId);
+        }
+        else
+        {
+            _logger.LogInformation("Event {EventName} processed | Correlation: {CorrelationId}", eventName, correlationId);
+        }
+    }
+
+    /// <summary>Pick a random structured event payload, its severity, and its event name.</summary>
+    private (object Payload, string Severity, string EventName) BuildJsonPayload()
     {
         switch (_random.Next(4))
         {
@@ -327,7 +361,7 @@ public class LogGenerator
                     total = Math.Round(_random.NextDouble() * 500, 2),
                     currency = "USD",
                     status = "confirmed",
-                }, "info");
+                }, "info", "order.created");
 
             case 1:
                 return (new
@@ -338,7 +372,7 @@ public class LogGenerator
                     statusCode = new[] { 200, 201, 204, 400, 404, 500 }[_random.Next(6)],
                     durationMs = _random.Next(5, 800),
                     responseBytes = _random.Next(200, 50000),
-                }, "info");
+                }, "info", "http.request");
 
             case 2:
                 return (new
@@ -350,7 +384,7 @@ public class LogGenerator
                     reason = new[] { "card_declined", "insufficient_funds", "expired_card", "gateway_timeout" }[_random.Next(4)],
                     retry = _random.Next(0, 2) == 1,
                     gateway = new { name = "stripe", latencyMs = _random.Next(50, 2000) },
-                }, "error");
+                }, "error", "payment.failed");
 
             default:
                 return (new
@@ -364,7 +398,7 @@ public class LogGenerator
                         ip = $"10.0.{_random.Next(0, 255)}.{_random.Next(0, 255)}",
                         device = new[] { "mobile", "desktop", "tablet" }[_random.Next(3)],
                     },
-                }, "info");
+                }, "info", "user.activity");
         }
     }
 

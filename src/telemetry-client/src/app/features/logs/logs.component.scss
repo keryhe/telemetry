@@ -349,6 +349,10 @@ mark.search-hit {
   border: 1px solid var(--mat-sys-outline-variant);
   border-radius: 4px;
   overflow: hidden;
+  // Width of the caret gutter on a JSON row. Plain rows and the expanded <pre> indent by
+  // it (below) so every attribute key lines up in one column — tune here only.
+  --attr-gutter: 18px;
+  --attr-indent: calc(12px + var(--attr-gutter) + 8px);
 }
 
 .attr-row {
@@ -356,16 +360,93 @@ mark.search-hit {
   gap: 8px;
   padding: 4px 12px;
   font-size: 12px;
-  &:nth-child(even) { background: var(--mat-sys-surface-container); }
 }
+
+// Striping lives on the wrapper: a JSON attribute's <pre> is a sibling of its row,
+// so :nth-child on .attr-row itself would lose parity as rows expand.
+.attr-entry:nth-child(even) > .attr-row { background: var(--mat-sys-surface-container); }
 
 .attr-key { min-width: 200px; color: var(--mat-sys-on-surface-variant); font-family: monospace; font-weight: 500; }
 .attr-val { flex: 1; word-break: break-all; font-family: monospace; }
 
+// JSON attribute: caret + copy button, collapsed to a single elided preview line.
+.attr-row-json {
+  align-items: center;
+  cursor: pointer;
+  .attr-val {
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    word-break: normal;
+    color: var(--mat-sys-on-surface-variant);
+  }
+}
+.attr-entry > .attr-row-json:hover { background: var(--mat-sys-surface-container-high); }
+
+// Indent plain rows by the gutter so every key lines up — but only when this log
+// actually has a JSON attribute, so the common case renders flush as before.
+.attr-table.has-json-attrs .attr-row:not(.attr-row-json) { padding-left: var(--attr-indent); }
+
+.attr-caret {
+  flex: none;
+  font-size: 18px;
+  width: 18px;
+  height: 18px;
+  color: var(--mat-sys-on-surface-variant);
+  transition: transform 200ms;
+  &.rotated { transform: rotate(90deg); }
+}
+
+// Centre the glyph explicitly: Material sizes icon buttons for a 40px state layer, so
+// shrinking one to 24px leaves the icon riding low on the inherited line-height.
+.attr-copy.mat-mdc-icon-button {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  line-height: 1;
+  --mdc-icon-button-state-layer-size: 24px;
+  mat-icon {
+    display: block;
+    font-size: 16px;
+    width: 16px;
+    height: 16px;
+    line-height: 16px;
+    margin: 0;
+  }
+}
+
+// Expanded JSON: the copy button is parked in the caret gutter, under the chevron,
+// with the pretty-printed block filling the rest of the row.
+.attr-json-block {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 0 12px 8px;
+}
+
+.attr-json-gutter {
+  flex: none;
+  width: var(--attr-gutter);
+  display: flex;
+  justify-content: center; // the button is wider than the caret; centring keeps them plumb
+  padding-top: 6px;        // sit level with the <pre>'s first line
+}
+
+// Two classes so this wins over .json-body-view, which is declared later in the file.
+.attr-json-block > .attr-json-view {
+  margin: 0;
+  flex: 1;
+  min-width: 0; // let the <pre> shrink and scroll itself instead of stretching the row
+  max-height: 300px;
+}
+
 .json-body-header {
   display: flex;
   align-items: center;
-  justify-content: space-between;
   gap: 8px;
 }
 .json-body-actions {

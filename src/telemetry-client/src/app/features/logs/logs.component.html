@@ -269,13 +269,37 @@
                     }
                   }
 
-                  @if (l.attributes && (l.attributes | keyvalue).length) {
+                  @if (attrEntries(l.attributes).length) {
                     <div class="detail-section-title">Attributes</div>
-                    <div class="attr-table">
-                      @for (entry of l.attributes | keyvalue; track entry.key) {
-                        <div class="attr-row">
-                          <span class="attr-key">{{ entry.key }}</span>
-                          <span class="attr-val">{{ entry.value }}</span>
+                    <div class="attr-table" [class.has-json-attrs]="hasJsonAttrs(l.attributes)">
+                      @for (entry of attrEntries(l.attributes); track entry.key) {
+                        <div class="attr-entry">
+                          @if (isJsonAttr(entry.value)) {
+                            <div class="attr-row attr-row-json"
+                                 (click)="toggleAttr(entry.key); $event.stopPropagation()">
+                              <mat-icon class="attr-caret"
+                                        [class.rotated]="isAttrExpanded(entry.key)">chevron_right</mat-icon>
+                              <span class="attr-key">{{ entry.key }}</span>
+                              <span class="attr-val">{{ attrPreview(entry.value) }}</span>
+                            </div>
+                            @if (isAttrExpanded(entry.key)) {
+                              <div class="attr-json-block">
+                                <span class="attr-json-gutter">
+                                  <button mat-icon-button class="attr-copy"
+                                          (click)="copyAttr(entry.key, entry.value); $event.stopPropagation()"
+                                          [matTooltip]="copiedAttrKey() === entry.key ? 'Copied!' : 'Copy JSON'">
+                                    <mat-icon>{{ copiedAttrKey() === entry.key ? 'check' : 'content_copy' }}</mat-icon>
+                                  </button>
+                                </span>
+                                <pre class="json-body-view attr-json-view">{{ prettyJsonAttr(entry.value) }}</pre>
+                              </div>
+                            }
+                          } @else {
+                            <div class="attr-row">
+                              <span class="attr-key">{{ entry.key }}</span>
+                              <span class="attr-val">{{ entry.value }}</span>
+                            </div>
+                          }
                         </div>
                       }
                     </div>

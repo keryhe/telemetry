@@ -106,6 +106,9 @@ var host = new HostBuilder()
         logging.AddOpenTelemetry(otlpLogging =>
         {
             otlpLogging.IncludeFormattedMessage = true;
+            // Scope key/values are promoted to log-record attributes, which lets a generator attach
+            // structured context (e.g. a JSON payload) without it bleeding into the formatted body.
+            otlpLogging.IncludeScopes = true;
             otlpLogging
                 .SetResourceBuilder(ResourceBuilder.CreateDefault().AddService(serviceName, serviceVersion: serviceVersion))
                 .AddOtlpExporter(exporterOptions =>

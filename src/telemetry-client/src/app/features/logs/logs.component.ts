@@ -1,5 +1,5 @@
 import { Component, computed, effect, inject, signal, untracked, viewChild } from '@angular/core';
-import { DatePipe, DecimalPipe, KeyValuePipe, SlicePipe, PercentPipe } from '@angular/common';
+import { DatePipe, DecimalPipe, SlicePipe, PercentPipe } from '@angular/common';
 import { ActivatedRoute, RouterLink } from '@angular/router';
 import { MatCardModule } from '@angular/material/card';
 import { MatFormFieldModule } from '@angular/material/form-field';
@@ -64,7 +64,7 @@ function splitTerms(query: string): string[] {
   selector: 'app-logs',
   standalone: true,
   imports: [
-    DatePipe, DecimalPipe, KeyValuePipe, SlicePipe, PercentPipe, FormsModule, RouterLink,
+    DatePipe, DecimalPipe, SlicePipe, PercentPipe, FormsModule, RouterLink,
     MatCardModule, MatTableModule, MatIconModule,
     MatFormFieldModule, MatInputModule, MatSelectModule, MatProgressBarModule,
     MatButtonModule, MatPaginatorModule, MatChipsModule, MatDialogModule,
@@ -109,6 +109,10 @@ export class LogsComponent {
   protected bodyCollapsed = signal(false);
   /** Transient "Copied!" affordance for the copy-JSON-body button. */
   protected bodyCopied = signal(false);
+  /** Which JSON attribute rows are expanded in the open detail (reset when a new row opens). */
+  private readonly expandedAttrKeys = signal<Set<string>>(new Set());
+  /** Attribute key whose "Copied!" affordance is showing — only one row shows it at a time. */
+  protected copiedAttrKey = signal<string | null>(null);
 
   // Faceting sidebar: collapse state + which keys are collapsed (all open by default).
   protected facetsCollapsed = signal<boolean>(this.saved.facetsCollapsed);
@@ -444,6 +448,8 @@ export class LogsComponent {
   protected toggleRow(row: LogRecord): void {
     this.expandedRow.update((cur) => (cur === row ? null : row));
     this.bodyCollapsed.set(false); // each newly-opened row starts with its JSON body expanded
+    this.expandedAttrKeys.set(new Set()); // ...and with every JSON attribute collapsed
+    this.copiedAttrKey.set(null);         // don't carry a stale check-mark into the new row
     // Force the table to re-evaluate the detail row's `when` predicate.
     this.table()?.renderRows();
   }
@@ -591,7 +597,7 @@ export class LogsComponent {
   }
 
   // =========================================================================
-  // JSON BODY (expanded detail)
+  // JSON BODY / ATTRIBUTES (expanded detail)
   // =========================================================================
 
   /** Parse a log body as a JSON object/array, or null when it isn't structured JSON. */
@@ -626,6 +632,73 @@ export class LogsComponent {
     navigator.clipboard?.writeText(text).then(() => {
       this.bodyCopied.set(true);
       setTimeout(() => this.bodyCopied.set(false), 1500);
+    }).catch(() => {});
+  }
+
+  /**
+   * Parse an attribute value as structured JSON. Unlike a body, an attribute is typed `unknown`:
+   * it may already be an object/array, or a JSON string (which parses on the same rules as a body).
+   */
+  private parseJsonAttr(value: unknown): unknown | null {
+    if (value !== null && typeof value === 'object') return value;
+    return typeof value === 'string' ? this.parseJsonBody(value) : null;
+  }
+
+  /** True when an attribute value is structured JSON worth its own expander. */
+  protected isJsonAttr(value: unknown): boolean {
+    return this.parseJsonAttr(value) !== null;
+  }
+
+  /** Pretty-printed (2-space) JSON for a structured attribute value; '' when not JSON. */
+  protected prettyJsonAttr(value: unknown): string {
+    const v = this.parseJsonAttr(value);
+    return v === null ? '' : JSON.stringify(v, null, 2);
+  }
+
+  /** One-line collapsed preview of a JSON attribute (object values would render `[object Object]`). */
+  protected attrPreview(value: unknown): string {
+    const v = this.parseJsonAttr(value);
+    return v === null ? String(value ?? '') : JSON.stringify(v);
+  }
+
+  /** True when any attribute is JSON — drives the caret gutter that keeps all keys aligned. */
+  protected hasJsonAttrs(attrs: Record<string, unknown> | null | undefined): boolean {
+    return attrs != null && Object.values(attrs).some((v) => this.isJsonAttr(v));
+  }
+
+  /**
+   * The attribute bag as key-sorted entries. Replaces the `keyvalue` pipe here: the table row is
+   * untyped (`any`), so the pipe widened `entry.key` to `unknown` and it couldn't be passed to
+   * the per-attribute expand/copy handlers.
+   */
+  protected attrEntries(attrs: Record<string, unknown> | null | undefined): { key: string; value: unknown }[] {
+    if (!attrs) return [];
+    return Object.entries(attrs)
+      .map(([key, value]) => ({ key, value }))
+      .sort((a, b) => a.key.localeCompare(b.key));
+  }
+
+  protected isAttrExpanded(key: string): boolean {
+    return this.expandedAttrKeys().has(key);
+  }
+
+  /** Expand/collapse the pretty-printed JSON under one attribute row. */
+  protected toggleAttr(key: string): void {
+    this.expandedAttrKeys.update((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key); else next.add(key);
+      return next;
+    });
+  }
+
+  /** Copy one attribute's pretty-printed JSON, flagging just that row as copied. */
+  protected copyAttr(key: string, value: unknown): void {
+    const text = this.prettyJsonAttr(value);
+    if (!text) return;
+    navigator.clipboard?.writeText(text).then(() => {
+      this.copiedAttrKey.set(key);
+      // Guard the reset: a later copy of another attribute owns the affordance now.
+      setTimeout(() => { if (this.copiedAttrKey() === key) this.copiedAttrKey.set(null); }, 1500);
     }).catch(() => {});
   }
 
