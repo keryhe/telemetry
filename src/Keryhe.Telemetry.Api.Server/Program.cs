@@ -33,7 +33,13 @@ if (app.Environment.IsDevelopment())
     app.MapOpenApi();
 }
 
-app.UseHttpsRedirection();
+// ── ANGULAR CLIENT ────────────────────────────────────────────────────────────
+// Serves the compiled SPA from wwwroot (populated at publish time from
+// src/telemetry-client). Placed before the tenant middleware so asset requests
+// skip scoped tenant resolution entirely. In development wwwroot is empty and
+// these are no-ops — the UI runs on the Angular dev server instead.
+app.UseDefaultFiles();
+app.UseStaticFiles();
 
 // CORS before tenant middleware so OPTIONS preflight requests pass through.
 app.UseCors("Angular");
@@ -41,5 +47,10 @@ app.UseCors("Angular");
 app.UseKeryheTelemetryApi();
 
 app.MapControllers();
+
+// Anything not matched by an api/* controller or a real file is an Angular
+// client-side route (/traces/:id, /metrics/:name, ...) — serve the SPA shell so
+// deep links and hard reloads work.
+app.MapFallbackToFile("index.html");
 
 app.Run();

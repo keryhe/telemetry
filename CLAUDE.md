@@ -10,14 +10,24 @@ Requires the .NET 10 SDK and Node.js (Angular 20 for the UI).
 # Build the whole .NET solution
 dotnet build Telemetry.sln
 
-# Run the gRPC OTLP ingestion server (write path)
-dotnet run --project src/Keryhe.Telemetry.Collector.Server
+# Run the all-in-one host (gRPC ingestion + REST API + Angular UI in one process)
+dotnet run --project src/Keryhe.Telemetry.Server
 
-# Run the REST API (read path, consumed by the Angular UI)
+# ...or run the two split hosts separately (scale-out deployments):
+# gRPC OTLP ingestion server (write path)
+dotnet run --project src/Keryhe.Telemetry.Collector.Server
+# REST API (read path, consumed by the Angular UI)
 dotnet run --project src/Keryhe.Telemetry.Api.Server
 
-# Run the Angular UI (dev server on http://localhost:4201)
+# Run the Angular UI (dev server on http://localhost:4201 — development only)
 cd src/telemetry-client && npm install && npm start
+
+# Publish the all-in-one host (also builds + bundles the Angular UI into wwwroot)
+dotnet publish src/Keryhe.Telemetry.Server -c Release -o ./publish-server
+# The API-only host publishes the UI the same way:
+dotnet publish src/Keryhe.Telemetry.Api.Server -c Release -o ./publish
+# ...and to publish against an already-built src/telemetry-client/dist instead:
+dotnet publish src/Keryhe.Telemetry.Api.Server -c Release -p:BuildSpaOnPublish=false
 
 # Run the test data generator (sends synthetic OTLP data to the gRPC server)
 dotnet run --project src/Keryhe.Telemetry.TestDataGenerator
@@ -44,10 +54,30 @@ There are no .NET test projects in the solution. The Angular project has `npm te
 ### Default ports
 
 - gRPC ingestion (`Keryhe.Telemetry.Collector.Server`): `http://localhost:5117` (h2c), `https://localhost:7057` (HTTP/2)
-- REST API (`Keryhe.Telemetry.Api.Server`): `http://localhost:5188`, `https://localhost:7105`
-- Angular dev server (`src/telemetry-client`): `http://localhost:4201`
+- REST API (`Keryhe.Telemetry.Api.Server`): `http://localhost:5188`, `https://localhost:7105` — also serves the UI at `/` when published
+- Angular dev server (`src/telemetry-client`): `http://localhost:4201` — **development only**
 
-The Angular dev config points at `https://localhost:7105/api` (`src/telemetry-client/src/environments/environment.ts`).
+`Keryhe.Telemetry.Server` (all-in-one) serves all four of the above on the same ports, via named
+Kestrel endpoints in its `appsettings.json`: `Grpc` (5117, h2c/`Http2`), `GrpcTls` (7057, `Http2`),
+`Api` (5188, `Http1`), `ApiTls` (7105, `Http1AndHttp2`). Its `launchSettings.json` deliberately sets
+**no** `applicationUrl` — `ASPNETCORE_URLS` overrides `Kestrel:Endpoints` wholesale and would
+collapse the per-endpoint `Protocols`, breaking h2c gRPC on 5117. It also omits `UseHttpsRedirection()`
+for the same reason.
+
+The Angular dev config points at `https://localhost:7105/api` (`src/telemetry-client/src/environments/environment.ts`),
+which is why the API host has a CORS policy. The **production** build swaps in
+`environment.prod.ts` (`apiUrl: '/api'`) via `fileReplacements` in `angular.json`, so a
+published deployment is same-origin and needs no CORS.
+
+### UI hosting (published builds)
+
+`Keryhe.Telemetry.Api.Server` serves the SPA from `wwwroot`: `UseDefaultFiles`/`UseStaticFiles`
+run before the tenant middleware, and `MapFallbackToFile("index.html")` runs *after*
+`MapControllers` so Angular deep links (`/traces/:id`) survive a hard reload while `/api/*`
+and `/openapi/*` are never swallowed. The `BuildAngularClient`/`IncludeAngularClient` MSBuild
+targets in `Keryhe.Telemetry.Api.Server.csproj` build the SPA and stage `dist/telemetry-client/browser`
+into the published `wwwroot` — on publish only, so plain `dotnet build` never runs npm, and
+nothing is written into the source tree (there is no checked-in `wwwroot`).
 
 ## Architecture
 
@@ -70,6 +100,7 @@ REST API consumed by an Angular single-page application.
 | `Keryhe.Telemetry.Collector.Server` | Thin ASP.NET Core host that maps the gRPC services and runs the ingestion worker |
 | `Keryhe.Telemetry.Api` | REST API controllers, tenant middleware, and read-service wiring (class library) |
 | `Keryhe.Telemetry.Api.Server` | Thin ASP.NET Core host that composes the API + OpenAPI + CORS |
+| `Keryhe.Telemetry.Server` | All-in-one host: gRPC ingestion + REST API + Angular UI in one process |
 | `Keryhe.Telemetry.Alerting` | Alert rule evaluation with pluggable evaluators and webhook delivery |
 | `Keryhe.Telemetry.TestDataGenerator` | Worker service that emits synthetic telemetry via the OpenTelemetry SDK |
 | `src/telemetry-client` | Angular 20 UI (Angular Material, ApexCharts, ngx-graph) — not part of the .sln |
@@ -91,17 +122,28 @@ Angular UI (localhost:4201)
   → REST (Keryhe.Telemetry.Api.Server, /api) → controllers → I*ReadRepository (active provider, Dapper) → DB
 ```
 
-### The two composition roots
+### The three composition roots
 
-Both hosts are thin `Program.cs` shells; the real wiring lives in the class libraries:
+All three hosts are thin `Program.cs` shells; the real wiring lives in the class libraries,
+behind two matching extension pairs:
 
-- **`Keryhe.Telemetry.Collector.Server`** registers the ingestion channel, `ResourceScopeCache`,
-  the `TelemetryIngestionWorker`, the write repositories, and the **write-side** provider
-  services, then maps the three gRPC services.
-- **`Keryhe.Telemetry.Api.Server`** calls `AddKeryheTelemetryApi(configuration)`
-  (`TelemetryApiExtensions.cs`), which registers controllers (via an MVC application part,
-  since they live in the class library), the tenant context, and the **read-side** provider
-  services.
+- **Write side** — `AddKeryheTelemetryCollector(configuration)` / `MapKeryheTelemetryCollector()`
+  (`Keryhe.Telemetry.Collector/TelemetryCollectorExtensions.cs`): gRPC, the ingestion channel,
+  `ResourceScopeCache`, the `TelemetryIngestionWorker`, the write repositories, and the
+  **write-side** provider services; then maps the three gRPC services.
+- **Read side** — `AddKeryheTelemetryApi(configuration)` / `UseKeryheTelemetryApi()`
+  (`Keryhe.Telemetry.Api/TelemetryApiExtensions.cs`): controllers (via an MVC application part,
+  since they live in the class library), the tenant context, and the **read-side** provider services.
+
+`Keryhe.Telemetry.Collector.Server` calls the first pair, `Keryhe.Telemetry.Api.Server` the second,
+and `Keryhe.Telemetry.Server` calls **both** plus `AddAlerting` and the SPA static-file middleware.
+
+> **All-in-one constraint.** The Npgsql-backed providers (`PostgreSQL`, `Timescale`) register a
+> singleton `NpgsqlDataSource` in *both* `Add*WriteServices` (from `ConnectionStrings:Write`) and
+> `Add*ReadServices` (from `ConnectionStrings:Read`). In one container the last registration silently
+> wins for both paths, so `Keryhe.Telemetry.Server` fails fast at startup
+> (`Program.EnsureSingleNpgsqlDataSource`) if the two connection strings differ. SqlServer,
+> ClickHouse, and MySql read their connection string per class and are unaffected.
 
 ### Provider abstraction (the central pattern)
 
@@ -208,6 +250,8 @@ Built-in views: `trace_summary`, `service_map`, `service_map_detailed`, `log_sev
 Connection strings (both hosts point at the same database):
 - Ingestion server reads `ConnectionStrings:Write` in `Keryhe.Telemetry.Collector.Server/appsettings.json`
 - API server reads `ConnectionStrings:Read` in `Keryhe.Telemetry.Api.Server/appsettings.json`
+- The all-in-one `Keryhe.Telemetry.Server` reads **both**, and requires them to be identical under
+  the Npgsql-backed providers (see the all-in-one constraint above)
 - Both select the provider via the `Database:Provider` key in the same file
 
 ### Proto Files

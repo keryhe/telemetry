@@ -1,7 +1,3 @@
-using Keryhe.Telemetry.Data;
-using Keryhe.Telemetry.Collector.Services;
-using Keryhe.Telemetry.Core;
-
 namespace Keryhe.Telemetry.Collector.Server;
 
 public class Program
@@ -17,34 +13,10 @@ public class Program
 
         // Add services to the container.
 
-        builder.Services.AddGrpc();
-        builder.Services.AddLogging();
+        // Registers gRPC, the ingestion channel + worker, the write repositories, and the
+        // active provider's write services (Database:Provider + ConnectionStrings:Write).
+        builder.Services.AddKeryheTelemetryCollector(builder.Configuration);
 
-        // Singletons shared across all gRPC requests and the background worker.
-        builder.Services.AddSingleton<TelemetryIngestionChannel>();
-        builder.Services.AddSingleton<ResourceScopeCache>();
-
-        // Write path: the generic worker drains the ingestion channel and delegates each
-        // batch flush to the active provider's ITelemetryBulkWriter. The provider — and with
-        // it ITelemetryBulkWriter, ITenantResolver, and ITelemetryWriteStore — is selected by
-        // the Database:Provider config key.
-        switch (builder.Configuration["Database:Provider"])
-        {
-            case "SqlServer":  builder.Services.AddSqlServerWriteServices(builder.Configuration);  break;
-            case "PostgreSQL": builder.Services.AddPostgreSqlWriteServices(builder.Configuration); break;
-            case "Timescale":  builder.Services.AddTimescaleWriteServices(builder.Configuration);  break;
-            case "ClickHouse": builder.Services.AddClickHouseWriteServices(builder.Configuration); break;
-            case "MySql":      builder.Services.AddMySqlWriteServices(builder.Configuration);      break;
-            default: throw new InvalidOperationException("Unknown or missing Database:Provider (expected SqlServer, PostgreSQL, Timescale, ClickHouse, or MySql).");
-        }
-
-        builder.Services.AddHostedService<TelemetryIngestionWorker>();
-
-        builder.Services
-            .AddScoped<ILogWriteRepository, LogWriteRepository>()
-            .AddScoped<IMetricWriteRepository, MetricWriteRepository>()
-            .AddScoped<ITraceWriteRepository, TraceWriteRepository>();
-        
         // Add CORS for web clients if needed
         builder.Services.AddCors(o => o.AddPolicy("AllowAll", builder =>
         {
@@ -55,17 +27,13 @@ public class Program
         }));
 
         var app = builder.Build();
-        
+
         // Configure the HTTP request pipeline.
-        // Configure the HTTP request pipeline
         app.UseCors();
         app.UseRouting();
 
         // Map gRPC services
-        app.MapGrpcService<LogService>();
-        app.MapGrpcService<TraceService>();
-        app.MapGrpcService<MetricService>();
-        
+        app.MapKeryheTelemetryCollector();
 
         app.MapGet("/",
             () =>

@@ -28,6 +28,8 @@ Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Keryhe.Telemetry.ClickHouse
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Keryhe.Telemetry.MySql", "src\Keryhe.Telemetry.MySql\Keryhe.Telemetry.MySql.csproj", "{9904AEE2-4062-4982-AD56-694E58CD1504}"
 EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Keryhe.Telemetry.Server", "src\Keryhe.Telemetry.Server\Keryhe.Telemetry.Server.csproj", "{66EE3E47-3FD0-49AA-A170-103DF3DEF8D6}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -194,6 +196,18 @@ Global
 		{9904AEE2-4062-4982-AD56-694E58CD1504}.Release|x64.Build.0 = Release|Any CPU
 		{9904AEE2-4062-4982-AD56-694E58CD1504}.Release|x86.ActiveCfg = Release|Any CPU
 		{9904AEE2-4062-4982-AD56-694E58CD1504}.Release|x86.Build.0 = Release|Any CPU
+		{66EE3E47-3FD0-49AA-A170-103DF3DEF8D6}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{66EE3E47-3FD0-49AA-A170-103DF3DEF8D6}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{66EE3E47-3FD0-49AA-A170-103DF3DEF8D6}.Debug|x64.ActiveCfg = Debug|Any CPU
+		{66EE3E47-3FD0-49AA-A170-103DF3DEF8D6}.Debug|x64.Build.0 = Debug|Any CPU
+		{66EE3E47-3FD0-49AA-A170-103DF3DEF8D6}.Debug|x86.ActiveCfg = Debug|Any CPU
+		{66EE3E47-3FD0-49AA-A170-103DF3DEF8D6}.Debug|x86.Build.0 = Debug|Any CPU
+		{66EE3E47-3FD0-49AA-A170-103DF3DEF8D6}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{66EE3E47-3FD0-49AA-A170-103DF3DEF8D6}.Release|Any CPU.Build.0 = Release|Any CPU
+		{66EE3E47-3FD0-49AA-A170-103DF3DEF8D6}.Release|x64.ActiveCfg = Release|Any CPU
+		{66EE3E47-3FD0-49AA-A170-103DF3DEF8D6}.Release|x64.Build.0 = Release|Any CPU
+		{66EE3E47-3FD0-49AA-A170-103DF3DEF8D6}.Release|x86.ActiveCfg = Release|Any CPU
+		{66EE3E47-3FD0-49AA-A170-103DF3DEF8D6}.Release|x86.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE
@@ -203,5 +217,6 @@ Global
 		{F78626C1-673A-4811-A4CD-CEEAF043058D} = {827E0CD3-B72D-47B6-A68D-7590B98EB39B}
 		{F0F1C8AF-173A-4F09-9538-4F91D8B2D402} = {827E0CD3-B72D-47B6-A68D-7590B98EB39B}
 		{9904AEE2-4062-4982-AD56-694E58CD1504} = {827E0CD3-B72D-47B6-A68D-7590B98EB39B}
+		{66EE3E47-3FD0-49AA-A170-103DF3DEF8D6} = {827E0CD3-B72D-47B6-A68D-7590B98EB39B}
 	EndGlobalSection
 EndGlobal

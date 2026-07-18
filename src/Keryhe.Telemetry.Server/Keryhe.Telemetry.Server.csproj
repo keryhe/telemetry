@@ -1,20 +1,28 @@
-﻿<Project Sdk="Microsoft.NET.Sdk.Web">
+<Project Sdk="Microsoft.NET.Sdk.Web">
 
   <PropertyGroup>
     <TargetFramework>net10.0</TargetFramework>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
-    <UserSecretsId>ca957620-f71d-4561-8dec-c71d4bf490d9</UserSecretsId>
+    <UserSecretsId>c909d5eb-6fbc-4ee8-8c0a-d4e762606018</UserSecretsId>
   </PropertyGroup>
 
   <ItemGroup>
     <PackageReference Include="Microsoft.AspNetCore.OpenApi" Version="10.0.10" />
     <!-- Pin to override the vulnerable Microsoft.OpenApi 2.0.0 pulled transitively (GHSA-v5pm-xwqc-g5wc) -->
     <PackageReference Include="Microsoft.OpenApi" Version="2.11.0" />
+    <PackageReference Include="Microsoft.Extensions.Hosting.WindowsServices" Version="10.0.10" />
   </ItemGroup>
 
   <ItemGroup>
     <ProjectReference Include="..\Keryhe.Telemetry.Api\Keryhe.Telemetry.Api.csproj" />
+    <ProjectReference Include="..\Keryhe.Telemetry.Collector\Keryhe.Telemetry.Collector.csproj" />
+    <!-- All providers are referenced; the active one is chosen at runtime via Database:Provider. -->
+    <ProjectReference Include="..\Keryhe.Telemetry.SqlServer\Keryhe.Telemetry.SqlServer.csproj" />
+    <ProjectReference Include="..\Keryhe.Telemetry.PostgreSQL\Keryhe.Telemetry.PostgreSQL.csproj" />
+    <ProjectReference Include="..\Keryhe.Telemetry.Timescale\Keryhe.Telemetry.Timescale.csproj" />
+    <ProjectReference Include="..\Keryhe.Telemetry.ClickHouse\Keryhe.Telemetry.ClickHouse.csproj" />
+    <ProjectReference Include="..\Keryhe.Telemetry.MySql\Keryhe.Telemetry.MySql.csproj" />
   </ItemGroup>
 
   <!-- ── ANGULAR CLIENT ──────────────────────────────────────────────────────

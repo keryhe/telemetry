@@ -70,6 +70,7 @@ across all providers (no EF Core); writes use each backend's native bulk path (N
 | `Keryhe.Telemetry.Collector.Server` | Thin ASP.NET Core host: maps the gRPC services and runs the ingestion worker |
 | `Keryhe.Telemetry.Api` | REST API controllers, tenant middleware, and read-service wiring (class library) |
 | `Keryhe.Telemetry.Api.Server` | Thin ASP.NET Core host: composes the API, OpenAPI, CORS, and the alerting worker |
+| `Keryhe.Telemetry.Server` | All-in-one host: gRPC ingestion, REST API, and the Angular UI in a single process |
 | `Keryhe.Telemetry.Alerting` | Alert rule evaluators, webhook delivery, and the periodic evaluation background worker |
 | `Keryhe.Telemetry.TestDataGenerator` | Worker service that emits synthetic telemetry |
 | `src/telemetry-client` | Angular 20 SPA (Dashboard, Traces, Metrics, Logs, Alerts) |
@@ -227,7 +228,17 @@ Any OpenTelemetry SDK follows the same convention — set the OTLP exporter head
 dotnet build Telemetry.sln
 ```
 
-**5. Run the server, API, and client (in separate terminals):**
+**5. Run the backend and the client (in separate terminals):**
+
+```bash
+# Terminal 1 — all-in-one host (gRPC ingestion + REST API on 5117/7057 and 5188/7105)
+dotnet run --project src/Keryhe.Telemetry.Server
+
+# Terminal 2 — Angular dev server
+cd src/telemetry-client && npm install && npm run start
+```
+
+Or run the two hosts separately instead of the all-in-one:
 
 ```bash
 # Terminal 1 — gRPC ingestion server
@@ -235,12 +246,14 @@ dotnet run --project src/Keryhe.Telemetry.Collector.Server --launch-profile "htt
 
 # Terminal 2 — REST API
 dotnet run --project src/Keryhe.Telemetry.Api.Server --launch-profile "https"
-
-# Terminal 3 — Angular dev server
-cd src/telemetry-client && npm install && npm run start
 ```
 
 Open `http://localhost:4201` in your browser.
+
+> The Angular dev server on 4201 is for **development only** — it gives you hot reload and
+> talks to the API cross-origin (hence the CORS policy in `Keryhe.Telemetry.Api.Server`).
+> For deployment, the API host serves the UI itself; see
+> [Deploying](#deploying-a-single-host) below.
 
 **6. (Optional) Generate test data:**
 
@@ -249,6 +262,47 @@ dotnet run --project src/Keryhe.Telemetry.TestDataGenerator
 ```
 
 The test data generator sends synthetic traces, metrics, and logs to the server at `http://localhost:5117` on a configurable interval.
+
+## Deploying a Single Host
+
+For a single-node deployment, **`Keryhe.Telemetry.Server`** is the recommended host: it runs gRPC
+OTLP ingestion, the REST API, and the compiled Angular UI in one process, so there is nothing else
+to deploy.
+
+```bash
+dotnet publish src/Keryhe.Telemetry.Server -c Release -o ./publish-server
+./publish-server/Keryhe.Telemetry.Server
+```
+
+It listens on the same ports as the split hosts — `5117` (h2c) and `7057` (HTTP/2) for OTLP
+ingestion, `5188` and `7105` for the API and UI — configured as named Kestrel endpoints in its
+`appsettings.json`. It reads **both** `ConnectionStrings:Read` and `ConnectionStrings:Write`.
+
+> **Note.** Under the `PostgreSQL` and `Timescale` providers the read and write connection strings
+> must be identical — both sides share a single `NpgsqlDataSource` in one process. The host refuses
+> to start otherwise. Use the split hosts below if you need to target separate read/write endpoints.
+
+For scale-out deployments the two hosts can still be run and scaled independently.
+`Keryhe.Telemetry.Api.Server` serves the compiled Angular UI alongside the REST API, so it also
+needs no separate web server for the SPA and no CORS configuration.
+
+```bash
+dotnet publish src/Keryhe.Telemetry.Api.Server -c Release -o ./publish
+```
+
+Publishing runs `npm ci && npm run build` in `src/telemetry-client` and stages the output
+into the published `wwwroot`. The resulting host serves the UI at `/` and the API under
+`/api` on the same origin — deep links like `/traces/<id>` are handled by an SPA fallback
+to `index.html`.
+
+- Plain `dotnet build` never invokes npm, so normal .NET builds stay fast.
+- Pass `-p:BuildSpaOnPublish=false` to publish against an already-built
+  `src/telemetry-client/dist` (useful when CI builds the UI in a separate stage).
+- The production build uses `src/environments/environment.prod.ts`, which points `apiUrl`
+  at a relative `/api`. The app assumes it is served from the origin root (`<base href="/">`).
+
+When deploying `Keryhe.Telemetry.Api.Server` this way, the gRPC ingestion host
+(`Keryhe.Telemetry.Collector.Server`) is deployed separately.
 
 ## Database Schema
 
