@@ -52,7 +52,7 @@
 }
 
 .sidenav {
-  width: 175px;
+  width: 90px;
   background-color: var(--mat-sys-surface-container-low);
   border-right: 1px solid var(--mat-sys-outline-variant);
   border-radius: 0;
@@ -66,13 +66,45 @@
 }
 
 // Inset the nav items so the hover / selected pill never touches the rail edges.
-mat-nav-list {
-  padding: 8px;
+.nav-rail {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 8px 6px;
 }
 
-::ng-deep .mat-mdc-list-item {
-  border-radius: 28px !important;
-  overflow: hidden; // clip the hover/focus state layer to the rounded corners
+// Icon centered above its label.
+.nav-item {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  padding: 10px 4px;
+  border-radius: 16px;
+  overflow: hidden; // clip the ripple / hover state layer to the rounded corners
+  text-decoration: none;
+  color: var(--mat-sys-on-surface-variant);
+  cursor: pointer;
+
+  mat-icon {
+    font-size: 30px;
+    width: 30px;
+    height: 30px;
+  }
+
+  &:hover {
+    background-color: var(--mat-sys-surface-container-high);
+  }
+}
+
+.nav-label {
+  font-size: 12px;
+  font-weight: 500;
+  letter-spacing: 0.02em;
+  line-height: 1.2;
+  text-align: center;
 }
 
 .tenant-select {
@@ -86,11 +118,11 @@ mat-nav-list {
   overflow-y: auto;
 }
 
-::ng-deep .active-link {
-  background-color: var(--mat-sys-secondary-container) !important;
-  color: var(--mat-sys-on-secondary-container) !important;
+.nav-item.active-link {
+  background-color: var(--mat-sys-secondary-container);
+  color: var(--mat-sys-on-secondary-container);
 
   .mat-icon {
-    color: var(--mat-sys-on-secondary-container) !important;
+    color: var(--mat-sys-on-secondary-container);
   }
 }

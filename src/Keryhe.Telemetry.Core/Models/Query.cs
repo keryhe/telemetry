@@ -84,10 +84,22 @@ public sealed class TagFilter
     public string Value { get; init; } = "";
     public bool Exact { get; init; }
 
-    /// <summary>Parses one wire token: <c>key=value</c> (exact) or <c>key:value</c> (contains). Null if malformed.</summary>
+    /// <summary>
+    /// True for a <c>-</c>-prefixed token: exclude traces where <em>any</em> span satisfies the
+    /// predicate (rather than the near-vacuous "some span does not satisfy it").
+    /// </summary>
+    public bool Negate { get; init; }
+
+    /// <summary>
+    /// Parses one wire token: <c>key=value</c> (exact) or <c>key:value</c> (contains), each
+    /// optionally <c>-</c>-prefixed to negate. Null if malformed.
+    /// </summary>
     public static TagFilter? Parse(string token)
     {
         if (string.IsNullOrWhiteSpace(token)) return null;
+        // A leading `-` excludes matches, mirroring the client search-box syntax.
+        var negate = token.StartsWith('-');
+        if (negate) token = token[1..];
         var eq = token.IndexOf('=');
         var colon = token.IndexOf(':');
         // Whichever delimiter appears first wins (values may legitimately contain the other char).
@@ -98,7 +110,8 @@ public sealed class TagFilter
         {
             Key = token[..at].Trim(),
             Value = token[(at + 1)..].Trim().Trim('"', '\''),
-            Exact = exact
+            Exact = exact,
+            Negate = negate
         };
     }
 }

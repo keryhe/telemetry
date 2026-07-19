@@ -375,7 +375,11 @@ public abstract class TraceReadRepositoryBase : DapperReadRepository, ITraceRead
             // Operation filter: the trace contains a span with this name.
             .Where(t => operation == null || t.Spans.Any(s => s.Name == operation))
             // All-span tag search: every predicate must be satisfied by some span in the trace.
-            .Where(t => tags.Count == 0 || tags.All(tag => t.Spans.Any(s => MatchesTag(s, tag))))
+            // A negated predicate instead requires that *no* span satisfies it.
+            .Where(t => tags.Count == 0 || tags.All(tag =>
+                tag.Negate
+                    ? !t.Spans.Any(s => MatchesTag(s, tag))
+                    : t.Spans.Any(s => MatchesTag(s, tag))))
             .ToList();
 
         // Order: explicit sort key when supplied, otherwise the mode default (slow → worst

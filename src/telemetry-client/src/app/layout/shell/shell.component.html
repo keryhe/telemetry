@@ -53,9 +53,12 @@
       [mode]="(isHandset$ | async) ? 'over' : 'side'"
       [opened]="!(isHandset$ | async)"
       class="sidenav">
-      <mat-nav-list>
+      <nav class="nav-rail">
         @for (item of navItems; track item.route) {
-          <a mat-list-item
+          <a class="nav-item"
+             matRipple
+             [matTooltip]="item.label"
+             matTooltipPosition="right"
              [routerLink]="item.route"
              routerLinkActive="active-link"
              [routerLinkActiveOptions]="{
@@ -64,11 +67,11 @@
                matrixParams: 'ignored',
                fragment: 'ignored'
              }">
-            <mat-icon matListItemIcon>{{ item.icon }}</mat-icon>
-            <span matListItemTitle>{{ item.label }}</span>
+            <mat-icon>{{ item.icon }}</mat-icon>
+            <span class="nav-label">{{ item.label }}</span>
           </a>
         }
-      </mat-nav-list>
+      </nav>
     </mat-sidenav>
 
     <mat-sidenav-content>

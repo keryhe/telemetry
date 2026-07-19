@@ -57,6 +57,12 @@ type ChartView = 'volume' | 'latency';
 const STATE_KEY = 'state.traces';
 /** Upper bound on traces pulled for the chart/stat overview (and shallow client paging). */
 const OVERVIEW_CAP = 1000;
+/**
+ * Delimiter joining tag predicates into the reload cache key. ASCII US, matching `PATH_SEP` in
+ * trace-detail — a printable separator could occur inside an attribute value and let two distinct
+ * tag sets collide into one key, suppressing a reload the filter change needs.
+ */
+const TAG_KEY_SEP = '\u001F';
 
 @Component({
   selector: 'app-trace-list',
@@ -136,12 +142,17 @@ export class TraceListComponent {
   private attributeTerms = computed(() => this.parsedQuery().terms.filter((t) => t.isAttributeFilter));
   private freeTextTerms = computed(() => this.parsedQuery().terms.filter((t) => !t.isAttributeFilter));
 
-  /** Tag predicates sent to the server, encoded as `key=value` (exact) / `key:value` (contains). */
+  /**
+   * Tag predicates sent to the server, encoded as `key=value` (exact) / `key:value` (contains),
+   * `-`-prefixed when the term is negated (server excludes traces where any span matches).
+   */
   protected serverTags = computed<string[]>(() =>
-    this.attributeTerms().map((t) => `${t.key}${t.isExactMatch ? '=' : ':'}${t.value ?? ''}`)
+    this.attributeTerms().map(
+      (t) => `${t.negate ? '-' : ''}${t.key}${t.isExactMatch ? '=' : ':'}${t.value ?? ''}`
+    )
   );
   /** Stable string key so free-text keystrokes don't re-trigger the tag-driven overview reload. */
-  private serverTagsKey = computed(() => this.serverTags().join(''));
+  private serverTagsKey = computed(() => this.serverTags().join(TAG_KEY_SEP));
 
   /** True when the result must be paged/refined client-side (trace-id or free-text search). */
   protected clientMode = computed(() => this.isTraceIdSearch() || this.freeTextTerms().length > 0);
