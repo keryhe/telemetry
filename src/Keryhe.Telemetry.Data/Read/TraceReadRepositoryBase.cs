@@ -207,11 +207,7 @@ public abstract class TraceReadRepositoryBase : DapperReadRepository, ITraceRead
         var (where, p) = BuildTimeFilter(startTime, endTime, startBound: "s.start_time_unix_nano", endBound: "s.start_time_unix_nano");
         var raw = await FetchRawSpansAsync(where, p, cancellationToken);
 
-        var filtered = raw.Where(s => s.ResourceAttributes != null &&
-                                      s.ResourceAttributes.ContainsKey("service.name") &&
-                                      s.ResourceAttributes["service.name"]?.ToString() == serviceName);
-
-        var groups = filtered
+        var groups = raw
             .GroupBy(s => s.TraceId)
             .Select(g => new
             {
@@ -220,8 +216,12 @@ public abstract class TraceReadRepositoryBase : DapperReadRepository, ITraceRead
                 MinStartTimeNano = g.Min(s => s.StartTimeUnixNano),
                 MaxEndTimeNano = g.Max(s => s.EndTimeUnixNano),
                 HasErrors = g.Any(s => s.StatusCode == "ERROR"),
-                RootSpan = g.FirstOrDefault(s => s.ParentSpanId == null) ?? g.OrderBy(s => s.StartTimeUnixNano).First()
+                RootSpan = g.FirstOrDefault(s => s.ParentSpanId == null) ?? g.OrderBy(s => s.StartTimeUnixNano).First(),
+                InvolvesService = g.Any(s => MatchesService(s, serviceName))
             })
+            // Matched at the trace level: filtering the spans first would strip the root span of
+            // any trace whose entry point lives in another service, dropping the trace outright.
+            .Where(t => t.InvolvesService)
             .OrderByDescending(t => t.MinStartTimeNano)
             .ToList();
 
@@ -238,8 +238,13 @@ public abstract class TraceReadRepositoryBase : DapperReadRepository, ITraceRead
 
     public async Task<List<TraceInfo>> GetErrorTracesAsync(DateTime? startTime = null, DateTime? endTime = null, int limit = 100, CancellationToken cancellationToken = default)
     {
+        // Same bounds the outer query uses, re-expressed against the subquery's own alias.
+        var innerTime = new System.Text.StringBuilder();
+        if (startTime.HasValue) innerTime.Append(" AND s2.start_time_unix_nano >= @start");
+        if (endTime.HasValue) innerTime.Append(" AND s2.start_time_unix_nano <= @end");
+
         var (where, p) = BuildTimeFilter(startTime, endTime, startBound: "s.start_time_unix_nano", endBound: "s.start_time_unix_nano",
-            extra: "s.status_code = 'ERROR'");
+            extra: ErrorTracePredicate(innerTime.ToString()));
         var raw = await FetchRawSpansAsync(where, p, cancellationToken);
 
         var groups = raw
@@ -250,6 +255,7 @@ public abstract class TraceReadRepositoryBase : DapperReadRepository, ITraceRead
                 SpanCount = g.Count(),
                 MinStartTimeNano = g.Min(s => s.StartTimeUnixNano),
                 MaxEndTimeNano = g.Max(s => s.EndTimeUnixNano),
+                HasErrors = g.Any(s => s.StatusCode == "ERROR"),
                 RootSpan = g.FirstOrDefault(s => s.ParentSpanId == null) ?? g.OrderBy(s => s.StartTimeUnixNano).First(),
                 ServiceName = ExtractServiceName(g.OrderBy(s => s.StartTimeUnixNano).FirstOrDefault()?.ResourceAttributes)
             })
@@ -263,7 +269,7 @@ public abstract class TraceReadRepositoryBase : DapperReadRepository, ITraceRead
         return groups
             .Where(t => t.RootSpan.ParentSpanId == null || !existingParentIds.Contains(t.RootSpan.ParentSpanId))
             .Take(limit)
-            .Select(t => ToTraceInfo(t.TraceIdHex, t.SpanCount, t.MinStartTimeNano, t.MaxEndTimeNano, true, t.ServiceName, t.RootSpan))
+            .Select(t => ToTraceInfo(t.TraceIdHex, t.SpanCount, t.MinStartTimeNano, t.MaxEndTimeNano, t.HasErrors, t.ServiceName, t.RootSpan))
             .ToList();
     }
 
@@ -323,11 +329,64 @@ public abstract class TraceReadRepositoryBase : DapperReadRepository, ITraceRead
     }
 
     /// <summary>
+    /// True volume histogram over the same filter set as <see cref="QueryTracesAsync"/>, bucketed
+    /// in memory over the already-computed full trace list — no new SQL, since the underlying
+    /// span fetch is already unbounded. Buckets are evenly spaced across <c>[Start,End)</c>,
+    /// matching the bucket math the Angular client used to compute client-side.
+    /// </summary>
+    public async Task<List<TraceVolumeBucket>> GetTraceHistogramAsync(HistogramQuery query, CancellationToken cancellationToken = default)
+    {
+        if (query.Start >= query.End)
+            throw new ArgumentException("Start time must be before end time");
+
+        var bucketCount = Math.Clamp(query.BucketCount, 1, 500);
+        var traces = await ComputeTraceInfosAsync(new TraceQuery
+        {
+            Start = query.Start,
+            End = query.End,
+            Mode = query.Mode,
+            Service = query.Service,
+            Operation = query.Operation,
+            MinDurationMs = query.MinDurationMs,
+            MaxDurationMs = query.MaxDurationMs,
+            Tags = query.Tags
+        }, cancellationToken);
+
+        var startTicks = query.Start.Ticks;
+        var rangeTicks = Math.Max(1, query.End.Ticks - startTicks);
+
+        var counts = new int[bucketCount];
+        var errorCounts = new int[bucketCount];
+        var sumDurationMs = new double[bucketCount];
+        foreach (var t in traces)
+        {
+            var idx = (int)((t.TraceStartTime.Ticks - startTicks) * bucketCount / rangeTicks);
+            idx = Math.Clamp(idx, 0, bucketCount - 1);
+            counts[idx]++;
+            if (t.HasErrors) errorCounts[idx]++;
+            sumDurationMs[idx] += t.TraceDuration.TotalMilliseconds;
+        }
+
+        var result = new List<TraceVolumeBucket>(bucketCount);
+        for (var i = 0; i < bucketCount; i++)
+        {
+            result.Add(new TraceVolumeBucket
+            {
+                Timestamp = new DateTime(startTicks + i * rangeTicks / bucketCount, query.Start.Kind),
+                Count = counts[i],
+                ErrorCount = errorCounts[i],
+                SumDurationMs = sumDurationMs[i]
+            });
+        }
+        return result;
+    }
+
+    /// <summary>
     /// Fetches the raw spans matching the query's mode/service/time predicates, groups them into the
     /// same trace-level shape the legacy <c>Get*TracesAsync</c> methods produce, filters out non-root
     /// traces, and returns the full ordered list (no offset/limit applied — the caller pages it).
     /// </summary>
-    private async Task<List<TraceInfo>> ComputeTraceInfosAsync(TraceQuery query, CancellationToken ct)
+    protected async Task<List<TraceInfo>> ComputeTraceInfosAsync(TraceQuery query, CancellationToken ct)
     {
         var startNano = TimeConversion.DateTimeToUnixNano(query.Start);
         var endNano = TimeConversion.DateTimeToUnixNano(query.End);
@@ -337,20 +396,19 @@ public abstract class TraceReadRepositoryBase : DapperReadRepository, ITraceRead
             ? (long)(query.MaxDurationMs.Value * 1_000_000)
             : long.MaxValue;
         var operation = string.IsNullOrWhiteSpace(query.Operation) ? null : query.Operation;
+        var service = string.IsNullOrEmpty(query.Service) ? null : query.Service;
+        var isErrors = query.Mode == "errors";
         var tags = query.Tags;
 
         var clauses = new List<string> { "s.start_time_unix_nano >= @start", "s.start_time_unix_nano <= @end" };
-        if (query.Mode == "errors") clauses.Add("s.status_code = 'ERROR'");
+        // Narrow by *trace*, not by span: selecting only ERROR spans would leave each group
+        // without its (non-erroring) root span, breaking root detection and the trace-level
+        // aggregates below. The subquery keeps the DB doing the narrowing while the outer
+        // query still returns every span of each matching trace.
+        if (isErrors) clauses.Add(ErrorTracePredicate(" AND s2.start_time_unix_nano >= @start AND s2.start_time_unix_nano <= @end"));
         var where = string.Join(" AND ", clauses);
 
         var raw = await FetchRawSpansAsync(where, new { tenantId = TenantId, start = startNano, end = endNano }, ct);
-
-        if (!string.IsNullOrEmpty(query.Service))
-        {
-            raw = raw.Where(s => s.ResourceAttributes != null &&
-                                 s.ResourceAttributes.TryGetValue("service.name", out var v) &&
-                                 v?.ToString() == query.Service).ToList();
-        }
 
         var groups = raw
             .GroupBy(s => s.TraceId)
@@ -372,6 +430,14 @@ public abstract class TraceReadRepositoryBase : DapperReadRepository, ITraceRead
             })
             .Select(t => new { t.TraceIdHex, t.SpanCount, t.MinStartTimeNano, t.MaxEndTimeNano, t.HasErrors, t.RootSpan, t.ServiceName, t.Spans, DurationNano = t.MaxEndTimeNano - t.MinStartTimeNano })
             .Where(t => !isSlow || (t.DurationNano >= minDurationNano && t.DurationNano <= maxDurationNano))
+            // Errors filter: the trace contains an error span (HasErrors is computed over the
+            // trace's full span set, so this holds even when the root span itself is OK).
+            .Where(t => !isErrors || t.HasErrors)
+            // Service filter: the trace involves this service (matched anywhere in the trace,
+            // not only at its root). Kept in C# — the ResourceServiceNameExpr SQL hook is only
+            // overridden on the *log* repositories, so a SQL predicate here would emit
+            // Postgres-only JSON syntax on SqlServer/ClickHouse/MySql.
+            .Where(t => service == null || t.Spans.Any(s => MatchesService(s, service)))
             // Operation filter: the trace contains a span with this name.
             .Where(t => operation == null || t.Spans.Any(s => s.Name == operation))
             // All-span tag search: every predicate must be satisfied by some span in the trace.
@@ -568,6 +634,30 @@ public abstract class TraceReadRepositoryBase : DapperReadRepository, ITraceRead
     // =========================================================================
     // HELPERS
     // =========================================================================
+
+    /// <summary>True when the span's resource carries this exact <c>service.name</c>.</summary>
+    private static bool MatchesService(RawSpan span, string service)
+        => span.ResourceAttributes != null &&
+           span.ResourceAttributes.TryGetValue("service.name", out var v) &&
+           v?.ToString() == service;
+
+    /// <summary>
+    /// Predicate restricting the outer span query to traces containing at least one ERROR span.
+    /// Filtering the spans themselves would strip each trace's root span whenever the error sits
+    /// on a child, which then trips the root-span check and drops the trace entirely — the cause
+    /// of a ~34% undercount in the errors view. Plain columns and a literal only (no JSON or
+    /// dialect functions, no parameter list), so it is portable across every provider.
+    /// <paramref name="innerTimeClause"/> is the optional time filter on the inner spans, already
+    /// prefixed with <c> AND </c> (the caller owns which bounds apply).
+    /// </summary>
+    private static string ErrorTracePredicate(string innerTimeClause) => $"""
+        s.trace_id IN (
+            SELECT s2.trace_id
+            FROM spans s2
+            JOIN resources r2 ON s2.resource_id = r2.id
+            WHERE r2.tenant_id = @tenantId{innerTimeClause} AND s2.status_code = 'ERROR'
+        )
+        """;
 
     /// <summary>True when a span's own or resource attributes satisfy the tag predicate (case-insensitive).</summary>
     private static bool MatchesTag(RawSpan span, TagFilter tag)

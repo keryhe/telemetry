@@ -1,9 +1,11 @@
 import { Injectable, inject } from '@angular/core';
 import { HttpClient, HttpParams } from '@angular/common/http';
 import { Observable } from 'rxjs';
+import { map } from 'rxjs/operators';
 import { environment } from '../../../../environments/environment';
 import { OperationStats, ServiceDependency, SpanModel, TraceFilter, TraceInfo } from '../../models/trace.models';
 import { PagedResult } from '../../models/paged.models';
+import { TimeBucket } from '../../../shared/utils/chart.utils';
 
 export interface TraceSearchQuery extends TraceFilter {
   offset: number;
@@ -12,6 +14,18 @@ export interface TraceSearchQuery extends TraceFilter {
   operation?: string;
   maxDurationMs?: number;
   /** All-span tag predicates, each pre-encoded as `key:value` (contains) or `key=value` (exact). */
+  tags?: string[];
+}
+
+export interface TraceHistogramQuery {
+  start: Date;
+  end: Date;
+  bucketCount?: number;
+  mode?: string;
+  service?: string;
+  operation?: string;
+  minDurationMs?: number;
+  maxDurationMs?: number;
   tags?: string[];
 }
 
@@ -46,6 +60,23 @@ export class TracesApiService {
     if (query.sort) params = params.set('sort', query.sort).set('dir', query.dir ?? 'desc');
     for (const tag of query.tags ?? []) params = params.append('tag', tag);
     return this.http.get<PagedResult<TraceInfo>>(`${this.base}/search`, { params });
+  }
+
+  /** True volume histogram (unaffected by any row-count cap) for the traces chart. */
+  getTraceHistogram(query: TraceHistogramQuery): Observable<TimeBucket[]> {
+    let params = new HttpParams()
+      .set('start', query.start.toISOString())
+      .set('end', query.end.toISOString())
+      .set('bucketCount', query.bucketCount ?? 24)
+      .set('mode', query.mode ?? 'all');
+    if (query.service) params = params.set('service', query.service);
+    if (query.operation) params = params.set('operation', query.operation);
+    if (query.minDurationMs != null) params = params.set('minDurationMs', query.minDurationMs);
+    if (query.maxDurationMs != null) params = params.set('maxDurationMs', query.maxDurationMs);
+    for (const tag of query.tags ?? []) params = params.append('tag', tag);
+    return this.http.get<TimeBucket[]>(`${this.base}/histogram`, { params }).pipe(
+      map((buckets) => buckets.map((b) => ({ ...b, timestamp: new Date(b.timestamp) })))
+    );
   }
 
   getSpans(traceId: string): Observable<SpanModel[]> {

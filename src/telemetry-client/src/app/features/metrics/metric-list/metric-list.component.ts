@@ -1,6 +1,7 @@
 import { Component, computed, effect, inject, signal, untracked } from '@angular/core';
 import { DatePipe } from '@angular/common';
 import { Router } from '@angular/router';
+import { forkJoin } from 'rxjs';
 import { MatButtonToggleModule } from '@angular/material/button-toggle';
 import { MatCardModule } from '@angular/material/card';
 import { MatChipsModule } from '@angular/material/chips';
@@ -18,7 +19,7 @@ import { FormsModule } from '@angular/forms';
 import { MetricsApiService } from '../../../core/services/api/metrics-api.service';
 import { MetricSearchHelpDialogComponent } from '../metric-search-help-dialog/metric-search-help-dialog.component';
 import { TimeRangeService } from '../../../core/services/time-range.service';
-import { MetricInfo, MetricType } from '../../../core/models/metric.models';
+import { MetricInfo, MetricType, MetricsSummary } from '../../../core/models/metric.models';
 import { StatCardComponent } from '../../../shared/components/stat-card/stat-card.component';
 import { EmptyStateComponent } from '../../../shared/components/empty-state/empty-state.component';
 import { loadPageState, savePageState } from '../../../shared/utils/page-state';
@@ -69,6 +70,8 @@ export class MetricListComponent {
 
   protected loading = signal(true);
   protected allMetrics = signal<MetricInfo[]>([]);
+  /** True (unbounded) distinct-metric-name counts per type — backs the count stat cards. */
+  protected summary = signal<MetricsSummary>({ uniqueMetricCount: 0, countsByType: [] });
   protected searchText = signal(this.saved.searchText);
   protected selectedService = signal(this.saved.selectedService);
   protected selectedType = signal<MetricType | -1>(this.saved.selectedType);
@@ -124,10 +127,13 @@ export class MetricListComponent {
     });
   });
 
-  // Count distinct metric names per type, matching the unique-name table (not raw instance rows).
-  protected gaugeCount = computed(() => this.uniqueMetrics().filter((m) => m.type === MetricType.Gauge).length);
-  protected counterCount = computed(() => this.uniqueMetrics().filter((m) => m.type === MetricType.Sum).length);
-  protected histogramCount = computed(() => this.uniqueMetrics().filter((m) => m.type === MetricType.Histogram).length);
+  // True distinct metric-name counts per type across the full range (not just the capped table fetch).
+  private countFor(type: MetricType): number {
+    return this.summary().countsByType.find((c) => c.type === type)?.count ?? 0;
+  }
+  protected gaugeCount = computed(() => this.countFor(MetricType.Gauge));
+  protected counterCount = computed(() => this.countFor(MetricType.Sum));
+  protected histogramCount = computed(() => this.countFor(MetricType.Histogram));
 
   protected readonly uniqueCols = ['name', 'type', 'unit', 'instances', 'services', 'lastSeen'];
   protected readonly allCols = ['name', 'type', 'unit', 'service', 'lastSeen'];
@@ -156,8 +162,15 @@ export class MetricListComponent {
   private load(): void {
     this.loading.set(true);
     const { start, end } = this.timeRange.range();
-    this.api.getAllMetrics(start, end, 500).subscribe({
-      next: (metrics) => { this.allMetrics.set(metrics); this.loading.set(false); },
+    forkJoin({
+      metrics: this.api.getAllMetrics(start, end, 500),
+      summary: this.api.getMetricsSummary(start, end),
+    }).subscribe({
+      next: ({ metrics, summary }) => {
+        this.allMetrics.set(metrics);
+        this.summary.set(summary);
+        this.loading.set(false);
+      },
       error: () => this.loading.set(false),
     });
   }

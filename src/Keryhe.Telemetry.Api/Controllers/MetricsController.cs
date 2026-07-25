@@ -27,6 +27,18 @@ public class MetricsController : ControllerBase
         return Ok(metrics);
     }
 
+    // GET /api/metrics/summary?start=&end=
+    // True unique-metric-name-per-type counts over the full unbounded range, unaffected by the /api/metrics limit cap.
+    [HttpGet("summary")]
+    public async Task<ActionResult<MetricsSummary>> GetMetricsSummary(
+        [FromQuery] DateTime? start,
+        [FromQuery] DateTime? end,
+        CancellationToken ct = default)
+    {
+        var summary = await _metrics.GetMetricsSummaryAsync(start, end, ct);
+        return Ok(summary);
+    }
+
     // GET /api/metrics/services?start=&end=
     [HttpGet("services")]
     public async Task<ActionResult<List<string>>> GetDistinctServices(

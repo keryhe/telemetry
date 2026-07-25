@@ -6,6 +6,7 @@ import {
   MetricInfo,
   MetricSeries,
   MetricSeriesParams,
+  MetricsSummary,
   MultiSeriesMetricData,
 } from '../../models/metric.models';
 
@@ -19,6 +20,14 @@ export class MetricsApiService {
     if (start) params = params.set('start', start.toISOString());
     if (end) params = params.set('end', end.toISOString());
     return this.http.get<MetricInfo[]>(this.base, { params });
+  }
+
+  /** True unique-metric-name-per-type counts over the full range, unaffected by getAllMetrics' limit. */
+  getMetricsSummary(start?: Date, end?: Date): Observable<MetricsSummary> {
+    let params = new HttpParams();
+    if (start) params = params.set('start', start.toISOString());
+    if (end) params = params.set('end', end.toISOString());
+    return this.http.get<MetricsSummary>(`${this.base}/summary`, { params });
   }
 
   getByName(name: string): Observable<MetricInfo[]> {

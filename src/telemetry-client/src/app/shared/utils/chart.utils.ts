@@ -36,30 +36,7 @@ export interface TimeBucket {
   timestamp: Date;
   count: number;
   errorCount: number;
-}
-
-export function bucketTraces(
-  items: { traceStartTime: string; hasErrors: boolean }[],
-  start: Date,
-  end: Date,
-  bucketCount = 24
-): TimeBucket[] {
-  const buckets: TimeBucket[] = Array.from({ length: bucketCount }, (_, i) => ({
-    timestamp: new Date(start.getTime() + (i / bucketCount) * (end.getTime() - start.getTime())),
-    count: 0,
-    errorCount: 0,
-  }));
-
-  const rangeMs = end.getTime() - start.getTime();
-  for (const item of items) {
-    const t = new Date(item.traceStartTime).getTime();
-    const idx = Math.min(bucketCount - 1, Math.floor(((t - start.getTime()) / rangeMs) * bucketCount));
-    if (idx >= 0) {
-      buckets[idx].count++;
-      if (item.hasErrors) buckets[idx].errorCount++;
-    }
-  }
-  return buckets;
+  sumDurationMs: number;
 }
 
 export interface LogBucket {

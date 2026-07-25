@@ -56,6 +56,10 @@ public class ClickHouseLogReadRepository(IConfiguration configuration, ITenantCo
     // JSONExtractString (coalesce guards NULL rows). ILIKE, LIMIT/OFFSET paging, and backslash
     // LIKE-escaping all match the Postgres defaults, so those hooks are inherited unchanged.
     protected override string ResourceServiceNameExpr => "JSONExtractString(coalesce(r.attributes_json, ''), 'service.name')";
+
+    // ClickHouse's `/` on Int64 operands promotes to Float64; intDiv keeps histogram
+    // bucket-index math as true integer floor division.
+    protected override string BucketIndexExpr(string numerator, string denominator) => $"intDiv({numerator}, {denominator})";
 }
 
 public class ClickHouseTenantCatalogRepository(IConfiguration configuration)

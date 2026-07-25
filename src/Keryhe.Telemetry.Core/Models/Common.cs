@@ -58,6 +58,24 @@ public enum MetricType
     SUMMARY
 }
 
+/// <summary>Distinct metric-name count for one <see cref="MetricType"/>, part of <see cref="MetricsSummary"/>.</summary>
+public sealed class MetricTypeCount
+{
+    public MetricType Type { get; init; }
+    public int Count { get; init; }
+}
+
+/// <summary>
+/// True (unbounded) count of distinct metric names with data in a time range, broken down by
+/// type — for the Metrics page stat cards, which must not be capped by the <c>/api/metrics</c>
+/// row-limit used to populate the metric table.
+/// </summary>
+public sealed class MetricsSummary
+{
+    public int UniqueMetricCount { get; init; }
+    public List<MetricTypeCount> CountsByType { get; init; } = new();
+}
+
 public enum AggregationTemporality
 {
     UNSPECIFIED,

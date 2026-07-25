@@ -15,6 +15,9 @@ public interface IMetricReadRepository
     Task<List<MetricInfo>> GetAllMetricsAsync(int limit = 100, DateTime? startTime = null,
         DateTime? endTime = null, CancellationToken cancellationToken = default);
 
+    /// <summary>True (unbounded) distinct-metric-name counts per type for a time range, unaffected by <see cref="GetAllMetricsAsync"/>'s row limit.</summary>
+    Task<MetricsSummary> GetMetricsSummaryAsync(DateTime? startTime = null, DateTime? endTime = null, CancellationToken cancellationToken = default);
+
     // Time series data
     Task<MetricSeries?> GetMetricSeriesAsync(string metricName, Dictionary<string, string>? labelFilters = null,
         DateTime? startTime = null, DateTime? endTime = null, long? metricId = null,

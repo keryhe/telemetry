@@ -1,6 +1,7 @@
 import { Component, computed, effect, inject, signal, untracked, viewChild } from '@angular/core';
 import { DatePipe, DecimalPipe, SlicePipe, PercentPipe } from '@angular/common';
 import { ActivatedRoute, RouterLink } from '@angular/router';
+import { forkJoin } from 'rxjs';
 import { MatCardModule } from '@angular/material/card';
 import { MatFormFieldModule } from '@angular/material/form-field';
 import { MatIconModule } from '@angular/material/icon';
@@ -24,7 +25,7 @@ import { ThemeService } from '../../core/services/theme.service';
 import { LogRecord, getSeverityLabel, getSeverityColor, getSeverityBg, getServiceName, getTimestamp } from '../../core/models/log.models';
 import { StatCardComponent } from '../../shared/components/stat-card/stat-card.component';
 import { EmptyStateComponent } from '../../shared/components/empty-state/empty-state.component';
-import { bucketLogs, buildLogSeriesOptions, timeRangeZoom } from '../../shared/utils/chart.utils';
+import { LogBucket, bucketLogs, buildLogSeriesOptions, timeRangeZoom } from '../../shared/utils/chart.utils';
 import { parseSearchQuery, ParsedSearchQuery, SearchTerm, buildAttributeTerm } from '../../shared/utils/search-query.parser';
 import { LogSearchHelpDialogComponent } from './log-search-help-dialog/log-search-help-dialog.component';
 import { FacetValueType, Facet } from './facet.models';
@@ -91,8 +92,10 @@ export class LogsComponent {
   });
 
   protected loading = signal(true);
-  /** Bounded, most-recent slice used for the chart, stat cards, and shallow/client paging. */
+  /** Bounded, most-recent slice used for shallow/client paging and faceting. */
   protected overview = signal<LogRecord[]>([]);
+  /** True (unbounded) volume-by-severity histogram — backs the chart and the error/warn stat cards. */
+  protected histogram = signal<LogBucket[]>([]);
   /** A single server-fetched page, used only when paging beyond the overview window. */
   private serverPage = signal<LogRecord[]>([]);
   protected total = signal(0);
@@ -249,10 +252,10 @@ export class LogsComponent {
     return this.overview().slice(start, start + this.pageSize());
   });
 
-  protected errorCount = computed(() => this.overview().filter((l) => (l.severityNumber ?? 0) >= 17).length);
-  protected warnCount = computed(() => this.overview().filter((l) => {
-    const s = l.severityNumber ?? 0; return s >= 13 && s < 17;
-  }).length);
+  /** True Error+Fatal count across the full filtered range (histogram sum, not the capped overview). */
+  protected errorCount = computed(() => this.histogram().reduce((a, b) => a + b.error + b.fatal, 0));
+  /** True Warn count across the full filtered range (histogram sum, not the capped overview). */
+  protected warnCount = computed(() => this.histogram().reduce((a, b) => a + b.warn, 0));
 
   protected chartOptions = signal<ApexOptions>({});
 
@@ -329,18 +332,21 @@ export class LogsComponent {
   private loadOverview(): void {
     this.loading.set(true);
     const { start, end } = this.timeRange.range();
-    this.api.searchLogs({
-      start, end,
+    const filters = {
       service: this.selectedService() || undefined,
       minSeverity: this.selectedSeverity() >= 0 ? this.selectedSeverity() : undefined,
       q: this.serverQuery() || undefined,
-      limit: OVERVIEW_CAP, offset: 0,
+    };
+    forkJoin({
+      page: this.api.searchLogs({ start, end, ...filters, limit: OVERVIEW_CAP, offset: 0 }),
+      histogram: this.api.getLogHistogram({ start, end, bucketCount: BUCKET_COUNT, ...filters }),
     }).subscribe({
-      next: (res) => {
-        this.overview.set(res.items);
-        this.total.set(res.total);
-        this.capped.set(res.total > res.items.length);
-        this.buildChart();
+      next: ({ page, histogram }) => {
+        this.overview.set(page.items);
+        this.total.set(page.total);
+        this.capped.set(page.total > page.items.length);
+        this.histogram.set(histogram);
+        this.buildChart(histogram);
         this.loading.set(false);
       },
       error: () => this.loading.set(false),
@@ -370,7 +376,11 @@ export class LogsComponent {
         this.overview.set(logs);
         this.total.set(logs.length);
         this.capped.set(false);
-        this.buildChart();
+        // Small, deterministic per-trace set — bucket locally rather than round-tripping.
+        const { start, end } = this.timeRange.range();
+        const buckets = bucketLogs(logs, start, end, BUCKET_COUNT);
+        this.histogram.set(buckets);
+        this.buildChart(buckets);
         this.loading.set(false);
       },
       error: () => this.loading.set(false),
@@ -405,10 +415,9 @@ export class LogsComponent {
     return false;
   }
 
-  private buildChart(): void {
+  private buildChart(buckets: LogBucket[]): void {
     const { start, end } = this.timeRange.range();
     const isDark = this.theme.isDark();
-    const buckets = bucketLogs(this.overview(), start, end, BUCKET_COUNT);
     // Use the shared base as-is (datetime axis, legend, visible grid) so this
     // matches the Dashboard log chart, then layer on drag-to-select zoom.
     const base = buildLogSeriesOptions(buckets, isDark, 180);

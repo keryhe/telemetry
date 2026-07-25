@@ -24,6 +24,17 @@ export interface MetricInfo {
   dataPointCount: number;
 }
 
+export interface MetricTypeCount {
+  type: MetricType;
+  count: number;
+}
+
+/** True (unbounded) distinct-metric-name counts per type, unaffected by the /api/metrics row limit. */
+export interface MetricsSummary {
+  uniqueMetricCount: number;
+  countsByType: MetricTypeCount[];
+}
+
 export interface MetricDataPoint {
   startTimestamp: string | null;
   timestamp: string;

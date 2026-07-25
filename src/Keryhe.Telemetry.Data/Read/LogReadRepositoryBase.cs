@@ -175,6 +175,99 @@ public abstract class LogReadRepositoryBase : DapperReadRepository, ILogReadRepo
     }
 
     /// <summary>
+    /// True volume-by-severity histogram, aggregated in SQL (log_records can be far larger than
+    /// the trace count, so — unlike traces — this pushes bucketing + counting into the database
+    /// rather than fetching every matching row). Buckets are evenly spaced across
+    /// <c>[Start,End)</c>, matching the bucket math the Angular client used to compute client-side.
+    /// </summary>
+    public async Task<List<LogVolumeBucket>> GetLogHistogramAsync(HistogramQuery query, CancellationToken cancellationToken = default)
+    {
+        if (query.Start >= query.End)
+            throw new ArgumentException("Start time must be before end time");
+
+        var bucketCount = Math.Clamp(query.BucketCount, 1, 500);
+        var startNano = TimeConversion.DateTimeToUnixNano(query.Start);
+        var endNano = TimeConversion.DateTimeToUnixNano(query.End);
+        var rangeNano = Math.Max(1, endNano - startNano);
+
+        var clauses = new List<string>
+        {
+            "lr.time_unix_nano >= @start",
+            "lr.time_unix_nano <= @end"
+        };
+        if (!string.IsNullOrEmpty(query.Service)) clauses.Add($"{ResourceServiceNameExpr} = @service");
+        if (query.MinSeverity.HasValue) clauses.Add("lr.severity_number >= @minSeverity");
+        if (!string.IsNullOrEmpty(query.Search)) clauses.Add($"lr.body_value {LikeOperator} @search");
+        var where = string.Join(" AND ", clauses);
+
+        // Raw (unclamped) bucket index; clamped into [0, bucketCount-1] via CASE (portable —
+        // SQL Server has no LEAST/GREATEST). Grouped by the raw expression, not the alias,
+        // since SQL Server disallows GROUP BY on a SELECT-list alias.
+        var rawIndexExpr = BucketIndexExpr("(lr.time_unix_nano - @start) * @bucketCount", "@rangeNano");
+        var clampedIndexExpr = $"CASE WHEN {rawIndexExpr} < 0 THEN 0 WHEN {rawIndexExpr} > @bucketCountMinus1 THEN @bucketCountMinus1 ELSE {rawIndexExpr} END";
+        var sql = $"""
+            SELECT
+                {clampedIndexExpr} AS BucketIndex,
+                SUM(CASE WHEN lr.severity_number <= 4 THEN 1 ELSE 0 END) AS Trace,
+                SUM(CASE WHEN lr.severity_number BETWEEN 5 AND 8 THEN 1 ELSE 0 END) AS Debug,
+                SUM(CASE WHEN lr.severity_number IS NULL OR lr.severity_number BETWEEN 9 AND 12 THEN 1 ELSE 0 END) AS Info,
+                SUM(CASE WHEN lr.severity_number BETWEEN 13 AND 16 THEN 1 ELSE 0 END) AS Warn,
+                SUM(CASE WHEN lr.severity_number BETWEEN 17 AND 20 THEN 1 ELSE 0 END) AS Error,
+                SUM(CASE WHEN lr.severity_number > 20 THEN 1 ELSE 0 END) AS Fatal
+            FROM log_records lr
+            JOIN resources r ON lr.resource_id = r.id
+            WHERE r.tenant_id = @tenantId AND {where}
+            GROUP BY {clampedIndexExpr}
+            """;
+
+        await using var conn = await OpenConnectionAsync(cancellationToken);
+        var rows = (await conn.QueryAsync<LogBucketRow>(new CommandDefinition(sql, new
+        {
+            tenantId = TenantId,
+            start = startNano,
+            end = endNano,
+            bucketCount,
+            bucketCountMinus1 = bucketCount - 1,
+            rangeNano,
+            service = query.Service,
+            minSeverity = query.MinSeverity,
+            search = string.IsNullOrEmpty(query.Search) ? null : $"%{EscapeLike(query.Search)}%"
+        }, cancellationToken: cancellationToken))).ToList();
+
+        var byIndex = rows.ToDictionary(r => r.BucketIndex);
+        var startTicks = query.Start.Ticks;
+        var rangeTicks = Math.Max(1, query.End.Ticks - startTicks);
+
+        var result = new List<LogVolumeBucket>(bucketCount);
+        for (var i = 0; i < bucketCount; i++)
+        {
+            byIndex.TryGetValue(i, out var r);
+            result.Add(new LogVolumeBucket
+            {
+                Timestamp = new DateTime(startTicks + i * rangeTicks / bucketCount, query.Start.Kind),
+                Trace = r?.Trace ?? 0,
+                Debug = r?.Debug ?? 0,
+                Info = r?.Info ?? 0,
+                Warn = r?.Warn ?? 0,
+                Error = r?.Error ?? 0,
+                Fatal = r?.Fatal ?? 0
+            });
+        }
+        return result;
+    }
+
+    private sealed class LogBucketRow
+    {
+        public int BucketIndex { get; set; }
+        public int Trace { get; set; }
+        public int Debug { get; set; }
+        public int Info { get; set; }
+        public int Warn { get; set; }
+        public int Error { get; set; }
+        public int Fatal { get; set; }
+    }
+
+    /// <summary>
     /// Escapes LIKE/ILIKE wildcards in user search text so <c>%</c>/<c>_</c> match literally.
     /// Postgres/ILIKE default: backslash escape. SqlServer overrides to bracket escaping.
     /// </summary>

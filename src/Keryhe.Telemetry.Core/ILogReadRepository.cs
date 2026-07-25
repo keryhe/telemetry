@@ -16,6 +16,9 @@ public interface ILogReadRepository
 
     /// <summary>Server-side filtered + paged log query; returns a page of rows plus the full filtered total.</summary>
     Task<PagedResult<LogRecordModel>> QueryLogRecordsAsync(LogQuery query, CancellationToken cancellationToken = default);
+
+    /// <summary>True volume-by-severity histogram (fixed bucket count over the full filtered range) for the logs list/dashboard chart, unaffected by any row-count cap.</summary>
+    Task<List<LogVolumeBucket>> GetLogHistogramAsync(HistogramQuery query, CancellationToken cancellationToken = default);
     Task<List<string>> GetDistinctServicesAsync(DateTime? startTime = null, DateTime? endTime = null, CancellationToken cancellationToken = default);
 
     /// <summary>

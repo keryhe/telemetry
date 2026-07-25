@@ -20,6 +20,9 @@ public interface ITraceReadRepository
     /// <summary>Server-side filtered + paged trace query; returns a page of traces plus the full filtered total.</summary>
     Task<PagedResult<TraceInfo>> QueryTracesAsync(TraceQuery query, CancellationToken cancellationToken = default);
 
+    /// <summary>True volume histogram (fixed bucket count over the full filtered range) for the traces list/dashboard chart, unaffected by any row-count cap.</summary>
+    Task<List<TraceVolumeBucket>> GetTraceHistogramAsync(HistogramQuery query, CancellationToken cancellationToken = default);
+
     // Analysis operations
     Task<List<ServiceDependency>> GetServiceDependenciesAsync(DateTime? startTime = null, DateTime? endTime = null, CancellationToken cancellationToken = default);
     Task<Dictionary<string, int>> GetOperationCountsAsync(string serviceName, DateTime? startTime = null, DateTime? endTime = null, CancellationToken cancellationToken = default);

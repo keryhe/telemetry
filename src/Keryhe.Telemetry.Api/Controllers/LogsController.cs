@@ -52,6 +52,30 @@ public class LogsController : ControllerBase
         return Ok(result);
     }
 
+    // GET /api/logs/histogram?start=&end=&bucketCount=&service=&minSeverity=&q=
+    // True volume-by-severity histogram for the logs list/dashboard chart — unaffected by any row-count cap.
+    [HttpGet("histogram")]
+    public async Task<ActionResult<List<LogVolumeBucket>>> GetLogHistogram(
+        [FromQuery] DateTime start,
+        [FromQuery] DateTime end,
+        [FromQuery] int bucketCount = 24,
+        [FromQuery] string? service = null,
+        [FromQuery] int? minSeverity = null,
+        [FromQuery] string? q = null,
+        CancellationToken ct = default)
+    {
+        var result = await _logs.GetLogHistogramAsync(new HistogramQuery
+        {
+            Start = start,
+            End = end,
+            BucketCount = bucketCount,
+            Service = service,
+            MinSeverity = minSeverity,
+            Search = q
+        }, ct);
+        return Ok(result);
+    }
+
     // GET /api/logs/services?start=&end=
     [HttpGet("services")]
     public async Task<ActionResult<List<string>>> GetDistinctServices(

@@ -46,6 +46,15 @@ public abstract class DapperReadRepository
     /// <summary>SQL expression extracting <c>service.name</c> from the <c>r.attributes_json</c> resource column.</summary>
     protected virtual string ResourceServiceNameExpr => "r.attributes_json ->> 'service.name'";
 
+    /// <summary>
+    /// Integer floor-division SQL expression, <c>numerator / denominator</c>, used to compute
+    /// histogram bucket indices from nanosecond timestamps. The default (<c>bigint / bigint</c>)
+    /// truncates toward zero on Postgres/Timescale/SqlServer, which is correct floor division
+    /// since the numerator is always &gt;= 0. ClickHouse and MySQL promote <c>/</c> to a
+    /// floating-point result and must override this with their integer-division operator.
+    /// </summary>
+    protected virtual string BucketIndexExpr(string numerator, string denominator) => $"({numerator} / {denominator})";
+
     // =========================================================================
     // JSON / ATTRIBUTE HELPERS (parity with the former EF [NotMapped] getters)
     // =========================================================================

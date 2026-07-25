@@ -77,6 +77,52 @@ public sealed class TraceQuery
     public int Offset { get; init; }
 }
 
+/// <summary>Server-side filter for the traces/logs volume histogram (no paging — evenly-spaced buckets over the whole filtered range).</summary>
+public sealed class HistogramQuery
+{
+    public DateTime Start { get; init; }
+    public DateTime End { get; init; }
+
+    /// <summary>Number of evenly-spaced buckets to divide <c>[Start,End)</c> into.</summary>
+    public int BucketCount { get; init; } = 24;
+
+    // Trace-only filters (ignored by the log histogram).
+    /// <summary><c>all</c> | <c>errors</c> | <c>slow</c>.</summary>
+    public string Mode { get; init; } = "all";
+    public string? Service { get; init; }
+    public string? Operation { get; init; }
+    public double? MinDurationMs { get; init; }
+    public double? MaxDurationMs { get; init; }
+    public IReadOnlyList<TagFilter> Tags { get; init; } = Array.Empty<TagFilter>();
+
+    // Log-only filters (ignored by the trace histogram).
+    public int? MinSeverity { get; init; }
+    public string? Search { get; init; }
+}
+
+/// <summary>One bucket of the trace volume histogram.</summary>
+public sealed class TraceVolumeBucket
+{
+    public DateTime Timestamp { get; init; }
+    public int Count { get; init; }
+    public int ErrorCount { get; init; }
+
+    /// <summary>Sum of trace durations (ms) in this bucket; avg = SumDurationMs / Count.</summary>
+    public double SumDurationMs { get; init; }
+}
+
+/// <summary>One bucket of the log volume-by-severity histogram.</summary>
+public sealed class LogVolumeBucket
+{
+    public DateTime Timestamp { get; init; }
+    public int Trace { get; init; }
+    public int Debug { get; init; }
+    public int Info { get; init; }
+    public int Warn { get; init; }
+    public int Error { get; init; }
+    public int Fatal { get; init; }
+}
+
 /// <summary>A single span-tag predicate for all-span trace search (<c>key:value</c> contains / <c>key=value</c> exact).</summary>
 public sealed class TagFilter
 {

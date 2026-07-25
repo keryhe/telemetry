@@ -29,7 +29,7 @@ import { ThemeService } from '../../../core/services/theme.service';
 import { TraceInfo, ServiceDependency, OperationStats } from '../../../core/models/trace.models';
 import { StatCardComponent } from '../../../shared/components/stat-card/stat-card.component';
 import { EmptyStateComponent } from '../../../shared/components/empty-state/empty-state.component';
-import { bucketTraces, formatDuration, parseDotnetTimespan, timeRangeZoom } from '../../../shared/utils/chart.utils';
+import { TimeBucket, formatDuration, parseDotnetTimespan, timeRangeZoom } from '../../../shared/utils/chart.utils';
 import { parseSearchQuery, ParsedSearchQuery, SearchTerm } from '../../../shared/utils/search-query.parser';
 import { TraceSearchHelpDialogComponent } from '../trace-search-help-dialog/trace-search-help-dialog.component';
 import { loadPageState, savePageState } from '../../../shared/utils/page-state';
@@ -101,8 +101,10 @@ export class TraceListComponent {
   });
 
   protected loading = signal(true);
-  /** Bounded overview used for the chart, stat cards, and shallow/client paging. */
+  /** Bounded overview used for the scatter chart and shallow/client paging. */
   protected overview = signal<TraceInfo[]>([]);
+  /** True (unbounded) volume histogram — backs the bar chart and the error/duration stat cards. */
+  protected histogram = signal<TimeBucket[]>([]);
   /** A single server-fetched page, used only when paging beyond the overview window. */
   private serverPage = signal<TraceInfo[]>([]);
   protected total = signal(0);
@@ -191,13 +193,18 @@ export class TraceListComponent {
   }
 
   protected totalTraces = computed(() => this.effectiveTotal());
-  protected errorCount = computed(() => this.overview().filter((t) => t.hasErrors).length);
+  /** True error count across the full filtered range (histogram sum, not the capped overview). */
+  protected errorCount = computed(() => this.histogram().reduce((a, b) => a + b.errorCount, 0));
   protected errorRate = computed(() =>
-    this.overview().length > 0 ? ((this.errorCount() / this.overview().length) * 100).toFixed(1) + '%' : '0%'
+    this.total() > 0 ? ((this.errorCount() / this.total()) * 100).toFixed(1) + '%' : '0%'
   );
+  /** True average duration across the full filtered range (histogram duration/count sums). */
   protected avgDuration = computed(() => {
-    const ms = this.overview().map((t) => parseDotnetTimespan(t.traceDuration));
-    return ms.length > 0 ? formatDuration(ms.reduce((a, b) => a + b, 0) / ms.length) : '—';
+    const buckets = this.histogram();
+    const count = buckets.reduce((a, b) => a + b.count, 0);
+    if (count === 0) return '—';
+    const totalMs = buckets.reduce((a, b) => a + b.sumDurationMs, 0);
+    return formatDuration(totalMs / count);
   });
 
   /** Per-service health (error rate + call volume), derived from the dependency edges. */
@@ -427,15 +434,17 @@ export class TraceListComponent {
   private loadOverview(): void {
     this.loading.set(true);
     const { start, end } = this.timeRange.range();
-    this.api.searchTraces({
-      start, end, ...this.serverFilters(),
-      limit: OVERVIEW_CAP, offset: 0,
+    const filters = this.serverFilters();
+    forkJoin({
+      page: this.api.searchTraces({ start, end, ...filters, limit: OVERVIEW_CAP, offset: 0 }),
+      histogram: this.api.getTraceHistogram({ start, end, ...filters }),
     }).subscribe({
-      next: (res) => {
-        this.overview.set(res.items);
-        this.total.set(res.total);
-        this.capped.set(res.total > res.items.length);
-        this.buildChart(start, end);
+      next: ({ page, histogram }) => {
+        this.overview.set(page.items);
+        this.total.set(page.total);
+        this.capped.set(page.total > page.items.length);
+        this.histogram.set(histogram);
+        this.buildChart(start, end, histogram);
         this.buildScatter(start, end);
         this.loading.set(false);
       },
@@ -476,9 +485,8 @@ export class TraceListComponent {
     });
   }
 
-  private buildChart(start: Date, end: Date): void {
+  private buildChart(start: Date, end: Date, buckets: TimeBucket[]): void {
     const isDark = this.theme.isDark();
-    const buckets = bucketTraces(this.overview(), start, end);
     const timestamps = buckets.map((b) => b.timestamp.getTime());
 
     this.traceChartOptions.set({

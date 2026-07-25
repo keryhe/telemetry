@@ -25,7 +25,7 @@ import { TraceInfo } from '../../core/models/trace.models';
 import { LogRecord, getServiceName } from '../../core/models/log.models';
 import { StatCardComponent } from '../../shared/components/stat-card/stat-card.component';
 import { EmptyStateComponent } from '../../shared/components/empty-state/empty-state.component';
-import { bucketTraces, bucketLogs, buildLogSeriesOptions, formatDuration, parseDotnetTimespan, timeRangeZoom } from '../../shared/utils/chart.utils';
+import { TimeBucket, LogBucket, buildLogSeriesOptions, formatDuration, parseDotnetTimespan, timeRangeZoom } from '../../shared/utils/chart.utils';
 import { loadPageState, savePageState } from '../../shared/utils/page-state';
 
 const STATE_KEY = 'state.dashboard';
@@ -61,13 +61,16 @@ export class DashboardComponent {
   protected autoRefresh = signal(this.saved.autoRefresh);
   protected readonly preset = computed(() => this.timeRange.range().preset);
   private refreshSub?: Subscription;
+  /** Bounded (limit: 500) sample used for the recent-errors/slowest-traces tables. */
   protected traces = signal<TraceInfo[]>([]);
   protected logs = signal<LogRecord[]>([]);
   protected availableServices = signal<string[]>([]);
   protected selectedService = signal(this.saved.selectedService);
+  /** True (unbounded) volume histogram — backs the chart and the trace-count/error-rate stat cards. */
+  private traceHistogram = signal<TimeBucket[]>([]);
 
-  protected totalTraces = computed(() => this.traces().length);
-  protected errorTraces = computed(() => this.traces().filter((t) => t.hasErrors).length);
+  protected totalTraces = computed(() => this.traceHistogram().reduce((a, b) => a + b.count, 0));
+  protected errorTraces = computed(() => this.traceHistogram().reduce((a, b) => a + b.errorCount, 0));
   protected errorRate = computed(() =>
     this.totalTraces() > 0 ? this.errorTraces() / this.totalTraces() : 0
   );
@@ -133,26 +136,28 @@ export class DashboardComponent {
     forkJoin({
       traces:     this.tracesApi.getTraces({ start, end, limit: 500, service: svc || undefined }),
       logs:       this.logsApi.getLogs(start, end),
+      traceHist:  this.tracesApi.getTraceHistogram({ start, end, service: svc || undefined }),
+      logHist:    this.logsApi.getLogHistogram({ start, end, service: svc || undefined }),
       traceSvcs:  this.tracesApi.getServices(start, end).pipe(catchError(() => of([]))),
       logSvcs:    this.logsApi.getServices(start, end).pipe(catchError(() => of([]))),
       metricSvcs: this.metricsApi.getServices(start, end).pipe(catchError(() => of([]))),
     }).subscribe({
-      next: ({ traces, logs, traceSvcs, logSvcs, metricSvcs }) => {
+      next: ({ traces, logs, traceHist, logHist, traceSvcs, logSvcs, metricSvcs }) => {
         this.traces.set(traces);
         this.logs.set(svc ? logs.filter((l) => getServiceName(l) === svc) : logs);
+        this.traceHistogram.set(traceHist);
         const services = [...new Set([...traceSvcs, ...logSvcs, ...metricSvcs])].sort();
         if (services.length > 0) this.availableServices.set(services);
-        this.buildCharts(start, end);
+        this.buildCharts(traceHist, logHist);
         this.loading.set(false);
       },
       error: () => this.loading.set(false),
     });
   }
 
-  private buildCharts(start: Date, end: Date): void {
+  private buildCharts(traceBuckets: TimeBucket[], logBuckets: LogBucket[]): void {
     const isDark = this.theme.isDark();
-    const buckets = bucketTraces(this.traces(), start, end);
-    const timestamps = buckets.map((b) => b.timestamp.getTime());
+    const timestamps = traceBuckets.map((b) => b.timestamp.getTime());
 
     const zoom = timeRangeZoom((from, to) => this.timeRange.setCustom(from, to));
 
@@ -160,8 +165,8 @@ export class DashboardComponent {
       chart: { type: 'area', height: 220, toolbar: { show: false }, background: 'transparent', ...zoom },
       theme: { mode: isDark ? 'dark' : 'light' },
       series: [
-        { name: 'Total', data: buckets.map((b, i) => [timestamps[i], b.count]) },
-        { name: 'Errors', data: buckets.map((b, i) => [timestamps[i], b.errorCount]) },
+        { name: 'Total', data: traceBuckets.map((b, i) => [timestamps[i], b.count]) },
+        { name: 'Errors', data: traceBuckets.map((b, i) => [timestamps[i], b.errorCount]) },
       ],
       xaxis: { type: 'datetime', labels: { datetimeUTC: false } },
       colors: ['#2196f3', '#f44336'],
@@ -171,7 +176,6 @@ export class DashboardComponent {
       dataLabels: { enabled: false },
     });
 
-    const logBuckets = bucketLogs(this.logs(), start, end);
     const logBase = buildLogSeriesOptions(logBuckets, isDark, 220);
     this.logChartOptions.set({ ...logBase, chart: { ...logBase.chart!, ...zoom } });
   }

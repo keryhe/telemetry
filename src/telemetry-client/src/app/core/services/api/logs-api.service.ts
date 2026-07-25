@@ -1,9 +1,11 @@
 import { Injectable, inject } from '@angular/core';
 import { HttpClient, HttpParams } from '@angular/common/http';
 import { Observable } from 'rxjs';
+import { map } from 'rxjs/operators';
 import { environment } from '../../../../environments/environment';
 import { LogRecord } from '../../models/log.models';
 import { PagedResult } from '../../models/paged.models';
+import { LogBucket } from '../../../shared/utils/chart.utils';
 
 export interface LogSearchQuery {
   start: Date;
@@ -13,6 +15,26 @@ export interface LogSearchQuery {
   q?: string;
   limit: number;
   offset: number;
+}
+
+export interface LogHistogramQuery {
+  start: Date;
+  end: Date;
+  bucketCount?: number;
+  service?: string;
+  minSeverity?: number;
+  q?: string;
+}
+
+/** Wire shape of a log histogram bucket (backend field is `timestamp`, not `time`). */
+interface LogVolumeBucketDto {
+  timestamp: string;
+  trace: number;
+  debug: number;
+  info: number;
+  warn: number;
+  error: number;
+  fatal: number;
 }
 
 @Injectable({ providedIn: 'root' })
@@ -38,6 +60,23 @@ export class LogsApiService {
     if (query.minSeverity != null && query.minSeverity >= 0) params = params.set('minSeverity', query.minSeverity);
     if (query.q) params = params.set('q', query.q);
     return this.http.get<PagedResult<LogRecord>>(`${this.base}/search`, { params });
+  }
+
+  /** True volume-by-severity histogram (unaffected by any row-count cap) for the logs chart. */
+  getLogHistogram(query: LogHistogramQuery): Observable<LogBucket[]> {
+    let params = new HttpParams()
+      .set('start', query.start.toISOString())
+      .set('end', query.end.toISOString())
+      .set('bucketCount', query.bucketCount ?? 24);
+    if (query.service) params = params.set('service', query.service);
+    if (query.minSeverity != null && query.minSeverity >= 0) params = params.set('minSeverity', query.minSeverity);
+    if (query.q) params = params.set('q', query.q);
+    return this.http.get<LogVolumeBucketDto[]>(`${this.base}/histogram`, { params }).pipe(
+      map((buckets) => buckets.map((b) => ({
+        time: new Date(b.timestamp),
+        trace: b.trace, debug: b.debug, info: b.info, warn: b.warn, error: b.error, fatal: b.fatal,
+      })))
+    );
   }
 
   getLogsByTrace(traceId: string): Observable<LogRecord[]> {

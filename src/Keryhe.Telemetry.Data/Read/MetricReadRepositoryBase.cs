@@ -84,6 +84,45 @@ public abstract class MetricReadRepositoryBase : DapperReadRepository, IMetricRe
             .ToList();
     }
 
+    /// <summary>
+    /// True (unbounded) distinct-metric-name counts per type for a time range — reuses
+    /// <see cref="GetMetricIdsWithDataInRangeAsync"/> (already computes the full matching id set
+    /// across all data-point tables, no row cap), then a plain SELECT DISTINCT over the metrics
+    /// table restricted to those ids. No dialect-specific SQL needed.
+    /// </summary>
+    public async Task<MetricsSummary> GetMetricsSummaryAsync(DateTime? startTime = null, DateTime? endTime = null, CancellationToken cancellationToken = default)
+    {
+        await using var conn = await OpenConnectionAsync(cancellationToken);
+
+        var idsWithData = await GetMetricIdsWithDataInRangeAsync(conn, startTime, endTime, cancellationToken);
+        if (idsWithData is { Count: 0 })
+            return new MetricsSummary();
+
+        var sql = "SELECT DISTINCT m.name AS Name, m.type AS Type FROM metrics m JOIN resources r ON m.resource_id = r.id WHERE r.tenant_id = @tenantId";
+        if (idsWithData != null) sql += $" AND m.id IN ({IdInList(idsWithData)})";
+
+        var rows = await conn.QueryAsync<NameTypeRow>(new CommandDefinition(sql, new { tenantId = TenantId }, cancellationToken: cancellationToken));
+
+        // A name could in principle appear with more than one type across instances (rare);
+        // first-seen wins, matching the frontend's own uniqueMetrics grouping (items[0].type).
+        var byName = new Dictionary<string, MetricType>();
+        foreach (var r in rows)
+            if (!byName.ContainsKey(r.Name)) byName[r.Name] = Enum.Parse<MetricType>(r.Type);
+
+        var counts = byName.Values
+            .GroupBy(t => t)
+            .Select(g => new MetricTypeCount { Type = g.Key, Count = g.Count() })
+            .ToList();
+
+        return new MetricsSummary { UniqueMetricCount = byName.Count, CountsByType = counts };
+    }
+
+    private sealed class NameTypeRow
+    {
+        public string Name { get; set; } = null!;
+        public string Type { get; set; } = null!;
+    }
+
     // =========================================================================
     // TIME SERIES READS
     // =========================================================================

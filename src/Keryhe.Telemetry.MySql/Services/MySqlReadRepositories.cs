@@ -58,6 +58,10 @@ public class MySqlLogReadRepository(IConfiguration configuration, ITenantContext
     protected override string ResourceServiceNameExpr => "r.attributes_json ->> '$.\"service.name\"'";
     protected override string PagingClause => "LIMIT @limit OFFSET @offset";
     // MySQL LIKE uses backslash as the default escape character (matches the Postgres base default).
+
+    // MySQL's `/` always yields a DECIMAL result even for integer operands; DIV keeps histogram
+    // bucket-index math as true integer floor division.
+    protected override string BucketIndexExpr(string numerator, string denominator) => $"({numerator} DIV {denominator})";
 }
 
 public class MySqlTenantCatalogRepository(IConfiguration configuration)
