@@ -19,7 +19,7 @@
 
 .timeline-card { overflow: hidden; }
 
-.timeline-content { padding: 0 !important; }
+.timeline-content { padding: 0 !important; position: relative; }
 
 .service-legend {
   display: flex;
@@ -105,16 +105,85 @@
   gap: 4px;
   /* border-box so the per-depth padding-left indent is absorbed inside the
      fixed width — this keeps every gantt-track starting at the same x, so the
-     time-axis gridlines stay vertically aligned across rows. */
+     time-axis gridlines stay vertically aligned across rows. The width is a
+     custom property (set on the host, drag-resized via .col-resizer) so this
+     cell and .span-name-spacer can never drift apart. */
   box-sizing: border-box;
-  width: 280px;
-  min-width: 280px;
+  width: var(--name-col-w, 280px);
+  min-width: var(--name-col-w, 280px);
   overflow: hidden;
+  /* Establishes the stacking context the hover pop-out lifts itself out of. */
+  position: relative;
   border-right: 1px solid var(--mat-sys-outline-variant);
   padding-right: 8px;
 }
 
-.collapse-icon { font-size: 18px; width: 18px; height: 18px; color: var(--mat-sys-on-surface-variant); cursor: pointer; }
+/* Hover pop-out: only rows the component measured as clipped escape the column,
+   floating the full name over the Gantt rather than ellipsising it. */
+.span-row:hover .span-name.clipped {
+  overflow: visible;
+  z-index: 5;
+
+  .op-name {
+    /* Restoring `overflow: visible` re-arms flexbox's automatic minimum size
+       (min-content = the whole nowrap name), so this item stops shrinking and
+       instead overflows the column to the right — exactly the effect we want. */
+    overflow: visible;
+    text-overflow: clip;
+    flex-shrink: 0;
+    width: max-content;
+    border-radius: 3px;
+    background: var(--mat-sys-surface-container-high);
+    /* The chip's breathing room comes from a spread-only shadow, not padding or a
+       negative margin: those participate in flex layout and would drag the text off
+       its resting position. This paints outside the box at zero layout cost. */
+    box-shadow:
+      0 0 0 5px var(--mat-sys-surface-container-high),
+      0 2px 8px 5px rgb(0 0 0 / 22%);
+  }
+}
+
+/* Full-height drag target straddling the name/Gantt border. Absolutely positioned,
+   so widening the column never reflows the rows themselves. */
+.col-resizer {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: var(--name-col-w, 280px);
+  width: 9px;
+  margin-left: -4px;
+  cursor: col-resize;
+  z-index: 6;
+  touch-action: none;
+
+  &:hover::after, &:active::after {
+    content: '';
+    position: absolute;
+    left: 4px;
+    top: 0;
+    bottom: 0;
+    width: 2px;
+    background: var(--mat-sys-primary);
+  }
+}
+
+/* While dragging: no text selection, and no pop-outs firing under the cursor. */
+.timeline-content.resizing {
+  user-select: none;
+  .span-row:hover .span-name.clipped { overflow: hidden; z-index: auto; }
+  .span-row:hover .span-name.clipped .op-name {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    flex-shrink: 1;
+    width: auto;
+    background: none;
+    box-shadow: none;
+  }
+}
+
+/* flex-shrink: 0 to match .leaf-indent — without it the chevron is the only shrinkable
+   item in the row, so it collapses to nothing whenever .op-name refuses to shrink. */
+.collapse-icon { font-size: 18px; width: 18px; height: 18px; flex-shrink: 0; color: var(--mat-sys-on-surface-variant); cursor: pointer; }
 .leaf-indent { width: 18px; flex-shrink: 0; }
 .op-name { font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
@@ -131,8 +200,8 @@
 
 .span-name-spacer {
   box-sizing: border-box;
-  width: 280px;
-  min-width: 280px;
+  width: var(--name-col-w, 280px);
+  min-width: var(--name-col-w, 280px);
   border-right: 1px solid var(--mat-sys-outline-variant);
 }
 

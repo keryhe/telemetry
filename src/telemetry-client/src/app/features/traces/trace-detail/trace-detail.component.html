@@ -104,7 +104,16 @@
         </button>
       </div>
 
-      <mat-card-content class="timeline-content" [class.crit-active]="showCriticalPath()">
+      <mat-card-content class="timeline-content"
+                        [class.crit-active]="showCriticalPath()"
+                        [class.resizing]="resizing()">
+        <!-- Drag handle straddling the name/Gantt border; absolute, so it costs no layout -->
+        <!-- Native title, not matTooltip: the handle spans the full list height, so a
+             Material tooltip would anchor to its midpoint and float far from the cursor. -->
+        <div class="col-resizer"
+             (pointerdown)="onResizeStart($event)"
+             (dblclick)="autoFitNameCol()"
+             title="Drag to resize · double-click to fit"></div>
         <!-- Time axis (aligned with the Gantt tracks below) -->
         <div class="timeline-header">
           <div class="span-name-spacer"></div>
@@ -124,7 +133,9 @@
                [class.current-match]="currentMatchId() === node.spanIdHex"
                (click)="selectSpan(node)">
             <!-- Name column -->
-            <div class="span-name" [style.padding-left.px]="node.depth * 16 + 8">
+            <div class="span-name"
+                 [class.clipped]="clippedIds().has(node.spanIdHex)"
+                 [style.padding-left.px]="node.depth * indentStep() + 8">
               @if (node.children.length > 0) {
                 <mat-icon class="collapse-icon" (click)="$event.stopPropagation(); toggleCollapse(node)">
                   {{ node.collapsed ? 'chevron_right' : 'expand_more' }}
@@ -133,6 +144,7 @@
                 <span class="leaf-indent"></span>
               }
               <span class="service-dot" [style.background]="colorFor(node.serviceName)"></span>
+              <!-- No tooltip here: .clipped rows already reveal the full name inline on hover. -->
               <span class="op-name">{{ node.name }}</span>
             </div>
             <!-- Gantt bar -->

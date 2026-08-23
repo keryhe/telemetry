@@ -23,6 +23,7 @@ import { formatDuration } from '../../../shared/utils/chart.utils';
 import { parseSearchQuery, ParsedSearchQuery, SearchTerm } from '../../../shared/utils/search-query.parser';
 import { SERVICE_COLORS } from '../../../shared/utils/service-colors';
 import { UrlStateService } from '../../../shared/utils/url-state';
+import { loadPageState, savePageState } from '../../../shared/utils/page-state';
 
 interface SpanNode extends SpanModel {
   children: SpanNode[];
@@ -59,6 +60,26 @@ interface StatRow {
 
 /** Delimiter for aggregated call-path keys (unlikely to occur in an operation name). */
 const PATH_SEP = '';
+
+const STATE_KEY = 'state.trace-detail';
+
+/**
+ * Name-column indent budget. The per-level step shrinks so the *deepest* row's indent never
+ * exceeds INDENT_BUDGET px — otherwise a deeply nested trace eats the whole (border-box)
+ * column from the left and the operation name is clipped to nothing.
+ */
+const INDENT_BUDGET = 160;
+const INDENT_STEP_MAX = 16;
+const INDENT_STEP_MIN = 4;
+
+/** Resizable name column: bounds, and the room always reserved for the Gantt track. */
+const NAME_COL_DEFAULT = 280;
+const NAME_COL_MIN = 180;
+const NAME_COL_MAX = 720;
+const GANTT_MIN = 240;
+
+/** Chrome around the operation name inside `.span-name` (collapse icon + dot + gaps + padding). */
+const NAME_FIXED_PX = 52;
 
 /** A rendered flame cell — shared by the time-ordered and aggregated layouts. */
 interface FlameCell {
@@ -119,6 +140,8 @@ interface AggBuild {
   ],
   templateUrl: './trace-detail.component.html',
   styleUrl: './trace-detail.component.scss',
+  // Published on the host so the sticky header spacer and every row read one source of truth.
+  host: { '[style.--name-col-w.px]': 'nameColWidth()' },
 })
 export class TraceDetailComponent implements OnInit {
   @Input() id!: string;
@@ -136,6 +159,14 @@ export class TraceDetailComponent implements OnInit {
   protected selectedSpan = signal<SpanNode | null>(null);
   protected tree = signal<SpanNode[]>([]);
   protected showCriticalPath = signal(false);
+
+  private readonly saved = loadPageState(STATE_KEY, { nameColWidth: NAME_COL_DEFAULT });
+
+  /** Width of the timeline's name column, in px — drag-resizable, persisted across visits. */
+  protected nameColWidth = signal(
+    Math.max(NAME_COL_MIN, Math.min(NAME_COL_MAX, this.saved.nameColWidth)));
+  /** True while the divider is being dragged (suppresses hover chrome + text selection). */
+  protected resizing = signal(false);
 
   /** Active detail view: waterfall timeline, aggregate statistics, flame graph, or raw JSON. */
   protected view = signal<DetailView>('timeline');
@@ -170,6 +201,8 @@ export class TraceDetailComponent implements OnInit {
       this.findText();
       untracked(() => this.currentMatchIndex.set(0));
     });
+
+    effect(() => savePageState(STATE_KEY, { nameColWidth: this.nameColWidth() }));
   }
 
   protected traceStart = computed(() => {
@@ -197,6 +230,33 @@ export class TraceDetailComponent implements OnInit {
 
   /** Every span node in tree order, ignoring collapse (for stats/flame/error nav). */
   protected allNodes = computed<SpanNode[]>(() => this.flattenAll(this.tree()));
+
+  // --- Name column: adaptive indent, and which rows are actually clipped. ---
+
+  /** Deepest span in the trace, ignoring collapse — so the step doesn't jitter on expand/collapse. */
+  protected maxDepth = computed(() =>
+    this.allNodes().reduce((m, n) => Math.max(m, n.depth), 0));
+
+  /** Per-level indent, shrunk so `maxDepth × step` fits within INDENT_BUDGET. */
+  protected indentStep = computed(() => {
+    const d = this.maxDepth();
+    if (d <= 0) return INDENT_STEP_MAX;
+    return Math.max(INDENT_STEP_MIN, Math.min(INDENT_STEP_MAX, INDENT_BUDGET / d));
+  });
+
+  /**
+   * Visible rows whose name can't fit at the current width/indent. Drives the hover pop-out, so
+   * names that already fit don't flash a pointless chip. Recomputes only when the flattened tree,
+   * the indent step, or the column width changes.
+   */
+  protected clippedIds = computed(() => {
+    const step = this.indentStep();
+    const avail = this.nameColWidth() - NAME_FIXED_PX;
+    return new Set(
+      this.flatTree()
+        .filter((n) => this.measureName(n.name) > avail - n.depth * step)
+        .map((n) => n.spanIdHex));
+  });
 
   /** child span id → parent node, for expanding ancestors when revealing a span. */
   private parentMap = computed<Map<string, SpanNode>>(() => {
@@ -419,6 +479,61 @@ export class TraceDetailComponent implements OnInit {
   }
 
   /** Multi-line summary shown when hovering a Gantt bar. */
+  // --- Name-column resizing ---
+
+  /**
+   * Drag the divider between the name column and the Gantt track. Uses pointer capture, so all
+   * moves retarget to the handle — no document-level listeners, and the drag survives the pointer
+   * leaving the element.
+   */
+  protected onResizeStart(ev: PointerEvent): void {
+    ev.preventDefault();
+    const el = ev.currentTarget as HTMLElement;
+    const startX = ev.clientX;
+    const startW = this.nameColWidth();
+    const avail = el.parentElement?.clientWidth ?? NAME_COL_MAX + GANTT_MIN;
+    const max = Math.max(NAME_COL_MIN, Math.min(NAME_COL_MAX, avail - GANTT_MIN));
+
+    el.setPointerCapture(ev.pointerId);
+    this.resizing.set(true);
+
+    const move = (e: PointerEvent) =>
+      this.nameColWidth.set(Math.max(NAME_COL_MIN, Math.min(max, startW + e.clientX - startX)));
+    const stop = () => {
+      el.releasePointerCapture(ev.pointerId);
+      el.removeEventListener('pointermove', move);
+      el.removeEventListener('pointerup', stop);
+      el.removeEventListener('pointercancel', stop);
+      this.resizing.set(false);
+    };
+
+    el.addEventListener('pointermove', move);
+    el.addEventListener('pointerup', stop);
+    el.addEventListener('pointercancel', stop);
+  }
+
+  /** Double-click the divider: widen the column to fit the widest currently-visible name. */
+  protected autoFitNameCol(): void {
+    const step = this.indentStep();
+    const widest = this.flatTree().reduce(
+      (m, n) => Math.max(m, n.depth * step + NAME_FIXED_PX + this.measureName(n.name)), 0);
+    this.nameColWidth.set(
+      Math.max(NAME_COL_MIN, Math.min(NAME_COL_MAX, Math.ceil(widest) + 8)));
+  }
+
+  /** Lazily-built canvas context for measuring `.op-name` text without touching the DOM. */
+  private measureCtx: CanvasRenderingContext2D | null = null;
+
+  private measureName(text: string): number {
+    if (!this.measureCtx) {
+      const ctx = document.createElement('canvas').getContext('2d');
+      if (!ctx) return text.length * 6.6; // coarse fallback (SSR / canvas unavailable)
+      ctx.font = `12px ${getComputedStyle(document.body).fontFamily}`;
+      this.measureCtx = ctx;
+    }
+    return this.measureCtx.measureText(text).width;
+  }
+
   protected barTooltip(node: SpanNode): string {
     return [
       node.name,
