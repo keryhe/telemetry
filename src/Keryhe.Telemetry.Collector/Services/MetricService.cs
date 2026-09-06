@@ -77,12 +77,10 @@ public class MetricService : MetricsService.MetricsServiceBase
 
             // Store metrics using the repository
             var storedMetricIds = await _metricRepository.StoreMetricsBatchAsync(metrics, context.CancellationToken);
-            var storedMetricCount = storedMetricIds.Count();
             totalDataPointCount = CalculateTotalDataPoints(metrics);
-            storedDataPointCount = CalculateTotalDataPoints(metrics.Take(storedMetricCount));
-
-            _logger.LogInformation("Successfully stored {StoredMetricCount} metrics with {TotalDataPointCount} data points", 
-                storedMetricCount, totalDataPointCount);
+            storedDataPointCount = totalDataPointCount;
+            _logger.LogInformation("Received {MetricCount} metrics with {TotalDataPointCount} data points", 
+                metrics.Count, totalDataPointCount);
             
         }
         catch (OperationCanceledException)

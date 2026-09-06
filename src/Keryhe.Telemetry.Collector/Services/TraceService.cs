@@ -79,8 +79,7 @@ public class TraceService : OpenTelemetry.Proto.Collector.Trace.V1.TraceService.
             var storedTraceCount = storedTraceIds.Count();
             totalSpanCount = traces.Sum(t => t.Spans.Count);
             storedSpanCount = traces.Where(t => storedTraceIds.Contains(t.Spans.FirstOrDefault()?.TraceIdHex ?? "")) .Sum(t => t.Spans.Count);
-
-            _logger.LogInformation("Successfully stored {StoredTraceCount} traces with {TotalSpanCount} spans", 
+            _logger.LogInformation("Received {TraceCount} traces with {TotalSpanCount} spans", 
                 storedTraceCount, totalSpanCount);
         }
         catch (OperationCanceledException)

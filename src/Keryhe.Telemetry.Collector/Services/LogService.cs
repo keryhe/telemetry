@@ -74,9 +74,8 @@ public class LogService : OpenTelemetry.Proto.Collector.Logs.V1.LogsService.Logs
 
             // Store log records using the repository
             var storedIds = await _logRepository.StoreLogRecordsBatchAsync(logRecords, context.CancellationToken);
-            storedLogCount = storedIds.Count();
-
-            _logger.LogInformation("Successfully stored {StoredLogCount} log records", storedLogCount);
+            storedLogCount = logRecords.Count;
+            _logger.LogInformation("Received {LogCount} log records", logRecords.Count);
         }
         catch (OperationCanceledException)
         {
