@@ -40,18 +40,6 @@ public class MetricWriteRepository : IMetricWriteRepository
         return Enumerable.Empty<long>();
     }
 
-    public Task<bool> DeleteMetricAsync(long id, CancellationToken cancellationToken = default)
-        => _store.DeleteMetricAsync(id, cancellationToken);
-
-    public Task<int> DeleteMetricsByNameAsync(string name, CancellationToken cancellationToken = default)
-        => _store.DeleteMetricsByNameAsync(name, cancellationToken);
-
-    public Task<int> DeleteMetricsByTimeRangeAsync(
-        DateTime startTime,
-        DateTime endTime,
-        CancellationToken cancellationToken = default)
-        => _store.DeleteMetricsByTimeRangeAsync(startTime, endTime, cancellationToken);
-
-    public Task<int> DeleteOldMetricsAsync(TimeSpan retentionPeriod, CancellationToken cancellationToken = default)
-        => _store.DeleteOldMetricsAsync(retentionPeriod, cancellationToken);
+    public Task<int> DeleteOldMetricDataPointsAsync(TimeSpan retentionPeriod, CancellationToken cancellationToken = default)
+        => _store.DeleteOldMetricDataPointsAsync(retentionPeriod, cancellationToken);
 }

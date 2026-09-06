@@ -88,7 +88,7 @@ public sealed class PostgreSqlBulkWriter(
         var resourceIds = await ResolveResourcesAsync(conn, metrics.Select(m => m.Resource), ct);
         var scopeIds = await ResolveScopesAsync(conn, metrics.Select(m => m.InstrumentationScope), ct);
 
-        var metricIds = await BulkInsertMetricsAsync(conn, metrics, resourceIds, scopeIds, ct);
+        var metricIds = await ResolveMetricIdsAsync(conn, metrics, resourceIds, scopeIds, ct);
 
         for (var i = 0; i < metrics.Count; i++)
         {
@@ -126,26 +126,30 @@ public sealed class PostgreSqlBulkWriter(
         IEnumerable<ResourceModel?> resources,
         CancellationToken ct)
     {
+        // Keyed by ResourceKey, never by the bare hash: two tenants running the same service with the
+        // same attributes share a hash, and collapsing them here would give the second tenant the
+        // first tenant's resources.id -- silently storing its telemetry under the wrong owner.
         var result = new Dictionary<string, long>(StringComparer.Ordinal);
-        var pending = new Dictionary<string, ResourceModel>(StringComparer.Ordinal);
+        var pending = new Dictionary<string, (string Hash, ResourceModel Model)>(StringComparer.Ordinal);
 
         foreach (var r in resources)
         {
             var model = NormalizeResource(r);
             var hash = HashResource(model);
-            if (result.ContainsKey(hash)) continue;
+            var key = ResourceKey(model.TenantId, hash);
+            if (result.ContainsKey(key)) continue;
 
-            if (cache.TryGetResource(hash, out var id))
-                result[hash] = id;
+            if (cache.TryGetResource(model.TenantId, hash, out var id))
+                result[key] = id;
             else
-                pending.TryAdd(hash, model);
+                pending.TryAdd(key, (hash, model));
         }
 
-        foreach (var (hash, model) in pending)
+        foreach (var (key, entry) in pending)
         {
-            var id = await UpsertResourceAsync(conn, model, hash, ct);
-            cache.SetResource(hash, id);
-            result[hash] = id;
+            var id = await UpsertResourceAsync(conn, entry.Model, entry.Hash, ct);
+            cache.SetResource(entry.Model.TenantId, entry.Hash, id);
+            result[key] = id;
         }
 
         return result;
@@ -276,7 +280,7 @@ public sealed class PostgreSqlBulkWriter(
         for (var i = 0; i < n; i++)
         {
             var r = records[i];
-            resIds[i] = resourceIds[HashResource(NormalizeResource(r.Resource))];
+            resIds[i] = resourceIds[ResourceKey(r.Resource)];
             scoIds[i] = scopeIds[HashScope(NormalizeScope(r.InstrumentationScope))];
             times[i] = r.TimeUnixNano ?? 0L;
             obsTimes[i] = r.ObservedTimeUnixNano;
@@ -361,7 +365,7 @@ public sealed class PostgreSqlBulkWriter(
         for (var i = 0; i < n; i++)
         {
             var (span, resource, scope) = spans[i];
-            resIds[i] = resourceIds[HashResource(NormalizeResource(resource))];
+            resIds[i] = resourceIds[ResourceKey(resource)];
             scoIds[i] = scopeIds[HashScope(NormalizeScope(scope))];
             traceIds[i] = span.TraceIdHex;
             spanIds[i] = span.SpanIdHex;
@@ -486,55 +490,109 @@ public sealed class PostgreSqlBulkWriter(
     }
 
     // =========================================================================
-    // BULK INSERT: METRICS
+    // RESOLVE: METRICS
     // =========================================================================
+    // metrics is a reference table deduplicated on (resource_id, name, type, scope_id).
+    // Mirrors ResolveResourcesAsync: dedup within the batch, consult the process cache,
+    // upsert only what is left, cache the result. A warm process issues no statement here
+    // at all -- which is also why description/unit refresh on a cold start rather than on
+    // every export.
 
-    private static async Task<long[]> BulkInsertMetricsAsync(
+    private async Task<long[]> ResolveMetricIdsAsync(
         NpgsqlConnection conn,
         List<MetricModel> metrics,
         Dictionary<string, long> resourceIds,
         Dictionary<string, long> scopeIds,
         CancellationToken ct)
     {
+        // DO UPDATE rather than DO NOTHING so RETURNING fires for conflicting rows too, giving
+        // one output row per input row. That is what lets this skip the "WITH ins AS (...)
+        // UNION ALL SELECT ... LIMIT 1" fallback that UpsertResourceAsync needs.
+        //
+        // Do NOT add a WHERE to the DO UPDATE to skip no-op writes: it would suppress RETURNING
+        // for unchanged rows and bring that fallback straight back.
+        //
+        // The key columns come back rather than relying on RETURNING row order, which PostgreSQL
+        // does not actually guarantee.
         const string sql = """
             INSERT INTO metrics (resource_id, scope_id, name, description, unit, type, created_at)
             SELECT unnest($1::bigint[]), unnest($2::bigint[]), unnest($3::text[]),
                    unnest($4::text[]),   unnest($5::text[]),   unnest($6::text[]), NOW()
-            RETURNING id
+            ON CONFLICT (resource_id, name, type, scope_id) DO UPDATE
+                SET description = EXCLUDED.description,
+                    unit        = EXCLUDED.unit
+            RETURNING id, resource_id, scope_id, name, type
             """;
 
         var n = metrics.Count;
-        var resIds = new long[n];
-        var scoIds = new long[n];
-        var names = new string[n];
-        var descs = new string?[n];
-        var units = new string?[n];
-        var types = new string[n];
+        var keys = new string[n];
+        var result = new Dictionary<string, long>(StringComparer.Ordinal);
+        var pending = new List<(string Key, long ResId, long ScoId, MetricModel M)>();
+        var pendingKeys = new HashSet<string>(StringComparer.Ordinal);
 
         for (var i = 0; i < n; i++)
         {
             var m = metrics[i];
-            resIds[i] = resourceIds[HashResource(NormalizeResource(m.Resource))];
-            scoIds[i] = scopeIds[HashScope(NormalizeScope(m.InstrumentationScope))];
-            names[i] = m.Name;
-            descs[i] = m.Description;
-            units[i] = m.Unit;
-            types[i] = m.Type.ToString();
+            var resId = resourceIds[ResourceKey(m.Resource)];
+            var scoId = scopeIds[HashScope(NormalizeScope(m.InstrumentationScope))];
+            var type = m.Type.ToString();
+            keys[i] = MetricKey(resId, scoId, m.Name, type);
+
+            if (result.ContainsKey(keys[i])) continue;
+            if (cache.TryGetMetric(keys[i], out var cached)) { result[keys[i]] = cached; continue; }
+
+            // Per-batch dedup is mandatory, not an optimization: the worker merges many OTLP
+            // exports into one batch, so the same metric recurs many times, and PostgreSQL
+            // raises 21000 "ON CONFLICT DO UPDATE command cannot affect row a second time" if
+            // one statement touches the same key twice.
+            if (pendingKeys.Add(keys[i]))
+                pending.Add((keys[i], resId, scoId, m));
         }
 
-        await using var cmd = new NpgsqlCommand(sql, conn);
-        cmd.Parameters.Add(new NpgsqlParameter { Value = resIds, NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Bigint });
-        cmd.Parameters.Add(new NpgsqlParameter { Value = scoIds, NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Bigint });
-        cmd.Parameters.Add(new NpgsqlParameter { Value = names, NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Text });
-        cmd.Parameters.Add(new NpgsqlParameter { Value = descs, NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Text });
-        cmd.Parameters.Add(new NpgsqlParameter { Value = units, NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Text });
-        cmd.Parameters.Add(new NpgsqlParameter { Value = types, NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Text });
+        if (pending.Count > 0)
+        {
+            // Deterministic lock order, so two collectors upserting the same key set cannot deadlock.
+            pending.Sort(static (a, b) => string.CompareOrdinal(a.Key, b.Key));
 
-        // PostgreSQL returns RETURNING rows in insertion order, which matches unnest array order.
+            var c = pending.Count;
+            var resIds = new long[c];
+            var scoIds = new long[c];
+            var names = new string[c];
+            var descs = new string?[c];
+            var units = new string?[c];
+            var types = new string[c];
+
+            for (var i = 0; i < c; i++)
+            {
+                var (_, resId, scoId, m) = pending[i];
+                resIds[i] = resId;
+                scoIds[i] = scoId;
+                names[i] = m.Name;
+                descs[i] = m.Description;
+                units[i] = m.Unit;
+                types[i] = m.Type.ToString();
+            }
+
+            await using var cmd = new NpgsqlCommand(sql, conn);
+            cmd.Parameters.Add(new NpgsqlParameter { Value = resIds, NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Bigint });
+            cmd.Parameters.Add(new NpgsqlParameter { Value = scoIds, NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Bigint });
+            cmd.Parameters.Add(new NpgsqlParameter { Value = names, NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Text });
+            cmd.Parameters.Add(new NpgsqlParameter { Value = descs, NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Text });
+            cmd.Parameters.Add(new NpgsqlParameter { Value = units, NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Text });
+            cmd.Parameters.Add(new NpgsqlParameter { Value = types, NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Text });
+
+            await using var reader = await cmd.ExecuteReaderAsync(ct);
+            while (await reader.ReadAsync(ct))
+            {
+                var id = reader.GetInt64(0);
+                var key = MetricKey(reader.GetInt64(1), reader.GetInt64(2), reader.GetString(3), reader.GetString(4));
+                result[key] = id;
+                cache.SetMetric(key, id);
+            }
+        }
+
         var ids = new long[n];
-        await using var reader = await cmd.ExecuteReaderAsync(ct);
-        for (var i = 0; i < n && await reader.ReadAsync(ct); i++)
-            ids[i] = reader.GetInt64(0);
+        for (var i = 0; i < n; i++) ids[i] = result[keys[i]];
         return ids;
     }
 

@@ -8,8 +8,15 @@ namespace Keryhe.Telemetry.ClickHouse.Services;
 /// Application-side surrogate-key generation. ClickHouse has no auto-increment or
 /// <c>RETURNING</c>, so the bulk writer computes the <c>Int64</c> ids that the relational
 /// providers rely on the database to generate. Ids for deduplicated rows are DETERMINISTIC
-/// (derived from the same SHA-256 hash used for dedup) so that re-inserting an identical
+/// (derived from the same key the table dedups on) so that re-inserting an identical
 /// resource/scope/span produces an identical row, which <c>ReplacingMergeTree</c> collapses.
+///
+/// "the same key the table dedups on" is exact, not approximate. <c>resources</c> is
+/// <c>ORDER BY (tenant_id, resource_hash)</c>, so its id must be derived from BOTH -- deriving it
+/// from the hash alone gave two tenants with identical resources two rows sharing one id, which the
+/// engine cannot collapse (id is not in the sort key) and which every read then joins to the wrong
+/// tenant. <c>instrumentation_scopes</c> is <c>ORDER BY scope_hash</c> with no tenant column, so the
+/// hash alone is genuinely its whole key.
 /// </summary>
 internal static class ClickHouseIds
 {
@@ -27,8 +34,8 @@ internal static class ClickHouseIds
 }
 
 /// <summary>
-/// Monotonic in-process id generator for rows that have no natural dedup key (metrics,
-/// span events/links, alert events). Seeded from the clock so ids stay roughly increasing
+/// Monotonic in-process id generator for rows that have no natural dedup key (span
+/// events/links, alert events). Seeded from the clock so ids stay roughly increasing
 /// across process restarts. Uniqueness is per-process, which is sufficient because these
 /// rows are never deduplicated on re-ingest.
 /// </summary>

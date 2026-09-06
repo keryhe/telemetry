@@ -31,7 +31,7 @@ PROVIDER="${1:-}"
 DATABASE="${2:-telemetry}"
 
 # Target version must match the value written by the schema scripts.
-TARGET_VERSION="2.6.0"
+TARGET_VERSION="2.7.0"
 
 if [[ -z "$PROVIDER" ]]; then
     echo "usage: $0 <postgresql|timescale|sqlserver|clickhouse|mysql> [database]" >&2

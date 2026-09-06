@@ -74,18 +74,6 @@ public class TraceWriteRepository : ITraceWriteRepository
         return Enumerable.Empty<long>();
     }
 
-    public Task<bool> DeleteTraceAsync(string traceIdHex, CancellationToken cancellationToken = default)
-        => _store.DeleteTraceAsync(traceIdHex, cancellationToken);
-
-    public Task<int> DeleteTracesByTimeRangeAsync(
-        DateTime startTime,
-        DateTime endTime,
-        CancellationToken cancellationToken = default)
-        => _store.DeleteTracesByTimeRangeAsync(startTime, endTime, cancellationToken);
-
-    public Task<bool> DeleteSpanAsync(
-        string traceIdHex,
-        string spanIdHex,
-        CancellationToken cancellationToken = default)
-        => _store.DeleteSpanAsync(traceIdHex, spanIdHex, cancellationToken);
+    public Task<int> DeleteOldTracesAsync(TimeSpan retentionPeriod, CancellationToken cancellationToken = default)
+        => _store.DeleteOldTracesAsync(retentionPeriod, cancellationToken);
 }

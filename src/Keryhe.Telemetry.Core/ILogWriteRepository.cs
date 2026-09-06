@@ -12,7 +12,7 @@ public interface ILogWriteRepository
     Task<long> StoreLogRecordAsync(LogRecordModel logRecord, CancellationToken cancellationToken = default);
     Task<IEnumerable<long>> StoreLogRecordsBatchAsync(IEnumerable<LogRecordModel> logRecords, CancellationToken cancellationToken = default);
 
-    // Delete operations
-    Task<bool> DeleteLogRecordAsync(long id, CancellationToken cancellationToken = default);
-    Task<int> DeleteLogRecordsByTimeRangeAsync(DateTime startTime, DateTime endTime, CancellationToken cancellationToken = default);
+    // Retention. See ITelemetryWriteStore for why this is the only delete offered and why it
+    // is deliberately not tenant-scoped.
+    Task<int> DeleteOldLogRecordsAsync(TimeSpan retentionPeriod, CancellationToken cancellationToken = default);
 }

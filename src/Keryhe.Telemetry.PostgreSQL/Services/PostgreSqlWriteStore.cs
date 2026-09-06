@@ -6,134 +6,125 @@ using Keryhe.Telemetry.Data;
 namespace Keryhe.Telemetry.PostgreSQL.Services;
 
 /// <summary>
-/// PostgreSQL (plain) implementation of <see cref="ITelemetryWriteStore"/> — the
-/// write-path <c>Delete*</c> operations. Child rows (span events/links, metric data
-/// points) are removed by the schema's <c>ON DELETE CASCADE</c> foreign keys, so the
-/// deletes target only the parent tables.
+/// PostgreSQL (plain) implementation of <see cref="ITelemetryWriteStore"/> — the write-path
+/// retention sweeps. Span events and links are removed by the schema's <c>ON DELETE CASCADE</c>
+/// foreign keys, so the trace sweep targets only <c>spans</c>.
+///
+/// The metric sweep is the exception to that pattern: it targets the data-point tables directly
+/// on <c>time_unix_nano</c> rather than cascading from <c>metrics</c>, because after the 2.7.0
+/// dedup a catalog row's <c>created_at</c> is "first seen" and cascading from it would discard a
+/// metric's entire history. See <see cref="ITelemetryWriteStore"/>.
+///
+/// The trace sweep is batched; the metric and log sweeps are not, and that asymmetry is deliberate.
+/// <c>spans</c> is the largest table in the schema and the only one nothing else prunes, so its first
+/// sweep is the biggest delete this system will ever run -- and on Postgres one enormous DELETE holds
+/// a transaction open long enough to block autovacuum database-wide, emits all its WAL at once, and
+/// loses every bit of progress if it is interrupted. The other two are left as single statements
+/// because no index suits a bounded batch: the metric data-point tables are covered by BRIN and a
+/// composite (metric_id, time_unix_nano), both of which serve one bulk delete well and a LIMIT badly.
+/// Batching those would mean adding indexes, which is a schema change.
 /// </summary>
 public sealed class PostgreSqlWriteStore(NpgsqlDataSource dataSource) : ITelemetryWriteStore
 {
-    // =========================================================================
-    // TRACES
-    // =========================================================================
+    /// <summary>
+    /// Rows removed per statement by the trace sweep. Bounded so a large first sweep does not run as
+    /// one long transaction -- on Postgres that would block autovacuum from reclaiming dead tuples
+    /// across the whole database, not just this table.
+    /// </summary>
+    private const int DeleteBatchSize = 50_000;
 
-    public async Task<bool> DeleteTraceAsync(string traceIdHex, CancellationToken cancellationToken = default)
+    /// <summary>
+    /// Postgres has neither <c>DELETE TOP (n)</c> nor <c>DELETE ... LIMIT n</c>, so the batch is bounded
+    /// by selecting a capped set of keys first.
+    ///
+    /// Keyed on <c>id</c> (the table's identity primary key) rather than <c>ctid</c>: the PK index is
+    /// already there and this reads as ordinary SQL. <c>ctid</c> is the idiom for a table with no
+    /// primary key, which is not the case here.
+    ///
+    /// The <c>ORDER BY</c> makes the sweep remove oldest-first, so an interrupted run leaves a clean
+    /// prefix rather than holes scattered through the table. It costs nothing: <c>idx_start_time</c> is
+    /// DESC and Postgres reads it backwards without a sort. The <c>LIMIT</c> inside the CTE is what lets
+    /// the planner stop walking that index early instead of locating every matching row.
+    ///
+    /// Not a <c>const</c>: C# constant interpolated strings require every hole to be a constant string,
+    /// and <see cref="DeleteBatchSize"/> is an int.
+    /// </summary>
+    private static readonly string TraceSweepSql = $"""
+        WITH doomed AS (
+            SELECT id FROM spans
+            WHERE start_time_unix_nano < @cutoff
+            ORDER BY start_time_unix_nano
+            LIMIT {DeleteBatchSize}
+        )
+        DELETE FROM spans WHERE id IN (SELECT id FROM doomed)
+        """;
+
+    public async Task<int> DeleteOldTracesAsync(TimeSpan retentionPeriod, CancellationToken cancellationToken = default)
     {
-        if (string.IsNullOrEmpty(traceIdHex))
-            throw new ArgumentException("Trace ID cannot be null or empty", nameof(traceIdHex));
+        var cutoffNano = CutoffNano(retentionPeriod);
 
         await using var conn = await dataSource.OpenConnectionAsync(cancellationToken);
-        var affected = await conn.ExecuteAsync(new CommandDefinition(
-            "DELETE FROM spans WHERE trace_id = @traceId",
-            new { traceId = traceIdHex }, cancellationToken: cancellationToken));
-        return affected > 0;
+
+        // Each statement commits on its own -- that is the whole point, so do NOT wrap this loop in a
+        // transaction. Doing so would reproduce exactly the long-running transaction the batching is
+        // here to avoid. The loop terminates because the cutoff is computed once, so rows arriving
+        // during the sweep are never older than it.
+        //
+        // The returned count is span rows. span_events and span_links come out via ON DELETE CASCADE,
+        // so the real work per batch is larger than DeleteBatchSize suggests.
+        var total = 0;
+        int batch;
+        do
+        {
+            batch = await conn.ExecuteAsync(new CommandDefinition(
+                TraceSweepSql, new { cutoff = cutoffNano }, cancellationToken: cancellationToken));
+            total += batch;
+        } while (batch == DeleteBatchSize);
+
+        return total;
     }
 
-    public async Task<int> DeleteTracesByTimeRangeAsync(DateTime startTime, DateTime endTime, CancellationToken cancellationToken = default)
+    public async Task<int> DeleteOldMetricDataPointsAsync(TimeSpan retentionPeriod, CancellationToken cancellationToken = default)
     {
-        if (startTime >= endTime)
-            throw new ArgumentException("Start time must be before end time");
-
-        var startNano = TimeConversion.DateTimeToUnixNano(startTime);
-        var endNano   = TimeConversion.DateTimeToUnixNano(endTime);
+        var cutoffNano = CutoffNano(retentionPeriod);
 
         await using var conn = await dataSource.OpenConnectionAsync(cancellationToken);
 
-        // Match the prior EF behavior: report the number of distinct traces affected.
-        var traceCount = await conn.ExecuteScalarAsync<int>(new CommandDefinition(
-            "SELECT COUNT(DISTINCT trace_id) FROM spans WHERE start_time_unix_nano BETWEEN @start AND @end",
-            new { start = startNano, end = endNano }, cancellationToken: cancellationToken));
+        var total = 0;
+        foreach (var table in TelemetryIngestionHelpers.TimePrunedMetricTables)
+        {
+            total += await conn.ExecuteAsync(new CommandDefinition(
+                $"DELETE FROM {table} WHERE time_unix_nano < @cutoff",
+                new { cutoff = cutoffNano }, cancellationToken: cancellationToken));
+        }
 
-        await conn.ExecuteAsync(new CommandDefinition(
-            "DELETE FROM spans WHERE start_time_unix_nano BETWEEN @start AND @end",
-            new { start = startNano, end = endNano }, cancellationToken: cancellationToken));
-
-        return traceCount;
+        return total;
     }
 
-    public async Task<bool> DeleteSpanAsync(string traceIdHex, string spanIdHex, CancellationToken cancellationToken = default)
+    public async Task<int> DeleteOldLogRecordsAsync(TimeSpan retentionPeriod, CancellationToken cancellationToken = default)
     {
-        if (string.IsNullOrEmpty(traceIdHex))
-            throw new ArgumentException("Trace ID cannot be null or empty", nameof(traceIdHex));
-        if (string.IsNullOrEmpty(spanIdHex))
-            throw new ArgumentException("Span ID cannot be null or empty", nameof(spanIdHex));
-
-        await using var conn = await dataSource.OpenConnectionAsync(cancellationToken);
-        var affected = await conn.ExecuteAsync(new CommandDefinition(
-            "DELETE FROM spans WHERE trace_id = @traceId AND span_id = @spanId",
-            new { traceId = traceIdHex, spanId = spanIdHex }, cancellationToken: cancellationToken));
-        return affected > 0;
-    }
-
-    // =========================================================================
-    // METRICS
-    // =========================================================================
-
-    public async Task<bool> DeleteMetricAsync(long id, CancellationToken cancellationToken = default)
-    {
-        await using var conn = await dataSource.OpenConnectionAsync(cancellationToken);
-        var affected = await conn.ExecuteAsync(new CommandDefinition(
-            "DELETE FROM metrics WHERE id = @id",
-            new { id }, cancellationToken: cancellationToken));
-        return affected > 0;
-    }
-
-    public async Task<int> DeleteMetricsByNameAsync(string name, CancellationToken cancellationToken = default)
-    {
-        if (string.IsNullOrEmpty(name))
-            throw new ArgumentException("Metric name cannot be null or empty", nameof(name));
+        var cutoffNano = CutoffNano(retentionPeriod);
 
         await using var conn = await dataSource.OpenConnectionAsync(cancellationToken);
         return await conn.ExecuteAsync(new CommandDefinition(
-            "DELETE FROM metrics WHERE name = @name",
-            new { name }, cancellationToken: cancellationToken));
+            "DELETE FROM log_records WHERE time_unix_nano < @cutoff",
+            new { cutoff = cutoffNano }, cancellationToken: cancellationToken));
     }
 
-    public async Task<int> DeleteMetricsByTimeRangeAsync(DateTime startTime, DateTime endTime, CancellationToken cancellationToken = default)
+    /// <summary>
+    /// The retention cutoff as unix nanoseconds.
+    ///
+    /// The negative guard is load-bearing, not defensive noise: a negative period puts the cutoff
+    /// in the FUTURE, at which point every predicate here matches every row in the table. On a
+    /// retention API that is the difference between a no-op and erasing the telemetry store, so it
+    /// fails loudly rather than quietly succeeding.
+    /// </summary>
+    private static long CutoffNano(TimeSpan retentionPeriod)
     {
-        if (startTime >= endTime)
-            throw new ArgumentException("Start time must be before end time");
+        if (retentionPeriod < TimeSpan.Zero)
+            throw new ArgumentOutOfRangeException(nameof(retentionPeriod),
+                "Retention period cannot be negative; that would delete all telemetry.");
 
-        await using var conn = await dataSource.OpenConnectionAsync(cancellationToken);
-        return await conn.ExecuteAsync(new CommandDefinition(
-            "DELETE FROM metrics WHERE created_at BETWEEN @start AND @end",
-            new { start = startTime, end = endTime }, cancellationToken: cancellationToken));
-    }
-
-    public async Task<int> DeleteOldMetricsAsync(TimeSpan retentionPeriod, CancellationToken cancellationToken = default)
-    {
-        var cutoff = DateTime.UtcNow - retentionPeriod;
-
-        await using var conn = await dataSource.OpenConnectionAsync(cancellationToken);
-        return await conn.ExecuteAsync(new CommandDefinition(
-            "DELETE FROM metrics WHERE created_at < @cutoff",
-            new { cutoff }, cancellationToken: cancellationToken));
-    }
-
-    // =========================================================================
-    // LOGS
-    // =========================================================================
-
-    public async Task<bool> DeleteLogRecordAsync(long id, CancellationToken cancellationToken = default)
-    {
-        await using var conn = await dataSource.OpenConnectionAsync(cancellationToken);
-        var affected = await conn.ExecuteAsync(new CommandDefinition(
-            "DELETE FROM log_records WHERE id = @id",
-            new { id }, cancellationToken: cancellationToken));
-        return affected > 0;
-    }
-
-    public async Task<int> DeleteLogRecordsByTimeRangeAsync(DateTime startTime, DateTime endTime, CancellationToken cancellationToken = default)
-    {
-        if (startTime >= endTime)
-            throw new ArgumentException("Start time must be before end time");
-
-        var startNano = TimeConversion.DateTimeToUnixNano(startTime);
-        var endNano   = TimeConversion.DateTimeToUnixNano(endTime);
-
-        await using var conn = await dataSource.OpenConnectionAsync(cancellationToken);
-        return await conn.ExecuteAsync(new CommandDefinition(
-            "DELETE FROM log_records WHERE time_unix_nano BETWEEN @start AND @end",
-            new { start = startNano, end = endNano }, cancellationToken: cancellationToken));
+        return TimeConversion.DateTimeToUnixNano(DateTime.UtcNow - retentionPeriod);
     }
 }

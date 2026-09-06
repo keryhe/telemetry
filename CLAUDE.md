@@ -37,16 +37,18 @@ psql -d telemetry -f schema/PostgreSQL-Schema.sql      # PostgreSQL (plain)
 psql -d telemetry -f schema/Timescale-Schema.sql       # PostgreSQL + TimescaleDB
 sqlcmd -d telemetry -i schema/SqlServer-Schema.sql     # SqlServer
 clickhouse-client --database telemetry --multiquery < schema/ClickHouse-Schema.sql  # ClickHouse
+mysql telemetry < schema/MySQL-Schema.sql               # MySQL
 
 # Or use the runner (skips if the target schema_version is already applied):
-schema/apply-schema.sh <postgresql|timescale|sqlserver|clickhouse> [database]
+schema/apply-schema.sh <postgresql|timescale|sqlserver|clickhouse|mysql> [database]
 ```
 
 There is one schema script per supported provider, all producing the same logical
 table/column set: `schema/PostgreSQL-Schema.sql` (plain Postgres), `schema/Timescale-Schema.sql`
 (Postgres + TimescaleDB hypertables/compression/retention/continuous aggregate),
-`schema/SqlServer-Schema.sql`, and `schema/ClickHouse-Schema.sql` (columnar MergeTree family;
-see the ClickHouse notes below).
+`schema/SqlServer-Schema.sql`, `schema/MySQL-Schema.sql`, and `schema/ClickHouse-Schema.sql`
+(columnar MergeTree family; see the ClickHouse notes below). A schema change edits all five plus
+`TARGET_VERSION` in `apply-schema.sh`, in one commit.
 
 There are no .NET test projects in the solution. The Angular project has `npm test`
 (Karma/Jasmine) but no meaningful tests are set up.
@@ -96,6 +98,7 @@ REST API consumed by an Angular single-page application.
 | `Keryhe.Telemetry.Timescale` | TimescaleDB provider implementation |
 | `Keryhe.Telemetry.SqlServer` | SQL Server provider implementation (Microsoft.Data.SqlClient + Dapper) |
 | `Keryhe.Telemetry.ClickHouse` | ClickHouse provider implementation (ClickHouse.Client bulk-copy writes + Dapper reads) |
+| `Keryhe.Telemetry.MySql` | MySQL provider implementation (MySqlConnector + Dapper) |
 | `Keryhe.Telemetry.Collector` | gRPC services + OpenTelemetry proto files → generated stubs (class library) |
 | `Keryhe.Telemetry.Collector.Server` | Thin ASP.NET Core host that maps the gRPC services and runs the ingestion worker |
 | `Keryhe.Telemetry.Api` | REST API controllers, tenant middleware, and read-service wiring (class library) |
@@ -148,7 +151,7 @@ and `Keryhe.Telemetry.Server` calls **both** plus `AddAlerting` and the SPA stat
 ### Provider abstraction (the central pattern)
 
 The database provider is selected at runtime by the **`Database:Provider`** config key
-(`"PostgreSQL"`, `"Timescale"`, `"SqlServer"`, or `"ClickHouse"`). Each provider project exposes
+(`"PostgreSQL"`, `"Timescale"`, `"SqlServer"`, `"ClickHouse"`, or `"MySql"`). Each provider project exposes
 `ServiceCollectionExtensions` with `Add<Provider>WriteServices` / `Add<Provider>ReadServices`,
 and the hosts `switch` on the config key to call the right one. An unknown/missing provider
 throws at startup.
@@ -157,10 +160,12 @@ throws at startup.
 relational three in a few deliberate ways (all confined to the provider; Core interfaces are
 unchanged):
 - **App-generated ids.** No auto-increment / `RETURNING`. `ClickHouseBulkWriter` computes the
-  `Int64` surrogate keys the read repos join on: resource/scope ids are derived deterministically
-  from the dedup hash, span ids from `(trace_id, span_id)`, and metrics/events/links use a
+  `Int64` surrogate keys the read repos join on, always from the table's full `ORDER BY` key:
+  resource ids from `(tenant_id, resource_hash)`, scope ids from `scope_hash` (scopes carry no
+  tenant), span ids from `(trace_id, span_id)`, metric ids from
+  `(resource_id, scope_id, name, type)` via `ClickHouseIds.FromKey`, and events/links use a
   monotonic in-process generator (`ClickHouseIds` / `RowId`).
-- **Dedup via `ReplacingMergeTree`, not `ON CONFLICT`.** resources/scopes/spans collapse on their
+- **Dedup via `ReplacingMergeTree`, not `ON CONFLICT`.** resources/scopes/spans/metrics collapse on their
   `ORDER BY` key at merge time, backed by `ResourceScopeCache` + per-batch dedup. Dedup is
   *eventual* — reads may briefly see a duplicate before a merge (`OPTIMIZE ... FINAL` forces it).
 - **Writes go through `ClickHouseBulkCopy`** (async batched insert); reads reuse the shared Dapper
@@ -204,17 +209,47 @@ return partial-success responses.
 `Alerts`, `Tenants` — each wraps the corresponding read repository with query/aggregation
 logic.
 
-**Hash-based deduplication**: Resources and InstrumentationScopes are deduplicated via hash
-columns (`ResourceHash`, `ScopeHash`) with UNIQUE constraints — inserts use ON CONFLICT DO
-NOTHING/UPDATE (Postgres) or MERGE (SqlServer). An in-memory `ResourceScopeCache` (singleton
-`ConcurrentDictionary`) short-circuits DB lookups for resources/scopes already seen this
-process lifetime.
+**Deduplication of the reference tables**: three entities are deduplicated, by two different
+mechanisms, and the distinction is deliberate.
+
+*Hash-keyed* — Resources and InstrumentationScopes dedup on an unbounded attribute map, so they
+carry a SHA-256 hash column (`ResourceHash`, `ScopeHash`) with a UNIQUE constraint.
+
+**A resource hash is not a resource identity.** `HashResource` covers only schema URL + attributes,
+so two tenants running the same service with the same attributes produce the same hash — which is
+why every schema keys resources on `UNIQUE (tenant_id, resource_hash)`, and why anything holding a
+resource identity in memory must go through `TelemetryIngestionHelpers.ResourceKey(tenantId, hash)`.
+`ResourceScopeCache.TryGetResource`/`SetResource` take the tenant as a parameter for exactly this
+reason. Scopes are the deliberate exception: `UNIQUE (scope_hash)` with no tenant, because a scope is
+an instrumentation library and is shared across tenants on purpose.
+
+*Natural-keyed* — Metrics dedup on `uk_metric_identity UNIQUE (resource_id, name, type, scope_id)`,
+four bounded scalar columns already on the row, so there is no metric hash column. `type` is part
+of the key rather than merely refreshed on conflict: the write path picks a data-point table from
+the *incoming* type while the read path picks from the *stored* type, so a metric that changed
+type and matched an existing row would write points the reader never looks for. Added in schema
+2.7.0 — before it, `metrics` grew by one row per export cycle per metric.
+
+Inserts use ON CONFLICT DO UPDATE (Postgres/Timescale), MERGE ... WITH (HOLDLOCK) (SqlServer),
+ON DUPLICATE KEY UPDATE (MySql) or `ReplacingMergeTree` (ClickHouse). A singleton
+`ResourceScopeCache` (`ConcurrentDictionary`) short-circuits DB lookups for all three, so a warm
+process resolves them with no round trip. The cache needs no invalidation because nothing deletes a
+resource, scope or metrics catalog row — `ITelemetryWriteStore` offers retention only. If a delete
+that removes catalog rows is ever added, it must clear the cache, or every data-point insert fails
+its foreign key on each subsequent batch until the process restarts.
+
+Because `metrics.created_at` now means "first seen" rather than approximately the data timestamp,
+metric retention prunes `TelemetryIngestionHelpers.TimePrunedMetricTables` — the five data-point
+tables plus `exemplars` — on `time_unix_nano`, instead of cascading from `metrics`.
 
 **JSONB for attributes**: OpenTelemetry key-value attributes are stored as JSONB/`nvarchar`
 columns (`Attributes`, `FilteredAttributes`) rather than normalized tables; Dapper maps them
 via `JsonAttributesTypeHandler`.
 
-**Multi-tenant architecture**: All telemetry tables include `tenant_id`. The ingestion server
+**Multi-tenant architecture**: Telemetry is tenant-scoped *through* `resources.tenant_id` — only
+`resources`, `api_keys` and `alert_rules` carry a `tenant_id` column, while every signal table
+(`spans`, `metrics`, the data-point tables, `log_records`, …) carries just `resource_id` and joins
+to reach its tenant. The ingestion server
 resolves tenants by hashing the `Authorization: Bearer <key>` gRPC header against `api_keys`
 (`ITenantResolver`). The API resolves the tenant in `TenantMiddleware` and carries it via a
 scoped `ITenantContext` (`ApiTenantContext`); read queries filter on `tenant_id`.
@@ -229,7 +264,7 @@ explicitly if you wire it up.
 
 ### Database
 
-Providers: plain PostgreSQL, PostgreSQL + TimescaleDB, or SQL Server. Under TimescaleDB, the
+Providers: plain PostgreSQL, PostgreSQL + TimescaleDB, SQL Server, ClickHouse, or MySQL. Under TimescaleDB, the
 metric data-point tables and `log_records` are hypertables (partitioned on `time_unix_nano`);
 compression activates at 7 days; retention drops metrics at 180 days and logs at 90 days;
 `log_severity_stats_daily` is a continuous aggregate (refreshes every 5 minutes).

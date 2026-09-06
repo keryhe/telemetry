@@ -79,8 +79,7 @@ public class TraceService : OpenTelemetry.Proto.Collector.Trace.V1.TraceService.
             var storedTraceCount = storedTraceIds.Count();
             totalSpanCount = traces.Sum(t => t.Spans.Count);
             storedSpanCount = traces.Where(t => storedTraceIds.Contains(t.Spans.FirstOrDefault()?.TraceIdHex ?? "")) .Sum(t => t.Spans.Count);
-            _logger.LogInformation("Received {TraceCount} traces with {TotalSpanCount} spans", 
-                storedTraceCount, totalSpanCount);
+            _logger.LogInformation("Received {TraceCount} traces with {TotalSpanCount} spans", storedTraceCount, totalSpanCount);
         }
         catch (OperationCanceledException)
         {
@@ -156,18 +155,24 @@ public class TraceService : OpenTelemetry.Proto.Collector.Trace.V1.TraceService.
     }
 
     /// <summary>
-    /// Converts OTLP Resource to ResourceModel
+    /// Converts OTLP Resource to ResourceModel.
+    ///
+    /// Never returns null, even when the export carries no Resource block. OTLP permits omitting it,
+    /// and the fallback has to be built HERE because this is the last point where the authenticated
+    /// tenant is still known: NormalizeResource's own null fallback runs inside the bulk writer, which
+    /// has no tenant and can only default to tenant 1 -- filing a resource-less export from any tenant
+    /// under tenant 1's telemetry.
     /// </summary>
-    private ResourceModel? ConvertResource(OpenTelemetry.Proto.Trace.V1.ResourceSpans? resourceSpan, long tenantId)
+    private ResourceModel ConvertResource(OpenTelemetry.Proto.Trace.V1.ResourceSpans? resourceSpan, long tenantId)
     {
-        if (resourceSpan?.Resource == null)
-            return null;
-
         return new ResourceModel
         {
             TenantId = tenantId,
-            SchemaUrl = string.IsNullOrEmpty(resourceSpan.SchemaUrl) ? null : resourceSpan.SchemaUrl,
-            Attributes = ConvertAttributes(resourceSpan.Resource.Attributes)
+            SchemaUrl = string.IsNullOrEmpty(resourceSpan?.SchemaUrl) ? null : resourceSpan.SchemaUrl,
+            // Mirrors NormalizeResource's synthetic resource, but carrying the real tenant.
+            Attributes = resourceSpan?.Resource == null
+                ? new Dictionary<string, object> { { "service.name", "unknown" } }
+                : ConvertAttributes(resourceSpan.Resource.Attributes)
         };
     }
 

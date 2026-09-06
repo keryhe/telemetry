@@ -183,11 +183,30 @@ CREATE TABLE metrics (
         CHECK ([type] IN ('GAUGE', 'SUM', 'HISTOGRAM', 'EXPONENTIAL_HISTOGRAM', 'SUMMARY')),
     created_at  DATETIME2     NOT NULL DEFAULT SYSDATETIME(),
     CONSTRAINT fk_metrics_resources FOREIGN KEY (resource_id) REFERENCES resources (id),
-    CONSTRAINT fk_metrics_scopes    FOREIGN KEY (scope_id)    REFERENCES instrumentation_scopes (id)
+    CONSTRAINT fk_metrics_scopes    FOREIGN KEY (scope_id)    REFERENCES instrumentation_scopes (id),
+    -- Metric identity: one row per (resource, scope, name, type), not one row per OTLP
+    -- export cycle. Resources and instrumentation_scopes dedup on an unbounded attribute map
+    -- and therefore need a SHA-256 hash column; a metric is identified by bounded scalar
+    -- columns that already exist here, so a plain composite UNIQUE is enough.
+    --
+    -- type is part of the key, not merely updated on conflict. The write path chooses which
+    -- data-point table to insert into from the INCOMING type while the read path chooses which
+    -- to read from the STORED type, so a metric that changes type mid-stream and matched an
+    -- existing row would write points the reader would never look for. Keying on type makes
+    -- such a change a new row instead: old points stay readable, new points are found.
+    --
+    -- Column order is deliberate. Leading with (resource_id, name, ...) makes the former
+    -- idx_resource_name an exact redundant left prefix, so it is dropped below.
+    -- Key bytes: 8 + 510 + 60 + 8 = 586, well inside the 1700-byte nonclustered limit.
+    -- NOTE: under a case-insensitive database collation (the LocalDB default) this treats
+    -- metric names differing only by case as the same metric, which PostgreSQL and
+    -- ClickHouse do not. OTLP names are case-sensitive; no real instrumentation emits
+    -- case-variant duplicates, so this is accepted rather than forced with a BIN2 collation.
+    CONSTRAINT uk_metric_identity UNIQUE (resource_id, name, [type], scope_id)
 );
 CREATE INDEX idx_metrics_name  ON metrics (name);
 CREATE INDEX idx_type          ON metrics ([type]);
-CREATE INDEX idx_resource_name ON metrics (resource_id, name);
+-- idx_resource_name (resource_id, name) dropped in 2.7.0: now a left prefix of uk_metric_identity.
 GO
 
 -- Gauge data points.
@@ -224,7 +243,10 @@ CREATE TABLE sum_data_points (
     attributes_json         NVARCHAR(MAX),
     CONSTRAINT fk_sum_data_points_metrics FOREIGN KEY (metric_id) REFERENCES metrics (id) ON DELETE CASCADE
 );
+-- Standalone time index added in 2.7.0: metric retention now deletes from the data-point
+-- tables by time_unix_nano alone, which without this would full-scan.
 CREATE INDEX idx_sum_metric_time ON sum_data_points (metric_id, time_unix_nano DESC);
+CREATE INDEX idx_sum_time        ON sum_data_points (time_unix_nano DESC);
 CREATE INDEX idx_temporality     ON sum_data_points (aggregation_temporality);
 GO
 
@@ -248,6 +270,7 @@ CREATE TABLE histogram_data_points (
     CONSTRAINT fk_histogram_data_points_metrics FOREIGN KEY (metric_id) REFERENCES metrics (id) ON DELETE CASCADE
 );
 CREATE INDEX idx_histogram_metric_time ON histogram_data_points (metric_id, time_unix_nano DESC);
+CREATE INDEX idx_histogram_time        ON histogram_data_points (time_unix_nano DESC);
 GO
 
 -- Exponential histogram data points.
@@ -274,6 +297,7 @@ CREATE TABLE exponential_histogram_data_points (
     CONSTRAINT fk_exponential_histogram_data_points_metrics FOREIGN KEY (metric_id) REFERENCES metrics (id) ON DELETE CASCADE
 );
 CREATE INDEX idx_exp_histogram_metric_time ON exponential_histogram_data_points (metric_id, time_unix_nano DESC);
+CREATE INDEX idx_exp_histogram_time        ON exponential_histogram_data_points (time_unix_nano DESC);
 GO
 
 -- Summary data points.
@@ -290,6 +314,7 @@ CREATE TABLE summary_data_points (
     CONSTRAINT fk_summary_data_points_metrics FOREIGN KEY (metric_id) REFERENCES metrics (id) ON DELETE CASCADE
 );
 CREATE INDEX idx_summary_metric_time ON summary_data_points (metric_id, time_unix_nano DESC);
+CREATE INDEX idx_summary_time        ON summary_data_points (time_unix_nano DESC);
 GO
 
 -- Exemplars (regular table, soft-referenced by data point tables via exemplar_id).
@@ -499,7 +524,7 @@ GO
 -- Only reached when every statement above succeeded, so a partial apply cannot
 -- leave a false version marker for the apply-schema.sh gate.
 MERGE schema_version AS target
-USING (VALUES (N'2.6.0')) AS src (version)
+USING (VALUES (N'2.7.0')) AS src (version)
 ON target.version = src.version
 WHEN MATCHED     THEN UPDATE SET applied_at = SYSDATETIME()
 WHEN NOT MATCHED THEN INSERT (version, applied_at) VALUES (src.version, SYSDATETIME());

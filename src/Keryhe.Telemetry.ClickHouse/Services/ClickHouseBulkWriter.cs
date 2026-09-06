@@ -41,7 +41,7 @@ public sealed class ClickHouseBulkWriter(
         var rows = records.Select(r => new object?[]
         {
             RowId.Next(),
-            resourceIds[HashResource(NormalizeResource(r.Resource))],
+            resourceIds[ResourceKey(r.Resource)],
             scopeIds[HashScope(NormalizeScope(r.InstrumentationScope))],
             r.TimeUnixNano ?? 0L,
             r.ObservedTimeUnixNano,
@@ -100,7 +100,7 @@ public sealed class ClickHouseBulkWriter(
                 span.TraceIdHex,
                 span.SpanIdHex,
                 span.ParentSpanIdHex,
-                resourceIds[HashResource(NormalizeResource(resource))],
+                resourceIds[ResourceKey(resource)],
                 scopeIds[HashScope(NormalizeScope(scope))],
                 span.Name,
                 span.Kind.ToString(),
@@ -162,26 +162,7 @@ public sealed class ClickHouseBulkWriter(
         var resourceIds = await ResolveResourcesAsync(conn, metrics.Select(m => m.Resource), ct);
         var scopeIds    = await ResolveScopesAsync(conn, metrics.Select(m => m.InstrumentationScope), ct);
 
-        // Each metric gets a fresh in-process id; data points reference it within this flush.
-        var metricIds = new long[metrics.Count];
-        var metricRows = new List<object?[]>(metrics.Count);
-        for (var i = 0; i < metrics.Count; i++)
-        {
-            var m = metrics[i];
-            metricIds[i] = RowId.Next();
-            metricRows.Add(
-            [
-                metricIds[i],
-                resourceIds[HashResource(NormalizeResource(m.Resource))],
-                scopeIds[HashScope(NormalizeScope(m.InstrumentationScope))],
-                m.Name,
-                m.Description,
-                m.Unit,
-                m.Type.ToString()
-            ]);
-        }
-
-        await BulkInsertAsync(conn, "metrics", MetricColumns, metricRows, ct);
+        var metricIds = await ResolveMetricIdsAsync(conn, metrics, resourceIds, scopeIds, ct);
 
         for (var i = 0; i < metrics.Count; i++)
         {
@@ -242,6 +223,60 @@ public sealed class ClickHouseBulkWriter(
         logger.LogDebug("Flushed {Count} metrics", metrics.Count);
     }
 
+    // metrics ids are derived deterministically from the dedup key rather than allocated from
+    // RowId, so re-inserting the same metric produces a byte-identical row that
+    // ReplacingMergeTree collapses -- the same approach resources/scopes/spans already use. The
+    // cache short-circuits repeat inserts; residual duplicates collapse at merge time.
+    private async Task<long[]> ResolveMetricIdsAsync(
+        ClickHouseConnection conn,
+        List<MetricModel> metrics,
+        Dictionary<string, long> resourceIds,
+        Dictionary<string, long> scopeIds,
+        CancellationToken ct)
+    {
+        var n = metrics.Count;
+        var keys = new string[n];
+        var result = new Dictionary<string, long>(StringComparer.Ordinal);
+        var pending = new List<(string Key, long ResId, long ScoId, MetricModel M)>();
+        var pendingKeys = new HashSet<string>(StringComparer.Ordinal);
+
+        for (var i = 0; i < n; i++)
+        {
+            var m = metrics[i];
+            var resId = resourceIds[ResourceKey(m.Resource)];
+            var scoId = scopeIds[HashScope(NormalizeScope(m.InstrumentationScope))];
+            keys[i] = MetricKey(resId, scoId, m.Name, m.Type.ToString());
+
+            if (result.ContainsKey(keys[i])) continue;
+            if (cache.TryGetMetric(keys[i], out var cached)) { result[keys[i]] = cached; continue; }
+            if (pendingKeys.Add(keys[i]))
+                pending.Add((keys[i], resId, scoId, m));
+        }
+
+        if (pending.Count > 0)
+        {
+            var rows = new List<object?[]>(pending.Count);
+            foreach (var (key, resId, scoId, m) in pending)
+            {
+                // FromKey, not FromHash: FromHash expects a 64-char hex SHA-256 string, and metrics
+                // deliberately have no hash column. FromKey hashes the natural key itself, exactly
+                // as spans do with (trace_id, span_id). The two are NOT interchangeable -- FromHash
+                // parses leading hex chars big-endian, FromKey takes the digest's first 8 bytes via
+                // BitConverter -- so never assume they agree on the same input.
+                var id = ClickHouseIds.FromKey(key);
+                rows.Add([id, resId, scoId, m.Name, m.Description, m.Unit, m.Type.ToString()]);
+                cache.SetMetric(key, id);
+                result[key] = id;
+            }
+
+            await BulkInsertAsync(conn, "metrics", MetricColumns, rows, ct);
+        }
+
+        var ids = new long[n];
+        for (var i = 0; i < n; i++) ids[i] = result[keys[i]];
+        return ids;
+    }
+
     private static readonly string[] MetricColumns =
         ["id", "resource_id", "scope_id", "name", "description", "unit", "type"];
 
@@ -285,29 +320,40 @@ public sealed class ClickHouseBulkWriter(
     private async Task<Dictionary<string, long>> ResolveResourcesAsync(
         ClickHouseConnection conn, IEnumerable<ResourceModel?> resources, CancellationToken ct)
     {
+        // Keyed by ResourceKey, never by the bare hash: two tenants running the same service with the
+        // same attributes share a hash, and collapsing them here would give the second tenant the
+        // first tenant's resources.id -- silently storing its telemetry under the wrong owner.
         var result  = new Dictionary<string, long>(StringComparer.Ordinal);
-        var pending = new Dictionary<string, ResourceModel>(StringComparer.Ordinal);
+        var pending = new Dictionary<string, (string Hash, ResourceModel Model)>(StringComparer.Ordinal);
 
         foreach (var r in resources)
         {
             var model = NormalizeResource(r);
             var hash  = HashResource(model);
-            if (result.ContainsKey(hash)) continue;
-            if (cache.TryGetResource(hash, out var id))
-                result[hash] = id;
+            var key   = ResourceKey(model.TenantId, hash);
+            if (result.ContainsKey(key)) continue;
+            if (cache.TryGetResource(model.TenantId, hash, out var id))
+                result[key] = id;
             else
-                pending.TryAdd(hash, model);
+                pending.TryAdd(key, (hash, model));
         }
 
         if (pending.Count > 0)
         {
             var rows = new List<object?[]>(pending.Count);
-            foreach (var (hash, model) in pending)
+            foreach (var (key, entry) in pending)
             {
-                var id = ClickHouseIds.FromHash(hash);
-                rows.Add([id, model.TenantId, hash, model.SchemaUrl, SerializeDeterministicJson(model.Attributes)]);
-                cache.SetResource(hash, id);
-                result[hash] = id;
+                // FromKey over the tenant-qualified key, NOT FromHash over the bare hash. The table is
+                // ORDER BY (tenant_id, resource_hash) but `id` is not in that key, so deriving the id
+                // from the hash alone gave two tenants with identical resources two rows sharing one
+                // id -- which ReplacingMergeTree never collapses, and which every read then joins to
+                // the wrong tenant's row. FromHash also requires a bare 64-char hex string, which this
+                // key is not.
+                var id = ClickHouseIds.FromKey(key);
+                rows.Add([id, entry.Model.TenantId, entry.Hash, entry.Model.SchemaUrl,
+                          SerializeDeterministicJson(entry.Model.Attributes)]);
+                cache.SetResource(entry.Model.TenantId, entry.Hash, id);
+                result[key] = id;
             }
             await BulkInsertAsync(conn, "resources", ResourceColumns, rows, ct);
         }

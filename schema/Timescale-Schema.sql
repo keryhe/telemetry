@@ -159,11 +159,25 @@ CREATE TABLE metrics (
         CHECK ("type" IN ('GAUGE', 'SUM', 'HISTOGRAM', 'EXPONENTIAL_HISTOGRAM', 'SUMMARY')),
     "created_at"   TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
     CONSTRAINT fk_metrics_resources FOREIGN KEY ("resource_id") REFERENCES resources ("id"),
-    CONSTRAINT fk_metrics_scopes    FOREIGN KEY ("scope_id")    REFERENCES instrumentation_scopes ("id")
+    CONSTRAINT fk_metrics_scopes    FOREIGN KEY ("scope_id")    REFERENCES instrumentation_scopes ("id"),
+    -- Metric identity: one row per (resource, scope, name, type), not one row per OTLP
+    -- export cycle. Resources and instrumentation_scopes dedup on an unbounded attribute map
+    -- and therefore need a SHA-256 hash column; a metric is identified by bounded scalar
+    -- columns that already exist here, so a plain composite UNIQUE is enough.
+    --
+    -- type is part of the key, not merely updated on conflict. The write path chooses which
+    -- data-point table to insert into from the INCOMING type while the read path chooses which
+    -- to read from the STORED type, so a metric that changes type mid-stream and matched an
+    -- existing row would write points the reader would never look for. Keying on type makes
+    -- such a change a new row instead: old points stay readable, new points are found.
+    --
+    -- Column order is deliberate. Leading with (resource_id, name, ...) makes the former
+    -- idx_resource_name an exact redundant left prefix, so it is dropped below.
+    CONSTRAINT uk_metric_identity UNIQUE ("resource_id", "name", "type", "scope_id")
 );
 CREATE INDEX idx_metrics_name  ON metrics ("name");
 CREATE INDEX idx_type          ON metrics ("type");
-CREATE INDEX idx_resource_name ON metrics ("resource_id", "name");
+-- idx_resource_name (resource_id, name) dropped in 2.7.0: now a left prefix of uk_metric_identity.
 
 -- TimescaleDB chunk sizing baseline (nanoseconds):
 --   1 hour  =  3600000000000
@@ -589,7 +603,7 @@ FROM log_severity_stats_daily;
 -- =============================================================================
 -- Only reached when every statement above succeeded, so a partial apply cannot
 -- leave a false version marker for the apply-schema.sh gate.
-INSERT INTO schema_version ("version") VALUES ('2.6.0')
+INSERT INTO schema_version ("version") VALUES ('2.7.0')
 ON CONFLICT ("version") DO UPDATE
 SET "applied_at" = NOW();
 

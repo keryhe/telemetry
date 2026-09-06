@@ -132,18 +132,24 @@ public class LogService : OpenTelemetry.Proto.Collector.Logs.V1.LogsService.Logs
     }
 
     /// <summary>
-    /// Converts OTLP Resource to ResourceModel
+    /// Converts OTLP Resource to ResourceModel.
+    ///
+    /// Never returns null, even when the export carries no Resource block. OTLP permits omitting it,
+    /// and the fallback has to be built HERE because this is the last point where the authenticated
+    /// tenant is still known: NormalizeResource's own null fallback runs inside the bulk writer, which
+    /// has no tenant and can only default to tenant 1 -- filing a resource-less export from any tenant
+    /// under tenant 1's telemetry.
     /// </summary>
-    private ResourceModel? ConvertResource(string schemaUrl, OpenTelemetry.Proto.Resource.V1.Resource? resource, long tenantId)
+    private ResourceModel ConvertResource(string schemaUrl, OpenTelemetry.Proto.Resource.V1.Resource? resource, long tenantId)
     {
-        if (resource == null)
-            return null;
-
         return new ResourceModel
         {
             TenantId = tenantId,
             SchemaUrl = string.IsNullOrEmpty(schemaUrl) ? null : schemaUrl,
-            Attributes = ConvertAttributes(resource.Attributes)
+            // Mirrors NormalizeResource's synthetic resource, but carrying the real tenant.
+            Attributes = resource == null
+                ? new Dictionary<string, object> { { "service.name", "unknown" } }
+                : ConvertAttributes(resource.Attributes)
         };
     }
 

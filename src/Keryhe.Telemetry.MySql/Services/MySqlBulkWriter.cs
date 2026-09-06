@@ -96,7 +96,7 @@ public sealed class MySqlBulkWriter(
         var resourceIds = await ResolveResourcesAsync(conn, metrics.Select(m => m.Resource), ct);
         var scopeIds    = await ResolveScopesAsync(conn, metrics.Select(m => m.InstrumentationScope), ct);
 
-        var metricIds = await InsertMetricsAsync(conn, metrics, resourceIds, scopeIds, ct);
+        var metricIds = await ResolveMetricIdsAsync(conn, metrics, resourceIds, scopeIds, ct);
 
         for (var i = 0; i < metrics.Count; i++)
         {
@@ -134,25 +134,29 @@ public sealed class MySqlBulkWriter(
         IEnumerable<ResourceModel?> resources,
         CancellationToken ct)
     {
+        // Keyed by ResourceKey, never by the bare hash: two tenants running the same service with the
+        // same attributes share a hash, and collapsing them here would give the second tenant the
+        // first tenant's resources.id -- silently storing its telemetry under the wrong owner.
         var result  = new Dictionary<string, long>(StringComparer.Ordinal);
-        var pending = new Dictionary<string, ResourceModel>(StringComparer.Ordinal);
+        var pending = new Dictionary<string, (string Hash, ResourceModel Model)>(StringComparer.Ordinal);
 
         foreach (var r in resources)
         {
             var model = NormalizeResource(r);
             var hash  = HashResource(model);
-            if (result.ContainsKey(hash)) continue;
-            if (cache.TryGetResource(hash, out var id))
-                result[hash] = id;
+            var key   = ResourceKey(model.TenantId, hash);
+            if (result.ContainsKey(key)) continue;
+            if (cache.TryGetResource(model.TenantId, hash, out var id))
+                result[key] = id;
             else
-                pending.TryAdd(hash, model);
+                pending.TryAdd(key, (hash, model));
         }
 
-        foreach (var (hash, model) in pending)
+        foreach (var (key, entry) in pending)
         {
-            var id = await UpsertResourceAsync(conn, model, hash, ct);
-            cache.SetResource(hash, id);
-            result[hash] = id;
+            var id = await UpsertResourceAsync(conn, entry.Model, entry.Hash, ct);
+            cache.SetResource(entry.Model.TenantId, entry.Hash, id);
+            result[key] = id;
         }
 
         return result;
@@ -251,7 +255,7 @@ public sealed class MySqlBulkWriter(
         {
             rows.Add(new object?[]
             {
-                resourceIds[HashResource(NormalizeResource(r.Resource))],
+                resourceIds[ResourceKey(r.Resource)],
                 scopeIds[HashScope(NormalizeScope(r.InstrumentationScope))],
                 r.TimeUnixNano ?? 0L,
                 BoxOrNull(r.ObservedTimeUnixNano),
@@ -312,7 +316,7 @@ public sealed class MySqlBulkWriter(
                 span.TraceIdHex,
                 span.SpanIdHex,
                 (object?)span.ParentSpanIdHex ?? DBNull.Value,
-                resourceIds[HashResource(NormalizeResource(resource))],
+                resourceIds[ResourceKey(resource)],
                 scopeIds[HashScope(NormalizeScope(scope))],
                 span.Name,
                 span.Kind.ToString(),
@@ -414,38 +418,78 @@ public sealed class MySqlBulkWriter(
     }
 
     // =========================================================================
-    // INSERT: METRICS (individually to capture AUTO_INCREMENT-generated IDs)
+    // RESOLVE: METRICS (individually, to capture AUTO_INCREMENT-generated IDs)
     // =========================================================================
-    // metrics is the low-volume reference table; each row is inserted on its own so
-    // cmd.LastInsertedId yields the id that keys the high-volume data point inserts below.
+    // metrics is a reference table deduplicated on (resource_id, name, type, scope_id) -- the
+    // comment above about it being "the low-volume reference table" is finally true. Mirrors
+    // ResolveResourcesAsync: dedup within the batch, consult the process cache, upsert only what
+    // is left, cache the result. A warm process issues no statement here at all.
 
-    private static async Task<long[]> InsertMetricsAsync(
+    private async Task<long[]> ResolveMetricIdsAsync(
         MySqlConnection conn,
         List<MetricModel> metrics,
         Dictionary<string, long> resourceIds,
         Dictionary<string, long> scopeIds,
         CancellationToken ct)
     {
+        // Same upsert-and-return idiom as UpsertResourceAsync: id = LAST_INSERT_ID(id) is what
+        // makes cmd.LastInsertedId yield the EXISTING row's id on a duplicate key. It fires even
+        // when the row is byte-identical and affected_rows is 0.
+        //
+        // VALUES(col) is deprecated in MySQL 8.0.20+ in favour of the "AS new" alias form, but the
+        // alias form needs 8.0.19+ and is not supported by MariaDB, so keep VALUES() here.
         const string sql = """
             INSERT INTO metrics (resource_id, scope_id, name, description, unit, type)
             VALUES (@resourceId, @scopeId, @name, @description, @unit, @type)
+            ON DUPLICATE KEY UPDATE
+                description = VALUES(description),
+                unit        = VALUES(unit),
+                id          = LAST_INSERT_ID(id)
             """;
 
-        var ids = new long[metrics.Count];
-        for (var i = 0; i < metrics.Count; i++)
+        var n = metrics.Count;
+        var keys = new string[n];
+        var result = new Dictionary<string, long>(StringComparer.Ordinal);
+        var pending = new List<(string Key, long ResId, long ScoId, MetricModel M)>();
+        var pendingKeys = new HashSet<string>(StringComparer.Ordinal);
+
+        for (var i = 0; i < n; i++)
         {
             var m = metrics[i];
+            var resId = resourceIds[ResourceKey(m.Resource)];
+            var scoId = scopeIds[HashScope(NormalizeScope(m.InstrumentationScope))];
+            keys[i] = MetricKey(resId, scoId, m.Name, m.Type.ToString());
+
+            if (result.ContainsKey(keys[i])) continue;
+            if (cache.TryGetMetric(keys[i], out var cached)) { result[keys[i]] = cached; continue; }
+
+            // Per-batch dedup: the worker merges many OTLP exports into one batch, so the same
+            // metric recurs many times. Each duplicate hit would also burn an AUTO_INCREMENT value.
+            if (pendingKeys.Add(keys[i]))
+                pending.Add((keys[i], resId, scoId, m));
+        }
+
+        // Deterministic lock order, so two collectors upserting the same key set cannot deadlock.
+        pending.Sort(static (a, b) => string.CompareOrdinal(a.Key, b.Key));
+
+        foreach (var (key, resId, scoId, m) in pending)
+        {
             await using var cmd = new MySqlCommand(sql, conn);
-            cmd.Parameters.AddWithValue("@resourceId",  resourceIds[HashResource(NormalizeResource(m.Resource))]);
-            cmd.Parameters.AddWithValue("@scopeId",     scopeIds[HashScope(NormalizeScope(m.InstrumentationScope))]);
+            cmd.Parameters.AddWithValue("@resourceId",  resId);
+            cmd.Parameters.AddWithValue("@scopeId",     scoId);
             cmd.Parameters.AddWithValue("@name",        m.Name);
             cmd.Parameters.AddWithValue("@description", (object?)m.Description ?? DBNull.Value);
             cmd.Parameters.AddWithValue("@unit",        (object?)m.Unit        ?? DBNull.Value);
             cmd.Parameters.AddWithValue("@type",        m.Type.ToString());
             await cmd.ExecuteNonQueryAsync(ct);
-            ids[i] = cmd.LastInsertedId;
+
+            var id = cmd.LastInsertedId;
+            result[key] = id;
+            cache.SetMetric(key, id);
         }
 
+        var ids = new long[n];
+        for (var i = 0; i < n; i++) ids[i] = result[keys[i]];
         return ids;
     }
 

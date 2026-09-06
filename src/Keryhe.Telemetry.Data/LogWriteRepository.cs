@@ -40,12 +40,6 @@ public class LogWriteRepository : ILogWriteRepository
         return Enumerable.Empty<long>();
     }
 
-    public Task<bool> DeleteLogRecordAsync(long id, CancellationToken cancellationToken = default)
-        => _store.DeleteLogRecordAsync(id, cancellationToken);
-
-    public Task<int> DeleteLogRecordsByTimeRangeAsync(
-        DateTime startTime,
-        DateTime endTime,
-        CancellationToken cancellationToken = default)
-        => _store.DeleteLogRecordsByTimeRangeAsync(startTime, endTime, cancellationToken);
+    public Task<int> DeleteOldLogRecordsAsync(TimeSpan retentionPeriod, CancellationToken cancellationToken = default)
+        => _store.DeleteOldLogRecordsAsync(retentionPeriod, cancellationToken);
 }
