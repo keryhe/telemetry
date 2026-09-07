@@ -1,10 +1,11 @@
-import { Component, HostListener, computed, inject, signal } from '@angular/core';
+import { Component, ElementRef, HostListener, computed, inject, signal } from '@angular/core';
 import { MatIconModule } from '@angular/material/icon';
 import { MatButtonModule } from '@angular/material/button';
 import { MatDatepickerModule } from '@angular/material/datepicker';
 import { MatFormFieldModule } from '@angular/material/form-field';
 import { MatInputModule } from '@angular/material/input';
 import { MatNativeDateModule } from '@angular/material/core';
+import { MatSnackBar } from '@angular/material/snack-bar';
 import { FormsModule } from '@angular/forms';
 import { TimePreset, TimeRangeService } from '../../../core/services/time-range.service';
 
@@ -152,6 +153,8 @@ import { TimePreset, TimeRangeService } from '../../../core/services/time-range.
 })
 export class TimeRangePickerComponent {
   protected readonly timeRange = inject(TimeRangeService);
+  private readonly elementRef = inject(ElementRef);
+  private readonly snack = inject(MatSnackBar);
 
   protected readonly presets: { value: TimePreset; label: string }[] = [
     { value: '1h', label: 'Last 1 Hour' },
@@ -188,9 +191,13 @@ export class TimeRangePickerComponent {
     this.showPanel.set(false);
   }
 
-  @HostListener('document:click')
-  protected onDocumentClick(): void {
-    if (this.showPanel()) this.showPanel.set(false);
+  @HostListener('document:click', ['$event'])
+  protected onDocumentClick(event: Event): void {
+    if (!this.showPanel()) return;
+    const target = event.target as HTMLElement;
+    if (this.elementRef.nativeElement.contains(target)) return;
+    if (target.closest('.cdk-overlay-container')) return;
+    this.showPanel.set(false);
   }
 
   protected onPreset(value: TimePreset): void {
@@ -199,7 +206,7 @@ export class TimeRangePickerComponent {
   }
 
   protected toTimeString(d: Date | null): string {
-    if (!d) return '00:00';
+    if (!this.isValidDate(d)) return '00:00';
     return d.toTimeString().slice(0, 5);
   }
 
@@ -215,8 +222,20 @@ export class TimeRangePickerComponent {
 
   protected applyCustom(): void {
     if (!this.customStart || !this.customEnd) return;
+    if (!this.isValidDate(this.customStart) || !this.isValidDate(this.customEnd)) {
+      this.snack.open('Enter a valid start and end date/time.', undefined, { duration: 4000 });
+      return;
+    }
+    if (this.customStart.getTime() >= this.customEnd.getTime()) {
+      this.snack.open('End date/time must be after the start date/time.', undefined, { duration: 4000 });
+      return;
+    }
     this.showPanel.set(false);
     this.timeRange.setCustom(this.customStart, this.customEnd);
+  }
+
+  private isValidDate(d: Date | null): d is Date {
+    return d instanceof Date && !isNaN(d.getTime());
   }
 
   private formatRangeBound(d: Date): string {
