@@ -2,7 +2,7 @@ using ClickHouse.Client.ADO;
 using Dapper;
 using Microsoft.Extensions.Configuration;
 using Keryhe.Telemetry.Core;
-using Keryhe.Telemetry.Data;
+using Keryhe.Telemetry.Core.Data;
 
 namespace Keryhe.Telemetry.ClickHouse.Services;
 

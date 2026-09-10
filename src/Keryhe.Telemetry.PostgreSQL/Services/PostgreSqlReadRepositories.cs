@@ -1,7 +1,7 @@
 using System.Data.Common;
 using Npgsql;
 using Keryhe.Telemetry.Core;
-using Keryhe.Telemetry.Data.Read;
+using Keryhe.Telemetry.Core.Data.Read;
 
 namespace Keryhe.Telemetry.PostgreSQL.Services;
 

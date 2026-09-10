@@ -5,14 +5,14 @@
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <GeneratePackageOnBuild>true</GeneratePackageOnBuild>
-    <Version>1.0.0</Version>
+    <Version>1.0.1</Version>
     <Authors>Keith Heard</Authors>
     <Product>Telemetry</Product>
     <PackageLicenseExpression>MIT</PackageLicenseExpression>
     <PackageProjectUrl>https://github.com/keryhe/telemetry</PackageProjectUrl>
     <PackageTags>Keryhe Telemetry Api</PackageTags>
-    <AssemblyVersion>1.0.0.0</AssemblyVersion>
-    <FileVersion>1.0.0.0</FileVersion>
+    <AssemblyVersion>1.0.1.0</AssemblyVersion>
+    <FileVersion>1.0.1.0</FileVersion>
     <Description>Telemetry Api</Description>
     <Copyright>Copyright 2026</Copyright>
     <PackageReadmeFile>README.md</PackageReadmeFile>
@@ -27,9 +27,7 @@
   </ItemGroup>
 
   <ItemGroup>
-    <ProjectReference Include="..\Keryhe.Telemetry.Alerting\Keryhe.Telemetry.Alerting.csproj" />
     <ProjectReference Include="..\Keryhe.Telemetry.Core\Keryhe.Telemetry.Core.csproj" />
-    <ProjectReference Include="..\Keryhe.Telemetry.Data\Keryhe.Telemetry.Data.csproj" />
     <!-- All providers are referenced; the active one is chosen at runtime via Database:Provider. -->
     <ProjectReference Include="..\Keryhe.Telemetry.SqlServer\Keryhe.Telemetry.SqlServer.csproj" />
     <ProjectReference Include="..\Keryhe.Telemetry.PostgreSQL\Keryhe.Telemetry.PostgreSQL.csproj" />
@@ -37,5 +35,6 @@
     <ProjectReference Include="..\Keryhe.Telemetry.ClickHouse\Keryhe.Telemetry.ClickHouse.csproj" />
     <ProjectReference Include="..\Keryhe.Telemetry.MySql\Keryhe.Telemetry.MySql.csproj" />
   </ItemGroup>
+
 
 </Project>

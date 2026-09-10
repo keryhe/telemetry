@@ -4,8 +4,8 @@ using Microsoft.Extensions.Logging;
 using MySqlConnector;
 using Keryhe.Telemetry.Core;
 using Keryhe.Telemetry.Core.Models;
-using Keryhe.Telemetry.Data;
-using static Keryhe.Telemetry.Data.TelemetryIngestionHelpers;
+using Keryhe.Telemetry.Core.Data;
+using static Keryhe.Telemetry.Core.Data.TelemetryIngestionHelpers;
 
 namespace Keryhe.Telemetry.MySql.Services;
 
@@ -15,7 +15,7 @@ namespace Keryhe.Telemetry.MySql.Services;
 /// tables, <c>INSERT IGNORE</c> + a natural-key <c>SELECT</c> to resolve span ids, and
 /// <c>INSERT ... ON DUPLICATE KEY UPDATE id = LAST_INSERT_ID(id)</c> upserts for
 /// resource/scope dedup. The channel-draining loop and the normalization/hashing helpers
-/// live in <c>Keryhe.Telemetry.Data</c>. Targets MySQL 8.0+.
+/// live in <c>Keryhe.Telemetry.Core.Data</c>. Targets MySQL 8.0+.
 /// </summary>
 public sealed class MySqlBulkWriter(
     IConfiguration configuration,

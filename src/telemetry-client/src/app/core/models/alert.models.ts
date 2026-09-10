@@ -41,7 +41,7 @@ export interface AlertEvent {
 
 // Condition shapes stored in conditionJson per rule type.
 // NOTE: keys are PascalCase to match the server's System.Text.Json (case-sensitive)
-// deserialization into Keryhe.Telemetry.Alerting.Models.*Condition.
+// deserialization into Keryhe.Telemetry.Api.Alerting.Models.*Condition.
 export interface MetricThresholdCondition {
   MetricName: string;
   Operator: string; // ">", "<", ">=", "<="

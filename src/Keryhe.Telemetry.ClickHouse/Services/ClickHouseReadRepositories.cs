@@ -4,7 +4,7 @@ using Dapper;
 using Microsoft.Extensions.Configuration;
 using Keryhe.Telemetry.Core;
 using Keryhe.Telemetry.Core.Models;
-using Keryhe.Telemetry.Data.Read;
+using Keryhe.Telemetry.Core.Data.Read;
 
 namespace Keryhe.Telemetry.ClickHouse.Services;
 

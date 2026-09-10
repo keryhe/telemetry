@@ -4,8 +4,8 @@ using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging;
 using Keryhe.Telemetry.Core;
 using Keryhe.Telemetry.Core.Models;
-using Keryhe.Telemetry.Data;
-using static Keryhe.Telemetry.Data.TelemetryIngestionHelpers;
+using Keryhe.Telemetry.Core.Data;
+using static Keryhe.Telemetry.Core.Data.TelemetryIngestionHelpers;
 
 namespace Keryhe.Telemetry.SqlServer.Services;
 
@@ -15,7 +15,7 @@ namespace Keryhe.Telemetry.SqlServer.Services;
 /// high-volume tables, staging-table <c>MERGE ... OUTPUT</c> for spans, and
 /// <c>MERGE ... WITH (HOLDLOCK)</c> upserts for resource/scope dedup. The
 /// channel-draining loop and the normalization/hashing helpers live in
-/// <c>Keryhe.Telemetry.Data</c>.
+/// <c>Keryhe.Telemetry.Core.Data</c>.
 /// </summary>
 public sealed class SqlServerBulkWriter(
     IConfiguration configuration,

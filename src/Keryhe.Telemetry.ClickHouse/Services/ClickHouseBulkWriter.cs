@@ -4,8 +4,8 @@ using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging;
 using Keryhe.Telemetry.Core;
 using Keryhe.Telemetry.Core.Models;
-using Keryhe.Telemetry.Data;
-using static Keryhe.Telemetry.Data.TelemetryIngestionHelpers;
+using Keryhe.Telemetry.Core.Data;
+using static Keryhe.Telemetry.Core.Data.TelemetryIngestionHelpers;
 
 namespace Keryhe.Telemetry.ClickHouse.Services;
 
@@ -17,7 +17,7 @@ namespace Keryhe.Telemetry.ClickHouse.Services;
 /// engine plus the shared <see cref="ResourceScopeCache"/>, and every table is written with
 /// ClickHouse's native async bulk-copy path (<see cref="ClickHouseBulkCopy"/>). The
 /// channel-draining loop and the normalization/hashing helpers live in
-/// <c>Keryhe.Telemetry.Data</c>.
+/// <c>Keryhe.Telemetry.Core.Data</c>.
 /// </summary>
 public sealed class ClickHouseBulkWriter(
     IConfiguration configuration,

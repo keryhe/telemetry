@@ -3,7 +3,7 @@ using Microsoft.Extensions.Logging;
 using OpenTelemetry.Proto.Collector.Logs.V1;
 using OpenTelemetry.Proto.Common.V1;
 using OpenTelemetry.Proto.Logs.V1;
-using Keryhe.Telemetry.Data;
+using Keryhe.Telemetry.Core.Data;
 using Keryhe.Telemetry.Core;
 using Keryhe.Telemetry.Core.Models;
 using System.Security.Cryptography;

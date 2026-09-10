@@ -2,7 +2,7 @@ using Dapper;
 using MySqlConnector;
 using Microsoft.Extensions.Configuration;
 using Keryhe.Telemetry.Core;
-using Keryhe.Telemetry.Data;
+using Keryhe.Telemetry.Core.Data;
 
 namespace Keryhe.Telemetry.MySql.Services;
 

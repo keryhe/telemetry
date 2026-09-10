@@ -4,7 +4,7 @@ using Microsoft.Extensions.Logging;
 using OpenTelemetry.Proto.Collector.Metrics.V1;
 using OpenTelemetry.Proto.Common.V1;
 using OpenTelemetry.Proto.Metrics.V1;
-using Keryhe.Telemetry.Data;
+using Keryhe.Telemetry.Core.Data;
 using Keryhe.Telemetry.Core;
 using Keryhe.Telemetry.Core.Models;
 using Keryhe.Telemetry.Collector.Services.Helpers;

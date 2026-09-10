@@ -2,7 +2,7 @@ using System.Data.Common;
 using Microsoft.Data.SqlClient;
 using Microsoft.Extensions.Configuration;
 using Keryhe.Telemetry.Core;
-using Keryhe.Telemetry.Data.Read;
+using Keryhe.Telemetry.Core.Data.Read;
 
 namespace Keryhe.Telemetry.SqlServer.Services;
 

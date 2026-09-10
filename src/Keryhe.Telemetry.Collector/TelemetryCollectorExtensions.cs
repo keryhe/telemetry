@@ -1,5 +1,6 @@
 using Keryhe.Telemetry.Core;
-using Keryhe.Telemetry.Data;
+using Keryhe.Telemetry.Core.Data;
+using Keryhe.Telemetry.Core.Data.Write;
 using Microsoft.Extensions.Configuration;
 
 namespace Microsoft.Extensions.DependencyInjection;

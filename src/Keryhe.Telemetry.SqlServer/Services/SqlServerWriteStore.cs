@@ -2,7 +2,7 @@ using Dapper;
 using Microsoft.Data.SqlClient;
 using Microsoft.Extensions.Configuration;
 using Keryhe.Telemetry.Core;
-using Keryhe.Telemetry.Data;
+using Keryhe.Telemetry.Core.Data;
 
 namespace Keryhe.Telemetry.SqlServer.Services;
 

@@ -1,6 +1,6 @@
 using Microsoft.Extensions.Configuration;
 using Keryhe.Telemetry.Core;
-using Keryhe.Telemetry.Data;
+using Keryhe.Telemetry.Core.Data;
 using Keryhe.Telemetry.MySql.Services;
 
 namespace Microsoft.Extensions.DependencyInjection;

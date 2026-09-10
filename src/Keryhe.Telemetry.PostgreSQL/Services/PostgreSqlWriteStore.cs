@@ -1,7 +1,7 @@
 using Dapper;
 using Npgsql;
 using Keryhe.Telemetry.Core;
-using Keryhe.Telemetry.Data;
+using Keryhe.Telemetry.Core.Data;
 
 namespace Keryhe.Telemetry.PostgreSQL.Services;
 

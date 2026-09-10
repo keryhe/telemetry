@@ -4,6 +4,29 @@
         <TargetFramework>net10.0</TargetFramework>
         <ImplicitUsings>enable</ImplicitUsings>
         <Nullable>enable</Nullable>
+        <GeneratePackageOnBuild>true</GeneratePackageOnBuild>
+        <Version>1.0.1</Version>
+        <Authors>Keith Heard</Authors>
+        <Product>Telemetry</Product>
+        <PackageLicenseExpression>MIT</PackageLicenseExpression>
+        <PackageProjectUrl>https://github.com/keryhe/telemetry</PackageProjectUrl>
+        <PackageTags>Keryhe Telemetry Core</PackageTags>
+        <AssemblyVersion>1.0.1.0</AssemblyVersion>
+        <FileVersion>1.0.1.0</FileVersion>
+        <Description>Telemetry Core Library</Description>
+        <Copyright>Copyright 2026</Copyright>
+        <PackageReadmeFile>README.md</PackageReadmeFile>
     </PropertyGroup>
+
+    <ItemGroup>
+        <None Include="README.md" Pack="true" PackagePath="\" />
+    </ItemGroup>
+
+    <ItemGroup>
+        <PackageReference Include="Dapper" Version="2.1.79" />
+        <PackageReference Include="Microsoft.Extensions.DependencyInjection" Version="10.0.10" />
+        <PackageReference Include="Microsoft.Extensions.Hosting.Abstractions" Version="10.0.10" />
+        <PackageReference Include="Microsoft.Extensions.Logging" Version="10.0.10" />
+    </ItemGroup>
 
 </Project>

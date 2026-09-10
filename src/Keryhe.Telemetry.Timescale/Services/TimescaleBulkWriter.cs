@@ -4,8 +4,8 @@ using Npgsql;
 using NpgsqlTypes;
 using Keryhe.Telemetry.Core;
 using Keryhe.Telemetry.Core.Models;
-using Keryhe.Telemetry.Data;
-using static Keryhe.Telemetry.Data.TelemetryIngestionHelpers;
+using Keryhe.Telemetry.Core.Data;
+using static Keryhe.Telemetry.Core.Data.TelemetryIngestionHelpers;
 
 namespace Keryhe.Telemetry.Timescale.Services;
 
@@ -14,7 +14,7 @@ namespace Keryhe.Telemetry.Timescale.Services;
 /// only the Npgsql bulk path: <c>unnest()</c> array expansion for set-based inserts,
 /// <c>ON CONFLICT DO NOTHING</c> dedup with <c>RETURNING</c>, and CTE upserts for
 /// resource/scope. The channel-draining loop and the normalization/hashing helpers live
-/// in <c>Keryhe.Telemetry.Data</c>. The hypertable nature of the target tables is
+/// in <c>Keryhe.Telemetry.Core.Data</c>. The hypertable nature of the target tables is
 /// transparent to these inserts.
 /// </summary>
 public sealed class TimescaleBulkWriter(
