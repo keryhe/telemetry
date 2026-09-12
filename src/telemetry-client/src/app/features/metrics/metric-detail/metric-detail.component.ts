@@ -29,7 +29,7 @@ import { EmptyStateComponent } from '../../../shared/components/empty-state/empt
 import {
   AggregateFn, aggregateHistogramWindows, aggregateSeries, aggregateSummaryWindows,
   buildHistogramBarFromWindows, buildHistogramHeatmapFromWindows, buildRadialGauge, buildShareDonut,
-  chartGrid, computeRateSeries,
+  chartGrid, computeRateSeries, formatUnitValue,
   HistogramWindow, histogramQuantile,
   isCounterMetric, isDeltaSum, normalizeExpHistogramSeries, timeRangeZoom,
 } from '../../../shared/utils/chart.utils';
@@ -116,6 +116,7 @@ export class MetricDetailComponent implements OnInit {
   protected readonly chartStyleMeta = CHART_STYLE_META;
 
   protected metricType = computed(() => this.instances()[0]?.type ?? MetricType.Gauge);
+  protected metricUnit = computed(() => this.instances()[0]?.unit ?? '');
 
   /**
    * Points feeding the stat cards / metadata / exemplars / export. For scalar metrics this is the
@@ -514,8 +515,8 @@ export class MetricDetailComponent implements OnInit {
         };
       }
       this.buildThroughputChart(windows, start, end, isDark);
-      this.bucketBarOptions.set(buildHistogramBarFromWindows(bounds, windows, isDark));
-      const heatmap = buildHistogramHeatmapFromWindows(bounds, windows, isDark);
+      this.bucketBarOptions.set(buildHistogramBarFromWindows(bounds, windows, isDark, this.metricUnit()));
+      const heatmap = buildHistogramHeatmapFromWindows(bounds, windows, isDark, this.metricUnit());
       this.heatmapOptions.set(heatmap ? { ...heatmap, chart: { ...heatmap.chart!, ...this.zoomChart() } } : null);
     } else if (this.isDelta()) {
       chartType = 'bar';
@@ -528,6 +529,11 @@ export class MetricDetailComponent implements OnInit {
       chartSeries = [{ name: s.name, data: points.map((p) => [new Date(p.timestamp).getTime(), val(p)]) }];
     }
 
+    // Distribution charts (histogram/exp-histogram/summary) plot values in the metric's own unit
+    // (durations, bytes, …); other chart types plot raw/rate values with no unit semantics.
+    const unit = this.isDistribution() ? this.metricUnit() : '';
+    const valueFormatter = (v: number) => (unit ? formatUnitValue(v, unit) : v.toFixed(2));
+
     this.chartOptions.set({
       chart: { type: chartType, height: 300, toolbar: { show: false }, background: 'transparent', ...this.zoomChart() },
       theme: { mode: isDark ? 'dark' : 'light' },
@@ -537,7 +543,8 @@ export class MetricDetailComponent implements OnInit {
       stroke,
       fill: { opacity: chartType === 'area' ? 0.15 : 1 },
       dataLabels: { enabled: false },
-      yaxis: { labels: { formatter: (v: number) => v.toFixed(2) } },
+      yaxis: { labels: { formatter: valueFormatter } },
+      tooltip: unit ? { y: { formatter: valueFormatter } } : undefined,
       grid: chartGrid(isDark),
       legend: { position: 'top' },
     });

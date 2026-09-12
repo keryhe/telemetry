@@ -103,25 +103,26 @@
                 <mat-button-toggle value="volume" matTooltip="Volume over time">
                   <mat-icon>area_chart</mat-icon>
                 </mat-button-toggle>
-                <mat-button-toggle value="latency" matTooltip="Duration vs time (click a dot to open)">
-                  <mat-icon>scatter_plot</mat-icon>
+                <mat-button-toggle value="latency" matTooltip="Duration vs time, bucketed by volume/errors (click to zoom or open)">
+                  <mat-icon>bubble_chart</mat-icon>
                 </mat-button-toggle>
               </mat-button-toggle-group>
             </div>
 
             @if (chartView() === 'latency') {
               <apx-chart
-                [series]="scatterOptions().series!"
-                [chart]="scatterOptions().chart!"
-                [xaxis]="scatterOptions().xaxis!"
-                [yaxis]="scatterOptions().yaxis!"
-                [colors]="scatterOptions().colors!"
-                [markers]="scatterOptions().markers!"
-                [tooltip]="scatterOptions().tooltip!"
-                [theme]="scatterOptions().theme!"
-                [legend]="scatterOptions().legend!"
-                [grid]="scatterOptions().grid!"
-                [dataLabels]="scatterOptions().dataLabels!" />
+                [series]="latencyBubbleOptions().series!"
+                [chart]="latencyBubbleOptions().chart!"
+                [xaxis]="latencyBubbleOptions().xaxis!"
+                [yaxis]="latencyBubbleOptions().yaxis!"
+                [colors]="latencyBubbleOptions().colors!"
+                [plotOptions]="latencyBubbleOptions().plotOptions!"
+                [markers]="latencyBubbleOptions().markers!"
+                [tooltip]="latencyBubbleOptions().tooltip!"
+                [theme]="latencyBubbleOptions().theme!"
+                [legend]="latencyBubbleOptions().legend!"
+                [grid]="latencyBubbleOptions().grid!"
+                [dataLabels]="latencyBubbleOptions().dataLabels!" />
             } @else {
               <apx-chart
                 [series]="traceChartOptions().series!"
@@ -152,10 +153,6 @@
             <table mat-table [dataSource]="displayTraces()" matSort
                    [matSortActive]="sortColumn()" [matSortDirection]="sortDir()"
                    (matSortChange)="onSort($event)" class="full-width">
-              <ng-container matColumnDef="traceId">
-                <th mat-header-cell *matHeaderCellDef>Trace ID</th>
-                <td mat-cell *matCellDef="let t" class="mono">{{ t.traceIdHex | slice:0:16 }}…</td>
-              </ng-container>
               <ng-container matColumnDef="service">
                 <th mat-header-cell *matHeaderCellDef mat-sort-header>Service</th>
                 <td mat-cell *matCellDef="let t" class="mono">{{ t.serviceName }}</td>
@@ -163,15 +160,6 @@
               <ng-container matColumnDef="operation">
                 <th mat-header-cell *matHeaderCellDef mat-sort-header>Operation</th>
                 <td mat-cell *matCellDef="let t" class="mono">{{ t.rootOperationName }}</td>
-              </ng-container>
-              <ng-container matColumnDef="duration">
-                <th mat-header-cell *matHeaderCellDef mat-sort-header>Duration</th>
-                <td mat-cell *matCellDef="let t" class="duration-cell">
-                  <span class="mono dur-text">{{ formatDuration(parseDuration(t.traceDuration)) }}</span>
-                  <span class="dur-bar-track">
-                    <span class="dur-bar" [class.err]="t.hasErrors" [style.width.%]="durationBarPct(t)"></span>
-                  </span>
-                </td>
               </ng-container>
               <ng-container matColumnDef="spans">
                 <th mat-header-cell *matHeaderCellDef mat-sort-header>Spans</th>
@@ -185,6 +173,13 @@
                   </mat-icon>
                 </td>
               </ng-container>
+              <ng-container matColumnDef="duration">
+                <th mat-header-cell *matHeaderCellDef mat-sort-header>Duration</th>
+                <td mat-cell *matCellDef="let t" class="duration-cell">
+                  <span class="dur-bar-fill" [style.width.%]="durationBarPct(t)"></span>
+                  <span class="mono dur-text">{{ formatDuration(parseDuration(t.traceDuration)) }}</span>
+                </td>
+              </ng-container>
               <ng-container matColumnDef="time">
                 <th mat-header-cell *matHeaderCellDef mat-sort-header>Start Time</th>
                 <td mat-cell *matCellDef="let t" class="mono">{{ t.traceStartTime | date:'MM/dd/yyyy, h:mm:ss a' }}</td>
@@ -192,7 +187,6 @@
               <tr mat-header-row *matHeaderRowDef="displayedColumns"></tr>
               <tr mat-row *matRowDef="let row; columns: displayedColumns"
                   class="clickable-row"
-                  [style.background-color]="row.hasErrors ? 'rgba(244,67,54,0.12)' : ''"
                   (click)="navigate(row.traceIdHex)"></tr>
             </table>
 

@@ -96,23 +96,25 @@
 
 .mono { font-family: monospace; font-size: 12px; }
 
-// Inline relative-duration bar under the duration text.
+// Full-cell "heat bar": a background fill sized proportionally to relative
+// duration, with the duration text overlaid on top. Neutral surface token
+// so it reads correctly in both light and dark themes.
 .duration-cell {
-  .dur-text { display: block; line-height: 1.4; }
-  .dur-bar-track {
-    display: block;
-    width: 72px;
-    height: 4px;
-    border-radius: 2px;
+  position: relative;
+  overflow: hidden;
+
+  .dur-bar-fill {
+    position: absolute;
+    inset: 0;
     background: var(--mat-sys-surface-container-highest);
-    overflow: hidden;
+    z-index: 0;
   }
-  .dur-bar {
+
+  .dur-text {
+    position: relative;
+    z-index: 1;
     display: block;
-    height: 100%;
-    border-radius: 2px;
-    background: var(--mat-sys-primary);
-    &.err { background: #f44336; }
+    line-height: 1.4;
   }
 }
 

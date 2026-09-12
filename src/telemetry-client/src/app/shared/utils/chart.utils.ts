@@ -244,21 +244,19 @@ export function histogramQuantile(counts: number[], bounds: number[], q: number)
   return bounds.length ? bounds[bounds.length - 1] : NaN;
 }
 
-function fmtBound(v: number): string {
+function fmtBound(v: number, unit?: string | null): string {
   if (!isFinite(v)) return '∞';
   if (v === 0) return '0';
-  const abs = Math.abs(v);
-  if (abs >= 1000 || abs < 0.01) return Number(v.toPrecision(3)).toString();
-  return Number(v.toFixed(3)).toString();
+  return formatUnitValue(v, unit);
 }
 
 /** Human-readable range label per bucket, e.g. "< 5", "5 – 10", "≥ 100". */
-function bucketLabels(counts: number[], bounds: number[]): string[] {
+function bucketLabels(counts: number[], bounds: number[], unit?: string | null): string[] {
   const labels: string[] = [];
   for (let i = 0; i < counts.length; i++) {
-    if (i === 0) labels.push(`< ${fmtBound(bounds[0] ?? Infinity)}`);
-    else if (i < bounds.length) labels.push(`${fmtBound(bounds[i - 1])} – ${fmtBound(bounds[i])}`);
-    else labels.push(`≥ ${fmtBound(bounds[bounds.length - 1])}`);
+    if (i === 0) labels.push(`< ${fmtBound(bounds[0] ?? Infinity, unit)}`);
+    else if (i < bounds.length) labels.push(`${fmtBound(bounds[i - 1], unit)} – ${fmtBound(bounds[i], unit)}`);
+    else labels.push(`≥ ${fmtBound(bounds[bounds.length - 1], unit)}`);
   }
   return labels;
 }
@@ -269,7 +267,11 @@ function bucketLabels(counts: number[], bounds: number[]): string[] {
  * buckets; points with a mismatched bucket count are skipped. Returns null if no point has
  * usable bucket data.
  */
-export function buildHistogramHeatmap(points: MetricDataPoint[], isDark: boolean): ApexOptions | null {
+export function buildHistogramHeatmap(
+  points: MetricDataPoint[],
+  isDark: boolean,
+  unit?: string | null,
+): ApexOptions | null {
   const ordered = [...points].sort(
     (a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime()
   );
@@ -277,7 +279,7 @@ export function buildHistogramHeatmap(points: MetricDataPoint[], isDark: boolean
   if (!template) return null;
 
   const bucketCount = template.counts.length;
-  const labels = bucketLabels(template.counts, template.bounds);
+  const labels = bucketLabels(template.counts, template.bounds, unit);
 
   // One heatmap row per bucket; ApexCharts renders the first series at the bottom.
   const series = labels.map((label) => ({ name: label, data: [] as { x: number; y: number }[] }));
@@ -418,11 +420,82 @@ function seriesToData(points: MetricDataPoint[], asRate: boolean): [number, numb
 }
 
 /** Evenly-spaced epoch grid of `bucketCount` steps across [start, end] (bucketCount+1 points). */
-function makeGrid(start: Date, end: Date, bucketCount: number): number[] {
+export function makeGrid(start: Date, end: Date, bucketCount: number): number[] {
   const s = start.getTime();
   const span = end.getTime() - s;
   const step = span / bucketCount;
   return Array.from({ length: bucketCount + 1 }, (_, i) => s + i * step);
+}
+
+export interface LatencyBucket {
+  xStart: number; xEnd: number; xCenter: number;   // epoch ms, time-column bounds
+  yStart: number; yEnd: number; yCenter: number;   // ms, duration-row bounds (log-spaced)
+  count: number;
+  errorCount: number;
+  errorRatio: number;                              // errorCount / count
+  traceIds: string[];
+}
+
+/**
+ * Bins raw {x: startTime, y: durationMs, hasErrors, traceIdHex} points onto a fixed
+ * time-column × log-duration-row grid. Time columns are evenly spaced across [start, end]
+ * (via makeGrid); duration rows are log-spaced across the observed [minDuration, maxDuration]
+ * since durations are right-skewed — many fast traces, a long tail of slow ones. Empty cells
+ * are omitted from the result. Bucket x/y center is the grid cell midpoint, not a centroid of
+ * the contained points — sufficient for tooltip/zoom purposes.
+ */
+export function binLatencyPoints(
+  points: { x: number; y: number; hasErrors: boolean; traceIdHex: string }[],
+  start: Date,
+  end: Date,
+  timeCols = 48,
+  durationRows = 20,
+): LatencyBucket[] {
+  if (!points.length) return [];
+
+  const timeGrid = makeGrid(start, end, timeCols);
+  const yMin = Math.max(1, Math.min(...points.map((p) => p.y)));
+  const yMax = Math.max(yMin * 10, Math.max(...points.map((p) => p.y)));
+  const logMin = Math.log(yMin);
+  const logMax = Math.log(yMax);
+  const logStep = (logMax - logMin) / durationRows;
+
+  const colIndexFor = (x: number): number => {
+    const span = timeGrid[timeGrid.length - 1] - timeGrid[0];
+    if (span <= 0) return 0;
+    const idx = Math.floor(((x - timeGrid[0]) / span) * timeCols);
+    return Math.min(timeCols - 1, Math.max(0, idx));
+  };
+  const rowIndexFor = (y: number): number => {
+    if (y <= yMin) return 0;
+    const idx = Math.floor((Math.log(y) - logMin) / logStep);
+    return Math.min(durationRows - 1, Math.max(0, idx));
+  };
+
+  const buckets = new Map<string, LatencyBucket>();
+  for (const p of points) {
+    const col = colIndexFor(p.x);
+    const row = rowIndexFor(p.y);
+    const key = `${col}:${row}`;
+    let b = buckets.get(key);
+    if (!b) {
+      const xStart = timeGrid[col];
+      const xEnd = timeGrid[col + 1];
+      const yStart = Math.exp(logMin + row * logStep);
+      const yEnd = Math.exp(logMin + (row + 1) * logStep);
+      b = {
+        xStart, xEnd, xCenter: (xStart + xEnd) / 2,
+        yStart, yEnd, yCenter: (yStart + yEnd) / 2,
+        count: 0, errorCount: 0, errorRatio: 0, traceIds: [],
+      };
+      buckets.set(key, b);
+    }
+    b.count++;
+    if (p.hasErrors) b.errorCount++;
+    b.traceIds.push(p.traceIdHex);
+  }
+  for (const b of buckets.values()) b.errorRatio = b.errorCount / b.count;
+  return Array.from(buckets.values());
 }
 
 /**
@@ -657,11 +730,12 @@ export function buildHistogramHeatmapFromWindows(
   bounds: number[],
   windows: HistogramWindow[],
   isDark: boolean,
+  unit?: string | null,
 ): ApexOptions | null {
   if (!windows.length || !windows[0].counts.length) return null;
   const refLen = windows[0].counts.length;
   const { groups, bounds: rowBounds } = planBucketGroups(refLen, bounds, MAX_HEATMAP_ROWS);
-  const labels = bucketLabels(new Array(groups.length), rowBounds);
+  const labels = bucketLabels(new Array(groups.length), rowBounds, unit);
 
   const series = labels.map((label) => ({ name: label, data: [] as { x: number; y: number }[] }));
   let maxCount = 0;
@@ -689,6 +763,7 @@ export function buildHistogramBarFromWindow(
   bounds: number[],
   window: HistogramWindow,
   isDark: boolean,
+  unit?: string | null,
 ): ApexOptions | null {
   if (!window.counts.length || window.total === 0) return null;
   const { groups, bounds: barBounds } = planBucketGroups(window.counts.length, bounds, MAX_HEATMAP_ROWS);
@@ -697,7 +772,7 @@ export function buildHistogramBarFromWindow(
     for (let i = start; i < end; i++) sum += window.counts[i];
     return sum;
   });
-  const labels = bucketLabels(new Array(groups.length), barBounds);
+  const labels = bucketLabels(new Array(groups.length), barBounds, unit);
 
   return {
     chart: {
@@ -725,6 +800,7 @@ export function buildHistogramBarFromWindows(
   bounds: number[],
   windows: HistogramWindow[],
   isDark: boolean,
+  unit?: string | null,
 ): ApexOptions | null {
   const refLen = windows.find((w) => w.counts.length)?.counts.length ?? 0;
   if (!refLen) return null;
@@ -738,7 +814,7 @@ export function buildHistogramBarFromWindows(
   }
 
   const aggregate: HistogramWindow = { edge: windows[0]?.edge ?? 0, counts, total, sum: 0, min: null, max: null };
-  return buildHistogramBarFromWindow(bounds, aggregate, isDark);
+  return buildHistogramBarFromWindow(bounds, aggregate, isDark, unit);
 }
 
 /**
@@ -838,9 +914,63 @@ export function aggregateSummaryWindows(
 }
 
 export function formatDuration(ms: number): string {
+  return (ms < 0 ? '-' : '') + formatDurationMs(Math.abs(ms));
+}
+
+/** Auto-scaled µs/ms/s label for a non-negative duration already expressed in milliseconds. */
+function formatDurationMs(ms: number): string {
   if (ms < 1) return `${(ms * 1000).toFixed(0)}µs`;
   if (ms < 1000) return `${ms.toFixed(1)}ms`;
   return `${(ms / 1000).toFixed(2)}s`;
+}
+
+/** Auto-scaled B/KB/MB/GB/TB label for a non-negative byte count (binary/1024-based steps). */
+function formatBytes(bytes: number): string {
+  const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+  let v = bytes;
+  let i = 0;
+  while (v >= 1024 && i < units.length - 1) { v /= 1024; i++; }
+  return `${i === 0 ? v.toFixed(0) : v.toFixed(2)}${units[i]}`;
+}
+
+/** Milliseconds-per-unit for recognized OTLP/UCUM time units. */
+const TIME_UNIT_TO_MS: Record<string, number> = {
+  s: 1000, ms: 1, us: 0.001, 'µs': 0.001, ns: 0.000001,
+};
+
+/** Bytes-per-unit for recognized OTLP/UCUM byte units (binary/1024-based). */
+const BYTE_UNIT_TO_BYTES: Record<string, number> = {
+  By: 1, KiBy: 1024, MiBy: 1024 ** 2, GiBy: 1024 ** 3, TiBy: 1024 ** 4,
+};
+
+/**
+ * Formats a raw metric value using its OTLP/UCUM `unit` string: recognized time units
+ * auto-scale through µs/ms/s (via {@link formatDurationMs}), recognized byte units
+ * auto-scale through B/KB/MB/GB/TB, `%` and dimensionless (`1`) get their conventional
+ * bare/suffixed form, and any other unit (or no unit) falls back to a plain rounded number
+ * with the raw unit string appended. Used for histogram/exp-histogram bucket bounds and
+ * axis/tooltip labels so a chart's numbers read in a unit-appropriate scale instead of the
+ * stored magnitude verbatim.
+ */
+export function formatUnitValue(value: number, unit?: string | null): string {
+  const u = unit ?? '';
+  const sign = value < 0 ? '-' : '';
+  const abs = Math.abs(value);
+
+  if (u in TIME_UNIT_TO_MS) return sign + formatDurationMs(abs * TIME_UNIT_TO_MS[u]);
+  if (u in BYTE_UNIT_TO_BYTES) return sign + formatBytes(abs * BYTE_UNIT_TO_BYTES[u]);
+  if (u === '%') return `${value}%`;
+  if (u === '1' || u === '') return plainNumber(value);
+  return `${plainNumber(value)} ${u}`;
+}
+
+/** Bare-number formatting shared by the unit-less fallback paths: fixed precision for typical
+ *  magnitudes, significant-digit precision (no scientific notation surprises) for very small/large. */
+function plainNumber(v: number): string {
+  const abs = Math.abs(v);
+  if (abs === 0) return '0';
+  if (abs >= 1000 || abs < 0.01) return Number(v.toPrecision(3)).toString();
+  return Number(v.toFixed(3)).toString();
 }
 
 export function parseDotnetTimespan(ts: string): number {

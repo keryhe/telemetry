@@ -29,7 +29,7 @@ import { ThemeService } from '../../../core/services/theme.service';
 import { TraceInfo, ServiceDependency, OperationStats } from '../../../core/models/trace.models';
 import { StatCardComponent } from '../../../shared/components/stat-card/stat-card.component';
 import { EmptyStateComponent } from '../../../shared/components/empty-state/empty-state.component';
-import { TimeBucket, formatDuration, parseDotnetTimespan, timeRangeZoom } from '../../../shared/utils/chart.utils';
+import { TimeBucket, formatDuration, parseDotnetTimespan, timeRangeZoom, binLatencyPoints } from '../../../shared/utils/chart.utils';
 import { parseSearchQuery, ParsedSearchQuery, SearchTerm } from '../../../shared/utils/search-query.parser';
 import { TraceSearchHelpDialogComponent } from '../trace-search-help-dialog/trace-search-help-dialog.component';
 import { loadPageState, savePageState } from '../../../shared/utils/page-state';
@@ -57,6 +57,13 @@ type ChartView = 'volume' | 'latency';
 const STATE_KEY = 'state.traces';
 /** Upper bound on traces pulled for the chart/stat overview (and shallow client paging). */
 const OVERVIEW_CAP = 1000;
+/** Discrete error-ratio tiers for latency-bubble coloring (ApexCharts colors per series, not per point). */
+const ERROR_TIERS: { max: number; color: string; label: string }[] = [
+  { max: 0, color: '#2196f3', label: 'OK' },
+  { max: 0.25, color: '#ffb300', label: 'Low errors' },
+  { max: 0.75, color: '#fb8c00', label: 'Mixed' },
+  { max: 1, color: '#e53935', label: 'High errors' },
+];
 /**
  * Delimiter joining tag predicates into the reload cache key. ASCII US, matching `PATH_SEP` in
  * trace-detail — a printable separator could occur inside an attribute value and let two distinct
@@ -286,12 +293,10 @@ export class TraceListComponent {
   protected readonly analyticsColumns = ['operation', 'count', 'rate', 'errorRate', 'p50', 'p95', 'p99', 'avg'];
 
   protected traceChartOptions = signal<ApexOptions>({});
-  /** Jaeger-style duration-vs-time scatter (latency view). */
-  protected scatterOptions = signal<ApexOptions>({});
-  /** traceId lookup for scatter marker clicks, indexed [seriesIndex][dataPointIndex]. */
-  private scatterIds: string[][] = [];
+  /** Jaeger-style duration-vs-time latency chart, binned into count/error-sized bubbles. */
+  protected latencyBubbleOptions = signal<ApexOptions>({});
 
-  protected readonly displayedColumns = ['traceId', 'service', 'operation', 'duration', 'spans', 'status', 'time'];
+  protected readonly displayedColumns = ['service', 'operation', 'spans', 'status', 'duration', 'time'];
   protected readonly formatDuration = formatDuration;
   protected readonly parseDuration = parseDotnetTimespan;
 
@@ -445,7 +450,7 @@ export class TraceListComponent {
         this.capped.set(page.total > page.items.length);
         this.histogram.set(histogram);
         this.buildChart(start, end, histogram);
-        this.buildScatter(start, end);
+        this.buildLatencyBubbles(start, end);
         this.loading.set(false);
       },
       error: () => this.loading.set(false),
@@ -510,57 +515,64 @@ export class TraceListComponent {
   }
 
   /**
-   * Jaeger-style latency scatter: each trace a dot at (start time, duration ms), split into an OK
-   * and an Error series for color, with span count driving marker size. Clicking a dot opens it.
+   * Jaeger-style latency chart: traces binned onto a time × log-duration grid, rendered as
+   * bubbles sized by trace count and colored by error ratio (see ERROR_TIERS). Clicking a
+   * single-trace bubble opens it; clicking a multi-trace bubble zooms into its time span.
    */
-  private buildScatter(start: Date, end: Date): void {
+  private buildLatencyBubbles(start: Date, end: Date): void {
     const isDark = this.theme.isDark();
-    const ok: { x: number; y: number; z: number }[] = [];
-    const err: { x: number; y: number; z: number }[] = [];
-    const okIds: string[] = [];
-    const errIds: string[] = [];
+    const points = this.overview().map((t) => ({
+      x: new Date(t.traceStartTime).getTime(),
+      y: parseDotnetTimespan(t.traceDuration),
+      hasErrors: t.hasErrors,
+      traceIdHex: t.traceIdHex,
+    }));
+    const buckets = binLatencyPoints(points, start, end);
 
-    for (const t of this.overview()) {
-      const point = {
-        x: new Date(t.traceStartTime).getTime(),
-        y: parseDotnetTimespan(t.traceDuration),
-        z: t.spanCount,
-      };
-      if (t.hasErrors) { err.push(point); errIds.push(t.traceIdHex); }
-      else { ok.push(point); okIds.push(t.traceIdHex); }
+    const tierSeries: { x: number; y: number; z: number; count: number; errorCount: number;
+      errorRatio: number; xStart: number; xEnd: number; yStart: number; yEnd: number; traceIds: string[] }[][] =
+      ERROR_TIERS.map(() => []);
+    for (const b of buckets) {
+      const tierIndex = ERROR_TIERS.findIndex((t) => b.errorRatio <= t.max);
+      tierSeries[tierIndex < 0 ? ERROR_TIERS.length - 1 : tierIndex].push({
+        x: b.xCenter, y: b.yCenter, z: Math.sqrt(b.count),
+        count: b.count, errorCount: b.errorCount, errorRatio: b.errorRatio,
+        xStart: b.xStart, xEnd: b.xEnd, yStart: b.yStart, yEnd: b.yEnd, traceIds: b.traceIds,
+      });
     }
-    // Series order must match the [seriesIndex] used by the marker-click lookup.
-    this.scatterIds = [okIds, errIds];
 
     const zoom = timeRangeZoom((s, e) => this.timeRange.setCustom(s, e));
-    this.scatterOptions.set({
+    this.latencyBubbleOptions.set({
       chart: {
-        type: 'scatter', height: 200, background: 'transparent', toolbar: { show: false },
+        type: 'bubble', height: 200, background: 'transparent', toolbar: { show: false },
         zoom: { ...zoom.zoom, type: 'x' },
         events: {
           ...zoom.events,
-          // markerClick is the scatter marker event; dataPointSelection covers ApexCharts
-          // versions where only the latter fires for scatter series.
-          markerClick: (_e, _ctx, cfg: { seriesIndex: number; dataPointIndex: number }) =>
-            this.onScatterClick(cfg.seriesIndex, cfg.dataPointIndex),
-          dataPointSelection: (_e, _ctx, cfg: { seriesIndex: number; dataPointIndex: number }) =>
-            this.onScatterClick(cfg.seriesIndex, cfg.dataPointIndex),
+          // markerClick is the bubble marker event; dataPointSelection covers ApexCharts
+          // versions where only the latter fires.
+          markerClick: (_e, _ctx, cfg: { seriesIndex: number; dataPointIndex: number; w: unknown }) =>
+            this.onBubbleClick(cfg),
+          dataPointSelection: (_e, _ctx, cfg: { seriesIndex: number; dataPointIndex: number; w: unknown }) =>
+            this.onBubbleClick(cfg),
         },
       },
       theme: { mode: isDark ? 'dark' : 'light' },
-      series: [
-        { name: 'OK', data: ok },
-        { name: 'Error', data: err },
-      ],
-      colors: ['#2196f3', '#f44336'],
+      series: ERROR_TIERS.map((tier, i) => ({ name: tier.label, data: tierSeries[i] })),
+      colors: ERROR_TIERS.map((t) => t.color),
+      plotOptions: { bubble: { minBubbleRadius: 4, maxBubbleRadius: 26, zScaling: false } },
       xaxis: { type: 'datetime', min: start.getTime(), max: end.getTime(), labels: { datetimeUTC: false } },
       yaxis: { title: { text: 'Duration' }, labels: { formatter: (v: number) => formatDuration(v) } },
-      markers: { size: [5, 6], strokeWidth: 0, fillOpacity: 0.6 },
+      markers: { strokeWidth: 0, fillOpacity: 0.7 },
       tooltip: {
         custom: ({ seriesIndex, dataPointIndex, w }) => {
           const p = w.config.series[seriesIndex].data[dataPointIndex];
-          const when = new Date(p.x).toLocaleTimeString();
-          return `<div style="padding:6px 8px"><b>${formatDuration(p.y)}</b> · ${p.z} spans<br/>${when}</div>`;
+          const pct = (p.errorRatio * 100).toFixed(0);
+          return `<div style="padding:6px 8px">
+            <b>${p.count}</b> trace${p.count === 1 ? '' : 's'}
+            ${p.errorCount ? ` · ${p.errorCount} error${p.errorCount === 1 ? '' : 's'} (${pct}%)` : ''}<br/>
+            ${formatDuration(p.yStart)}–${formatDuration(p.yEnd)}<br/>
+            ${new Date(p.xStart).toLocaleTimeString()} – ${new Date(p.xEnd).toLocaleTimeString()}
+          </div>`;
         },
       },
       grid: { show: true },
@@ -569,10 +581,15 @@ export class TraceListComponent {
     });
   }
 
-  /** Marker-click → open the clicked trace. ApexCharts fires outside Angular, so re-enter the zone. */
-  private onScatterClick(seriesIndex: number, dataPointIndex: number): void {
-    const id = this.scatterIds[seriesIndex]?.[dataPointIndex];
-    if (id) this.zone.run(() => this.navigate(id));
+  /** Bubble-click → open a single trace, or zoom into a multi-trace bucket's time span. */
+  private onBubbleClick(cfg: { seriesIndex: number; dataPointIndex: number; w: unknown }): void {
+    const w = cfg.w as { config: { series: { data: { count: number; traceIds: string[]; xStart: number; xEnd: number }[] }[] } };
+    const p = w?.config?.series?.[cfg.seriesIndex]?.data?.[cfg.dataPointIndex];
+    if (!p) return;
+    this.zone.run(() => {
+      if (p.count === 1) this.navigate(p.traceIds[0]);
+      else this.timeRange.setCustom(new Date(p.xStart), new Date(p.xEnd));
+    });
   }
 
   private applyParsedSearch(traces: TraceInfo[], terms: SearchTerm[]): TraceInfo[] {
