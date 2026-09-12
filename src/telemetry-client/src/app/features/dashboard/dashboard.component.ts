@@ -1,6 +1,6 @@
 import { Component, DestroyRef, OnInit, computed, effect, inject, signal, untracked } from '@angular/core';
 import { DatePipe, DecimalPipe, PercentPipe } from '@angular/common';
-import { Router } from '@angular/router';
+import { Router, RouterLink } from '@angular/router';
 import { Subscription, forkJoin, interval, of } from 'rxjs';
 import { catchError } from 'rxjs/operators';
 import { MatCardModule } from '@angular/material/card';
@@ -24,16 +24,28 @@ import { ThemeService } from '../../core/services/theme.service';
 import { TraceInfo } from '../../core/models/trace.models';
 import { StatCardComponent } from '../../shared/components/stat-card/stat-card.component';
 import { EmptyStateComponent } from '../../shared/components/empty-state/empty-state.component';
-import { TimeBucket, LogBucket, buildLogSeriesOptions, formatDuration, parseDotnetTimespan, timeRangeZoom } from '../../shared/utils/chart.utils';
+import {
+  TimeBucket, LogBucket, buildSparklineOptions,
+  formatDuration, parseDotnetTimespan, timeRangeZoom,
+} from '../../shared/utils/chart.utils';
 import { loadPageState, savePageState } from '../../shared/utils/page-state';
 
 const STATE_KEY = 'state.dashboard';
+
+/**
+ * Error-rate KPI thresholds. Deliberately separate from any alert rule: alert rules are
+ * per-tenant, per-rule-type, and often scoped to one service, so there is no single sensible way
+ * to fold an arbitrary set of them into one global card. Alerts own "is this a violation"; this
+ * card owns "does this look off at a glance" — different jobs, different thresholds.
+ */
+const ERROR_RATE_WARN = 0.01;
+const ERROR_RATE_ERROR = 0.05;
 
 @Component({
   selector: 'app-dashboard',
   standalone: true,
   imports: [
-    DatePipe, DecimalPipe, PercentPipe,
+    DatePipe, DecimalPipe, PercentPipe, RouterLink,
     MatCardModule, MatTableModule, MatIconModule,
     MatButtonModule, MatProgressBarModule, MatChipsModule,
     MatSlideToggleModule, MatTooltipModule, MatFormFieldModule, MatSelectModule,
@@ -67,9 +79,10 @@ export class DashboardComponent {
   /** True (unbounded) volume histogram — backs the chart and the trace-count/error-rate stat cards. */
   private traceHistogram = signal<TimeBucket[]>([]);
   /**
-   * Severity histogram — backs the log chart *and* the log stat cards. The counts come from here
-   * rather than from a raw `GET /api/logs` fetch: that endpoint is unbounded (no limit parameter),
-   * so the page was pulling every log record in the window over the wire just to read `.length`.
+   * Severity histogram — backs the log stat cards (full severity breakdown lives on the Logs
+   * page). Counts come from here rather than a raw `GET /api/logs` fetch: that endpoint is
+   * unbounded (no limit parameter), so the page was pulling every log record in the window over
+   * the wire just to read `.length`.
    */
   private logHistogram = signal<LogBucket[]>([]);
 
@@ -78,6 +91,13 @@ export class DashboardComponent {
   protected errorRate = computed(() =>
     this.totalTraces() > 0 ? this.errorTraces() / this.totalTraces() : 0
   );
+  /** 'default' | 'warn' | 'error' coloring for the Error Rate card — thresholds above. */
+  protected errorRateColor = computed<'default' | 'warn' | 'error'>(() => {
+    const rate = this.errorRate();
+    if (rate >= ERROR_RATE_ERROR) return 'error';
+    if (rate >= ERROR_RATE_WARN) return 'warn';
+    return 'default';
+  });
   protected serviceCount = computed(() => this.availableServices().length);
   protected logTotal = computed(() =>
     this.logHistogram().reduce(
@@ -97,8 +117,54 @@ export class DashboardComponent {
       .slice(0, 5)
   );
 
+  // ---------------------------------------------------------------------------------------------
+  // RED KPIs (Rate, Errors, Duration) — all derived from `traceHistogram`/`logHistogram`, which
+  // the page already fetches, so none of this adds a request.
+  // ---------------------------------------------------------------------------------------------
+
+  private windowSeconds = computed(() => {
+    const { start, end } = this.timeRange.range();
+    return Math.max((end.getTime() - start.getTime()) / 1000, 1);
+  });
+  protected tracesPerSecond = computed(() => this.totalTraces() / this.windowSeconds());
+  private sumDurationMsTotal = computed(() => this.traceHistogram().reduce((a, b) => a + b.sumDurationMs, 0));
+  protected avgDurationMs = computed(() =>
+    this.totalTraces() > 0 ? this.sumDurationMsTotal() / this.totalTraces() : 0
+  );
+
+  /** Per-bucket trace counts — 0 is a real value here (an idle bucket genuinely saw no traces). */
+  protected countSeries = computed<(number | null)[]>(() => this.traceHistogram().map((b) => b.count));
+  /**
+   * Per-bucket avg duration / error rate. `null` (not 0) for an empty bucket: with no traces,
+   * "average duration" and "error rate" are undefined, not zero — plotting 0 would read as
+   * "responses briefly became instant" / "errors briefly vanished" instead of "no data here".
+   */
+  protected avgDurationSeries = computed<(number | null)[]>(() =>
+    this.traceHistogram().map((b) => (b.count > 0 ? b.sumDurationMs / b.count : null))
+  );
+  protected errorRateSeries = computed<(number | null)[]>(() =>
+    this.traceHistogram().map((b) => (b.count > 0 ? b.errorCount / b.count : null))
+  );
+  /** Per-bucket error+fatal log count — 0 is real data (no error logs in that bucket). */
+  protected logErrorSeries = computed<(number | null)[]>(() =>
+    this.logHistogram().map((b) => b.error + b.fatal)
+  );
+
+  protected tracesSparkline = computed(() =>
+    buildSparklineOptions(this.countSeries(), this.theme.isDark(), '#2196f3')
+  );
+  protected durationSparkline = computed(() =>
+    buildSparklineOptions(this.avgDurationSeries(), this.theme.isDark(), '#2196f3')
+  );
+  protected errorRateSparkline = computed(() =>
+    buildSparklineOptions(this.errorRateSeries(), this.theme.isDark(), '#f44336')
+  );
+  protected logErrorSparkline = computed(() =>
+    buildSparklineOptions(this.logErrorSeries(), this.theme.isDark(), '#f44336')
+  );
+
   protected traceChartOptions = signal<ApexOptions>({});
-  protected logChartOptions = signal<ApexOptions>({});
+  protected latencyChartOptions = signal<ApexOptions>({});
 
   constructor() {
     // Slide relative preset windows to "now" on (re)entry so navigating back refreshes.
@@ -159,14 +225,14 @@ export class DashboardComponent {
         this.logHistogram.set(logHist);
         const services = [...new Set([...traceSvcs, ...logSvcs, ...metricSvcs])].sort();
         if (services.length > 0) this.availableServices.set(services);
-        this.buildCharts(traceHist, logHist);
+        this.buildCharts(traceHist);
         this.loading.set(false);
       },
       error: () => this.loading.set(false),
     });
   }
 
-  private buildCharts(traceBuckets: TimeBucket[], logBuckets: LogBucket[]): void {
+  private buildCharts(traceBuckets: TimeBucket[]): void {
     const isDark = this.theme.isDark();
     const timestamps = traceBuckets.map((b) => b.timestamp.getTime());
 
@@ -187,8 +253,24 @@ export class DashboardComponent {
       dataLabels: { enabled: false },
     });
 
-    const logBase = buildLogSeriesOptions(logBuckets, isDark, 220);
-    this.logChartOptions.set({ ...logBase, chart: { ...logBase.chart!, ...zoom } });
+    // Empty buckets plot as `null` (a gap), not 0 — see avgDurationSeries above for why.
+    this.latencyChartOptions.set({
+      chart: { type: 'line', height: 220, toolbar: { show: false }, background: 'transparent', ...zoom },
+      theme: { mode: isDark ? 'dark' : 'light' },
+      series: [
+        {
+          name: 'Avg Duration',
+          data: traceBuckets.map((b, i) => [timestamps[i], b.count > 0 ? b.sumDurationMs / b.count : null]),
+        },
+      ],
+      xaxis: { type: 'datetime', labels: { datetimeUTC: false } },
+      yaxis: { labels: { formatter: (v: number) => formatDuration(v) } },
+      colors: ['#ff9800'],
+      stroke: { curve: 'smooth', width: 2 },
+      legend: { position: 'top' },
+      dataLabels: { enabled: false },
+      tooltip: { y: { formatter: (v: number) => formatDuration(v) } },
+    });
   }
 
   protected navigateToTrace(traceId: string): void {

@@ -2,13 +2,15 @@ import { Component, Input } from '@angular/core';
 import { MatCardModule } from '@angular/material/card';
 import { MatIconModule } from '@angular/material/icon';
 import { NgClass } from '@angular/common';
+import { NgApexchartsModule } from 'ng-apexcharts';
+import type { ApexOptions } from 'ng-apexcharts';
 
 @Component({
   selector: 'app-stat-card',
   standalone: true,
-  imports: [MatCardModule, MatIconModule, NgClass],
+  imports: [MatCardModule, MatIconModule, NgClass, NgApexchartsModule],
   template: `
-    <mat-card class="stat-card">
+    <mat-card class="stat-card" [class.clickable]="clickable">
       <mat-card-content>
         <div class="stat-row">
           <div class="stat-text">
@@ -18,7 +20,15 @@ import { NgClass } from '@angular/common';
               <div class="subtitle">{{ subtitle }}</div>
             }
           </div>
-          @if (icon) {
+          @if (sparklineOptions) {
+            <apx-chart
+              class="sparkline"
+              [series]="sparklineOptions.series!"
+              [chart]="sparklineOptions.chart!"
+              [colors]="sparklineOptions.colors!"
+              [stroke]="sparklineOptions.stroke!"
+              [tooltip]="sparklineOptions.tooltip!" />
+          } @else if (icon) {
             <mat-icon class="stat-icon" [ngClass]="color">{{ icon }}</mat-icon>
           }
         </div>
@@ -27,6 +37,8 @@ import { NgClass } from '@angular/common';
   `,
   styles: [`
     .stat-card { height: 100%; }
+    .stat-card.clickable { cursor: pointer; }
+    .stat-card.clickable:hover { background: var(--mat-sys-surface-container-high); }
     mat-card-content { padding: 16px !important; }
     .stat-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
     .stat-text { min-width: 0; }
@@ -34,6 +46,7 @@ import { NgClass } from '@angular/common';
     .value { font-size: 28px; font-weight: 500; line-height: 1.2; }
     .subtitle { font-size: 12px; color: var(--mat-sys-on-surface-variant); margin-top: 4px; }
     .stat-icon { font-size: 36px; width: 36px; height: 36px; opacity: 0.7; color: var(--mat-sys-primary); flex-shrink: 0; }
+    .sparkline { flex-shrink: 0; width: 100px; height: 40px; }
     .error { color: var(--mat-sys-error); }
     .warn { color: #ff9800; }
     .success { color: #4caf50; }
@@ -46,4 +59,8 @@ export class StatCardComponent {
   @Input() subtitle = '';
   @Input() icon = '';
   @Input() color: 'default' | 'error' | 'warn' | 'success' = 'default';
+  /** Optional ~100x40 trend line, built via `buildSparklineOptions`. Takes priority over `icon`. */
+  @Input() sparklineOptions: ApexOptions | null = null;
+  /** Purely visual: cursor + hover state for a card wrapped in a `routerLink`/click handler. */
+  @Input() clickable = false;
 }

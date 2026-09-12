@@ -32,6 +32,34 @@ export function timeRangeZoom(
   };
 }
 
+/**
+ * Minimal ApexCharts config for a KPI-card sparkline: no axes, no grid, no tooltip — just the
+ * line shape. `series` values of `null` render as a gap rather than a dip to zero; callers must
+ * pass `null` for buckets with no data (e.g. an empty time bucket), never `0`, or an idle period
+ * reads as "duration crashed to 0ms" instead of "no data here".
+ */
+export function buildSparklineOptions(
+  series: (number | null)[],
+  isDark: boolean,
+  color: string,
+): ApexOptions {
+  return {
+    chart: {
+      type: 'line',
+      height: 40,
+      width: 100,
+      sparkline: { enabled: true },
+      background: 'transparent',
+      animations: { enabled: false },
+    },
+    theme: { mode: isDark ? 'dark' : 'light' },
+    series: [{ name: '', data: series }],
+    colors: [color],
+    stroke: { curve: 'smooth', width: 2 },
+    tooltip: { enabled: false },
+  };
+}
+
 export interface TimeBucket {
   timestamp: Date;
   count: number;

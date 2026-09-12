@@ -3,15 +3,41 @@
 }
 
 <div class="page-container">
-  <!-- Stat Cards -->
+  <!-- RED KPI strip: Rate, Errors, Duration (+ Services and one log signal) -->
   <div class="stat-grid">
-    <app-stat-card label="Total Traces" icon="account_tree" [value]="totalTraces() | number" />
+    <app-stat-card
+      label="Traces/sec"
+      icon="account_tree"
+      [value]="tracesPerSecond() | number: '1.0-2'"
+      [sparklineOptions]="tracesSparkline()"
+      matTooltip="Traces started per second, by root span. Not limited to HTTP — covers any OTLP trace (queue consumers, jobs, etc.)." />
+    <app-stat-card
+      label="Avg Trace Duration"
+      icon="timer"
+      [value]="formatDuration(avgDurationMs())"
+      [sparklineOptions]="durationSparkline()"
+      matTooltip="Wall time of the root span across the whole trace, including any async work it kicks off." />
     <app-stat-card
       label="Error Rate"
       icon="percent"
       [value]="(errorRate() | percent: '1.1-1') ?? '0%'"
-      [color]="errorRate() > 0.05 ? 'error' : 'default'" />
-    <app-stat-card label="Log Events" icon="article" [value]="logTotal() | number" />
+      [color]="errorRateColor()"
+      [sparklineOptions]="errorRateSparkline()" />
+    <app-stat-card
+      label="Error Logs"
+      icon="article"
+      [value]="logErrorCount() | number"
+      [sparklineOptions]="logErrorSparkline()"
+      [clickable]="true"
+      routerLink="/logs"
+      [queryParams]="{ severity: 17 }"
+      matTooltip="Error + Fatal log records in this window. Click to view them on the Logs page." />
+    <app-stat-card
+      label="p95 Trace Duration"
+      icon="speed"
+      value="—"
+      subtitle="Coming in Phase 4"
+      matTooltip="Per-bucket percentiles land in Phase 4 of the dashboard refactor — see plans/dashboard-refactor.md." />
     <app-stat-card label="Services" icon="cloud" [value]="serviceCount() | number" />
   </div>
 
@@ -62,18 +88,20 @@
     </mat-card>
 
     <mat-card>
-      <mat-card-header><mat-card-title>Log Severity</mat-card-title></mat-card-header>
+      <mat-card-header><mat-card-title>Latency Over Time</mat-card-title></mat-card-header>
       <mat-card-content>
-        @if (logChartOptions().series) {
+        @if (latencyChartOptions().series) {
           <apx-chart
-            [series]="logChartOptions().series!"
-            [chart]="logChartOptions().chart!"
-            [xaxis]="logChartOptions().xaxis!"
-            [colors]="logChartOptions().colors!"
-            [theme]="logChartOptions().theme!"
-            [legend]="logChartOptions().legend!"
-            [dataLabels]="logChartOptions().dataLabels!"
-            [plotOptions]="logChartOptions().plotOptions!" />
+            [series]="latencyChartOptions().series!"
+            [chart]="latencyChartOptions().chart!"
+            [xaxis]="latencyChartOptions().xaxis!"
+            [yaxis]="latencyChartOptions().yaxis!"
+            [colors]="latencyChartOptions().colors!"
+            [stroke]="latencyChartOptions().stroke!"
+            [theme]="latencyChartOptions().theme!"
+            [legend]="latencyChartOptions().legend!"
+            [dataLabels]="latencyChartOptions().dataLabels!"
+            [tooltip]="latencyChartOptions().tooltip!" />
         }
       </mat-card-content>
     </mat-card>
