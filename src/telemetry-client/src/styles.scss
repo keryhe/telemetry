@@ -52,17 +52,6 @@ body.theme-system {
   margin-bottom: 16px;
 }
 
-.chart-grid {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 16px;
-  margin-bottom: 16px;
-
-  @media (max-width: 900px) {
-    grid-template-columns: 1fr;
-  }
-}
-
 .full-width {
   width: 100%;
 }

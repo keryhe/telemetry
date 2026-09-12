@@ -239,7 +239,11 @@ export class DashboardComponent {
     const zoom = timeRangeZoom((from, to) => this.timeRange.setCustom(from, to));
 
     this.traceChartOptions.set({
-      chart: { type: 'area', height: 220, toolbar: { show: false }, background: 'transparent', ...zoom },
+      // height/width: '100%' — fills `.chart-container`, which sets a concrete pixel height via
+      // the CSS `aspect-ratio` property (see dashboard.component.scss). ApexCharts' own
+      // ResizeObserver (chart.redrawOnParentResize, on by default) redraws — not just CSS-stretches
+      // — whenever that container's size changes, e.g. the grid reflowing at a breakpoint.
+      chart: { type: 'area', height: '100%', width: '100%', toolbar: { show: false }, background: 'transparent', ...zoom },
       theme: { mode: isDark ? 'dark' : 'light' },
       series: [
         { name: 'Total', data: traceBuckets.map((b, i) => [timestamps[i], b.count]) },
@@ -255,7 +259,7 @@ export class DashboardComponent {
 
     // Empty buckets plot as `null` (a gap), not 0 — see avgDurationSeries above for why.
     this.latencyChartOptions.set({
-      chart: { type: 'line', height: 220, toolbar: { show: false }, background: 'transparent', ...zoom },
+      chart: { type: 'line', height: '100%', width: '100%', toolbar: { show: false }, background: 'transparent', ...zoom },
       theme: { mode: isDark ? 'dark' : 'light' },
       series: [
         {
