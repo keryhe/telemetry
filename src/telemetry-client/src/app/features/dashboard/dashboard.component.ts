@@ -22,7 +22,6 @@ import { MetricsApiService } from '../../core/services/api/metrics-api.service';
 import { TimeRangeService, recommendedRefreshIntervalMs } from '../../core/services/time-range.service';
 import { ThemeService } from '../../core/services/theme.service';
 import { TraceInfo } from '../../core/models/trace.models';
-import { LogRecord, getServiceName } from '../../core/models/log.models';
 import { StatCardComponent } from '../../shared/components/stat-card/stat-card.component';
 import { EmptyStateComponent } from '../../shared/components/empty-state/empty-state.component';
 import { TimeBucket, LogBucket, buildLogSeriesOptions, formatDuration, parseDotnetTimespan, timeRangeZoom } from '../../shared/utils/chart.utils';
@@ -63,11 +62,16 @@ export class DashboardComponent {
   private refreshSub?: Subscription;
   /** Bounded (limit: 500) sample used for the recent-errors/slowest-traces tables. */
   protected traces = signal<TraceInfo[]>([]);
-  protected logs = signal<LogRecord[]>([]);
   protected availableServices = signal<string[]>([]);
   protected selectedService = signal(this.saved.selectedService);
   /** True (unbounded) volume histogram — backs the chart and the trace-count/error-rate stat cards. */
   private traceHistogram = signal<TimeBucket[]>([]);
+  /**
+   * Severity histogram — backs the log chart *and* the log stat cards. The counts come from here
+   * rather than from a raw `GET /api/logs` fetch: that endpoint is unbounded (no limit parameter),
+   * so the page was pulling every log record in the window over the wire just to read `.length`.
+   */
+  private logHistogram = signal<LogBucket[]>([]);
 
   protected totalTraces = computed(() => this.traceHistogram().reduce((a, b) => a + b.count, 0));
   protected errorTraces = computed(() => this.traceHistogram().reduce((a, b) => a + b.errorCount, 0));
@@ -75,6 +79,14 @@ export class DashboardComponent {
     this.totalTraces() > 0 ? this.errorTraces() / this.totalTraces() : 0
   );
   protected serviceCount = computed(() => this.availableServices().length);
+  protected logTotal = computed(() =>
+    this.logHistogram().reduce(
+      (a, b) => a + b.trace + b.debug + b.info + b.warn + b.error + b.fatal, 0)
+  );
+  /** Error + fatal only — the log signal worth surfacing next to the trace RED metrics. */
+  protected logErrorCount = computed(() =>
+    this.logHistogram().reduce((a, b) => a + b.error + b.fatal, 0)
+  );
   protected recentErrors = computed(() =>
     this.traces().filter((t) => t.hasErrors).slice(0, 5)
   );
@@ -135,17 +147,16 @@ export class DashboardComponent {
 
     forkJoin({
       traces:     this.tracesApi.getTraces({ start, end, limit: 500, service: svc || undefined }),
-      logs:       this.logsApi.getLogs(start, end),
       traceHist:  this.tracesApi.getTraceHistogram({ start, end, service: svc || undefined }),
       logHist:    this.logsApi.getLogHistogram({ start, end, service: svc || undefined }),
       traceSvcs:  this.tracesApi.getServices(start, end).pipe(catchError(() => of([]))),
       logSvcs:    this.logsApi.getServices(start, end).pipe(catchError(() => of([]))),
       metricSvcs: this.metricsApi.getServices(start, end).pipe(catchError(() => of([]))),
     }).subscribe({
-      next: ({ traces, logs, traceHist, logHist, traceSvcs, logSvcs, metricSvcs }) => {
+      next: ({ traces, traceHist, logHist, traceSvcs, logSvcs, metricSvcs }) => {
         this.traces.set(traces);
-        this.logs.set(svc ? logs.filter((l) => getServiceName(l) === svc) : logs);
         this.traceHistogram.set(traceHist);
+        this.logHistogram.set(logHist);
         const services = [...new Set([...traceSvcs, ...logSvcs, ...metricSvcs])].sort();
         if (services.length > 0) this.availableServices.set(services);
         this.buildCharts(traceHist, logHist);

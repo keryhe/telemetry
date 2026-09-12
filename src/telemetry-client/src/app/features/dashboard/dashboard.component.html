@@ -11,7 +11,7 @@
       icon="percent"
       [value]="(errorRate() | percent: '1.1-1') ?? '0%'"
       [color]="errorRate() > 0.05 ? 'error' : 'default'" />
-    <app-stat-card label="Log Events" icon="article" [value]="logs().length | number" />
+    <app-stat-card label="Log Events" icon="article" [value]="logTotal() | number" />
     <app-stat-card label="Services" icon="cloud" [value]="serviceCount() | number" />
   </div>
 
