@@ -75,7 +75,7 @@ const TAG_KEY_SEP = '\u001F';
   selector: 'app-trace-list',
   standalone: true,
   imports: [
-    DatePipe, DecimalPipe, SlicePipe, FormsModule,
+    DatePipe, DecimalPipe, FormsModule,
     MatCardModule, MatPaginatorModule, MatTableModule, MatSortModule, MatTabsModule, MatIconModule,
     MatButtonToggleModule, MatButtonModule, MatSelectModule, MatFormFieldModule,
     MatInputModule, MatProgressBarModule, MatChipsModule, MatTooltipModule,
