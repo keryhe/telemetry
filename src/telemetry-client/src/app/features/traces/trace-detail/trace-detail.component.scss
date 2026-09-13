@@ -19,6 +19,16 @@
 
 .timeline-card { overflow: hidden; }
 
+// `<mat-card-header>` ships as a plain non-wrapping flex row (`.mat-mdc-card-header`), so the
+// title, view switcher, error nav, Critical path toggle and service legend all got squeezed
+// together as the viewport narrowed instead of reflowing. Wrapping is what the breakpoints at
+// the bottom of this file build on.
+mat-card-header {
+  flex-wrap: wrap;
+  align-items: center;
+  row-gap: 8px;
+}
+
 .timeline-content { padding: 0 !important; position: relative; }
 
 .service-legend {
@@ -36,7 +46,6 @@
 }
 
 .crit-toggle {
-  margin-left: 16px;
   font-size: 12px;
   flex-shrink: 0;
 }
@@ -392,10 +401,18 @@
 // ===========================================================================
 // View switcher + jump-to-error (card header)
 // ===========================================================================
+// Everything between the "Spans" title and the service legend, grouped so it wraps as one unit.
+.header-controls {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;  // safety net: wraps internally rather than overflowing if a row is still tight
+  gap: 4px 16px;
+  margin-left: 16px;
+}
+
 .view-switcher {
   display: flex;
   gap: 2px;
-  margin-left: 16px;
 
   button {
     min-width: 0;
@@ -411,7 +428,6 @@
   display: flex;
   align-items: center;
   gap: 2px;
-  margin-left: 16px;
 
   .error-count {
     display: flex;
@@ -423,6 +439,30 @@
     font-variant-numeric: tabular-nums;
     mat-icon { font-size: 16px; width: 16px; height: 16px; }
   }
+}
+
+// -------------------------------------------------------------------------------------------
+// Tablet wrap. Below 959.98px (upper bound of Angular CDK's `Breakpoints.Small`, the same value
+// the shell toolbar wraps at) the title, four view buttons, Critical path toggle and service
+// legend no longer fit one line, so the whole `.header-controls` group drops to its own row.
+// `flex-basis: 100%` forces the break; `order: 1` lays it out after the two order-0 items, which
+// keeps the legend up on the title row instead of pushing it down to a third line.
+// -------------------------------------------------------------------------------------------
+@media (max-width: 959.98px) {
+  .header-controls {
+    flex: 1 1 100%;
+    order: 1;
+    margin-left: 0;  // on its own row, align with the card title rather than indenting from it
+  }
+}
+
+// -------------------------------------------------------------------------------------------
+// Handset. Below 599.98px (Angular CDK's `Breakpoints.Handset` portrait threshold) the four
+// labelled buttons plus the toggle overflow even their own row, so the buttons go icon-only.
+// Nothing is lost: each already carries a `matTooltip` with its label.
+// -------------------------------------------------------------------------------------------
+@media (max-width: 599.98px) {
+  .view-switcher button .view-label { display: none; }
 }
 
 .detail-toolbar { margin-bottom: 12px; }

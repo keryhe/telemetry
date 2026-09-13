@@ -32,7 +32,7 @@ import {
   buildHistogramBarFromWindows, buildHistogramHeatmapFromWindows, buildRadialGauge, buildShareDonut,
   chartGrid, computeRateSeries, formatUnitValue,
   HistogramWindow, histogramQuantile,
-  isCounterMetric, isDeltaSum, normalizeExpHistogramSeries, timeRangeZoom,
+  isCounterMetric, isDeltaSum, normalizeExpHistogramSeries, PERCENTILE_COLORS, timeRangeZoom,
 } from '../../../shared/utils/chart.utils';
 import { loadPageState, savePageState } from '../../../shared/utils/page-state';
 
@@ -469,6 +469,9 @@ export class MetricDetailComponent implements OnInit {
     let chartSeries: { name: string; data: [number, number][] }[];
     // Per-series stroke for the main chart; histograms override it to render Max faint/dashed.
     let stroke: ApexOptions['stroke'] = { curve: 'smooth', width: 2 };
+    // Only the histogram percentile chart pins its colors; elsewhere `undefined` leaves ApexCharts
+    // on its default palette.
+    let chartColors: string[] | undefined;
 
     if (this.isSummary()) {
       // Quantiles can't be aggregated across series — plot them for one representative series. The
@@ -515,6 +518,10 @@ export class MetricDetailComponent implements OnInit {
           dashArray: [...Array(n - 1).fill(0), 6],
         };
       }
+      // Name-keyed, not positional: the `.filter` above drops percentiles with no finite data and
+      // Max is conditional, so mapping over the surviving names is what keeps colors aligned to
+      // series. A positional array would silently shift green onto p95 whenever p50 drops out.
+      chartColors = chartSeries.map((s2) => PERCENTILE_COLORS[s2.name]).filter((c): c is string => !!c);
       this.buildThroughputChart(windows, start, end, isDark);
       this.bucketBarOptions.set(buildHistogramBarFromWindows(bounds, windows, isDark, this.metricUnit()));
       const heatmap = buildHistogramHeatmapFromWindows(bounds, windows, isDark, this.metricUnit());
@@ -542,6 +549,7 @@ export class MetricDetailComponent implements OnInit {
       // Pin the axis to the header-selected window so the chart tracks that range (not the data extent).
       xaxis: { type: 'datetime', min: rangeStart.getTime(), max: rangeEnd.getTime(), labels: { datetimeUTC: false } },
       stroke,
+      colors: chartColors,
       fill: { opacity: chartType === 'area' ? 0.15 : 1 },
       dataLabels: { enabled: false },
       yaxis: { labels: { formatter: valueFormatter } },

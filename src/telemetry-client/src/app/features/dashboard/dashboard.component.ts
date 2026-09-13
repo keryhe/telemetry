@@ -28,7 +28,7 @@ import { PageHeaderComponent } from '../../shared/components/page-header/page-he
 import { ServiceHealthTableComponent } from './service-health-table/service-health-table.component';
 import {
   TimeBucket, LogBucket, buildSparklineOptions,
-  formatDuration, parseDotnetTimespan, timeRangeZoom,
+  formatDuration, parseDotnetTimespan, PERCENTILE_COLORS, timeRangeZoom,
 } from '../../shared/utils/chart.utils';
 import { loadPageState, savePageState } from '../../shared/utils/page-state';
 
@@ -296,10 +296,10 @@ export class DashboardComponent {
       ],
       xaxis: { type: 'datetime', labels: { datetimeUTC: false } },
       yaxis: { labels: { formatter: (v: number) => formatDuration(v) } },
-      // Avg neutral (matches "Total" in Trace Volume); p50/p95/p99 a deliberate green→orange→red
-      // severity gradient, reusing colors already established elsewhere on this dashboard (the
-      // stat-card `success` color, the Error-Rate `warn` tier, and "Errors" in Trace Volume).
-      colors: ['#2196f3', '#4caf50', '#ff9800', '#f44336'],
+      // Avg neutral (matches "Total" in Trace Volume); the percentiles come from the shared
+      // PERCENTILE_COLORS gradient in chart.utils.ts, which the metric-detail histogram chart also
+      // uses so the same percentile reads the same color on both pages.
+      colors: ['#2196f3', PERCENTILE_COLORS['p50'], PERCENTILE_COLORS['p95'], PERCENTILE_COLORS['p99']],
       stroke: { curve: 'smooth', width: 2 },
       // Same stray-marker fix as the sparklines (see buildSparklineOptions): every series here
       // carries `null`s, so ApexCharts emits one 0.1px-radius "virtual point" per series pinned to

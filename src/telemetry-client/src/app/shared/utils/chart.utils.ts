@@ -366,6 +366,16 @@ export const CATEGORICAL_COLORS = [
 ];
 
 /**
+ * Canonical percentile palette: a green → orange → red severity gradient shared by the dashboard's
+ * "Latency Over Time" chart and the histogram percentile chart on metric detail, so the same
+ * percentile always reads the same color. `Max` sits outside the gradient in purple — it's
+ * worst-case context, not a fourth severity tier.
+ */
+export const PERCENTILE_COLORS: Record<string, string> = {
+  p50: '#4caf50', p95: '#ff9800', p99: '#f44336', Max: '#9c27b0',
+};
+
+/**
  * Donut chart of share-of-total across slices (e.g. one slice per service/label set). Slices
  * arrive pre-reduced to a single value each; zero/negative values are dropped so the ring only
  * shows real contributions. Returns null if nothing positive remains.

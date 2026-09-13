@@ -46,35 +46,38 @@
       <mat-card-header>
         <mat-card-title>Spans</mat-card-title>
 
-        <!-- View switcher: timeline / statistics / flame / JSON -->
-        <div class="view-switcher">
-          @for (v of views; track v.id) {
-            <button mat-button [class.active]="view() === v.id" (click)="view.set(v.id)" [matTooltip]="v.label">
-              <mat-icon>{{ v.icon }}</mat-icon>
-              <span class="view-label">{{ v.label }}</span>
-            </button>
+        <!-- Grouped so the whole block drops to its own row when the header wraps -->
+        <div class="header-controls">
+          <!-- View switcher: timeline / statistics / flame / JSON -->
+          <div class="view-switcher">
+            @for (v of views; track v.id) {
+              <button mat-button [class.active]="view() === v.id" (click)="view.set(v.id)" [matTooltip]="v.label">
+                <mat-icon>{{ v.icon }}</mat-icon>
+                <span class="view-label">{{ v.label }}</span>
+              </button>
+            }
+          </div>
+
+          @if (view() === 'timeline') {
+            <!-- Jump-to-error -->
+            @if (errorSpans().length) {
+              <div class="error-nav">
+                <span class="error-count"><mat-icon>error</mat-icon> {{ currentErrorIndex() + 1 }} / {{ errorSpans().length }}</span>
+                <button mat-icon-button (click)="prevError()" matTooltip="Previous error">
+                  <mat-icon>keyboard_arrow_up</mat-icon>
+                </button>
+                <button mat-icon-button (click)="nextError()" matTooltip="Next error">
+                  <mat-icon>keyboard_arrow_down</mat-icon>
+                </button>
+              </div>
+            }
+            <mat-slide-toggle class="crit-toggle"
+                              [checked]="showCriticalPath()"
+                              (change)="showCriticalPath.set($event.checked)">
+              Critical path
+            </mat-slide-toggle>
           }
         </div>
-
-        @if (view() === 'timeline') {
-          <!-- Jump-to-error -->
-          @if (errorSpans().length) {
-            <div class="error-nav">
-              <span class="error-count"><mat-icon>error</mat-icon> {{ currentErrorIndex() + 1 }} / {{ errorSpans().length }}</span>
-              <button mat-icon-button (click)="prevError()" matTooltip="Previous error">
-                <mat-icon>keyboard_arrow_up</mat-icon>
-              </button>
-              <button mat-icon-button (click)="nextError()" matTooltip="Next error">
-                <mat-icon>keyboard_arrow_down</mat-icon>
-              </button>
-            </div>
-          }
-          <mat-slide-toggle class="crit-toggle"
-                            [checked]="showCriticalPath()"
-                            (change)="showCriticalPath.set($event.checked)">
-            Critical path
-          </mat-slide-toggle>
-        }
         <div class="service-legend">
           @for (svc of serviceNames(); track svc) {
             <span class="legend-item">

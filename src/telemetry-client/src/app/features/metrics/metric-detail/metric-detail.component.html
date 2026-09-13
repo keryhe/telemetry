@@ -16,10 +16,6 @@
     </button>
   </div>
 
-  @if (instances()[0]?.description) {
-    <p class="description">{{ instances()[0].description }}</p>
-  }
-
   <!-- Stats -->
   <div class="stat-grid">
     <app-stat-card [label]="(isHistogram() || isSummary()) ? 'Mean' : (statsAreRates() ? 'Current Rate' : 'Current')" icon="show_chart" [value]="fmtStat(currentValue())" />
