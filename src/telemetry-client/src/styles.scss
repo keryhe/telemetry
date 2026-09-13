@@ -39,10 +39,68 @@ body.theme-system {
   flex: 1 1 auto;
 }
 
+// -------------------------------------------------------------------------------------------
+// Page layout contract — paired with the shell's `.content` (shell.component.scss) and
+// `app-page-header`. `.content` fills the area below the toolbar and never scrolls itself;
+// each routed page is a full-height flex column whose `.page-container` is the page's only
+// scroll region, with the page header pinned above it as a non-scrolling sibling.
+//
+// Scrolling the body rather than the whole page is what makes the header behave: content can't
+// run past it horizontally (a wide table's overflow is trapped inside the scrollport instead of
+// spilling out beside the header), and a table's own `sticky: true` header pins directly beneath
+// it, because the top of its scrollport now *is* the underside of the page header.
+//
+// Below 959.98px that trade flips — see the media query at the bottom of this block.
+// -------------------------------------------------------------------------------------------
+:root {
+  --page-max-width: 1600px;
+}
+
+// The routed component's host element sits between `.content` and the page's own markup, so it
+// has to carry the column through or the page can't size its scroll region against the viewport.
+.content > *:not(router-outlet) {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
 .page-container {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+  box-sizing: border-box;
+  width: 100%;
   padding: 16px;
-  max-width: 1600px;
+  max-width: var(--page-max-width);
   margin: 0 auto;
+}
+
+// -------------------------------------------------------------------------------------------
+// Tablet and below: hand the scrolling back up so the page header scrolls away with the body.
+// Pinning it costs the same ~350px of height whatever the screen, which a desktop can spare and
+// a phone can't — there it leaves a reading window barely 200px tall. Below this width the
+// scarcer resource is vertical space, so the header earns its keep only while it's on screen.
+//
+// No markup moves: the header and `.page-container` are already siblings inside the routed
+// host, so making the host the scroll region puts both back in one scrolling flow. The
+// trade-offs of the desktop layout come back with it — a wide table scrolls the whole page
+// sideways, and a `sticky: true` table header pins at the top of the viewport — but both are
+// only reachable once the header itself has scrolled out of the way, which is when nothing is
+// left up there to collide with.
+//
+// 959.98px is the upper bound of Angular CDK's `Breakpoints.Small`, already used for the
+// toolbar's own wrap in shell.component.scss (and documented in shell.component.ts).
+// -------------------------------------------------------------------------------------------
+@media (max-width: 959.98px) {
+  .content > *:not(router-outlet) {
+    overflow-y: auto;
+  }
+
+  .page-container {
+    flex: 0 0 auto;
+    overflow: visible;
+  }
 }
 
 .stat-grid {

@@ -25,6 +25,7 @@ import { ThemeService } from '../../core/services/theme.service';
 import { LogRecord, getSeverityLabel, getSeverityColor, getSeverityBg, getServiceName, getTimestamp } from '../../core/models/log.models';
 import { StatCardComponent } from '../../shared/components/stat-card/stat-card.component';
 import { EmptyStateComponent } from '../../shared/components/empty-state/empty-state.component';
+import { PageHeaderComponent } from '../../shared/components/page-header/page-header.component';
 import { LogBucket, bucketLogs, buildLogSeriesOptions, timeRangeZoom } from '../../shared/utils/chart.utils';
 import { parseSearchQuery, ParsedSearchQuery, SearchTerm, buildAttributeTerm } from '../../shared/utils/search-query.parser';
 import { LogSearchHelpDialogComponent } from './log-search-help-dialog/log-search-help-dialog.component';
@@ -70,7 +71,7 @@ function splitTerms(query: string): string[] {
     MatFormFieldModule, MatInputModule, MatSelectModule, MatProgressBarModule,
     MatButtonModule, MatPaginatorModule, MatChipsModule, MatDialogModule,
     MatMenuModule, MatTooltipModule, NgApexchartsModule,
-    StatCardComponent, EmptyStateComponent,
+    StatCardComponent, EmptyStateComponent, PageHeaderComponent,
   ],
   templateUrl: './logs.component.html',
   styleUrl: './logs.component.scss',

@@ -42,6 +42,14 @@ interface NavItem {
  */
 const COMPACT_QUERY = '(max-width: 599.98px)';
 
+// A second, wider threshold — 959.98px, the upper bound of Angular CDK's `Breakpoints.Small`,
+// same "borrow a CDK constant" reasoning as above — lives only as a media query, in two places:
+// shell.component.scss (`.toolbar-controls`) wraps the tenant select / time-range picker / theme
+// toggle off the title row onto a second line, which COMPACT_QUERY then splits into a third; and
+// styles.scss hands page scrolling back to the routed host so the page header scrolls away
+// instead of staying pinned. No TS-driven behavior depends on it, so it isn't declared as a
+// constant here, but it's documented next to COMPACT_QUERY since the thresholds work together.
+
 @Component({
   selector: 'app-shell',
   standalone: true,

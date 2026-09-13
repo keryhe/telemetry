@@ -24,6 +24,7 @@ import { ThemeService } from '../../core/services/theme.service';
 import { ServiceStats, TraceInfo } from '../../core/models/trace.models';
 import { StatCardComponent } from '../../shared/components/stat-card/stat-card.component';
 import { EmptyStateComponent } from '../../shared/components/empty-state/empty-state.component';
+import { PageHeaderComponent } from '../../shared/components/page-header/page-header.component';
 import { ServiceHealthTableComponent } from './service-health-table/service-health-table.component';
 import {
   TimeBucket, LogBucket, buildSparklineOptions,
@@ -51,6 +52,7 @@ const ERROR_RATE_ERROR = 0.05;
     MatButtonModule, MatProgressBarModule, MatChipsModule,
     MatSlideToggleModule, MatTooltipModule, MatFormFieldModule, MatSelectModule,
     NgApexchartsModule, StatCardComponent, EmptyStateComponent, ServiceHealthTableComponent,
+    PageHeaderComponent,
   ],
   templateUrl: './dashboard.component.html',
   styleUrl: './dashboard.component.scss',

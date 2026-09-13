@@ -22,6 +22,7 @@ import { TimeRangeService } from '../../../core/services/time-range.service';
 import { MetricInfo, MetricType, MetricsSummary } from '../../../core/models/metric.models';
 import { StatCardComponent } from '../../../shared/components/stat-card/stat-card.component';
 import { EmptyStateComponent } from '../../../shared/components/empty-state/empty-state.component';
+import { PageHeaderComponent } from '../../../shared/components/page-header/page-header.component';
 import { loadPageState, savePageState } from '../../../shared/utils/page-state';
 
 const STATE_KEY = 'state.metrics';
@@ -53,7 +54,7 @@ const TYPE_LABELS: Record<MetricType, string> = {
     MatSelectModule, MatFormFieldModule, MatInputModule,
     MatProgressBarModule, MatChipsModule, MatButtonModule,
     MatDialogModule, MatTooltipModule,
-    StatCardComponent, EmptyStateComponent,
+    StatCardComponent, EmptyStateComponent, PageHeaderComponent,
   ],
   templateUrl: './metric-list.component.html',
   styleUrl: './metric-list.component.scss',

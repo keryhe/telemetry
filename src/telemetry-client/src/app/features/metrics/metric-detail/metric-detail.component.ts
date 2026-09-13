@@ -26,6 +26,7 @@ import {
 } from '../../../core/models/metric.models';
 import { StatCardComponent } from '../../../shared/components/stat-card/stat-card.component';
 import { EmptyStateComponent } from '../../../shared/components/empty-state/empty-state.component';
+import { PageHeaderComponent } from '../../../shared/components/page-header/page-header.component';
 import {
   AggregateFn, aggregateHistogramWindows, aggregateSeries, aggregateSummaryWindows,
   buildHistogramBarFromWindows, buildHistogramHeatmapFromWindows, buildRadialGauge, buildShareDonut,
@@ -81,7 +82,7 @@ const val = (p: MetricDataPoint): number => p.doubleValue ?? p.intValue ?? 0;
     MatCardModule, MatButtonModule, MatButtonToggleModule, MatIconModule,
     MatTabsModule, MatTableModule, MatChipsModule, MatFormFieldModule,
     MatSelectModule, MatProgressBarModule, MatTooltipModule, NgApexchartsModule,
-    StatCardComponent, EmptyStateComponent,
+    StatCardComponent, EmptyStateComponent, PageHeaderComponent,
   ],
   templateUrl: './metric-detail.component.html',
   styleUrl: './metric-detail.component.scss',

@@ -2,7 +2,7 @@
   <mat-progress-bar mode="indeterminate" />
 }
 
-<div class="page-container">
+<app-page-header>
   <div class="stat-grid">
     <app-stat-card label="Unique Metrics" icon="category" [value]="summary().uniqueMetricCount" />
     <app-stat-card label="Gauges" icon="speed" [value]="gaugeCount()" />
@@ -46,7 +46,9 @@
       <mat-icon>help_outline</mat-icon>
     </button>
   </div>
+</app-page-header>
 
+<div class="page-container">
   <mat-card>
     <mat-card-content>
       @if (filteredUnique().length === 0 && filteredAll().length === 0 && !loading()) {

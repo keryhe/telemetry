@@ -2,7 +2,7 @@
   <mat-progress-bar mode="indeterminate" />
 }
 
-<div class="page-container">
+<app-page-header>
   <!-- Stats -->
   <div class="stat-grid">
     <app-stat-card label="Traces" icon="account_tree" [value]="totalTraces() | number" />
@@ -87,7 +87,9 @@
       <mat-icon>{{ linkCopied() ? 'check' : 'link' }}</mat-icon>
     </button>
   </div>
+</app-page-header>
 
+<div class="page-container">
   <!-- Tabs -->
   <mat-tab-group [selectedIndex]="selectedTab()" (selectedIndexChange)="selectedTab.set($event)">
     <!-- Traces Table -->

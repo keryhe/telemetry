@@ -2,7 +2,7 @@
   <mat-progress-bar mode="indeterminate" />
 }
 
-<div class="page-container">
+<app-page-header>
   @if (traceIdFilter()) {
     <div class="trace-filter-banner">
       <mat-icon>filter_list</mat-icon>
@@ -73,7 +73,9 @@
       <mat-icon>{{ linkCopied() ? 'check' : 'link' }}</mat-icon>
     </button>
   </div>
+</app-page-header>
 
+<div class="page-container">
   <div class="logs-body">
     <aside class="facet-sidebar" [class.collapsed]="facetsCollapsed()">
       <div class="facet-toolbar">

@@ -2,7 +2,7 @@
   <mat-progress-bar mode="indeterminate" />
 }
 
-<div class="page-container">
+<app-page-header>
   <div class="breadcrumb">
     <a mat-button routerLink="/metrics"><mat-icon>arrow_back</mat-icon> Metrics</a>
     <span class="metric-name">{{ metricName() }}</span>
@@ -74,7 +74,9 @@
       </mat-button-toggle-group>
     }
   </div>
+</app-page-header>
 
+<div class="page-container">
   <mat-tab-group [selectedIndex]="activeTab()" (selectedIndexChange)="activeTab.set($event)">
     <!-- Chart -->
     <mat-tab label="Chart">

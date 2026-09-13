@@ -38,15 +38,16 @@
 }
 
 // -------------------------------------------------------------------------------------------
-// Widescreen cap. `.page-container` (styles.scss) caps at 1600px for the 6 other pages that use
-// it; this dashboard alone widens to 2400px so an ultrawide monitor gets more *columns*, not one
+// Widescreen cap. `--page-max-width` (styles.scss) caps at 1600px for the 6 other pages; this
+// dashboard alone widens to 2400px so an ultrawide monitor gets more *columns*, not one
 // stretched-out row — an unbounded width turns a time-series chart into an unreadable sliver.
 // A custom property, not a literal, so the cap can be overridden in one place (a theme, or a
-// user stylesheet) without touching this rule. Scoped to this component (Angular's emulated
-// view encapsulation) so it never affects `.page-container` on any other page.
+// user stylesheet) without touching this rule. Set on the host rather than `.page-container`
+// because the page header is a sibling of that container, and both have to honour the same cap
+// to stay aligned; inheritance from the shared host is what keeps them in step.
 // -------------------------------------------------------------------------------------------
-.page-container.page-container--wide {
-  max-width: var(--dashboard-max-width, 2400px);
+:host {
+  --page-max-width: var(--dashboard-max-width, 2400px);
 }
 
 // -------------------------------------------------------------------------------------------

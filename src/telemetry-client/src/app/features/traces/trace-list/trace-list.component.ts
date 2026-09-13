@@ -29,6 +29,7 @@ import { ThemeService } from '../../../core/services/theme.service';
 import { TraceInfo, ServiceDependency, OperationStats } from '../../../core/models/trace.models';
 import { StatCardComponent } from '../../../shared/components/stat-card/stat-card.component';
 import { EmptyStateComponent } from '../../../shared/components/empty-state/empty-state.component';
+import { PageHeaderComponent } from '../../../shared/components/page-header/page-header.component';
 import { TimeBucket, formatDuration, parseDotnetTimespan, timeRangeZoom, binLatencyPoints } from '../../../shared/utils/chart.utils';
 import { parseSearchQuery, ParsedSearchQuery, SearchTerm } from '../../../shared/utils/search-query.parser';
 import { TraceSearchHelpDialogComponent } from '../trace-search-help-dialog/trace-search-help-dialog.component';
@@ -80,7 +81,7 @@ const TAG_KEY_SEP = '\u001F';
     MatButtonToggleModule, MatButtonModule, MatSelectModule, MatFormFieldModule,
     MatInputModule, MatProgressBarModule, MatChipsModule, MatTooltipModule,
     MatDialogModule, MatMenuModule, NgxGraphModule, NgApexchartsModule,
-    StatCardComponent, EmptyStateComponent,
+    StatCardComponent, EmptyStateComponent, PageHeaderComponent,
   ],
   templateUrl: './trace-list.component.html',
   styleUrl: './trace-list.component.scss',

@@ -10,9 +10,26 @@
   flex: 0 0 auto;
   z-index: 10;
   gap: 8px;
-  height: 60px;
+  row-gap: 4px;
+  min-height: 60px;
+  height: auto;
+  flex-wrap: wrap;
+  padding-top: 6px;
+  padding-bottom: 6px;
   background-color: var(--mat-sys-surface-container);
   border-bottom: 1px solid var(--mat-sys-outline-variant);
+}
+
+.toolbar-controls {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.toolbar-controls-secondary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
 }
 
 .app-icon {
@@ -114,14 +131,33 @@
 }
 
 // -------------------------------------------------------------------------------------------
-// Handset overflow. The toolbar is a non-wrapping flex row (app icon/title, tenant select,
-// time-range picker, theme toggle) with no CSS to let any of it shrink — on a phone the content
-// is simply wider than the viewport, forcing horizontal scroll on every page (not just the
-// dashboard). 599.98px matches Angular CDK's own `Breakpoints.Handset` (portrait) threshold,
-// already used above for the drawer-toggle button, so this reacts at the same width the rest of
-// the shell already treats as "handset".
+// Tablet wrap. Below 959.98px (the upper bound of Angular CDK's `Breakpoints.Small`, the same
+// "borrow a CDK constant" reasoning as the 599.98px handset threshold below) there isn't room
+// for the title block and the tenant select/time-range picker/theme toggle on one row, so the
+// whole `.toolbar-controls` group drops to its own second line. `flex-basis: 100%` is what
+// forces that: `.toolbar` is a flex-wrap row, and a 100%-basis child always starts a new line.
+// -------------------------------------------------------------------------------------------
+@media (max-width: 959.98px) {
+  .toolbar-controls {
+    flex: 1 1 100%;
+    flex-wrap: wrap;
+    justify-content: flex-end;
+  }
+}
+
+// -------------------------------------------------------------------------------------------
+// Handset overflow. Below 599.98px (matching Angular CDK's own `Breakpoints.Handset` (portrait)
+// threshold, already used above for the drawer-toggle button) even the second line from the
+// query above is too narrow for the tenant select and the time-range picker/theme toggle
+// together, so `.toolbar-controls-secondary` gets the same `flex-basis: 100%` treatment and
+// drops to a third line, leaving the tenant select alone on line two.
 // -------------------------------------------------------------------------------------------
 @media (max-width: 599.98px) {
+  .toolbar-controls-secondary {
+    flex-basis: 100%;
+    justify-content: flex-end;
+  }
+
   .toolbar {
     gap: 2px;
   }
@@ -143,27 +179,24 @@
     font-size: 16px;
   }
 
-  // Material's own `.mat-mdc-select-value` already truncates with an ellipsis, so shrinking the
-  // field is enough — no extra CSS needed for long tenant names to degrade gracefully.
+  // The tenant select now gets its own full line (line two, above the time-range picker/theme
+  // toggle on line three) instead of sharing a row with them, so it no longer needs the
+  // aggressive 64–96px squeeze this block used when everything was crammed into one line —
+  // `.mat-mdc-select-value` still truncates long tenant names with an ellipsis regardless.
   .tenant-select {
-    min-width: 64px;
-    max-width: 96px;
-
-    // The floating "Tenant" label lives in a gap in the top border whose width Material caps at
-    // `calc(100% - 60px)`. On this narrowed field that leaves only ~36px of notch for a ~43px
-    // label, and the label is `overflow: hidden; text-overflow: clip`, so it renders as "Tenan".
-    // Lifting the cap lets the notch size to the label instead; it only widens the gap in the
-    // border, so nothing else in the field moves. ::ng-deep because the notch is rendered by
-    // Material's own template (same technique used in metric-detail/trace-list for its internals).
-    // !important because Material's own cap ships in a stylesheet that outranks this rule
-    // (the same reason stat-card and logs use !important against Material internals).
-    ::ng-deep .mdc-notched-outline__notch { max-width: none !important; }
+    min-width: 140px;
+    max-width: none;
   }
 }
 
+// The viewport for routed pages. It deliberately does NOT scroll: the page owns its scroll
+// region so the page header can sit above the scrollport — `.page-container` above 959.98px,
+// the routed host itself below it. Either way the scroller is a descendant (see styles.scss).
 .content {
   height: 100%;
-  overflow-y: auto;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
 }
 
 .nav-item.active-link {

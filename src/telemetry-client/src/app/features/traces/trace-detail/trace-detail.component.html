@@ -2,7 +2,9 @@
   <mat-progress-bar mode="indeterminate" />
 }
 
-<div class="page-container">
+@let hasSpans = spans().length > 0;
+
+<app-page-header>
   <!-- Breadcrumb -->
   <div class="breadcrumb">
     <a mat-button routerLink="/traces"><mat-icon>arrow_back</mat-icon> Traces</a>
@@ -10,7 +12,7 @@
     <button mat-icon-button [matTooltip]="copied() ? 'Copied!' : 'Copy trace ID'" (click)="copyTraceId()">
       <mat-icon>{{ copied() ? 'check' : 'content_copy' }}</mat-icon>
     </button>
-    @if (spans().length > 0) {
+    @if (hasSpans) {
       <span class="trace-time">
         {{ nanoToDate(rootStartNano()) | date:'MM/dd/yyyy, h:mm:ss a' }}
       </span>
@@ -20,9 +22,7 @@
     </a>
   </div>
 
-  @if (!loading() && spans().length === 0) {
-    <app-empty-state icon="account_tree" message="Trace not found" />
-  } @else if (spans().length > 0) {
+  @if (hasSpans) {
     <!-- Summary -->
     <div class="stat-grid">
       <app-stat-card label="Duration" icon="timer" [value]="formatDuration(totalDurationMs())" />
@@ -34,7 +34,13 @@
         [value]="hasErrors() ? 'Error' : 'OK'"
         [color]="hasErrors() ? 'error' : 'success'" />
     </div>
+  }
+</app-page-header>
 
+<div class="page-container">
+  @if (!loading() && !hasSpans) {
+    <app-empty-state icon="account_tree" message="Trace not found" />
+  } @else if (hasSpans) {
     <!-- Span Timeline (detail renders inline below the selected row) -->
     <mat-card class="timeline-card">
       <mat-card-header>

@@ -19,6 +19,7 @@ import { SpanSearchHelpDialogComponent } from '../span-search-help-dialog/span-s
 import { SpanModel, SpanStatusCode, SpanKind } from '../../../core/models/trace.models';
 import { EmptyStateComponent } from '../../../shared/components/empty-state/empty-state.component';
 import { StatCardComponent } from '../../../shared/components/stat-card/stat-card.component';
+import { PageHeaderComponent } from '../../../shared/components/page-header/page-header.component';
 import { formatDuration } from '../../../shared/utils/chart.utils';
 import { parseSearchQuery, ParsedSearchQuery, SearchTerm } from '../../../shared/utils/search-query.parser';
 import { SERVICE_COLORS } from '../../../shared/utils/service-colors';
@@ -136,7 +137,7 @@ interface AggBuild {
     MatCardModule, MatButtonModule, MatIconModule, MatTooltipModule,
     MatChipsModule, MatProgressBarModule, MatSlideToggleModule,
     MatFormFieldModule, MatInputModule, MatDialogModule,
-    EmptyStateComponent, StatCardComponent,
+    EmptyStateComponent, StatCardComponent, PageHeaderComponent,
   ],
   templateUrl: './trace-detail.component.html',
   styleUrl: './trace-detail.component.scss',

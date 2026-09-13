@@ -75,23 +75,28 @@ import { TimePreset, TimeRangeService } from '../../../core/services/time-range.
       align-items: center;
       gap: 4px;
     }
-    .trigger-icon { font-size: 18px; width: 18px; height: 18px; }
-    .trigger-label { font-size: 13px; }
-    .trigger-caret { font-size: 20px; width: 20px; height: 20px; margin-left: -2px; }
+    .trigger-icon { font-size: 18px; width: 18px; height: 18px; flex: 0 0 auto; }
+    .trigger-label {
+      font-size: 13px;
+    }
+    .trigger-caret { font-size: 20px; width: 20px; height: 20px; margin-left: -2px; flex: 0 0 auto; }
 
-    /* The formatted range label ("Jul 25 16:13 – Jul 25 16:33") is long and doesn't truncate
-       usefully — dropping it to an icon-only trigger is what actually saves the room the shell
-       toolbar needs on a phone. Clicking still opens the full panel to see/change the range.
-       599.98px matches Angular CDK's Breakpoints.Handset (portrait), same as the shell's own
-       handset threshold. Also drop mat-stroked-button's own default min-width/padding (still
-       sized for text content even with the label gone) and the caret — at icon-only size it's
-       redundant with the tap target itself opening the panel. */
+    /* Below 599.98px (matching Angular CDK's Breakpoints.Handset (portrait), same as the shell's
+       own handset threshold) the shell toolbar gives this picker its own row shared only with the
+       theme toggle, so the label has room to stay visible — it just needs to be able to shrink
+       and truncate instead of forcing the row to overflow on the narrowest phones. Letting
+       .trigger flex/shrink and ellipsis-truncating .trigger-label degrades a too-long formatted
+       range ("Jul 25 16:13 – Jul 25 16:33") instead of overflowing. */
     @media (max-width: 599.98px) {
-      .trigger-label { display: none; }
-      .trigger-caret { display: none; }
       .trigger {
+        flex: 1 1 auto;
         min-width: 0;
         padding: 0 8px;
+      }
+      .trigger-label {
+        overflow: hidden;
+        white-space: nowrap;
+        text-overflow: ellipsis;
       }
     }
 

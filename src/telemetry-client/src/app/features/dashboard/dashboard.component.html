@@ -2,7 +2,7 @@
   <mat-progress-bar mode="indeterminate" />
 }
 
-<div class="page-container page-container--wide">
+<app-page-header>
   <!-- RED KPI strip: Rate, Errors, Duration (+ Services and one log signal) -->
   <div class="stat-grid">
     <app-stat-card
@@ -60,7 +60,9 @@
       Auto-refresh
     </mat-slide-toggle>
   </div>
+</app-page-header>
 
+<div class="page-container">
   <!--
     12-column responsive grid (dashboard.component.scss). Undeclared widgets default to full
     width at every tier — that's deliberate: a future Service Health (Phase 5) or Custom Metrics
