@@ -282,32 +282,32 @@
                 <td mat-cell *matCellDef="let r" class="mono">{{ r.operation }}</td>
               </ng-container>
               <ng-container matColumnDef="count">
-                <th mat-header-cell *matHeaderCellDef mat-sort-header>Calls</th>
+                <th mat-header-cell *matHeaderCellDef mat-sort-header class="num" arrowPosition="before">Calls</th>
                 <td mat-cell *matCellDef="let r" class="num">{{ r.count | number }}</td>
               </ng-container>
               <ng-container matColumnDef="rate">
-                <th mat-header-cell *matHeaderCellDef mat-sort-header matTooltip="Calls per second">Rate/s</th>
+                <th mat-header-cell *matHeaderCellDef mat-sort-header matTooltip="Calls per second" class="num" arrowPosition="before">Rate/s</th>
                 <td mat-cell *matCellDef="let r" class="num">{{ r.ratePerSecond | number:'1.0-2' }}</td>
               </ng-container>
               <ng-container matColumnDef="errorRate">
-                <th mat-header-cell *matHeaderCellDef mat-sort-header>Err %</th>
+                <th mat-header-cell *matHeaderCellDef mat-sort-header class="num" arrowPosition="before">Err %</th>
                 <td mat-cell *matCellDef="let r" class="num"
                     [style.color]="r.errorRate > 0 ? '#f44336' : ''">{{ r.errorRate | number:'1.0-1' }}%</td>
               </ng-container>
               <ng-container matColumnDef="p50">
-                <th mat-header-cell *matHeaderCellDef mat-sort-header>p50</th>
+                <th mat-header-cell *matHeaderCellDef mat-sort-header class="num" arrowPosition="before">p50</th>
                 <td mat-cell *matCellDef="let r" class="num">{{ formatDuration(r.p50Ms) }}</td>
               </ng-container>
               <ng-container matColumnDef="p95">
-                <th mat-header-cell *matHeaderCellDef mat-sort-header>p95</th>
+                <th mat-header-cell *matHeaderCellDef mat-sort-header class="num" arrowPosition="before">p95</th>
                 <td mat-cell *matCellDef="let r" class="num">{{ formatDuration(r.p95Ms) }}</td>
               </ng-container>
               <ng-container matColumnDef="p99">
-                <th mat-header-cell *matHeaderCellDef mat-sort-header>p99</th>
+                <th mat-header-cell *matHeaderCellDef mat-sort-header class="num" arrowPosition="before">p99</th>
                 <td mat-cell *matCellDef="let r" class="num">{{ formatDuration(r.p99Ms) }}</td>
               </ng-container>
               <ng-container matColumnDef="avg">
-                <th mat-header-cell *matHeaderCellDef mat-sort-header>Avg</th>
+                <th mat-header-cell *matHeaderCellDef mat-sort-header class="num" arrowPosition="before">Avg</th>
                 <td mat-cell *matCellDef="let r" class="num">{{ formatDuration(r.avgMs) }}</td>
               </ng-container>
               <tr mat-header-row *matHeaderRowDef="analyticsColumns"></tr>

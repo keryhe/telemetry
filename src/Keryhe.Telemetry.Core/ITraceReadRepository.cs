@@ -23,6 +23,15 @@ public interface ITraceReadRepository
     /// <summary>True volume histogram (fixed bucket count over the full filtered range) for the traces list/dashboard chart, unaffected by any row-count cap.</summary>
     Task<List<TraceVolumeBucket>> GetTraceHistogramAsync(HistogramQuery query, CancellationToken cancellationToken = default);
 
+    /// <summary>
+    /// Dashboard overview: the same time-bucketed volume histogram as <see cref="GetTraceHistogramAsync"/>
+    /// plus per-service RED stats, computed from one scan instead of two. Grouped by each trace's
+    /// root-span service (<see cref="Models.TraceInfo.ServiceName"/>) — the correct semantic for
+    /// "traces originating in service X"; a multi-service trace's full participant list would
+    /// double-count it if used instead.
+    /// </summary>
+    Task<TraceOverview> GetTraceOverviewAsync(HistogramQuery query, CancellationToken cancellationToken = default);
+
     // Analysis operations
     Task<List<ServiceDependency>> GetServiceDependenciesAsync(DateTime? startTime = null, DateTime? endTime = null, CancellationToken cancellationToken = default);
     Task<Dictionary<string, int>> GetOperationCountsAsync(string serviceName, DateTime? startTime = null, DateTime? endTime = null, CancellationToken cancellationToken = default);

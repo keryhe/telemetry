@@ -116,6 +116,44 @@ public class TracesController : ControllerBase
         return Ok(result);
     }
 
+    // GET /api/traces/overview?start=&end=&bucketCount=&mode=all|errors|slow&service=&operation=&minDurationMs=&maxDurationMs=&tag=key:value
+    // Dashboard overview: the same volume histogram as /histogram plus per-service RED stats,
+    // from one scan instead of two. Kept as its own endpoint (not a flag on /histogram) so the
+    // traces list page's use of /histogram is unaffected and never pays for stats it doesn't read.
+    [HttpGet("overview")]
+    public async Task<ActionResult<TraceOverview>> GetTraceOverview(
+        [FromQuery] DateTime start,
+        [FromQuery] DateTime end,
+        [FromQuery] int bucketCount = 24,
+        [FromQuery] string mode = "all",
+        [FromQuery] string? service = null,
+        [FromQuery] string? operation = null,
+        [FromQuery] double? minDurationMs = null,
+        [FromQuery] double? maxDurationMs = null,
+        [FromQuery(Name = "tag")] string[]? tag = null,
+        CancellationToken ct = default)
+    {
+        var tags = (tag ?? Array.Empty<string>())
+            .Select(TagFilter.Parse)
+            .Where(t => t != null)
+            .Select(t => t!)
+            .ToList();
+
+        var result = await _traces.GetTraceOverviewAsync(new HistogramQuery
+        {
+            Start = start,
+            End = end,
+            BucketCount = bucketCount,
+            Mode = mode,
+            Service = service,
+            Operation = operation,
+            MinDurationMs = minDurationMs,
+            MaxDurationMs = maxDurationMs,
+            Tags = tags
+        }, ct);
+        return Ok(result);
+    }
+
     // GET /api/traces/{traceId}/spans
     [HttpGet("{traceId}/spans")]
     public async Task<ActionResult<List<SpanModel>>> GetSpans(string traceId, CancellationToken ct = default)

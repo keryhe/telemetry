@@ -21,9 +21,10 @@ import { LogsApiService } from '../../core/services/api/logs-api.service';
 import { MetricsApiService } from '../../core/services/api/metrics-api.service';
 import { TimeRangeService, recommendedRefreshIntervalMs } from '../../core/services/time-range.service';
 import { ThemeService } from '../../core/services/theme.service';
-import { TraceInfo } from '../../core/models/trace.models';
+import { ServiceStats, TraceInfo } from '../../core/models/trace.models';
 import { StatCardComponent } from '../../shared/components/stat-card/stat-card.component';
 import { EmptyStateComponent } from '../../shared/components/empty-state/empty-state.component';
+import { ServiceHealthTableComponent } from './service-health-table/service-health-table.component';
 import {
   TimeBucket, LogBucket, buildSparklineOptions,
   formatDuration, parseDotnetTimespan, timeRangeZoom,
@@ -49,7 +50,7 @@ const ERROR_RATE_ERROR = 0.05;
     MatCardModule, MatTableModule, MatIconModule,
     MatButtonModule, MatProgressBarModule, MatChipsModule,
     MatSlideToggleModule, MatTooltipModule, MatFormFieldModule, MatSelectModule,
-    NgApexchartsModule, StatCardComponent, EmptyStateComponent,
+    NgApexchartsModule, StatCardComponent, EmptyStateComponent, ServiceHealthTableComponent,
   ],
   templateUrl: './dashboard.component.html',
   styleUrl: './dashboard.component.scss',
@@ -85,6 +86,8 @@ export class DashboardComponent {
    * the wire just to read `.length`.
    */
   private logHistogram = signal<LogBucket[]>([]);
+  /** Per-service RED stats — comes from the same `/overview` fetch as `traceHistogram`, not a separate request. */
+  protected serviceStats = signal<ServiceStats[]>([]);
 
   protected totalTraces = computed(() => this.traceHistogram().reduce((a, b) => a + b.count, 0));
   protected errorTraces = computed(() => this.traceHistogram().reduce((a, b) => a + b.errorCount, 0));
@@ -213,23 +216,31 @@ export class DashboardComponent {
 
     forkJoin({
       traces:     this.tracesApi.getTraces({ start, end, limit: 500, service: svc || undefined }),
-      traceHist:  this.tracesApi.getTraceHistogram({ start, end, service: svc || undefined }),
+      // Swaps the plain histogram for the overview (same buckets, plus per-service RED stats) —
+      // one backend scan grouped two ways, not an additional request. See Phase 5 of the plan.
+      overview:   this.tracesApi.getTraceOverview({ start, end, service: svc || undefined }),
       logHist:    this.logsApi.getLogHistogram({ start, end, service: svc || undefined }),
       traceSvcs:  this.tracesApi.getServices(start, end).pipe(catchError(() => of([]))),
       logSvcs:    this.logsApi.getServices(start, end).pipe(catchError(() => of([]))),
       metricSvcs: this.metricsApi.getServices(start, end).pipe(catchError(() => of([]))),
     }).subscribe({
-      next: ({ traces, traceHist, logHist, traceSvcs, logSvcs, metricSvcs }) => {
+      next: ({ traces, overview, logHist, traceSvcs, logSvcs, metricSvcs }) => {
         this.traces.set(traces);
-        this.traceHistogram.set(traceHist);
+        this.traceHistogram.set(overview.buckets);
+        this.serviceStats.set(overview.services);
         this.logHistogram.set(logHist);
         const services = [...new Set([...traceSvcs, ...logSvcs, ...metricSvcs])].sort();
         if (services.length > 0) this.availableServices.set(services);
-        this.buildCharts(traceHist);
+        this.buildCharts(overview.buckets);
         this.loading.set(false);
       },
       error: () => this.loading.set(false),
     });
+  }
+
+  /** Service Health row click: select that service, or clear the filter if it's already active. */
+  protected onServiceRowClick(service: string): void {
+    this.selectedService.set(this.selectedService() === service ? '' : service);
   }
 
   private buildCharts(traceBuckets: TimeBucket[]): void {
@@ -239,11 +250,13 @@ export class DashboardComponent {
     const zoom = timeRangeZoom((from, to) => this.timeRange.setCustom(from, to));
 
     this.traceChartOptions.set({
-      // height/width: '100%' — fills `.chart-container`, which sets a concrete pixel height via
-      // the CSS `aspect-ratio` property (see dashboard.component.scss). ApexCharts' own
-      // ResizeObserver (chart.redrawOnParentResize, on by default) redraws — not just CSS-stretches
-      // — whenever that container's size changes, e.g. the grid reflowing at a breakpoint.
-      chart: { type: 'area', height: '100%', width: '100%', toolbar: { show: false }, background: 'transparent', ...zoom },
+      // Fixed pixel height, deliberately not tied to the card's (fluid) width: `.dashboard-grid`
+      // stretches this card's width to fill its row, and height must not follow along with it.
+      // (A prior `height: '100%'` + CSS `aspect-ratio` container attempted responsive height too,
+      // but ApexCharts' percentage-height resolution reads `this.el.parentNode` — the `apx-chart`
+      // host itself, which ng-apexcharts leaves entirely unstyled — not the aspect-ratio box, so
+      // it never actually tracked the container; that's what left a gap under the chart.)
+      chart: { type: 'area', height: 280, toolbar: { show: false }, background: 'transparent', ...zoom },
       theme: { mode: isDark ? 'dark' : 'light' },
       series: [
         { name: 'Total', data: traceBuckets.map((b, i) => [timestamps[i], b.count]) },
@@ -259,18 +272,44 @@ export class DashboardComponent {
 
     // Empty buckets plot as `null` (a gap), not 0 — see avgDurationSeries above for why.
     this.latencyChartOptions.set({
-      chart: { type: 'line', height: '100%', width: '100%', toolbar: { show: false }, background: 'transparent', ...zoom },
+      chart: { type: 'line', height: 280, toolbar: { show: false }, background: 'transparent', ...zoom },
       theme: { mode: isDark ? 'dark' : 'light' },
       series: [
         {
-          name: 'Avg Duration',
+          name: 'Avg',
           data: traceBuckets.map((b, i) => [timestamps[i], b.count > 0 ? b.sumDurationMs / b.count : null]),
+        },
+        {
+          name: 'p50',
+          data: traceBuckets.map((b, i) => [timestamps[i], b.count > 0 ? b.p50Ms : null]),
+        },
+        {
+          name: 'p95',
+          data: traceBuckets.map((b, i) => [timestamps[i], b.count > 0 ? b.p95Ms : null]),
+        },
+        {
+          name: 'p99',
+          data: traceBuckets.map((b, i) => [timestamps[i], b.count > 0 ? b.p99Ms : null]),
         },
       ],
       xaxis: { type: 'datetime', labels: { datetimeUTC: false } },
       yaxis: { labels: { formatter: (v: number) => formatDuration(v) } },
-      colors: ['#ff9800'],
+      // Avg neutral (matches "Total" in Trace Volume); p50/p95/p99 a deliberate green→orange→red
+      // severity gradient, reusing colors already established elsewhere on this dashboard (the
+      // stat-card `success` color, the Error-Rate `warn` tier, and "Errors" in Trace Volume).
+      colors: ['#2196f3', '#4caf50', '#ff9800', '#f44336'],
       stroke: { curve: 'smooth', width: 2 },
+      // Same stray-marker fix as the sparklines (see buildSparklineOptions): every series here
+      // carries `null`s, so ApexCharts emits one 0.1px-radius "virtual point" per series pinned to
+      // the bottom-left of the plot, and their default 2px `#fff` stroke was the only visible part
+      // — four white dots stacked on the x-axis. Zeroing the stroke hides them.
+      //
+      // That parked dot and the dot that tracks the crosshair on hover are the SAME four elements
+      // (ApexCharts just moves and enlarges them to r=6), so this necessarily drops the hover dot's
+      // white outline ring too — it now renders as a solid circle in the series color, still
+      // clearly legible against the plot. The legend swatches are separate elements
+      // (`apexcharts-legend-marker`) and keep their ring.
+      markers: { strokeWidth: 0 },
       legend: { position: 'top' },
       dataLabels: { enabled: false },
       tooltip: { y: { formatter: (v: number) => formatDuration(v) } },

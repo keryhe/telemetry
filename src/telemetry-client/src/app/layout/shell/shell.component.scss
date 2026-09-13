@@ -113,6 +113,54 @@
   @include mat.form-field-density(-3);
 }
 
+// -------------------------------------------------------------------------------------------
+// Handset overflow. The toolbar is a non-wrapping flex row (app icon/title, tenant select,
+// time-range picker, theme toggle) with no CSS to let any of it shrink — on a phone the content
+// is simply wider than the viewport, forcing horizontal scroll on every page (not just the
+// dashboard). 599.98px matches Angular CDK's own `Breakpoints.Handset` (portrait) threshold,
+// already used above for the drawer-toggle button, so this reacts at the same width the rest of
+// the shell already treats as "handset".
+// -------------------------------------------------------------------------------------------
+@media (max-width: 599.98px) {
+  .toolbar {
+    gap: 2px;
+  }
+
+  // The tagline doesn't earn its keep at this width; dropping it (not just visually hiding it —
+  // `display: none` removes it from the flex row entirely) is the single biggest reclaim here.
+  .app-subtitle {
+    display: none;
+  }
+
+  .app-icon {
+    font-size: 32px;
+    width: 32px;
+    height: 32px;
+    margin-right: 0;
+  }
+
+  .app-title {
+    font-size: 16px;
+  }
+
+  // Material's own `.mat-mdc-select-value` already truncates with an ellipsis, so shrinking the
+  // field is enough — no extra CSS needed for long tenant names to degrade gracefully.
+  .tenant-select {
+    min-width: 64px;
+    max-width: 96px;
+
+    // The floating "Tenant" label lives in a gap in the top border whose width Material caps at
+    // `calc(100% - 60px)`. On this narrowed field that leaves only ~36px of notch for a ~43px
+    // label, and the label is `overflow: hidden; text-overflow: clip`, so it renders as "Tenan".
+    // Lifting the cap lets the notch size to the label instead; it only widens the gap in the
+    // border, so nothing else in the field moves. ::ng-deep because the notch is rendered by
+    // Material's own template (same technique used in metric-detail/trace-list for its internals).
+    // !important because Material's own cap ships in a stylesheet that outranks this rule
+    // (the same reason stat-card and logs use !important against Material internals).
+    ::ng-deep .mdc-notched-outline__notch { max-width: none !important; }
+  }
+}
+
 .content {
   height: 100%;
   overflow-y: auto;

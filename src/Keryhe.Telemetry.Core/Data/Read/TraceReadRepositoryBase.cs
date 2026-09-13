@@ -339,46 +339,111 @@ public abstract class TraceReadRepositoryBase : DapperReadRepository, ITraceRead
         if (query.Start >= query.End)
             throw new ArgumentException("Start time must be before end time");
 
-        var bucketCount = Math.Clamp(query.BucketCount, 1, 500);
-        var traces = await ComputeTraceInfosAsync(new TraceQuery
-        {
-            Start = query.Start,
-            End = query.End,
-            Mode = query.Mode,
-            Service = query.Service,
-            Operation = query.Operation,
-            MinDurationMs = query.MinDurationMs,
-            MaxDurationMs = query.MaxDurationMs,
-            Tags = query.Tags
-        }, cancellationToken);
+        var traces = await ComputeTraceInfosAsync(ToTraceQuery(query), cancellationToken);
+        return BuildVolumeBuckets(traces, query);
+    }
 
+    public async Task<TraceOverview> GetTraceOverviewAsync(HistogramQuery query, CancellationToken cancellationToken = default)
+    {
+        if (query.Start >= query.End)
+            throw new ArgumentException("Start time must be before end time");
+
+        // One scan, grouped two ways — not two scans. `/histogram` (above) stays untouched and
+        // just as cheap for its other caller (the traces list page), which doesn't need
+        // per-service stats and shouldn't pay for them.
+        var traces = await ComputeTraceInfosAsync(ToTraceQuery(query), cancellationToken);
+        return new TraceOverview
+        {
+            Buckets = BuildVolumeBuckets(traces, query),
+            Services = BuildServiceStats(traces, query.Start, query.End),
+        };
+    }
+
+    private static TraceQuery ToTraceQuery(HistogramQuery query) => new()
+    {
+        Start = query.Start,
+        End = query.End,
+        Mode = query.Mode,
+        Service = query.Service,
+        Operation = query.Operation,
+        MinDurationMs = query.MinDurationMs,
+        MaxDurationMs = query.MaxDurationMs,
+        Tags = query.Tags
+    };
+
+    private static List<TraceVolumeBucket> BuildVolumeBuckets(List<TraceInfo> traces, HistogramQuery query)
+    {
+        var bucketCount = Math.Clamp(query.BucketCount, 1, 500);
         var startTicks = query.Start.Ticks;
         var rangeTicks = Math.Max(1, query.End.Ticks - startTicks);
 
         var counts = new int[bucketCount];
         var errorCounts = new int[bucketCount];
         var sumDurationMs = new double[bucketCount];
+        // Per-bucket durations, kept alongside the running sum, so percentiles cost only a sort
+        // per bucket at the end — no second pass over `traces` and no extra query.
+        var durationsByBucket = new List<double>[bucketCount];
+        for (var i = 0; i < bucketCount; i++) durationsByBucket[i] = [];
         foreach (var t in traces)
         {
             var idx = (int)((t.TraceStartTime.Ticks - startTicks) * bucketCount / rangeTicks);
             idx = Math.Clamp(idx, 0, bucketCount - 1);
+            var durationMs = t.TraceDuration.TotalMilliseconds;
             counts[idx]++;
             if (t.HasErrors) errorCounts[idx]++;
-            sumDurationMs[idx] += t.TraceDuration.TotalMilliseconds;
+            sumDurationMs[idx] += durationMs;
+            durationsByBucket[idx].Add(durationMs);
         }
 
         var result = new List<TraceVolumeBucket>(bucketCount);
         for (var i = 0; i < bucketCount; i++)
         {
+            var durations = durationsByBucket[i];
+            durations.Sort();
             result.Add(new TraceVolumeBucket
             {
                 Timestamp = new DateTime(startTicks + i * rangeTicks / bucketCount, query.Start.Kind),
                 Count = counts[i],
                 ErrorCount = errorCounts[i],
-                SumDurationMs = sumDurationMs[i]
+                SumDurationMs = sumDurationMs[i],
+                P50Ms = Percentile(durations, 50),
+                P95Ms = Percentile(durations, 95),
+                P99Ms = Percentile(durations, 99),
             });
         }
         return result;
+    }
+
+    /// <summary>
+    /// Groups the same trace list by root-span service (falling back to "(unknown)" for a trace
+    /// with none, so every trace is counted exactly once — Σ per-service counts must equal the
+    /// bucketed total). <see cref="TraceInfo.Services"/> (the full participant list) is
+    /// deliberately not used here — it would double-count a trace across every service it
+    /// touches, which is the wrong RED semantic ("traces originating in service X").
+    /// </summary>
+    private static List<ServiceStats> BuildServiceStats(List<TraceInfo> traces, DateTime start, DateTime end)
+    {
+        var windowSeconds = Math.Max((end - start).TotalSeconds, 1);
+        return traces
+            .GroupBy(t => t.ServiceName ?? "(unknown)")
+            .Select(g =>
+            {
+                var durations = g.Select(t => t.TraceDuration.TotalMilliseconds).OrderBy(x => x).ToList();
+                var count = durations.Count;
+                var errorCount = g.Count(t => t.HasErrors);
+                return new ServiceStats
+                {
+                    Service = g.Key,
+                    Count = count,
+                    ErrorCount = errorCount,
+                    ErrorRate = count > 0 ? errorCount / (double)count * 100 : 0,
+                    RatePerSecond = count / windowSeconds,
+                    AvgMs = count > 0 ? durations.Average() : 0,
+                    P95Ms = Percentile(durations, 95),
+                };
+            })
+            .OrderByDescending(s => s.Count)
+            .ToList();
     }
 
     /// <summary>

@@ -79,6 +79,22 @@ import { TimePreset, TimeRangeService } from '../../../core/services/time-range.
     .trigger-label { font-size: 13px; }
     .trigger-caret { font-size: 20px; width: 20px; height: 20px; margin-left: -2px; }
 
+    /* The formatted range label ("Jul 25 16:13 – Jul 25 16:33") is long and doesn't truncate
+       usefully — dropping it to an icon-only trigger is what actually saves the room the shell
+       toolbar needs on a phone. Clicking still opens the full panel to see/change the range.
+       599.98px matches Angular CDK's Breakpoints.Handset (portrait), same as the shell's own
+       handset threshold. Also drop mat-stroked-button's own default min-width/padding (still
+       sized for text content even with the label gone) and the caret — at icon-only size it's
+       redundant with the tap target itself opening the panel. */
+    @media (max-width: 599.98px) {
+      .trigger-label { display: none; }
+      .trigger-caret { display: none; }
+      .trigger {
+        min-width: 0;
+        padding: 0 8px;
+      }
+    }
+
     .panel {
       position: absolute;
       top: calc(100% + 4px);

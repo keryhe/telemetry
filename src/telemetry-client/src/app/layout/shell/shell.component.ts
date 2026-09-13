@@ -1,4 +1,4 @@
-import { BreakpointObserver, Breakpoints } from '@angular/cdk/layout';
+import { BreakpointObserver } from '@angular/cdk/layout';
 import { AsyncPipe } from '@angular/common';
 import { Component, inject } from '@angular/core';
 import { MatButtonModule } from '@angular/material/button';
@@ -24,6 +24,24 @@ interface NavItem {
   route: string;
 }
 
+/**
+ * Width at which the shell switches to its compact layout (drawer instead of a permanent rail).
+ *
+ * Deliberately width-only, and deliberately NOT Angular CDK's `Breakpoints.Handset`: that constant
+ * is two queries — `(max-width: 599.98px) and (orientation: portrait)` OR
+ * `(max-width: 959.98px) and (orientation: landscape)`. In a browser "orientation" is just
+ * width-vs-height, so dragging a desktop window narrower flips it mid-drag and the sidenav
+ * collapsed at 960, reappeared once width dropped below the window's height, then collapsed again
+ * at 600. A single width query gives exactly one transition, wherever the window's height happens
+ * to be.
+ *
+ * The same 599.98px threshold is hardcoded in two CSS media queries that compact the rest of the
+ * shell at the same point — the toolbar block in shell.component.scss and the icon-only trigger in
+ * shared/components/time-range-picker/time-range-picker.component.ts. A TS constant can't be shared
+ * into a CSS media query, so if this value changes, change those two as well.
+ */
+const COMPACT_QUERY = '(max-width: 599.98px)';
+
 @Component({
   selector: 'app-shell',
   standalone: true,
@@ -43,8 +61,9 @@ export class ShellComponent {
   protected readonly tenantService = inject(TenantService);
   private readonly breakpoints = inject(BreakpointObserver);
 
-  protected readonly isHandset$ = this.breakpoints
-    .observe(Breakpoints.Handset)
+  /** True below COMPACT_QUERY: hamburger + overlay drawer instead of the permanent nav rail. */
+  protected readonly isCompact$ = this.breakpoints
+    .observe(COMPACT_QUERY)
     .pipe(map((r) => r.matches));
 
   protected readonly navItems: NavItem[] = [

@@ -93,6 +93,17 @@ export interface ServiceDependency {
   errorRate: number;
 }
 
+/** Per-service RED metrics for the dashboard's service health table. */
+export interface ServiceStats {
+  service: string;
+  count: number;
+  errorCount: number;
+  errorRate: number;      // 0–100
+  ratePerSecond: number;
+  avgMs: number;
+  p95Ms: number;
+}
+
 export interface TraceFilter {
   start: Date;
   end: Date;

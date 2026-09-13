@@ -93,6 +93,26 @@ public class OperationStats
     public double P99Ms { get; set; }
 }
 
+/// <summary>
+/// Per-service RED metrics for the dashboard's service health table, grouped by each trace's
+/// root-span service — see <see cref="TraceOverview"/> for how this is produced.
+/// </summary>
+public class ServiceStats
+{
+    public string Service { get; set; } = null!;
+    public int Count { get; set; }
+    public int ErrorCount { get; set; }
+
+    /// <summary>Errors as a percentage of calls (0–100).</summary>
+    public double ErrorRate { get; set; }
+
+    /// <summary>Throughput: traces per second across the queried window.</summary>
+    public double RatePerSecond { get; set; }
+
+    public double AvgMs { get; set; }
+    public double P95Ms { get; set; }
+}
+
 public class ServiceDependency
 {
     public string ParentService { get; set; } = null!;

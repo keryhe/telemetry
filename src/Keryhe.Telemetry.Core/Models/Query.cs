@@ -109,6 +109,29 @@ public sealed class TraceVolumeBucket
 
     /// <summary>Sum of trace durations (ms) in this bucket; avg = SumDurationMs / Count.</summary>
     public double SumDurationMs { get; init; }
+
+    /// <summary>
+    /// Duration percentiles (ms) across the traces in this bucket, computed in memory from the
+    /// same per-trace durations the histogram already materializes — no extra query. 0 for an
+    /// empty bucket (Count == 0); callers should treat that as "no data", not a real value.
+    /// </summary>
+    public double P50Ms { get; init; }
+    public double P95Ms { get; init; }
+    public double P99Ms { get; init; }
+}
+
+/// <summary>
+/// Dashboard overview: the time-bucketed volume histogram plus per-service RED stats, both
+/// computed from a single scan of the window's traces (see
+/// <see cref="ITraceReadRepository.GetTraceOverviewAsync"/>) — grouping the same
+/// already-materialized trace list two ways rather than querying twice. Deliberately not a
+/// change to <c>GetTraceHistogramAsync</c>'s own response shape: that endpoint has a second
+/// caller (the traces list page) that doesn't need per-service stats and shouldn't pay for them.
+/// </summary>
+public sealed class TraceOverview
+{
+    public List<TraceVolumeBucket> Buckets { get; init; } = [];
+    public List<ServiceStats> Services { get; init; } = [];
 }
 
 /// <summary>One bucket of the log volume-by-severity histogram.</summary>

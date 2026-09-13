@@ -147,8 +147,18 @@
   }
 }
 
-// RED-metrics analytics table: right-align the numeric columns for easy scanning.
+// RED-metrics analytics table: right-align the numeric columns for easy scanning. Data cells get
+// the monospace/tabular treatment; headers only get the alignment (monospace on a header would
+// look out of place next to the non-numeric "Operation" header).
 .red-table {
-  .num { text-align: right; font-variant-numeric: tabular-nums; font-family: monospace; font-size: 12px; }
-  th.num, th.mat-mdc-header-cell.num { text-align: right; }
+  td.num { text-align: right; font-variant-numeric: tabular-nums; font-family: monospace; font-size: 12px; }
+
+  // `text-align` alone does NOT right-align a sort header: MatSortHeader wraps the projected
+  // text in `.mat-sort-header-container`, a flex container, and flex main-axis placement ignores
+  // `text-align`. The numeric headers therefore carry `arrowPosition="before"` (Material's own
+  // input), which sets `flex-direction: row-reverse` — so the default main-start packing lands
+  // the text flush against the right edge, with the sort arrow to its left. Without that, the
+  // trailing arrow reserves 18px (12px + 6px margin) and leaves the header text short of the
+  // data below it. `text-align` is kept here for any non-sort-header numeric column.
+  th.num { text-align: right; }
 }

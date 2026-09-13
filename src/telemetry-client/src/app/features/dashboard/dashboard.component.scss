@@ -1,6 +1,7 @@
 .dashboard-header {
   display: flex;
   align-items: center;
+  flex-wrap: wrap; // safety net: wraps instead of overflowing if the shrinks below still aren't enough
   gap: 12px;
   margin-bottom: 12px;
 }
@@ -11,6 +12,24 @@
 
 .header-spacer {
   flex: 1 1 auto;
+}
+
+// This row (Service filter + refresh + Auto-refresh toggle) doesn't fit a 320px phone at its
+// normal size: 180px filter + ~50px toggle label + 40px refresh button + gaps already exceeds
+// the ~288px available after page padding. Same 599.98px handset threshold as the shell header
+// and time-range picker fixes.
+@media (max-width: 599.98px) {
+  .service-filter {
+    min-width: 140px;
+  }
+
+  // ::ng-deep pierces mat-slide-toggle's internally-rendered label (established pattern — see
+  // metric-detail.component.scss, trace-list.component.scss for the same technique against
+  // Material's other internal label elements). The toggle itself still works and its tooltip
+  // still explains what it does; only the "Auto-refresh" text goes.
+  .dashboard-header mat-slide-toggle ::ng-deep .mdc-label {
+    display: none;
+  }
 }
 
 .clickable-row {
@@ -31,66 +50,39 @@
 }
 
 // -------------------------------------------------------------------------------------------
-// 12-column responsive grid for everything below the KPI strip (which keeps using the shared,
-// auto-fitting `.stat-grid`). Widgets default to full width (`grid-column: 1 / -1`) at every
-// tier; the four named widgets below override that from 1280px up. A widget added later
-// (Service Health in Phase 5, Custom Metrics in Phase 6) needs only the `dashboard-widget`
-// class — no span override — to get the full-width row the plan calls for.
+// Fluid-width, column-reflowing grid for everything below the KPI strip — same family as the
+// shared `.stat-grid`'s `auto-fit`/`minmax(_, 1fr)`: a minimum column width, stretched to fill
+// the row, with columns added or removed as the container crosses width thresholds. No hand-
+// picked breakpoints needed; this reflows correctly on its own. Card *height* is deliberately
+// NOT part of this grid — charts get a fixed pixel `chart.height` in dashboard.component.ts
+// instead of a container-derived one, so width changing here never drags height along with it
+// (that coupling, via a since-removed `.chart-container { aspect-ratio }`, was the original bug).
+// Widgets take the plain single-column default (no `grid-column` override) unless they opt into
+// `.widget-full` — the hook for a future full-width row (Service Health in Phase 5, Custom
+// Metrics in Phase 6) via `grid-column: 1 / -1`, which spans "all currently generated columns"
+// correctly regardless of how many `auto-fit` produces.
 // -------------------------------------------------------------------------------------------
 .dashboard-grid {
   display: grid;
-  grid-template-columns: 1fr; // < 768px: one column
+  // `min(560px, 100%)` — not a bare `560px` — as the minmax floor: `.stat-grid`'s 180px minimum
+  // is safely below every real device width so it never needs this, but 560px is wider than a
+  // phone viewport, and a bare `minmax(560px, 1fr)` forces every track to at least 560px even
+  // when the container itself is narrower, causing horizontal overflow on mobile. Clamping the
+  // floor to the container's own width lets a single column shrink to fit there instead.
+  grid-template-columns: repeat(auto-fit, minmax(min(560px, 100%), 1fr));
   gap: 16px;
   margin-bottom: 16px;
 }
 
 .dashboard-widget {
-  grid-column: 1 / -1;
   // Establishes a containment context so the `@container` rule below reacts to this widget's
   // own rendered width, not the viewport — the same widget then behaves correctly whether it's
-  // full width on a laptop or squeezed to a fraction of an ultrawide monitor.
+  // a full-width single column on mobile or one of several fluid columns on a wide screen.
   container-type: inline-size;
 }
 
-@media (min-width: 768px) {
-  .dashboard-grid {
-    grid-template-columns: repeat(6, 1fr); // 768–1280px: widgets still full width (span 1/-1)
-  }
-}
-
-@media (min-width: 1280px) {
-  .dashboard-grid {
-    grid-template-columns: repeat(12, 1fr); // 1280px+: two widgets share a row
-  }
-  .widget-trace-volume,
-  .widget-latency,
-  .widget-recent-errors,
-  .widget-slow-traces {
-    grid-column: span 6;
-  }
-}
-
-@media (min-width: 1920px) {
-  // Trace Volume carries a legend and more visual detail than the Latency line, so it gets the
-  // larger share once there's room to split unevenly. The Recent Errors / Slowest Traces tables
-  // are equally weighted, so they stay a plain 6/6 split at every tier.
-  .widget-trace-volume { grid-column: span 7; }
-  .widget-latency { grid-column: span 5; }
-}
-
-// A 3rd chart-row widget ("3 side by side", per the plan) has nowhere to go until Phase 5/6 adds
-// one — and `--dashboard-max-width` above caps available width at 2400px regardless of monitor
-// size, so there's no real estate beyond the 1920px tier for the current two charts to spread
-// into. Revisit when a third full-width-eligible widget exists.
-
-// Chart cards get a concrete pixel height from `aspect-ratio` (not a fixed `height: 220px`,
-// which is right at 800px wide and squashed at 1700px) so ApexCharts, told `height: '100%'` in
-// its chart config, always has something real to fill. `min-height` guards the ratio collapsing
-// too far if a widget is ever squeezed very narrow.
-.chart-container {
-  width: 100%;
-  aspect-ratio: 16 / 9;
-  min-height: 180px;
+.widget-full {
+  grid-column: 1 / -1;
 }
 
 // Container query (reacts to `.dashboard-widget`'s own width, via `container-type` above) — not

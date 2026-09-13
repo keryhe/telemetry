@@ -3,7 +3,7 @@ import { HttpClient, HttpParams } from '@angular/common/http';
 import { Observable } from 'rxjs';
 import { map } from 'rxjs/operators';
 import { environment } from '../../../../environments/environment';
-import { OperationStats, ServiceDependency, SpanModel, TraceFilter, TraceInfo } from '../../models/trace.models';
+import { OperationStats, ServiceDependency, ServiceStats, SpanModel, TraceFilter, TraceInfo } from '../../models/trace.models';
 import { PagedResult } from '../../models/paged.models';
 import { TimeBucket } from '../../../shared/utils/chart.utils';
 
@@ -27,6 +27,17 @@ export interface TraceHistogramQuery {
   minDurationMs?: number;
   maxDurationMs?: number;
   tags?: string[];
+}
+
+/**
+ * Same volume histogram as `getTraceHistogram` plus per-service RED stats, from one backend scan
+ * instead of two — see plans/dashboard-refactor.md Phase 5. Kept as its own endpoint/type rather
+ * than an option on `getTraceHistogram` so the traces list page (the histogram's other caller)
+ * never fetches or pays for stats it doesn't read.
+ */
+export interface TraceOverview {
+  buckets: TimeBucket[];
+  services: ServiceStats[];
 }
 
 @Injectable({ providedIn: 'root' })
@@ -76,6 +87,23 @@ export class TracesApiService {
     for (const tag of query.tags ?? []) params = params.append('tag', tag);
     return this.http.get<TimeBucket[]>(`${this.base}/histogram`, { params }).pipe(
       map((buckets) => buckets.map((b) => ({ ...b, timestamp: new Date(b.timestamp) })))
+    );
+  }
+
+  /** Dashboard-only: same query shape as `getTraceHistogram`, plus per-service RED stats. */
+  getTraceOverview(query: TraceHistogramQuery): Observable<TraceOverview> {
+    let params = new HttpParams()
+      .set('start', query.start.toISOString())
+      .set('end', query.end.toISOString())
+      .set('bucketCount', query.bucketCount ?? 24)
+      .set('mode', query.mode ?? 'all');
+    if (query.service) params = params.set('service', query.service);
+    if (query.operation) params = params.set('operation', query.operation);
+    if (query.minDurationMs != null) params = params.set('minDurationMs', query.minDurationMs);
+    if (query.maxDurationMs != null) params = params.set('maxDurationMs', query.maxDurationMs);
+    for (const tag of query.tags ?? []) params = params.append('tag', tag);
+    return this.http.get<TraceOverview>(`${this.base}/overview`, { params }).pipe(
+      map((o) => ({ ...o, buckets: o.buckets.map((b) => ({ ...b, timestamp: new Date(b.timestamp) })) }))
     );
   }
 

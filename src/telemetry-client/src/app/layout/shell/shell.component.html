@@ -1,6 +1,6 @@
 <div class="shell">
   <mat-toolbar class="toolbar">
-    @if (isHandset$ | async) {
+    @if (isCompact$ | async) {
       <button mat-icon-button (click)="drawer.toggle()">
         <mat-icon>menu</mat-icon>
       </button>
@@ -49,9 +49,9 @@
   <mat-sidenav-container class="sidenav-container">
     <mat-sidenav
       #drawer
-      [attr.role]="(isHandset$ | async) ? 'dialog' : 'navigation'"
-      [mode]="(isHandset$ | async) ? 'over' : 'side'"
-      [opened]="!(isHandset$ | async)"
+      [attr.role]="(isCompact$ | async) ? 'dialog' : 'navigation'"
+      [mode]="(isCompact$ | async) ? 'over' : 'side'"
+      [opened]="!(isCompact$ | async)"
       class="sidenav">
       <nav class="nav-rail">
         @for (item of navItems; track item.route) {

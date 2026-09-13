@@ -47,7 +47,12 @@ export function buildSparklineOptions(
     chart: {
       type: 'line',
       height: 40,
-      width: 100,
+      // '%' width so the chart tracks its (shrinkable) CSS box instead of being pinned to a fixed
+      // pixel size that would overflow a narrowed card. ApexCharts resolves a percentage width
+      // against its own inner container element, so the `<apx-chart>` host must keep a definite
+      // width — `.sparkline` in stat-card.component.ts supplies one via `flex: 0 1 100px`.
+      // Height stays fixed: only the width should be fluid.
+      width: '100%',
       sparkline: { enabled: true },
       background: 'transparent',
       animations: { enabled: false },
@@ -56,6 +61,13 @@ export function buildSparklineOptions(
     series: [{ name: '', data: series }],
     colors: [color],
     stroke: { curve: 'smooth', width: 2 },
+    // A series containing `null` makes ApexCharts emit one "virtual point" marker — a 0.1px-radius
+    // circle pinned to the bottom-left of the plot, drawn with `alwaysDrawMarker`, so sparkline
+    // mode's `markers.size: 0` does NOT suppress it. Its default 2px `#fff` stroke was the only
+    // thing visible, showing up as a stray white dot in the corner of the cards whose series has
+    // gaps (Avg Trace Duration, Error Rate). Zeroing the stroke hides it; sparkline mode draws no
+    // other markers, so nothing else is affected.
+    markers: { strokeWidth: 0 },
     tooltip: { enabled: false },
   };
 }
@@ -65,6 +77,10 @@ export interface TimeBucket {
   count: number;
   errorCount: number;
   sumDurationMs: number;
+  /** Duration percentiles (ms) for this bucket's traces. 0 when count === 0 — treat as no data. */
+  p50Ms: number;
+  p95Ms: number;
+  p99Ms: number;
 }
 
 export interface LogBucket {
