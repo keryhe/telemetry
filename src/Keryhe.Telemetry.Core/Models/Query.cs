@@ -132,6 +132,42 @@ public sealed class TraceOverview
 {
     public List<TraceVolumeBucket> Buckets { get; init; } = [];
     public List<ServiceStats> Services { get; init; } = [];
+
+    /// <summary>Window-wide totals and percentiles across every trace in the range.</summary>
+    public TraceWindowSummary Summary { get; init; } = new();
+}
+
+/// <summary>
+/// Window-wide aggregates over the whole filtered trace set — not per bucket and not per
+/// service. Exists because neither of those can produce a window percentile: percentiles do not
+/// average, so <c>TraceVolumeBucket.P95Ms</c> values cannot be combined into the window's p95,
+/// and <see cref="ServiceStats"/> is grouped by service (and carries no p50 at all). Computed
+/// from the same already-materialized trace list as the other two groupings — one extra sort,
+/// no extra query.
+/// </summary>
+public sealed class TraceWindowSummary
+{
+    public int Count { get; init; }
+    public int ErrorCount { get; init; }
+
+    /// <summary>
+    /// Duration percentiles (ms) across every trace in the window. 0 when <c>Count == 0</c>;
+    /// callers should treat that as "no data", not a real value — same contract as
+    /// <see cref="TraceVolumeBucket"/>.
+    /// </summary>
+    public double P50Ms { get; init; }
+    public double P95Ms { get; init; }
+    public double P99Ms { get; init; }
+
+    /// <summary>Distinct root-span services seen in the window (matches <c>Services.Count</c>).</summary>
+    public int ServiceCount { get; init; }
+
+    /// <summary>
+    /// Start time of the most recent trace in the window, or null when there were none. Bounded
+    /// by the query range, so it answers "is this still moving?" — not "when did this tenant
+    /// last report?", which needs an unbounded lookup.
+    /// </summary>
+    public DateTime? LastTraceStartTime { get; init; }
 }
 
 /// <summary>One bucket of the log volume-by-severity histogram.</summary>

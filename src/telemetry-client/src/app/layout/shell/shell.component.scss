@@ -40,12 +40,18 @@
   margin-right: 4px;
 }
 
+// An anchor to the Global Dashboard, styled to look exactly as it did when it was a plain div —
+// the branding is the way back out of a tenant, so it has to be clickable, but making it *look*
+// like a link would turn the app title into UI chrome.
 .app-title-block {
   display: flex;
   flex-direction: column;
   justify-content: center;
   line-height: 1;
   gap: 2px;
+  text-decoration: none;
+  color: inherit;
+  cursor: pointer;
 }
 
 .app-title {

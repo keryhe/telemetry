@@ -31,17 +31,11 @@ import {
   formatDuration, parseDotnetTimespan, PERCENTILE_COLORS, timeRangeZoom,
 } from '../../shared/utils/chart.utils';
 import { loadPageState, savePageState } from '../../shared/utils/page-state';
+import {
+  HEALTH_THRESHOLDS_TOKEN, HealthColor, classifyErrorRate,
+} from '../../shared/config/health-thresholds';
 
 const STATE_KEY = 'state.dashboard';
-
-/**
- * Error-rate KPI thresholds. Deliberately separate from any alert rule: alert rules are
- * per-tenant, per-rule-type, and often scoped to one service, so there is no single sensible way
- * to fold an arbitrary set of them into one global card. Alerts own "is this a violation"; this
- * card owns "does this look off at a glance" — different jobs, different thresholds.
- */
-const ERROR_RATE_WARN = 0.01;
-const ERROR_RATE_ERROR = 0.05;
 
 @Component({
   selector: 'app-dashboard',
@@ -65,6 +59,7 @@ export class DashboardComponent {
   private readonly theme = inject(ThemeService);
   private readonly router = inject(Router);
   private readonly destroyRef = inject(DestroyRef);
+  private readonly thresholds = inject(HEALTH_THRESHOLDS_TOKEN);
 
   private readonly saved = loadPageState(STATE_KEY, {
     selectedService: '',
@@ -96,13 +91,14 @@ export class DashboardComponent {
   protected errorRate = computed(() =>
     this.totalTraces() > 0 ? this.errorTraces() / this.totalTraces() : 0
   );
-  /** 'default' | 'warn' | 'error' coloring for the Error Rate card — thresholds above. */
-  protected errorRateColor = computed<'default' | 'warn' | 'error'>(() => {
-    const rate = this.errorRate();
-    if (rate >= ERROR_RATE_ERROR) return 'error';
-    if (rate >= ERROR_RATE_WARN) return 'warn';
-    return 'default';
-  });
+  /**
+   * Coloring for the Error Rate card. Thresholds come from the shared health config rather than
+   * this file so the Global Dashboard's tenant cards — and the legend explaining them — classify
+   * identically.
+   */
+  protected errorRateColor = computed<HealthColor>(() =>
+    classifyErrorRate(this.errorRate(), this.thresholds)
+  );
   protected serviceCount = computed(() => this.availableServices().length);
   protected logTotal = computed(() =>
     this.logHistogram().reduce(

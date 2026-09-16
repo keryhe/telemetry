@@ -72,6 +72,76 @@ export function buildSparklineOptions(
   };
 }
 
+/**
+ * Geometry for a sparkline drawn as raw inline SVG, as an alternative to
+ * {@link buildSparklineOptions}.
+ *
+ * ApexCharts is the right tool for one chart on a page; it is the wrong tool for one chart per
+ * row of a grid, where each instance is a full chart engine rendering its own SVG for a line
+ * with no axes, no grid, no tooltip and no interaction. A grid of fifty tenant cards pays that
+ * fifty times over. This returns the handful of numbers a `<polyline>` needs instead.
+ *
+ * Same `null`-means-no-data contract as {@link buildSparklineOptions}: a null value breaks the
+ * line rather than dipping it to zero, which is why the result is a list of segments.
+ */
+export interface SparklineShape {
+  /** One `points` attribute per run of consecutive non-null values. */
+  segments: string[];
+  /**
+   * Runs of length one. A `<polyline>` with a single point renders nothing at all, so an
+   * isolated sample has to be drawn as a mark of its own or it silently disappears.
+   */
+  dots: { x: number; y: number }[];
+}
+
+/**
+ * @param values Bucket values, `null` for "no data" (never 0 — see {@link SparklineShape}).
+ * @param width  viewBox width. Pair with `preserveAspectRatio="none"` and a CSS width so the
+ *               line stretches to the card; use `vector-effect="non-scaling-stroke"` on the
+ *               shapes so the resulting non-uniform scale doesn't thicken the stroke sideways.
+ */
+export function buildSparklineShape(
+  values: (number | null)[],
+  width = 100,
+  height = 24,
+): SparklineShape {
+  const empty: SparklineShape = { segments: [], dots: [] };
+  if (values.length === 0) return empty;
+
+  // Peak defines the top of the plot. An all-zero window is "nothing happened", not a flat line
+  // pinned to the axis, so it draws nothing — same reasoning as the null contract.
+  const max = Math.max(...values.map((v) => v ?? 0));
+  if (max <= 0) return empty;
+
+  // Half a stroke of headroom top and bottom, or the peak and the baseline get clipped.
+  const pad = 2;
+  const span = height - pad * 2;
+  const step = values.length > 1 ? width / (values.length - 1) : 0;
+  const xOf = (i: number) => (values.length > 1 ? i * step : width / 2);
+  const yOf = (v: number) => height - pad - (v / max) * span;
+
+  const segments: string[] = [];
+  const dots: { x: number; y: number }[] = [];
+  let run: string[] = [];
+
+  const flush = () => {
+    if (run.length > 1) segments.push(run.join(' '));
+    else if (run.length === 1) {
+      const [x, y] = run[0].split(',');
+      dots.push({ x: Number(x), y: Number(y) });
+    }
+    run = [];
+  };
+
+  values.forEach((v, i) => {
+    if (v == null) { flush(); return; }
+    run.push(`${xOf(i).toFixed(2)},${yOf(v).toFixed(2)}`);
+  });
+  flush();
+
+  return { segments, dots };
+}
+
 export interface TimeBucket {
   timestamp: Date;
   count: number;

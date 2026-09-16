@@ -1,22 +1,22 @@
 <div class="shell">
   <mat-toolbar class="toolbar">
-    @if (isCompact$ | async) {
-      <button mat-icon-button (click)="drawer.toggle()">
+    @if ((isCompact$ | async) && !chromeless()) {
+      <button mat-icon-button (click)="toggleDrawer()">
         <mat-icon>menu</mat-icon>
       </button>
     }
 
     <mat-icon class="app-icon">sensors</mat-icon>
-    <div class="app-title-block">
+    <a class="app-title-block" routerLink="/global" matTooltip="Global Dashboard">
       <span class="app-title">Sentinel</span>
       <span class="app-subtitle">OpenTelemetry Visualization</span>
-    </div>
+    </a>
 
     <span class="spacer"></span>
 
     <div class="toolbar-controls">
-      <!-- Tenant Picker -->
-      @if (tenantService.tenants().length > 0) {
+      <!-- Tenant Picker — hidden on cross-tenant pages, which have no single tenant to pick. -->
+      @if (tenantService.tenants().length > 0 && !chromeless()) {
         <mat-form-field class="tenant-select" appearance="outline" subscriptSizing="dynamic">
           <mat-label>Tenant</mat-label>
           <mat-select
@@ -52,8 +52,8 @@
   </mat-toolbar>
 
   <mat-sidenav-container class="sidenav-container">
+    @if (!chromeless()) {
     <mat-sidenav
-      #drawer
       [attr.role]="(isCompact$ | async) ? 'dialog' : 'navigation'"
       [mode]="(isCompact$ | async) ? 'over' : 'side'"
       [opened]="!(isCompact$ | async)"
@@ -78,6 +78,7 @@
         }
       </nav>
     </mat-sidenav>
+    }
 
     <mat-sidenav-content>
       <main class="content">

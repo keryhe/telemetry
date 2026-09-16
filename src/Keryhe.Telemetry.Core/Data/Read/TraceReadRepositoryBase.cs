@@ -339,7 +339,8 @@ public abstract class TraceReadRepositoryBase : DapperReadRepository, ITraceRead
         if (query.Start >= query.End)
             throw new ArgumentException("Start time must be before end time");
 
-        var traces = await ComputeTraceInfosAsync(ToTraceQuery(query), cancellationToken);
+        // slim: buckets are built from timestamps, durations and the error flag only.
+        var traces = await ComputeTraceInfosAsync(ToTraceQuery(query), cancellationToken, slim: true);
         return BuildVolumeBuckets(traces, query);
     }
 
@@ -351,11 +352,38 @@ public abstract class TraceReadRepositoryBase : DapperReadRepository, ITraceRead
         // One scan, grouped two ways — not two scans. `/histogram` (above) stays untouched and
         // just as cheap for its other caller (the traces list page), which doesn't need
         // per-service stats and shouldn't pay for them.
-        var traces = await ComputeTraceInfosAsync(ToTraceQuery(query), cancellationToken);
+        // slim: all three groupings below read only trace-level aggregates and the service name.
+        var traces = await ComputeTraceInfosAsync(ToTraceQuery(query), cancellationToken, slim: true);
+        var services = BuildServiceStats(traces, query.Start, query.End);
         return new TraceOverview
         {
             Buckets = BuildVolumeBuckets(traces, query),
-            Services = BuildServiceStats(traces, query.Start, query.End),
+            Services = services,
+            Summary = BuildWindowSummary(traces, services.Count),
+        };
+    }
+
+    /// <summary>
+    /// Window-wide aggregates over the same trace list the other two groupings use — a third
+    /// view of one scan, not a third query. The percentiles here are computed over every trace
+    /// in the range because a window percentile cannot be derived from the per-bucket ones.
+    /// </summary>
+    private static TraceWindowSummary BuildWindowSummary(List<TraceInfo> traces, int serviceCount)
+    {
+        if (traces.Count == 0) return new TraceWindowSummary();
+
+        var durations = traces.Select(t => t.TraceDuration.TotalMilliseconds).ToList();
+        durations.Sort();
+
+        return new TraceWindowSummary
+        {
+            Count = traces.Count,
+            ErrorCount = traces.Count(t => t.HasErrors),
+            P50Ms = Percentile(durations, 50),
+            P95Ms = Percentile(durations, 95),
+            P99Ms = Percentile(durations, 99),
+            ServiceCount = serviceCount,
+            LastTraceStartTime = traces.Max(t => t.TraceStartTime),
         };
     }
 
@@ -451,7 +479,14 @@ public abstract class TraceReadRepositoryBase : DapperReadRepository, ITraceRead
     /// same trace-level shape the legacy <c>Get*TracesAsync</c> methods produce, filters out non-root
     /// traces, and returns the full ordered list (no offset/limit applied — the caller pages it).
     /// </summary>
-    protected async Task<List<TraceInfo>> ComputeTraceInfosAsync(TraceQuery query, CancellationToken ct)
+    /// <param name="slim">
+    /// Opt out of fetching either attributes column — see <see cref="FetchRawSpansSlimAsync"/>.
+    /// Only safe for callers that read nothing but the trace-level aggregates (counts, timings,
+    /// error flag, service name); the returned <see cref="TraceInfo.RootSpanAttributes"/> will be
+    /// null. Silently ignored when the query carries tag predicates, which need span attributes.
+    /// </param>
+    protected async Task<List<TraceInfo>> ComputeTraceInfosAsync(
+        TraceQuery query, CancellationToken ct, bool slim = false)
     {
         var startNano = TimeConversion.DateTimeToUnixNano(query.Start);
         var endNano = TimeConversion.DateTimeToUnixNano(query.End);
@@ -473,7 +508,10 @@ public abstract class TraceReadRepositoryBase : DapperReadRepository, ITraceRead
         if (isErrors) clauses.Add(ErrorTracePredicate(" AND s2.start_time_unix_nano >= @start AND s2.start_time_unix_nano <= @end"));
         var where = string.Join(" AND ", clauses);
 
-        var raw = await FetchRawSpansAsync(where, new { tenantId = TenantId, start = startNano, end = endNano }, ct);
+        var spanParams = new { tenantId = TenantId, start = startNano, end = endNano };
+        var raw = slim && tags.Count == 0
+            ? await FetchRawSpansSlimAsync(where, spanParams, ct)
+            : await FetchRawSpansAsync(where, spanParams, ct);
 
         var groups = raw
             .GroupBy(s => s.TraceId)
@@ -489,7 +527,7 @@ public abstract class TraceReadRepositoryBase : DapperReadRepository, ITraceRead
                     MaxEndTimeNano = spans.Max(s => s.EndTimeUnixNano),
                     HasErrors = spans.Any(s => s.StatusCode == "ERROR"),
                     RootSpan = spans.FirstOrDefault(s => s.ParentSpanId == null) ?? first,
-                    ServiceName = ExtractServiceName(first.ResourceAttributes),
+                    ServiceName = first.ServiceName,
                     Spans = spans,
                 };
             })
@@ -701,10 +739,10 @@ public abstract class TraceReadRepositoryBase : DapperReadRepository, ITraceRead
     // =========================================================================
 
     /// <summary>True when the span's resource carries this exact <c>service.name</c>.</summary>
+    // Reads the resolved ServiceName rather than re-reading the attribute map, so it behaves
+    // identically on the full and slim fetch paths (the slim one has no attribute map at all).
     private static bool MatchesService(RawSpan span, string service)
-        => span.ResourceAttributes != null &&
-           span.ResourceAttributes.TryGetValue("service.name", out var v) &&
-           v?.ToString() == service;
+        => span.ServiceName == service;
 
     /// <summary>
     /// Predicate restricting the outer span query to traces containing at least one ERROR span.
@@ -796,6 +834,70 @@ public abstract class TraceReadRepositoryBase : DapperReadRepository, ITraceRead
 
         await using var conn = await OpenConnectionAsync(ct);
         var rows = await conn.QueryAsync<RawSpanRow>(new CommandDefinition(sql, parameters, cancellationToken: ct));
+        return rows.Select(r =>
+        {
+            var resourceAttributes = DeserializeAttributes(r.ResourceAttributesJson);
+            return new RawSpan
+            {
+                TraceId = r.TraceId,
+                StartTimeUnixNano = r.StartTimeUnixNano,
+                EndTimeUnixNano = r.EndTimeUnixNano,
+                StatusCode = r.StatusCode,
+                Name = r.Name,
+                ParentSpanId = r.ParentSpanId,
+                ServiceName = ExtractServiceName(resourceAttributes),
+                SpanAttributes = DeserializeAttributes(r.SpanAttributesJson),
+                ResourceAttributes = resourceAttributes
+            };
+        }).ToList();
+    }
+
+    /// <summary>
+    /// The same span set as <see cref="FetchRawSpansAsync"/> without either attributes column.
+    ///
+    /// The full fetch ships two JSONB blobs per span and parses both. Resource attributes are the
+    /// expensive half and the most wasteful: they are per-<em>resource</em> data fetched
+    /// per-<em>span</em>, so a window with 100k spans over 30 resources detoasts, transfers and
+    /// deserializes the same 30 documents 100k times, to read one string out of each. Here the
+    /// span query carries <c>resource_id</c> instead, and a second query resolves the tenant's
+    /// resources once — 30 parses, not 100,000.
+    ///
+    /// The cost is that <c>SpanAttributes</c> and <c>ResourceAttributes</c> come back null, so
+    /// this path cannot serve tag predicates or <see cref="TraceInfo.RootSpanAttributes"/>.
+    /// <see cref="ComputeTraceInfosAsync"/> owns that guard; do not call this directly.
+    /// </summary>
+    private async Task<List<RawSpan>> FetchRawSpansSlimAsync(string whereClause, object parameters, CancellationToken ct)
+    {
+        var spanSql = $"""
+            SELECT
+                s.trace_id              AS TraceId,
+                s.start_time_unix_nano  AS StartTimeUnixNano,
+                s.end_time_unix_nano    AS EndTimeUnixNano,
+                s.status_code           AS StatusCode,
+                s.name                  AS Name,
+                s.parent_span_id        AS ParentSpanId,
+                s.resource_id           AS ResourceId
+            FROM spans s
+            JOIN resources r ON s.resource_id = r.id
+            WHERE r.tenant_id = @tenantId AND {whereClause}
+            """;
+
+        // Scoped to the tenant rather than to the window's spans: bounded by distinct resource
+        // attribute sets (tens, typically), and narrowing it further would cost a second scan of
+        // `spans` to collect the referenced ids — more than the rows it would save.
+        const string resourceSql = """
+            SELECT id AS Id, attributes_json AS AttributesJson
+            FROM resources
+            WHERE tenant_id = @tenantId
+            """;
+
+        await using var conn = await OpenConnectionAsync(ct);
+
+        var resourceRows = await conn.QueryAsync<ResourceServiceRow>(new CommandDefinition(
+            resourceSql, new { tenantId = TenantId }, cancellationToken: ct));
+        var serviceByResourceId = resourceRows.ToDictionary(r => r.Id, r => ServiceNameOf(r.AttributesJson));
+
+        var rows = await conn.QueryAsync<SlimSpanRow>(new CommandDefinition(spanSql, parameters, cancellationToken: ct));
         return rows.Select(r => new RawSpan
         {
             TraceId = r.TraceId,
@@ -804,8 +906,7 @@ public abstract class TraceReadRepositoryBase : DapperReadRepository, ITraceRead
             StatusCode = r.StatusCode,
             Name = r.Name,
             ParentSpanId = r.ParentSpanId,
-            SpanAttributes = DeserializeAttributes(r.SpanAttributesJson),
-            ResourceAttributes = DeserializeAttributes(r.ResourceAttributesJson)
+            ServiceName = serviceByResourceId.GetValueOrDefault(r.ResourceId),
         }).ToList();
     }
 
@@ -852,7 +953,18 @@ public abstract class TraceReadRepositoryBase : DapperReadRepository, ITraceRead
         public string StatusCode { get; set; } = null!;
         public string Name { get; set; } = null!;
         public string? ParentSpanId { get; set; }
+
+        /// <summary>
+        /// Resolved once at fetch time, by both the full and slim paths, so callers never have to
+        /// know which one produced the span. On the slim path it comes from a per-resource lookup
+        /// rather than this span's own (unfetched) resource attributes.
+        /// </summary>
+        public string? ServiceName { get; set; }
+
+        /// <summary>Null on the slim path — see <see cref="FetchRawSpansSlimAsync"/>.</summary>
         public Dictionary<string, object>? SpanAttributes { get; set; }
+
+        /// <summary>Null on the slim path — see <see cref="FetchRawSpansSlimAsync"/>.</summary>
         public Dictionary<string, object>? ResourceAttributes { get; set; }
     }
 
@@ -866,6 +978,23 @@ public abstract class TraceReadRepositoryBase : DapperReadRepository, ITraceRead
         public string? ParentSpanId { get; set; }
         public string? SpanAttributesJson { get; set; }
         public string? ResourceAttributesJson { get; set; }
+    }
+
+    private sealed class SlimSpanRow
+    {
+        public string TraceId { get; set; } = null!;
+        public long StartTimeUnixNano { get; set; }
+        public long EndTimeUnixNano { get; set; }
+        public string StatusCode { get; set; } = null!;
+        public string Name { get; set; } = null!;
+        public string? ParentSpanId { get; set; }
+        public long ResourceId { get; set; }
+    }
+
+    private sealed class ResourceServiceRow
+    {
+        public long Id { get; set; }
+        public string? AttributesJson { get; set; }
     }
 
     private sealed class FullSpanRow

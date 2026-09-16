@@ -1,0 +1,214 @@
+@if (loading()) {
+  <mat-progress-bar mode="indeterminate" />
+}
+
+<app-page-header>
+  <div class="global-header">
+    <mat-form-field appearance="outline" subscriptSizing="dynamic" class="sort-select">
+      <mat-label>Sort</mat-label>
+      <mat-select [value]="sortBy()" (selectionChange)="sortBy.set($event.value)">
+        @for (opt of sortOptions; track opt.value) {
+          <mat-option [value]="opt.value">{{ opt.label }}</mat-option>
+        }
+      </mat-select>
+    </mat-form-field>
+
+    <span class="header-spacer"></span>
+
+    <button mat-icon-button (click)="refresh()" matTooltip="Refresh">
+      <mat-icon>refresh</mat-icon>
+    </button>
+    <mat-slide-toggle
+      [checked]="autoRefresh()"
+      [disabled]="preset() === 'custom'"
+      (change)="autoRefresh.set($event.checked)"
+      [matTooltip]="preset() === 'custom' ? 'Auto-refresh is paused for custom ranges' : 'Auto-refresh'">
+      Auto-refresh
+    </mat-slide-toggle>
+  </div>
+
+  <!-- Legend. Rendered from the injected thresholds, never from literals, so it cannot describe
+       one set of bands while the cards are coloured by another. -->
+  <div class="legend">
+    <span class="legend-label">errors</span>
+    <span class="legend-item">
+      <span class="legend-swatch warn"></span>
+      over {{ thresholds.errorRate.warn | percent: '1.0-2' }}
+    </span>
+    <span class="legend-item">
+      <span class="legend-swatch error"></span>
+      over {{ thresholds.errorRate.critical | percent: '1.0-2' }}
+    </span>
+
+    <span class="legend-divider"></span>
+    
+    <span class="legend-label">p95</span>
+    <span class="legend-item">
+      <span class="legend-swatch ok"></span>
+      under {{ formatDuration(thresholds.p95Ms.warn) }}
+    </span>
+    <span class="legend-item">
+      <span class="legend-swatch warn"></span>
+      {{ formatDuration(thresholds.p95Ms.warn) }}–{{ formatDuration(thresholds.p95Ms.critical) }}
+    </span>
+    <span class="legend-item">
+      <span class="legend-swatch error"></span>
+      over {{ formatDuration(thresholds.p95Ms.critical) }}
+    </span>
+
+    <span class="legend-divider"></span>
+
+    <span class="legend-label">log errors</span>
+    <span class="legend-item">
+      <span class="legend-swatch warn"></span>
+      over {{ thresholds.logErrorRate.warn | percent: '1.0-2' }}
+    </span>
+    <span class="legend-item">
+      <span class="legend-swatch error"></span>
+      over {{ thresholds.logErrorRate.critical | percent: '1.0-2' }}
+    </span>
+  </div>
+</app-page-header>
+
+<div class="page-container">
+  @if (hasTenants()) {
+    <div class="tenant-grid">
+      @for (card of cards(); track card.stats.tenantId) {
+        <mat-card
+          class="tenant-card"
+          [class.is-muted]="card.status === 'silent' || card.status === 'unknown'"
+          [class.is-degraded]="card.status === 'degraded'"
+          tabindex="0"
+          role="link"
+          [attr.aria-label]="card.stats.tenantName + ' — ' + card.status"
+          (click)="openTenant(card)"
+          (keydown.enter)="openTenant(card)"
+          (keydown.space)="openTenant(card)">
+          <mat-card-content>
+
+            <div class="tenant-name-row">
+              <mat-icon class="status-icon" [ngClass]="card.status.replace(' ', '-')">
+                {{ statusIcon(card.status) }}
+              </mat-icon>
+              <span class="tenant-name" [matTooltip]="card.stats.tenantName">
+                {{ card.stats.tenantName }}
+              </span>
+            </div>
+
+            <div class="status-row">
+              <span class="status-word">{{ card.status }}</span>
+              @if (card.showTail) {
+                <span
+                  class="chip warn"
+                  [matTooltip]="'p99 is more than ' + thresholds.tailRatio + '× the p95 — a slow tail the p95 alone hides.'">
+                  p99 {{ formatDuration(card.stats.p99Ms) }}
+                </span>
+              }
+            </div>
+
+            <div class="metric-row">
+              <div class="metric">
+                <div class="metric-label">traces</div>
+                <div class="metric-value">
+                  {{ card.tracesPerMinute | number: '1.0-1' }}<span class="unit">/m</span>
+                </div>
+              </div>
+              <div class="metric align-end">
+                <div class="metric-label">errors</div>
+                <div class="metric-value" [ngClass]="card.errorColor">
+                  @if (card.stats.traceCount > 0) {
+                    {{ card.errorRate | percent: '1.1-1' }}
+                  } @else {
+                    —
+                  }
+                </div>
+              </div>
+            </div>
+
+            <div class="latency-row">
+              <span class="metric-label">p50 / p95</span>
+              <span class="latency-values">
+                @if (card.stats.traceCount > 0) {
+                  {{ formatDuration(card.stats.p50Ms) }}
+                  <span class="separator">/</span>
+                  @if (card.showP95) {
+                    <span [ngClass]="card.p95Color">{{ formatDuration(card.stats.p95Ms) }}</span>
+                  } @else {
+                    <span class="unavailable" [matTooltip]="sampleHint(card.stats.traceCount)">—</span>
+                  }
+                } @else {
+                  —
+                }
+              </span>
+            </div>
+
+            @if (card.sparkline) {
+              <!-- preserveAspectRatio="none" stretches the 100x24 viewBox to the card's width;
+                   non-scaling-stroke keeps that from thickening the line horizontally. -->
+              <svg
+                class="sparkline"
+                [ngClass]="card.sparklineTone"
+                viewBox="0 0 100 24"
+                preserveAspectRatio="none"
+                aria-hidden="true">
+                @for (points of card.sparkline.segments; track $index) {
+                  <polyline
+                    [attr.points]="points"
+                    fill="none"
+                    stroke="currentColor"
+                    stroke-width="1.5"
+                    stroke-linejoin="round"
+                    stroke-linecap="round"
+                    vector-effect="non-scaling-stroke" />
+                }
+                @for (dot of card.sparkline.dots; track $index) {
+                  <circle [attr.cx]="dot.x" [attr.cy]="dot.y" r="1.2" fill="currentColor" />
+                }
+              </svg>
+            } @else {
+              <!-- No chart for a tenant with nothing to plot: a flat dashed rule says "no data"
+                   where a zero-valued line would say "traffic collapsed". -->
+              <div class="sparkline-empty"></div>
+            }
+
+            <!-- Only the error half is coloured, the same rule the p50/p95 line follows: the
+                 total is context, the error share is the signal. Bands are the legend's. -->
+            <div class="logs-row">
+              <span class="metric-label">logs / errors</span>
+              <span class="logs-values">
+                @if (card.stats.logCount > 0) {
+                  <span class="logs-total">{{ card.stats.logCount | number }}</span>
+                  <span class="separator">/</span>
+                  <span [ngClass]="card.logErrorColor">{{ card.stats.logErrorCount | number }}</span>
+                } @else {
+                  —
+                }
+              </span>
+            </div>
+
+            <div class="card-footer">
+              <span class="footer-item">
+                <mat-icon class="footer-icon">schedule</mat-icon>
+                {{ lastSeenLabel(card.stats.lastSeenUtc) }}
+              </span>
+              <span>
+                @if (card.stats.traceCount > 0 && !card.showP95) {
+                  {{ card.stats.traceCount | number }} traces
+                } @else {
+                  {{ card.stats.serviceCount | number }}
+                  {{ card.stats.serviceCount === 1 ? 'service' : 'services' }}
+                }
+              </span>
+            </div>
+
+          </mat-card-content>
+        </mat-card>
+      }
+    </div>
+  } @else if (!loading()) {
+    <app-empty-state
+      icon="domain"
+      message="No tenants"
+      hint="Nothing has been registered yet, or the API could not be reached." />
+  }
+</div>

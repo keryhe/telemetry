@@ -1,17 +1,18 @@
 import { BreakpointObserver } from '@angular/cdk/layout';
 import { AsyncPipe } from '@angular/common';
-import { Component, inject } from '@angular/core';
+import { Component, inject, viewChild } from '@angular/core';
+import { toSignal } from '@angular/core/rxjs-interop';
 import { MatButtonModule } from '@angular/material/button';
 import { MatRippleModule } from '@angular/material/core';
 import { MatIconModule } from '@angular/material/icon';
 import { MatFormFieldModule } from '@angular/material/form-field';
 import { MatMenuModule } from '@angular/material/menu';
 import { MatSelectModule } from '@angular/material/select';
-import { MatSidenavModule } from '@angular/material/sidenav';
+import { MatSidenav, MatSidenavModule } from '@angular/material/sidenav';
 import { MatToolbarModule } from '@angular/material/toolbar';
 import { MatTooltipModule } from '@angular/material/tooltip';
-import { RouterLink, RouterLinkActive, RouterOutlet } from '@angular/router';
-import { map } from 'rxjs/operators';
+import { ActivatedRoute, NavigationEnd, Router, RouterLink, RouterLinkActive, RouterOutlet } from '@angular/router';
+import { filter, map, startWith } from 'rxjs/operators';
 import { ThemeMode, ThemeService } from '../../core/services/theme.service';
 import { TenantService } from '../../core/services/tenant.service';
 import { TimeRangePickerComponent } from '../../shared/components/time-range-picker/time-range-picker.component';
@@ -68,11 +69,52 @@ export class ShellComponent {
   protected readonly themeService = inject(ThemeService);
   protected readonly tenantService = inject(TenantService);
   private readonly breakpoints = inject(BreakpointObserver);
+  private readonly router = inject(Router);
+  private readonly route = inject(ActivatedRoute);
 
   /** True below COMPACT_QUERY: hamburger + overlay drawer instead of the permanent nav rail. */
   protected readonly isCompact$ = this.breakpoints
     .observe(COMPACT_QUERY)
     .pipe(map((r) => r.matches));
+
+  /**
+   * True on pages that opt out of the per-tenant chrome — the nav rail and the tenant picker.
+   * Both are tenant-scoped controls: every nav item routes to a page that reads one tenant, and
+   * the picker chooses which. On the cross-tenant Global Dashboard neither has anything to act
+   * on, so the page declares `data: { chrome: 'global' }` and the shell drops them, keeping the
+   * toolbar (branding, time range, theme) that still applies.
+   *
+   * Driven by route data rather than a URL test so a second chromeless page costs one line.
+   */
+  protected readonly chromeless = toSignal(
+    this.router.events.pipe(
+      filter((e) => e instanceof NavigationEnd),
+      map(() => this.isChromeless()),
+      startWith(this.isChromeless()),
+    ),
+    { initialValue: false },
+  );
+
+  /**
+   * `route` is the shell's own (path-less) route, so its snapshot's `firstChild` is the page
+   * being rendered. Read off the snapshot rather than `route.firstChild?.snapshot`: during the
+   * component's field initialization the child ActivatedRoute exists before its snapshot does,
+   * so that form throws on the initial `startWith`.
+   */
+  private isChromeless(): boolean {
+    return this.route.snapshot.firstChild?.data?.['chrome'] === 'global';
+  }
+
+  /**
+   * Queried rather than referenced as `#drawer` in the template: the sidenav now lives inside an
+   * `@if`, which scopes a template reference variable to that block, and the toolbar's hamburger
+   * sits outside it.
+   */
+  private readonly drawer = viewChild(MatSidenav);
+
+  protected toggleDrawer(): void {
+    void this.drawer()?.toggle();
+  }
 
   protected readonly navItems: NavItem[] = [
     { label: 'Dashboard', icon: 'dashboard', route: '/dashboard' },

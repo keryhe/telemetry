@@ -1,0 +1,304 @@
+// Same widescreen cap as the per-tenant dashboard: an ultrawide monitor should get more card
+// columns, not wider cards. Set on the host so the page header and `.page-container` (siblings)
+// inherit the same value and stay aligned.
+:host {
+  --page-max-width: var(--dashboard-max-width, 2400px);
+}
+
+// -------------------------------------------------------------------------------------------
+// Controls row — mirrors `.dashboard-header` on the per-tenant dashboard so the refresh button
+// and auto-refresh toggle sit in the same place and behave the same way on both pages.
+// -------------------------------------------------------------------------------------------
+.global-header {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.sort-select {
+  min-width: 180px;
+}
+
+.header-spacer {
+  flex: 1 1 auto;
+}
+
+.legend {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px 12px;
+  margin-bottom: 16px;
+  font-size: 12px;
+  color: var(--mat-sys-on-surface-variant);
+}
+
+.legend-label {
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  font-weight: 500;
+}
+
+.legend-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.legend-swatch {
+  width: 10px;
+  height: 10px;
+  border-radius: 2px;
+  flex: none;
+
+  &.ok { background: var(--mat-sys-outline-variant); }
+  &.warn { background: #ff9800; }
+  &.error { background: var(--mat-sys-error); }
+}
+
+.legend-divider {
+  width: 1px;
+  height: 14px;
+  background: var(--mat-sys-outline-variant);
+}
+
+// -------------------------------------------------------------------------------------------
+// Card grid. Same `auto-fit`/`minmax` family as the shared `.stat-grid`, with a wider floor —
+// a tenant card carries a name, two metrics, a latency pair and a footer, which need more than
+// the 180px a single stat does.
+// -------------------------------------------------------------------------------------------
+.tenant-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(240px, 100%), 1fr));
+  gap: 16px;
+  margin-bottom: 16px;
+}
+
+.tenant-card {
+  container-type: inline-size;
+  cursor: pointer;
+
+  &:hover {
+    background: var(--mat-sys-surface-container-high);
+  }
+
+  &:focus-visible {
+    outline: 2px solid var(--mat-sys-primary);
+    outline-offset: 2px;
+  }
+
+  // A tenant that is reporting nothing must not look like a tenant reporting zeroes. Dimming
+  // the whole card is the fastest way to say "there is nothing here to read".
+  &.is-muted {
+    opacity: 0.72;
+  }
+
+  // Only the worst state gets a border; a grid where every card is outlined has no signal left.
+  &.is-degraded {
+    border: 1px solid var(--mat-sys-error);
+  }
+
+  mat-card-content {
+    padding: 14px !important;
+  }
+}
+
+.tenant-name-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.status-icon {
+  font-size: 18px;
+  width: 18px;
+  height: 18px;
+  flex: none;
+
+  &.healthy { color: #4caf50; }
+  &.degraded { color: var(--mat-sys-error); }
+  &.slow-tail { color: #ff9800; }
+  &.silent,
+  &.unknown { color: var(--mat-sys-on-surface-variant); }
+}
+
+.tenant-name {
+  font-size: 14px;
+  font-weight: 500;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.status-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 2px 0 12px 26px;
+  min-height: 20px;
+}
+
+.status-word {
+  font-size: 12px;
+  color: var(--mat-sys-on-surface-variant);
+}
+
+.chip {
+  font-size: 11px;
+  padding: 1px 8px;
+  border-radius: 10px;
+  white-space: nowrap;
+
+  // #ff9800 for both the tint and the text — the same warn literal `app-stat-card` uses. A
+  // darker amber would read better on white but is unreadable on the dark theme, and the theme
+  // here is driven by `color-scheme` rather than a class this stylesheet can branch on.
+  &.warn {
+    background: color-mix(in srgb, #ff9800 18%, transparent);
+    color: #ff9800;
+  }
+}
+
+.metric-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.metric {
+  min-width: 0;
+}
+
+.align-end {
+  text-align: right;
+}
+
+.metric-label {
+  font-size: 11px;
+  color: var(--mat-sys-on-surface-variant);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  white-space: nowrap;
+}
+
+.metric-value {
+  font-size: 20px;
+  font-weight: 500;
+  line-height: 1.2;
+}
+
+.unit {
+  font-size: 12px;
+  font-weight: 400;
+  color: var(--mat-sys-on-surface-variant);
+}
+
+// Each pair reads as one fact, so it gets its own full-width line rather than a third column —
+// at 240px three columns would force the numbers below legible size. The logs line repeats the
+// latency line's shape on purpose: same label-left / values-right rhythm, same rule above it as
+// the footer — one visual idea, three times down the card.
+.latency-row,
+.logs-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  border-top: 1px solid var(--mat-sys-outline-variant);
+  margin-top: 10px;
+  padding-top: 8px;
+}
+
+.latency-values,
+.logs-values {
+  font-size: 15px;
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+// Muted like `.separator`, for the same reason the p50 is left uncoloured: the total is the
+// denominator that makes the error count readable, not a signal of its own.
+.logs-total {
+  color: var(--mat-sys-on-surface-variant);
+}
+
+.separator,
+.unavailable {
+  color: var(--mat-sys-on-surface-variant);
+  font-weight: 400;
+}
+
+.separator {
+  margin: 0 2px;
+}
+
+// The line inherits `currentColor`, so the tone classes below are all that decide its colour —
+// which is what lets the neutral case use a theme token instead of a hardcoded grey.
+.sparkline {
+  display: block;
+  width: 100%;
+  height: 40px;
+  margin-top: 6px;
+  color: var(--mat-sys-outline);
+
+  &.error { color: var(--mat-sys-error); }
+  &.warn { color: #ff9800; }
+}
+
+.sparkline-empty {
+  height: 40px;
+  margin-top: 6px;
+  background-image: linear-gradient(
+    to right,
+    var(--mat-sys-outline-variant) 0 4px,
+    transparent 4px 8px
+  );
+  background-repeat: repeat-x;
+  background-size: 8px 1px;
+  background-position: left 75%;
+}
+
+.card-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  border-top: 1px solid var(--mat-sys-outline-variant);
+  margin-top: 8px;
+  padding-top: 8px;
+  font-size: 12px;
+  color: var(--mat-sys-on-surface-variant);
+  white-space: nowrap;
+}
+
+.footer-item {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+}
+
+.footer-icon {
+  font-size: 14px;
+  width: 14px;
+  height: 14px;
+}
+
+// Value colouring, matching `app-stat-card`'s own `.error` / `.warn` classes (and its two
+// literals) so a number means the same thing on both dashboards.
+.error { color: var(--mat-sys-error); }
+.warn { color: #ff9800; }
+
+// Same 599.98px handset threshold as the shell header and the per-tenant dashboard's control
+// row. `::ng-deep` pierces mat-slide-toggle's internally-rendered label — the established
+// technique here; the toggle still works and its tooltip still explains it.
+@media (max-width: 599.98px) {
+  .sort-select {
+    min-width: 140px;
+  }
+
+  .global-header mat-slide-toggle ::ng-deep .mdc-label {
+    display: none;
+  }
+}
