@@ -7,16 +7,13 @@ namespace Keryhe.Telemetry.Core.Data.Write;
 public class MetricWriteRepository : IMetricWriteRepository
 {
     private readonly TelemetryIngestionChannel _channel;
-    private readonly ITelemetryWriteStore _store;
     private readonly ILogger<MetricWriteRepository> _logger;
 
     public MetricWriteRepository(
         TelemetryIngestionChannel channel,
-        ITelemetryWriteStore store,
         ILogger<MetricWriteRepository> logger)
     {
         _channel = channel;
-        _store = store;
         _logger = logger;
     }
 
@@ -39,9 +36,6 @@ public class MetricWriteRepository : IMetricWriteRepository
         _logger.LogDebug("Enqueued {Count} metrics for async write", list.Count);
         return Enumerable.Empty<long>();
     }
-
-    public Task<int> DeleteOldMetricDataPointsAsync(TimeSpan retentionPeriod, CancellationToken cancellationToken = default)
-        => _store.DeleteOldMetricDataPointsAsync(retentionPeriod, cancellationToken);
 
     /// <summary>
     /// Reserves <c>metrics.Count</c> on <see cref="TelemetryIngestionChannel.MetricGate"/> before

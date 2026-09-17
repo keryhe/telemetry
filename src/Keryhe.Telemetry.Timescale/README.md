@@ -6,12 +6,12 @@ hypertable-aware write path on top of Npgsql/Dapper, reusing the
 
 ## What it provides
 
-- `AddTimescaleWriteServices(configuration)` — registers a singleton `NpgsqlDataSource` (from
-  `ConnectionStrings:Write`), `ITelemetryBulkWriter`, `ITenantResolver`, and `ITelemetryWriteStore`,
+- `AddTimescaleCollectorServices(configuration)` — registers a singleton `NpgsqlDataSource` (from
+  `ConnectionStrings:Collector`), `ITelemetryBulkWriter`, and `ITenantResolver`,
   targeting TimescaleDB's hypertables for the metric data-point tables and `log_records`.
-- `AddTimescaleReadServices(configuration)` — registers a singleton `NpgsqlDataSource` (from
-  `ConnectionStrings:Read`) and the read repositories, derived from the PostgreSQL
-  implementations since the query surface is identical.
+- `AddTimescaleApiServices(configuration)` — registers a singleton `NpgsqlDataSource` (from
+  `ConnectionStrings:Api`) and the read repositories (including `IRetentionSettingsRepository`),
+  derived from the PostgreSQL implementations since the query surface is identical.
 
 Install this package alongside `Keryhe.Telemetry.Collector` (write side) and/or
 `Keryhe.Telemetry.Api` (read side), and set `Database:Provider` to `Timescale`.
@@ -19,14 +19,14 @@ Install this package alongside `Keryhe.Telemetry.Collector` (write side) and/or
 ## Usage
 
 ```csharp
-builder.Services.AddTimescaleWriteServices(builder.Configuration);
-builder.Services.AddTimescaleReadServices(builder.Configuration);
+builder.Services.AddTimescaleCollectorServices(builder.Configuration);
+builder.Services.AddTimescaleApiServices(builder.Configuration);
 ```
 
 Configuration:
 
 - `Database:Provider` — must be `Timescale`.
-- `ConnectionStrings:Write` / `ConnectionStrings:Read` — Npgsql connection strings, e.g.
+- `ConnectionStrings:Collector` / `ConnectionStrings:Api` — Npgsql connection strings, e.g.
   `Host=localhost;Port=5432;Database=telemetry;Username=postgres;Password=<password>`.
 - In the all-in-one host (`Keryhe.Telemetry.Server`), the write and read connection strings must
   be identical — the underlying `NpgsqlDataSource` is a process-wide singleton.

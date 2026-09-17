@@ -5,11 +5,12 @@ implementations of the write and read repositories for a plain PostgreSQL databa
 
 ## What it provides
 
-- `AddPostgreSqlWriteServices(configuration)` — registers a singleton `NpgsqlDataSource` (from
-  `ConnectionStrings:Write`), `ITelemetryBulkWriter`, `ITenantResolver`, and `ITelemetryWriteStore`.
-- `AddPostgreSqlReadServices(configuration)` — registers a singleton `NpgsqlDataSource` (from
-  `ConnectionStrings:Read`), `ITraceReadRepository`, `IMetricReadRepository`,
-  `ILogReadRepository`, `IAlertRuleRepository`, and `ITenantCatalogRepository`.
+- `AddPostgreSqlCollectorServices(configuration)` — registers a singleton `NpgsqlDataSource` (from
+  `ConnectionStrings:Collector`), `ITelemetryBulkWriter`, and `ITenantResolver`.
+- `AddPostgreSqlApiServices(configuration)` — registers a singleton `NpgsqlDataSource` (from
+  `ConnectionStrings:Api`), `ITraceReadRepository`, `IMetricReadRepository`,
+  `ILogReadRepository`, `IAlertRuleRepository`, `ITenantCatalogRepository`, and
+  `IRetentionSettingsRepository`.
 
 Install this package alongside `Keryhe.Telemetry.Collector` (write side) and/or
 `Keryhe.Telemetry.Api` (read side), and set `Database:Provider` to `PostgreSQL`.
@@ -17,14 +18,14 @@ Install this package alongside `Keryhe.Telemetry.Collector` (write side) and/or
 ## Usage
 
 ```csharp
-builder.Services.AddPostgreSqlWriteServices(builder.Configuration);
-builder.Services.AddPostgreSqlReadServices(builder.Configuration);
+builder.Services.AddPostgreSqlCollectorServices(builder.Configuration);
+builder.Services.AddPostgreSqlApiServices(builder.Configuration);
 ```
 
 Configuration:
 
 - `Database:Provider` — must be `PostgreSQL`.
-- `ConnectionStrings:Write` / `ConnectionStrings:Read` — Npgsql connection strings, e.g.
+- `ConnectionStrings:Collector` / `ConnectionStrings:Api` — Npgsql connection strings, e.g.
   `Host=localhost;Port=5432;Database=telemetry;Username=postgres;Password=<password>`.
 
 Apply `schema/PostgreSQL-Schema.sql` (or `schema/apply-schema.sh postgresql`) before first use.

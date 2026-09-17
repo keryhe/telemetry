@@ -51,9 +51,9 @@ psql -d telemetry -f schema/PostgreSQL-Schema.sql
 
 # 2. Point both hosts at it via User Secrets (keeps credentials out of source control)
 dotnet user-secrets --project src/Keryhe.Telemetry.Api.Server \
-  set "ConnectionStrings:Read"  "Host=localhost;Port=5432;Database=telemetry;Username=postgres;Password=<password>"
+  set "ConnectionStrings:Api"       "Host=localhost;Port=5432;Database=telemetry;Username=postgres;Password=<password>"
 dotnet user-secrets --project src/Keryhe.Telemetry.Collector.Server \
-  set "ConnectionStrings:Write" "Host=localhost;Port=5432;Database=telemetry;Username=postgres;Password=<password>"
+  set "ConnectionStrings:Collector" "Host=localhost;Port=5432;Database=telemetry;Username=postgres;Password=<password>"
 
 # 3. Build and run the all-in-one host
 dotnet build Telemetry.sln

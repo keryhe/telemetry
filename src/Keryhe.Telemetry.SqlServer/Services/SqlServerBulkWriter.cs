@@ -58,7 +58,7 @@ public sealed class SqlServerBulkWriter(
     ResourceScopeCache cache,
     ILogger<SqlServerBulkWriter> logger) : ITelemetryBulkWriter
 {
-    private readonly string _connectionString = configuration.GetConnectionString("Write")!;
+    private readonly string _connectionString = configuration.GetConnectionString("Collector")!;
 
     // =========================================================================
     // FLUSH: LOGS

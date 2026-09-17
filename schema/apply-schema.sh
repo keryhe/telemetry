@@ -22,6 +22,11 @@
 #   SQLCMDSERVER=localhost SQLCMDUSER=sa SQLCMDPASSWORD=secret schema/apply-schema.sh sqlserver
 #   CLICKHOUSE_HOST=localhost schema/apply-schema.sh clickhouse
 #   MYSQL_HOST=localhost MYSQL_USER=root MYSQL_PWD=secret schema/apply-schema.sh mysql
+#
+# This runner is for FRESH installs only -- the full schema scripts are not written to be
+# re-applied on top of an older schema version. An EXISTING database on an older version must be
+# upgraded with the matching script under schema/migrations/ instead (e.g.
+# PostgreSQL-2.9.0-to-2.10.0.sql), run directly with the provider's own client.
 
 set -euo pipefail
 
@@ -31,7 +36,7 @@ PROVIDER="${1:-}"
 DATABASE="${2:-telemetry}"
 
 # Target version must match the value written by the schema scripts.
-TARGET_VERSION="2.9.0"
+TARGET_VERSION="2.10.0"
 
 if [[ -z "$PROVIDER" ]]; then
     echo "usage: $0 <postgresql|timescale|sqlserver|clickhouse|mysql> [database]" >&2

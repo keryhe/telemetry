@@ -17,7 +17,7 @@ public static class TelemetryApiServiceCollectionExtensions
     /// </summary>
     /// <param name="configuration">
     /// Host configuration. The provider defaults to the <c>Database:Provider</c> key
-    /// and connection strings are read from <c>ConnectionStrings:Read</c>.
+    /// and connection strings are read from <c>ConnectionStrings:Api</c>.
     /// </param>
     /// <param name="configure">Optional overrides for <see cref="TelemetryApiOptions"/>.</param>
     public static IServiceCollection AddKeryheTelemetryApi(
@@ -41,14 +41,14 @@ public static class TelemetryApiServiceCollectionExtensions
         services.AddScoped<ITenantContext>(sp => sp.GetRequiredService<ApiTenantContext>());
 
         // Read path: the active provider's Dapper read/alert repositories are selected by
-        // the resolved provider (connection string comes from ConnectionStrings:Read).
+        // the resolved provider (connection string comes from ConnectionStrings:Api).
         switch (options.Provider)
         {
-            case "SqlServer":  services.AddSqlServerReadServices(configuration);  break;
-            case "PostgreSQL": services.AddPostgreSqlReadServices(configuration); break;
-            case "Timescale":  services.AddTimescaleReadServices(configuration);  break;
-            case "ClickHouse": services.AddClickHouseReadServices(configuration); break;
-            case "MySql":      services.AddMySqlReadServices(configuration);      break;
+            case "SqlServer":  services.AddSqlServerApiServices(configuration);  break;
+            case "PostgreSQL": services.AddPostgreSqlApiServices(configuration); break;
+            case "Timescale":  services.AddTimescaleApiServices(configuration);  break;
+            case "ClickHouse": services.AddClickHouseApiServices(configuration); break;
+            case "MySql":      services.AddMySqlApiServices(configuration);      break;
             default: throw new InvalidOperationException(
                 "Unknown or missing telemetry database provider (expected SqlServer, PostgreSQL, Timescale, ClickHouse, or MySql).");
         }

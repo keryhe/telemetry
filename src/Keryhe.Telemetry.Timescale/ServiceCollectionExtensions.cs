@@ -13,29 +13,29 @@ namespace Microsoft.Extensions.DependencyInjection;
 /// </summary>
 public static class TimescaleServiceCollectionExtensions
 {
-    /// <summary>Write-side services for the gRPC ingestion server (uses <c>ConnectionStrings:Write</c>).</summary>
-    public static IServiceCollection AddTimescaleWriteServices(this IServiceCollection services, IConfiguration configuration)
+    /// <summary>Write-side services for the gRPC ingestion server (uses <c>ConnectionStrings:Collector</c>).</summary>
+    public static IServiceCollection AddTimescaleCollectorServices(this IServiceCollection services, IConfiguration configuration)
     {
-        services.AddSingleton(_ => NpgsqlDataSource.Create(configuration.GetConnectionString("Write")!));
+        services.AddSingleton(_ => NpgsqlDataSource.Create(configuration.GetConnectionString("Collector")!));
         services.AddSingleton<ITelemetryBulkWriter, TimescaleBulkWriter>();
         // The raw api_keys lookup and last_used_at bulk update. CachingTenantResolver (the
         // ITenantResolver every gRPC service actually resolves) and ApiKeyTouchWorker are
         // provider-agnostic and registered once, in AddKeryheTelemetryCollector.
         services.AddScoped<IApiKeyLookup, TenantResolver>();
         services.AddScoped<IApiKeyTouchStore, TimescaleApiKeyTouchStore>();
-        services.AddScoped<ITelemetryWriteStore, TimescaleWriteStore>();
         return services;
     }
 
-    /// <summary>Read-side services for the Blazor client and the API (uses <c>ConnectionStrings:Read</c>).</summary>
-    public static IServiceCollection AddTimescaleReadServices(this IServiceCollection services, IConfiguration configuration)
+    /// <summary>Read-side services for the Blazor client and the API (uses <c>ConnectionStrings:Api</c>).</summary>
+    public static IServiceCollection AddTimescaleApiServices(this IServiceCollection services, IConfiguration configuration)
     {
-        services.AddSingleton(_ => NpgsqlDataSource.Create(configuration.GetConnectionString("Read")!));
+        services.AddSingleton(_ => NpgsqlDataSource.Create(configuration.GetConnectionString("Api")!));
         services.AddScoped<ITraceReadRepository, TimescaleTraceReadRepository>();
         services.AddScoped<IMetricReadRepository, TimescaleMetricReadRepository>();
         services.AddScoped<ILogReadRepository, TimescaleLogReadRepository>();
         services.AddScoped<IAlertRuleRepository, TimescaleAlertRuleRepository>();
         services.AddScoped<ITenantCatalogRepository, TimescaleTenantCatalogRepository>();
+        services.AddScoped<IRetentionSettingsRepository, TimescaleRetentionSettingsRepository>();
         return services;
     }
 }

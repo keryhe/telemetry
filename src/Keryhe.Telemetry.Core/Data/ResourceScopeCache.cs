@@ -24,9 +24,9 @@ namespace Keryhe.Telemetry.Core.Data;
 /// intended. Do NOT "fix" this into a per-tenant key; it would fragment the scope table for nothing.
 ///
 /// Entries are never evicted and need no invalidation: nothing deletes a resource, scope or
-/// metrics catalog row. <c>ITelemetryWriteStore</c> offers retention only, and its metric sweep
-/// prunes data-point rows while deliberately leaving the catalog intact, so a cached id cannot go
-/// stale.
+/// metrics catalog row. <c>IRetentionSettingsRepository</c> offers retention only, and its metric
+/// sweep prunes data-point rows while deliberately leaving the catalog intact, so a cached id
+/// cannot go stale.
 ///
 /// That is a precondition, not a permanent property. If a delete that removes catalog rows is ever
 /// reintroduced, it MUST clear the affected entries here: a cached id whose row has been deleted

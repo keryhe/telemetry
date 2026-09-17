@@ -28,3 +28,13 @@ public sealed class TimescaleAlertRuleRepository(NpgsqlDataSource dataSource, IT
 
 public sealed class TimescaleTenantCatalogRepository(NpgsqlDataSource dataSource)
     : PostgreSqlTenantCatalogRepository(dataSource);
+
+/// <summary>
+/// Timescale retention sweeps reuse the plain-Postgres DML unchanged (same batching, same
+/// indexes). These are on-demand supplements here, not the primary mechanism, until the schema
+/// revision that removes Timescale's native <c>add_retention_policy</c> jobs for
+/// <c>log_records</c> and the metric data-point tables ships — <c>spans</c> has neither a policy
+/// nor hypertable status, so this is already the only trace retention that exists.
+/// </summary>
+public sealed class TimescaleRetentionSettingsRepository(NpgsqlDataSource dataSource)
+    : PostgreSqlRetentionSettingsRepository(dataSource);

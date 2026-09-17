@@ -410,6 +410,27 @@ CREATE INDEX idx_alert_events_fired_at ON alert_events (fired_at DESC);
 GO
 
 -- =============================================================================
+-- RETENTION TABLES
+-- =============================================================================
+
+-- Single global row (id = 1, enforced by the CHECK below) — see
+-- IRetentionSettingsRepository for why this is untenanted and why UPDATE, never INSERT,
+-- is the only mutation the app issues against it after the seed row below.
+CREATE TABLE retention_settings (
+    id                    SMALLINT  NOT NULL PRIMARY KEY DEFAULT 1,
+    trace_retention_days  INT       NOT NULL,
+    log_retention_days    INT       NOT NULL,
+    metric_retention_days INT       NOT NULL,
+    updated_at            DATETIME2 NOT NULL DEFAULT SYSUTCDATETIME(),
+    CONSTRAINT chk_retention_settings_singleton CHECK (id = 1)
+);
+GO
+-- Seeded with today's implicit defaults (traces 90d, logs 90d, metrics 180d).
+INSERT INTO retention_settings (id, trace_retention_days, log_retention_days, metric_retention_days)
+VALUES (1, 90, 90, 180);
+GO
+
+-- =============================================================================
 -- VIEWS
 -- =============================================================================
 
@@ -518,7 +539,7 @@ GO
 -- Only reached when every statement above succeeded, so a partial apply cannot
 -- leave a false version marker for the apply-schema.sh gate.
 MERGE schema_version AS target
-USING (VALUES (N'2.9.0')) AS src (version)
+USING (VALUES (N'2.10.0')) AS src (version)
 ON target.version = src.version
 WHEN MATCHED     THEN UPDATE SET applied_at = SYSDATETIME()
 WHEN NOT MATCHED THEN INSERT (version, applied_at) VALUES (src.version, SYSDATETIME());

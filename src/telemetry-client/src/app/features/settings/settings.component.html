@@ -1,0 +1,69 @@
+@if (loading()) {
+  <mat-progress-bar mode="indeterminate" />
+}
+
+<div class="page-container">
+  <!-- Theme -->
+  <mat-card>
+    <mat-card-header>
+      <mat-card-title>Theme</mat-card-title>
+    </mat-card-header>
+    <mat-card-content>
+      <div class="settings-grid">
+        @for (tm of themeModes; track tm.value) {
+          <button
+            type="button"
+            class="theme-tile"
+            [class.selected]="themeService.mode() === tm.value"
+            (click)="setTheme(tm.value)">
+            <mat-icon>{{ tm.icon }}</mat-icon>
+            <span>{{ tm.label }}</span>
+          </button>
+        }
+      </div>
+    </mat-card-content>
+  </mat-card>
+
+  <!-- Retention -->
+  <mat-card>
+    <mat-card-header>
+      <mat-card-title>Retention</mat-card-title>
+    </mat-card-header>
+    <mat-card-content>
+      <form [formGroup]="retentionForm" class="settings-grid" (ngSubmit)="saveRetention()">
+        <mat-form-field appearance="outline">
+          <mat-label>Traces (days)</mat-label>
+          <input matInput type="number" formControlName="traceRetentionDays" min="1" />
+          @if (retentionForm.controls.traceRetentionDays.invalid) {
+            <mat-error>Enter a positive number of days</mat-error>
+          }
+        </mat-form-field>
+
+        <mat-form-field appearance="outline">
+          <mat-label>Logs (days)</mat-label>
+          <input matInput type="number" formControlName="logRetentionDays" min="1" />
+          @if (retentionForm.controls.logRetentionDays.invalid) {
+            <mat-error>Enter a positive number of days</mat-error>
+          }
+        </mat-form-field>
+
+        <mat-form-field appearance="outline">
+          <mat-label>Metrics (days)</mat-label>
+          <input matInput type="number" formControlName="metricRetentionDays" min="1" />
+          @if (retentionForm.controls.metricRetentionDays.invalid) {
+            <mat-error>Enter a positive number of days</mat-error>
+          }
+        </mat-form-field>
+      </form>
+    </mat-card-content>
+    <mat-card-actions align="end">
+      <button
+        mat-flat-button
+        color="primary"
+        [disabled]="saving() || retentionForm.invalid"
+        (click)="saveRetention()">
+        Save
+      </button>
+    </mat-card-actions>
+  </mat-card>
+</div>

@@ -8,8 +8,8 @@ type handling and the generic `Microsoft.Extensions.*` abstractions.
 ## What it provides
 
 - Core interfaces implemented once per database provider: `ITelemetryBulkWriter`,
-  `ITelemetryWriteStore`, `ITraceReadRepository`, `IMetricReadRepository`,
-  `ILogReadRepository`, `IAlertRuleRepository`, `ITenantCatalogRepository`, and
+  `ITraceReadRepository`, `IMetricReadRepository`, `ILogReadRepository`,
+  `IAlertRuleRepository`, `ITenantCatalogRepository`, `IRetentionSettingsRepository`, and
   `ITenantResolver`.
 - The domain models passed across those interfaces (traces, metrics, logs, resources,
   instrumentation scopes, alert rules, tenants).

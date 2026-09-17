@@ -33,22 +33,8 @@
 
       <div class="toolbar-controls-secondary">
         <app-time-range-picker />
-
-        <!-- Theme Toggle -->
-        <button mat-icon-button [matMenuTriggerFor]="themeMenu" [matTooltip]="'Theme'">
-          <mat-icon>{{ themeIcon }}</mat-icon>
-        </button>
       </div>
     </div>
-
-    <mat-menu #themeMenu="matMenu">
-      @for (tm of themeModes; track tm.value) {
-        <button mat-menu-item (click)="setTheme(tm.value)">
-          <mat-icon>{{ tm.icon }}</mat-icon>
-          {{ tm.label }}
-        </button>
-      }
-    </mat-menu>
   </mat-toolbar>
 
   <mat-sidenav-container class="sidenav-container">

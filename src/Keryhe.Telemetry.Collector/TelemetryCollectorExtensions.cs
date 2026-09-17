@@ -16,7 +16,7 @@ public static class TelemetryCollectorServiceCollectionExtensions
     /// Registers the write path: gRPC, the ingestion channel (gated on resident record/span
     /// count — see <see cref="TelemetryIngestionOptions"/>), the background worker that drains
     /// it, and the provider selected by <c>Database:Provider</c> (connection string comes from
-    /// <c>ConnectionStrings:Write</c>). The host still owns CORS, Kestrel configuration, and
+    /// <c>ConnectionStrings:Collector</c>). The host still owns CORS, Kestrel configuration, and
     /// calling <c>MapKeryheTelemetryCollector()</c>.
     /// </summary>
     public static IServiceCollection AddKeryheTelemetryCollector(
@@ -48,15 +48,15 @@ public static class TelemetryCollectorServiceCollectionExtensions
 
         // Write path: the generic worker drains the ingestion channel and delegates each
         // batch flush to the active provider's ITelemetryBulkWriter. The provider — and with
-        // it ITelemetryBulkWriter, IApiKeyLookup, IApiKeyTouchStore, and ITelemetryWriteStore —
+        // it ITelemetryBulkWriter, IApiKeyLookup, and IApiKeyTouchStore —
         // is selected by the Database:Provider config key.
         switch (configuration["Database:Provider"])
         {
-            case "SqlServer":  services.AddSqlServerWriteServices(configuration);  break;
-            case "PostgreSQL": services.AddPostgreSqlWriteServices(configuration); break;
-            case "Timescale":  services.AddTimescaleWriteServices(configuration);  break;
-            case "ClickHouse": services.AddClickHouseWriteServices(configuration); break;
-            case "MySql":      services.AddMySqlWriteServices(configuration);      break;
+            case "SqlServer":  services.AddSqlServerCollectorServices(configuration);  break;
+            case "PostgreSQL": services.AddPostgreSqlCollectorServices(configuration); break;
+            case "Timescale":  services.AddTimescaleCollectorServices(configuration);  break;
+            case "ClickHouse": services.AddClickHouseCollectorServices(configuration); break;
+            case "MySql":      services.AddMySqlCollectorServices(configuration);      break;
             default: throw new InvalidOperationException(
                 "Unknown or missing Database:Provider (expected SqlServer, PostgreSQL, Timescale, ClickHouse, or MySql).");
         }

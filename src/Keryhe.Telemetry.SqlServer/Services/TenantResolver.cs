@@ -12,7 +12,7 @@ namespace Keryhe.Telemetry.SqlServer.Services;
 /// </summary>
 public class TenantResolver(IConfiguration configuration) : IApiKeyLookup
 {
-    private readonly string _connectionString = configuration.GetConnectionString("Write")!;
+    private readonly string _connectionString = configuration.GetConnectionString("Collector")!;
 
     public async Task<long> LookupTenantIdAsync(string keyHash, CancellationToken cancellationToken)
     {

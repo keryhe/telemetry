@@ -29,7 +29,7 @@
     @if (services().length > 1) {
       <mat-form-field appearance="outline" subscriptSizing="dynamic" class="ctrl-field">
         <mat-label>Service</mat-label>
-        <mat-select [value]="selectedService()" (selectionChange)="selectedService.set($event.value); reloadSeries()">
+        <mat-select panelWidth="auto" [value]="selectedService()" (selectionChange)="selectedService.set($event.value); reloadSeries()">
           <mat-option value="">All</mat-option>
           @for (s of services(); track s) { <mat-option [value]="s">{{ s }}</mat-option> }
         </mat-select>
@@ -39,7 +39,7 @@
     @for (key of labelKeys(); track key) {
       <mat-form-field appearance="outline" subscriptSizing="dynamic" class="ctrl-field">
         <mat-label>{{ key }}</mat-label>
-        <mat-select [value]="labelValue(key)"
+        <mat-select panelWidth="auto" [value]="labelValue(key)"
           (selectionChange)="updateLabelFilter(key, $event.value)">
           <mat-option value="">All</mat-option>
           @for (v of labels()[key]; track v) { <mat-option [value]="v">{{ v }}</mat-option> }
@@ -57,7 +57,7 @@
     @if (!isDistribution() && showSeriesControls() && chartStyle() !== 'stacked' && (services().length > 1 || labelKeys().length > 0)) {
       <mat-form-field appearance="outline" subscriptSizing="dynamic" class="ctrl-field">
         <mat-label>Aggregate</mat-label>
-        <mat-select [value]="aggMode()" (selectionChange)="onAggModeChange($event.value)">
+        <mat-select panelWidth="auto" [value]="aggMode()" (selectionChange)="onAggModeChange($event.value)">
           @for (m of aggModes; track m.value) { <mat-option [value]="m.value">{{ m.label }}</mat-option> }
         </mat-select>
       </mat-form-field>

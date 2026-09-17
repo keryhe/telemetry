@@ -1,21 +1,23 @@
 using System.Data.Common;
+using Dapper;
 using Microsoft.Data.SqlClient;
 using Microsoft.Extensions.Configuration;
 using Keryhe.Telemetry.Core;
+using Keryhe.Telemetry.Core.Data;
 using Keryhe.Telemetry.Core.Data.Read;
 
 namespace Keryhe.Telemetry.SqlServer.Services;
 
 // =============================================================================
 // SqlServer read repositories — separate dialect implementations.
-// Connection comes from ConnectionStrings:Read. The shared base classes hold the
+// Connection comes from ConnectionStrings:Api. The shared base classes hold the
 // dialect-neutral read SQL + shaping; only the alert CRUD/cooldown SQL differs.
 // =============================================================================
 
 public class SqlServerTraceReadRepository(IConfiguration configuration, ITenantContext tenantContext)
     : TraceReadRepositoryBase(tenantContext)
 {
-    private readonly string _connectionString = configuration.GetConnectionString("Read")!;
+    private readonly string _connectionString = configuration.GetConnectionString("Api")!;
 
     protected override async Task<DbConnection> OpenConnectionAsync(CancellationToken cancellationToken)
     {
@@ -28,7 +30,7 @@ public class SqlServerTraceReadRepository(IConfiguration configuration, ITenantC
 public class SqlServerMetricReadRepository(IConfiguration configuration, ITenantContext tenantContext)
     : MetricReadRepositoryBase(tenantContext)
 {
-    private readonly string _connectionString = configuration.GetConnectionString("Read")!;
+    private readonly string _connectionString = configuration.GetConnectionString("Api")!;
 
     protected override async Task<DbConnection> OpenConnectionAsync(CancellationToken cancellationToken)
     {
@@ -41,7 +43,7 @@ public class SqlServerMetricReadRepository(IConfiguration configuration, ITenant
 public class SqlServerLogReadRepository(IConfiguration configuration, ITenantContext tenantContext)
     : LogReadRepositoryBase(tenantContext)
 {
-    private readonly string _connectionString = configuration.GetConnectionString("Read")!;
+    private readonly string _connectionString = configuration.GetConnectionString("Api")!;
 
     protected override async Task<DbConnection> OpenConnectionAsync(CancellationToken cancellationToken)
     {
@@ -62,7 +64,7 @@ public class SqlServerLogReadRepository(IConfiguration configuration, ITenantCon
 public class SqlServerTenantCatalogRepository(IConfiguration configuration)
     : TenantCatalogRepositoryBase
 {
-    private readonly string _connectionString = configuration.GetConnectionString("Read")!;
+    private readonly string _connectionString = configuration.GetConnectionString("Api")!;
 
     protected override async Task<DbConnection> OpenConnectionAsync(CancellationToken cancellationToken)
     {
@@ -75,7 +77,7 @@ public class SqlServerTenantCatalogRepository(IConfiguration configuration)
 public class SqlServerAlertRuleRepository(IConfiguration configuration, ITenantContext tenantContext)
     : AlertRuleRepositoryBase(tenantContext)
 {
-    private readonly string _connectionString = configuration.GetConnectionString("Read")!;
+    private readonly string _connectionString = configuration.GetConnectionString("Api")!;
 
     protected override async Task<DbConnection> OpenConnectionAsync(CancellationToken cancellationToken)
     {
@@ -98,4 +100,71 @@ public class SqlServerAlertRuleRepository(IConfiguration configuration, ITenantC
           AND (last_fired_at IS NULL
                OR last_fired_at < DATEADD(MINUTE, -@cooldownMinutes, GETUTCDATE()))
         """;
+}
+
+/// <summary>
+/// SQL Server implementation of the <see cref="IRetentionSettingsRepository"/> sweeps. Span
+/// events and links are removed by the schema's <c>ON DELETE CASCADE</c> foreign keys, so the
+/// trace sweep targets only <c>spans</c>.
+/// </summary>
+public class SqlServerRetentionSettingsRepository(IConfiguration configuration)
+    : RetentionSettingsRepositoryBase
+{
+    private readonly string _connectionString = configuration.GetConnectionString("Api")!;
+
+    protected override async Task<DbConnection> OpenConnectionAsync(CancellationToken cancellationToken)
+    {
+        var conn = new SqlConnection(_connectionString);
+        await conn.OpenAsync(cancellationToken);
+        return conn;
+    }
+
+    /// <summary>
+    /// Rows removed per statement by the retention sweeps. Bounded so a sweep cannot escalate to a
+    /// table lock (SQL Server escalates past ~5000 row locks) while the ingest path is still appending.
+    /// </summary>
+    private const int DeleteBatchSize = 50_000;
+
+    public override Task<int> DeleteOldTracesAsync(TimeSpan retentionPeriod, CancellationToken cancellationToken = default)
+        => SweepAsync(["spans"], "start_time_unix_nano", retentionPeriod, cancellationToken);
+
+    public override Task<int> DeleteOldMetricDataPointsAsync(TimeSpan retentionPeriod, CancellationToken cancellationToken = default)
+        => SweepAsync(TelemetryIngestionHelpers.TimePrunedMetricTables, "time_unix_nano", retentionPeriod, cancellationToken);
+
+    public override Task<int> DeleteOldLogRecordsAsync(TimeSpan retentionPeriod, CancellationToken cancellationToken = default)
+        => SweepAsync(["log_records"], "time_unix_nano", retentionPeriod, cancellationToken);
+
+    /// <summary>
+    /// Deletes every row in <paramref name="tables"/> whose <paramref name="timeColumn"/> predates the
+    /// cutoff, in bounded chunks. Returns the total rows removed.
+    ///
+    /// The table and column names are interpolated rather than parameterized because they are not
+    /// user input: they are compile-time literals and the entries of
+    /// <see cref="TelemetryIngestionHelpers.TimePrunedMetricTables"/>.
+    /// </summary>
+    private async Task<int> SweepAsync(
+        IReadOnlyList<string> tables,
+        string timeColumn,
+        TimeSpan retentionPeriod,
+        CancellationToken cancellationToken)
+    {
+        var cutoffNano = CutoffNano(retentionPeriod);
+
+        await using var conn = await OpenConnectionAsync(cancellationToken);
+
+        var total = 0;
+        foreach (var table in tables)
+        {
+            int batch;
+            do
+            {
+                batch = await conn.ExecuteAsync(new CommandDefinition(
+                    $"DELETE TOP ({DeleteBatchSize}) FROM {table} WHERE {timeColumn} < @cutoff",
+                    new { cutoff = cutoffNano }, cancellationToken: cancellationToken));
+                total += batch;
+            } while (batch == DeleteBatchSize);
+        }
+
+        return total;
+    }
 }

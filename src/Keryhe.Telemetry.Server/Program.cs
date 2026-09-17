@@ -38,18 +38,24 @@ public class Program
 
         // ── TELEMETRY COLLECTOR (write path) ──────────────────────────────────────
         // gRPC, the bounded ingestion channel, the background worker that drains it, and
-        // the active provider's write services (Database:Provider + ConnectionStrings:Write).
+        // the active provider's write services (Database:Provider + ConnectionStrings:Collector).
         builder.Services.AddKeryheTelemetryCollector(builder.Configuration);
 
         // ── TELEMETRY API (read path) ─────────────────────────────────────────────
         // API controllers (via application part), tenant context, and the active
-        // provider's read services (Database:Provider + ConnectionStrings:Read).
+        // provider's read services (Database:Provider + ConnectionStrings:Api).
         builder.Services.AddKeryheTelemetryApi(builder.Configuration);
 
         // ── ALERTING ──────────────────────────────────────────────────────────────
         // Alert evaluation plus the periodic background worker that drives it.
         // Depends on the read repositories and tenant context registered above.
         builder.Services.AddAlerting(builder.Configuration);
+
+        // ── RETENTION ─────────────────────────────────────────────────────────────
+        // Periodic background worker that sweeps old telemetry per the DB-backed
+        // retention_settings row. Depends on IRetentionSettingsRepository, registered
+        // above by AddKeryheTelemetryApi.
+        builder.Services.AddRetention(builder.Configuration);
 
         var app = builder.Build();
 
@@ -93,8 +99,8 @@ public class Program
 
     /// <summary>
     /// The Npgsql-backed providers register a singleton <c>NpgsqlDataSource</c> from
-    /// <c>ConnectionStrings:Write</c> (write services) and again from
-    /// <c>ConnectionStrings:Read</c> (read services). In this combined host both
+    /// <c>ConnectionStrings:Collector</c> (write services) and again from
+    /// <c>ConnectionStrings:Api</c> (read services). In this combined host both
     /// registrations land in one container and the last one silently wins for both paths,
     /// so differing connection strings would point half the app at the wrong database with
     /// no error. Fail fast instead. SqlServer/ClickHouse/MySql read their connection string
@@ -108,16 +114,16 @@ public class Program
             return;
         }
 
-        var read = configuration.GetConnectionString("Read");
-        var write = configuration.GetConnectionString("Write");
+        var api = configuration.GetConnectionString("Api");
+        var collector = configuration.GetConnectionString("Collector");
 
-        if (!string.IsNullOrWhiteSpace(read) &&
-            !string.IsNullOrWhiteSpace(write) &&
-            !string.Equals(read, write, StringComparison.Ordinal))
+        if (!string.IsNullOrWhiteSpace(api) &&
+            !string.IsNullOrWhiteSpace(collector) &&
+            !string.Equals(api, collector, StringComparison.Ordinal))
         {
             throw new InvalidOperationException(
                 $"Database:Provider '{provider}' registers a single shared NpgsqlDataSource in this " +
-                "all-in-one host, so ConnectionStrings:Read and ConnectionStrings:Write must be " +
+                "all-in-one host, so ConnectionStrings:Api and ConnectionStrings:Collector must be " +
                 "identical (they may differ only when using the split Collector.Server / Api.Server " +
                 "hosts). Set both to the same value, or run the split hosts instead.");
         }

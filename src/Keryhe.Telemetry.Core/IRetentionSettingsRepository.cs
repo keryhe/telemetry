@@ -1,28 +1,42 @@
+using Keryhe.Telemetry.Core.Models;
+
 namespace Keryhe.Telemetry.Core;
 
 // =============================================================================
-// TELEMETRY WRITE STORE INTERFACE
+// RETENTION SETTINGS REPOSITORY INTERFACE
 // =============================================================================
 
 /// <summary>
-/// Provider-specific retention operations for the write path. The thin write
-/// repositories (<see cref="ITraceWriteRepository"/> etc.) enqueue stores to the
-/// ingestion channel directly, but delegate their <c>Delete*</c> operations here so
-/// the actual DML is owned by the active provider rather than EF Core.
+/// Owns the DB-backed retention policy (<see cref="RetentionSettings"/>) and the sweeps that
+/// enforce it. Replaces the former <c>ITelemetryWriteStore</c>: retention is a read-host
+/// (<c>ConnectionStrings:Api</c>) concern now, alongside alert-rule CRUD
+/// (<see cref="IAlertRuleRepository"/>), not a write-host one — <see cref="RetentionWorker"/>
+/// (in <c>Keryhe.Telemetry.Api</c>) and the settings API both resolve this same scoped instance.
 ///
-/// Retention is the ONLY delete this platform offers. Telemetry is append-only
-/// observational data, so there is deliberately no way to remove a single trace, span,
-/// metric or log record -- a targeted delete on an audit record is a liability, not a
-/// feature. Everything here prunes by age and nothing else.
+/// Retention is the ONLY delete this platform offers besides rule CRUD. Telemetry is append-only
+/// observational data, so there is deliberately no way to remove a single trace, span, metric or
+/// log record -- a targeted delete on an audit record is a liability, not a feature. The three
+/// sweeps below prune by age and nothing else.
 ///
-/// None of these is tenant-scoped, and that is deliberate rather than an oversight.
+/// None of the sweeps is tenant-scoped, and that is deliberate rather than an oversight.
 /// Retention is an operator concern; only <c>resources</c> carries a <c>tenant_id</c>, so
 /// scoping would force a subquery on <c>resources</c> into every predicate and displace the
 /// access paths these sweeps depend on -- the <c>time_unix_nano</c> indexes, Timescale's
-/// <c>drop_chunks</c>, ClickHouse's partition drops.
+/// <c>drop_chunks</c>, ClickHouse's partition drops. The settings row itself is likewise a
+/// single global row, not per-tenant, for the same reason.
 /// </summary>
-public interface ITelemetryWriteStore
+public interface IRetentionSettingsRepository
 {
+    /// <summary>Reads the single, global retention settings row.</summary>
+    Task<RetentionSettings> GetSettingsAsync(CancellationToken ct = default);
+
+    /// <summary>
+    /// Updates the single, global retention settings row. Always an <c>UPDATE</c>, never an
+    /// <c>INSERT</c> — the row is seeded by the schema install, so two concurrent saves race to
+    /// overwrite the same row rather than risk creating a second one.
+    /// </summary>
+    Task UpdateSettingsAsync(RetentionSettings settings, CancellationToken ct = default);
+
     /// <summary>
     /// Removes spans that started before <c>UtcNow - retentionPeriod</c>. Span events and links
     /// go with them via <c>ON DELETE CASCADE</c> on the relational providers, and by explicit
@@ -31,9 +45,6 @@ public interface ITelemetryWriteStore
     /// Returns the number of SPAN rows removed, not the number of distinct traces -- counting
     /// traces would cost a second scan of the largest table in the schema for a number retention
     /// has no use for.
-    ///
-    /// This is the only trace retention that exists anywhere: unlike the metric and log tables,
-    /// <c>spans</c> is not a Timescale hypertable and carries no <c>add_retention_policy</c>.
     /// </summary>
     Task<int> DeleteOldTracesAsync(TimeSpan retentionPeriod, CancellationToken cancellationToken = default);
 

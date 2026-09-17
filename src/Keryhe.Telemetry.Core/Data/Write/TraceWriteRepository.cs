@@ -7,16 +7,13 @@ namespace Keryhe.Telemetry.Core.Data.Write;
 public class TraceWriteRepository : ITraceWriteRepository
 {
     private readonly TelemetryIngestionChannel _channel;
-    private readonly ITelemetryWriteStore _store;
     private readonly ILogger<TraceWriteRepository> _logger;
 
     public TraceWriteRepository(
         TelemetryIngestionChannel channel,
-        ITelemetryWriteStore store,
         ILogger<TraceWriteRepository> logger)
     {
         _channel = channel;
-        _store = store;
         _logger = logger;
     }
 
@@ -73,9 +70,6 @@ public class TraceWriteRepository : ITraceWriteRepository
         await WriteTracesAsync(traces, list.Count, cancellationToken);
         return Enumerable.Empty<long>();
     }
-
-    public Task<int> DeleteOldTracesAsync(TimeSpan retentionPeriod, CancellationToken cancellationToken = default)
-        => _store.DeleteOldTracesAsync(retentionPeriod, cancellationToken);
 
     /// <summary>
     /// Reserves <paramref name="spanCount"/> spans on <see cref="TelemetryIngestionChannel.TraceGate"/>

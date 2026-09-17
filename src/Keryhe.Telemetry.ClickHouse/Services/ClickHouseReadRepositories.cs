@@ -3,6 +3,7 @@ using ClickHouse.Client.ADO;
 using Dapper;
 using Microsoft.Extensions.Configuration;
 using Keryhe.Telemetry.Core;
+using Keryhe.Telemetry.Core.Data;
 using Keryhe.Telemetry.Core.Models;
 using Keryhe.Telemetry.Core.Data.Read;
 
@@ -13,7 +14,7 @@ namespace Keryhe.Telemetry.ClickHouse.Services;
 // and shape rows in C# (attributes are deserialized from JSON text, so no Postgres `->>` on
 // the hot path). ClickHouse overrides only where its dialect differs: JSON extraction and the
 // alert-rule CRUD (no identity columns / transactional UPDATE — see below). Connections come
-// from ConnectionStrings:Read.
+// from ConnectionStrings:Api.
 // =============================================================================
 
 internal static class ClickHouseConnectionFactory
@@ -29,7 +30,7 @@ internal static class ClickHouseConnectionFactory
 public class ClickHouseTraceReadRepository(IConfiguration configuration, ITenantContext tenantContext)
     : TraceReadRepositoryBase(tenantContext)
 {
-    private readonly string _connectionString = configuration.GetConnectionString("Read")!;
+    private readonly string _connectionString = configuration.GetConnectionString("Api")!;
 
     protected override Task<DbConnection> OpenConnectionAsync(CancellationToken cancellationToken)
         => ClickHouseConnectionFactory.OpenReadAsync(_connectionString, cancellationToken);
@@ -38,7 +39,7 @@ public class ClickHouseTraceReadRepository(IConfiguration configuration, ITenant
 public class ClickHouseMetricReadRepository(IConfiguration configuration, ITenantContext tenantContext)
     : MetricReadRepositoryBase(tenantContext)
 {
-    private readonly string _connectionString = configuration.GetConnectionString("Read")!;
+    private readonly string _connectionString = configuration.GetConnectionString("Api")!;
 
     protected override Task<DbConnection> OpenConnectionAsync(CancellationToken cancellationToken)
         => ClickHouseConnectionFactory.OpenReadAsync(_connectionString, cancellationToken);
@@ -47,7 +48,7 @@ public class ClickHouseMetricReadRepository(IConfiguration configuration, ITenan
 public class ClickHouseLogReadRepository(IConfiguration configuration, ITenantContext tenantContext)
     : LogReadRepositoryBase(tenantContext)
 {
-    private readonly string _connectionString = configuration.GetConnectionString("Read")!;
+    private readonly string _connectionString = configuration.GetConnectionString("Api")!;
 
     protected override Task<DbConnection> OpenConnectionAsync(CancellationToken cancellationToken)
         => ClickHouseConnectionFactory.OpenReadAsync(_connectionString, cancellationToken);
@@ -65,7 +66,7 @@ public class ClickHouseLogReadRepository(IConfiguration configuration, ITenantCo
 public class ClickHouseTenantCatalogRepository(IConfiguration configuration)
     : TenantCatalogRepositoryBase
 {
-    private readonly string _connectionString = configuration.GetConnectionString("Read")!;
+    private readonly string _connectionString = configuration.GetConnectionString("Api")!;
 
     protected override Task<DbConnection> OpenConnectionAsync(CancellationToken cancellationToken)
         => ClickHouseConnectionFactory.OpenReadAsync(_connectionString, cancellationToken);
@@ -82,7 +83,7 @@ public class ClickHouseTenantCatalogRepository(IConfiguration configuration)
 public class ClickHouseAlertRuleRepository(IConfiguration configuration, ITenantContext tenantContext)
     : AlertRuleRepositoryBase(tenantContext)
 {
-    private readonly string _connectionString = configuration.GetConnectionString("Read")!;
+    private readonly string _connectionString = configuration.GetConnectionString("Api")!;
 
     // In-process id generators (ClickHouse has no auto-increment). Seeded from the clock so ids
     // stay unique-enough across restarts for these low-volume control-plane tables.
@@ -222,5 +223,121 @@ public class ClickHouseAlertRuleRepository(IConfiguration configuration, ITenant
             firedAt = alertEvent.FiredAt,
             detailsJson = alertEvent.DetailsJson
         }, cancellationToken: ct));
+    }
+}
+
+/// <summary>
+/// ClickHouse implementation of the <see cref="IRetentionSettingsRepository"/> sweeps. Two
+/// things differ from the relational providers, matching the same "control-plane is
+/// best-effort" pattern already used for alert-rule CRUD:
+///
+/// <see cref="UpdateSettingsAsync"/> overrides the base's plain <c>UPDATE</c> with an
+/// <c>ALTER TABLE ... UPDATE</c> mutation, since ClickHouse has no in-place row update.
+///
+/// There are no foreign keys and so no cascades. Child rows are deleted explicitly, and the trace
+/// sweep must remove <c>span_events</c> and <c>span_links</c> before the spans they hang off,
+/// because once the parent rows are gone the subquery that identifies the children matches nothing.
+/// A lightweight <c>DELETE</c> is an asynchronous mutation that reports no row count, so every
+/// sweep pre-counts what it is about to remove. That count is the return value; it is taken before
+/// the mutation is issued and is therefore a snapshot, not a receipt.
+/// </summary>
+public class ClickHouseRetentionSettingsRepository(IConfiguration configuration)
+    : RetentionSettingsRepositoryBase
+{
+    private readonly string _connectionString = configuration.GetConnectionString("Api")!;
+
+    protected override Task<DbConnection> OpenConnectionAsync(CancellationToken cancellationToken)
+        => ClickHouseConnectionFactory.OpenReadAsync(_connectionString, cancellationToken);
+
+    public override async Task UpdateSettingsAsync(RetentionSettings settings, CancellationToken ct = default)
+    {
+        var updatedAt = DateTime.UtcNow;
+
+        await using var conn = await OpenConnectionAsync(ct);
+        await conn.ExecuteAsync(new CommandDefinition(
+            """
+            ALTER TABLE retention_settings UPDATE
+                trace_retention_days = @traceRetentionDays,
+                log_retention_days = @logRetentionDays,
+                metric_retention_days = @metricRetentionDays,
+                updated_at = @updatedAt
+            WHERE id = 1
+            """,
+            new
+            {
+                traceRetentionDays = settings.TraceRetentionDays,
+                logRetentionDays = settings.LogRetentionDays,
+                metricRetentionDays = settings.MetricRetentionDays,
+                updatedAt
+            },
+            cancellationToken: ct));
+
+        settings.UpdatedAt = updatedAt;
+    }
+
+    public override async Task<int> DeleteOldTracesAsync(TimeSpan retentionPeriod, CancellationToken cancellationToken = default)
+    {
+        var args = new { cutoff = CutoffNano(retentionPeriod) };
+
+        await using var conn = await OpenConnectionAsync(cancellationToken);
+
+        var count = await conn.ExecuteScalarAsync<int>(new CommandDefinition(
+            "SELECT count() FROM spans WHERE start_time_unix_nano < @cutoff",
+            args, cancellationToken: cancellationToken));
+
+        // Children first: these subqueries resolve against spans, so they must run while the
+        // parent rows still exist.
+        await conn.ExecuteAsync(new CommandDefinition(
+            "DELETE FROM span_events WHERE span_id IN (SELECT id FROM spans WHERE start_time_unix_nano < @cutoff)",
+            args, cancellationToken: cancellationToken));
+        await conn.ExecuteAsync(new CommandDefinition(
+            "DELETE FROM span_links WHERE span_id IN (SELECT id FROM spans WHERE start_time_unix_nano < @cutoff)",
+            args, cancellationToken: cancellationToken));
+        await conn.ExecuteAsync(new CommandDefinition(
+            "DELETE FROM spans WHERE start_time_unix_nano < @cutoff",
+            args, cancellationToken: cancellationToken));
+
+        return count;
+    }
+
+    public override async Task<int> DeleteOldMetricDataPointsAsync(TimeSpan retentionPeriod, CancellationToken cancellationToken = default)
+    {
+        var args = new { cutoff = CutoffNano(retentionPeriod) };
+
+        await using var conn = await OpenConnectionAsync(cancellationToken);
+
+        var count = 0;
+        foreach (var table in TelemetryIngestionHelpers.TimePrunedMetricTables)
+        {
+            count += await conn.ExecuteScalarAsync<int>(new CommandDefinition(
+                $"SELECT count() FROM {table} WHERE time_unix_nano < @cutoff",
+                args, cancellationToken: cancellationToken));
+        }
+
+        foreach (var table in TelemetryIngestionHelpers.TimePrunedMetricTables)
+        {
+            await conn.ExecuteAsync(new CommandDefinition(
+                $"DELETE FROM {table} WHERE time_unix_nano < @cutoff",
+                args, cancellationToken: cancellationToken));
+        }
+
+        return count;
+    }
+
+    public override async Task<int> DeleteOldLogRecordsAsync(TimeSpan retentionPeriod, CancellationToken cancellationToken = default)
+    {
+        var args = new { cutoff = CutoffNano(retentionPeriod) };
+
+        await using var conn = await OpenConnectionAsync(cancellationToken);
+
+        var count = await conn.ExecuteScalarAsync<int>(new CommandDefinition(
+            "SELECT count() FROM log_records WHERE time_unix_nano < @cutoff",
+            args, cancellationToken: cancellationToken));
+
+        await conn.ExecuteAsync(new CommandDefinition(
+            "DELETE FROM log_records WHERE time_unix_nano < @cutoff",
+            args, cancellationToken: cancellationToken));
+
+        return count;
     }
 }

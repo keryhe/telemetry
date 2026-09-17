@@ -6,11 +6,12 @@ MySqlConnector/Dapper implementations of the write and read repositories. Requir
 
 ## What it provides
 
-- `AddMySqlWriteServices(configuration)` — registers `ITelemetryBulkWriter`, `ITenantResolver`,
-  and `ITelemetryWriteStore`, connecting via `ConnectionStrings:Write`.
-- `AddMySqlReadServices(configuration)` — registers `ITraceReadRepository`,
-  `IMetricReadRepository`, `ILogReadRepository`, `IAlertRuleRepository`, and
-  `ITenantCatalogRepository`, connecting via `ConnectionStrings:Read`.
+- `AddMySqlCollectorServices(configuration)` — registers `ITelemetryBulkWriter` and
+  `ITenantResolver`, connecting via `ConnectionStrings:Collector`.
+- `AddMySqlApiServices(configuration)` — registers `ITraceReadRepository`,
+  `IMetricReadRepository`, `ILogReadRepository`, `IAlertRuleRepository`,
+  `ITenantCatalogRepository`, and `IRetentionSettingsRepository`, connecting via
+  `ConnectionStrings:Api`.
 
 Install this package alongside `Keryhe.Telemetry.Collector` (write side) and/or
 `Keryhe.Telemetry.Api` (read side), and set `Database:Provider` to `MySql`.
@@ -18,14 +19,14 @@ Install this package alongside `Keryhe.Telemetry.Collector` (write side) and/or
 ## Usage
 
 ```csharp
-builder.Services.AddMySqlWriteServices(builder.Configuration);
-builder.Services.AddMySqlReadServices(builder.Configuration);
+builder.Services.AddMySqlCollectorServices(builder.Configuration);
+builder.Services.AddMySqlApiServices(builder.Configuration);
 ```
 
 Configuration:
 
 - `Database:Provider` — must be `MySql`.
-- `ConnectionStrings:Write` / `ConnectionStrings:Read` — MySqlConnector connection strings, e.g.
+- `ConnectionStrings:Collector` / `ConnectionStrings:Api` — MySqlConnector connection strings, e.g.
   `Server=localhost;Port=3306;Database=telemetry;User ID=root;Password=<password>`.
 
 Apply `schema/MySQL-Schema.sql` (or `schema/apply-schema.sh mysql`) before first use.

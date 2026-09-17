@@ -28,7 +28,7 @@ app.Run();
 Configuration:
 
 - `Database:Provider` — one of `PostgreSQL`, `Timescale`, `SqlServer`, `MySql`, `ClickHouse`.
-- `ConnectionStrings:Write` — connection string for the write path.
+- `ConnectionStrings:Collector` — connection string for the write path.
 
 Install the NuGet package matching the chosen provider alongside this one, e.g.
 `Keryhe.Telemetry.PostgreSQL`.

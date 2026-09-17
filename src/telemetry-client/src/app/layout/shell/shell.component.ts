@@ -6,14 +6,13 @@ import { MatButtonModule } from '@angular/material/button';
 import { MatRippleModule } from '@angular/material/core';
 import { MatIconModule } from '@angular/material/icon';
 import { MatFormFieldModule } from '@angular/material/form-field';
-import { MatMenuModule } from '@angular/material/menu';
 import { MatSelectModule } from '@angular/material/select';
 import { MatSidenav, MatSidenavModule } from '@angular/material/sidenav';
 import { MatToolbarModule } from '@angular/material/toolbar';
 import { MatTooltipModule } from '@angular/material/tooltip';
 import { ActivatedRoute, NavigationEnd, Router, RouterLink, RouterLinkActive, RouterOutlet } from '@angular/router';
 import { filter, map, startWith } from 'rxjs/operators';
-import { ThemeMode, ThemeService } from '../../core/services/theme.service';
+import { ThemeService } from '../../core/services/theme.service';
 import { TenantService } from '../../core/services/tenant.service';
 import { TimeRangePickerComponent } from '../../shared/components/time-range-picker/time-range-picker.component';
 import { Tenant } from '../../core/models/alert.models';
@@ -59,14 +58,17 @@ const COMPACT_QUERY = '(max-width: 599.98px)';
     RouterOutlet, RouterLink, RouterLinkActive,
     MatSidenavModule, MatToolbarModule, MatRippleModule,
     MatIconModule, MatButtonModule, MatTooltipModule,
-    MatMenuModule, MatSelectModule, MatFormFieldModule,
+    MatSelectModule, MatFormFieldModule,
     TimeRangePickerComponent,
   ],
   templateUrl: './shell.component.html',
   styleUrl: './shell.component.scss',
 })
 export class ShellComponent {
-  protected readonly themeService = inject(ThemeService);
+  // Not otherwise referenced here now that the theme controls live on the settings page — kept
+  // so the shell (always instantiated, unlike a lazy-loaded route) forces this singleton's
+  // constructor to run at startup and apply the persisted theme class to <body> immediately.
+  private readonly themeService = inject(ThemeService);
   protected readonly tenantService = inject(TenantService);
   private readonly breakpoints = inject(BreakpointObserver);
   private readonly router = inject(Router);
@@ -122,21 +124,8 @@ export class ShellComponent {
     { label: 'Traces', icon: 'account_tree', route: '/traces' },
     { label: 'Metrics', icon: 'bar_chart', route: '/metrics' },
     { label: 'Alerts', icon: 'notifications', route: '/alerts' },
+    { label: 'Settings', icon: 'settings', route: '/settings' },
   ];
-
-  protected readonly themeModes: { value: ThemeMode; icon: string; label: string }[] = [
-    { value: 'light', icon: 'light_mode', label: 'Light' },
-    { value: 'dark', icon: 'dark_mode', label: 'Dark' },
-    { value: 'system', icon: 'contrast', label: 'System' },
-  ];
-
-  protected get themeIcon(): string {
-    return this.themeModes.find((m) => m.value === this.themeService.mode())?.icon ?? 'contrast';
-  }
-
-  protected setTheme(mode: ThemeMode): void {
-    this.themeService.setMode(mode);
-  }
 
   protected selectTenant(tenant: Tenant): void {
     this.tenantService.selectTenant(tenant);

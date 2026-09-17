@@ -5,12 +5,12 @@ Microsoft.Data.SqlClient/Dapper implementations of the write and read repositori
 
 ## What it provides
 
-- `AddSqlServerWriteServices(configuration)` — registers `ITelemetryBulkWriter`
-  (SqlBulkCopy/MERGE-based), `ITenantResolver`, and `ITelemetryWriteStore`, connecting via
-  `ConnectionStrings:Write`.
-- `AddSqlServerReadServices(configuration)` — registers `ITraceReadRepository`,
-  `IMetricReadRepository`, `ILogReadRepository`, `IAlertRuleRepository`, and
-  `ITenantCatalogRepository`, connecting via `ConnectionStrings:Read`.
+- `AddSqlServerCollectorServices(configuration)` — registers `ITelemetryBulkWriter`
+  (SqlBulkCopy/MERGE-based) and `ITenantResolver`, connecting via `ConnectionStrings:Collector`.
+- `AddSqlServerApiServices(configuration)` — registers `ITraceReadRepository`,
+  `IMetricReadRepository`, `ILogReadRepository`, `IAlertRuleRepository`,
+  `ITenantCatalogRepository`, and `IRetentionSettingsRepository`, connecting via
+  `ConnectionStrings:Api`.
 
 Install this package alongside `Keryhe.Telemetry.Collector` (write side) and/or
 `Keryhe.Telemetry.Api` (read side), and set `Database:Provider` to `SqlServer`.
@@ -18,14 +18,14 @@ Install this package alongside `Keryhe.Telemetry.Collector` (write side) and/or
 ## Usage
 
 ```csharp
-builder.Services.AddSqlServerWriteServices(builder.Configuration);
-builder.Services.AddSqlServerReadServices(builder.Configuration);
+builder.Services.AddSqlServerCollectorServices(builder.Configuration);
+builder.Services.AddSqlServerApiServices(builder.Configuration);
 ```
 
 Configuration:
 
 - `Database:Provider` — must be `SqlServer`.
-- `ConnectionStrings:Write` / `ConnectionStrings:Read` — standard ADO.NET connection strings, e.g.
+- `ConnectionStrings:Collector` / `ConnectionStrings:Api` — standard ADO.NET connection strings, e.g.
   `Server=localhost;Database=telemetry;User Id=sa;Password=<password>;TrustServerCertificate=true`.
 
 Apply `schema/SqlServer-Schema.sql` (or `schema/apply-schema.sh sqlserver`) before first use.

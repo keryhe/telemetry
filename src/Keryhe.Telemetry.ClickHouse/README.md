@@ -6,12 +6,12 @@ ClickHouse.Client/Dapper implementation for columnar/OLAP storage. Requires Clic
 
 ## What it provides
 
-- `AddClickHouseWriteServices(configuration)` — registers `ITelemetryBulkWriter` (batched
-  `ClickHouseBulkCopy` inserts), `ITenantResolver`, and `ITelemetryWriteStore`, connecting via
-  `ConnectionStrings:Write`.
-- `AddClickHouseReadServices(configuration)` — registers `ITraceReadRepository`,
-  `IMetricReadRepository`, `ILogReadRepository`, `IAlertRuleRepository`, and
-  `ITenantCatalogRepository`, connecting via `ConnectionStrings:Read`.
+- `AddClickHouseCollectorServices(configuration)` — registers `ITelemetryBulkWriter` (batched
+  `ClickHouseBulkCopy` inserts) and `ITenantResolver`, connecting via `ConnectionStrings:Collector`.
+- `AddClickHouseApiServices(configuration)` — registers `ITraceReadRepository`,
+  `IMetricReadRepository`, `ILogReadRepository`, `IAlertRuleRepository`,
+  `ITenantCatalogRepository`, and `IRetentionSettingsRepository`, connecting via
+  `ConnectionStrings:Api`.
 
 Install this package alongside `Keryhe.Telemetry.Collector` (write side) and/or
 `Keryhe.Telemetry.Api` (read side), and set `Database:Provider` to `ClickHouse`.
@@ -19,14 +19,14 @@ Install this package alongside `Keryhe.Telemetry.Collector` (write side) and/or
 ## Usage
 
 ```csharp
-builder.Services.AddClickHouseWriteServices(builder.Configuration);
-builder.Services.AddClickHouseReadServices(builder.Configuration);
+builder.Services.AddClickHouseCollectorServices(builder.Configuration);
+builder.Services.AddClickHouseApiServices(builder.Configuration);
 ```
 
 Configuration:
 
 - `Database:Provider` — must be `ClickHouse`.
-- `ConnectionStrings:Write` / `ConnectionStrings:Read` — HTTP-interface connection strings, e.g.
+- `ConnectionStrings:Collector` / `ConnectionStrings:Api` — HTTP-interface connection strings, e.g.
   `Host=localhost;Port=8123;Username=default;Password=<password>;Database=telemetry`.
 
 Apply `schema/ClickHouse-Schema.sql` (or `schema/apply-schema.sh clickhouse`) before first use,

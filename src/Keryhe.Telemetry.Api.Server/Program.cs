@@ -17,13 +17,19 @@ builder.Services.AddOpenApi();
 
 // ── TELEMETRY API ─────────────────────────────────────────────────────────────
 // Registers the API controllers (via application part), tenant context, and the
-// active provider's read services (Database:Provider + ConnectionStrings:Read).
+// active provider's read services (Database:Provider + ConnectionStrings:Api).
 builder.Services.AddKeryheTelemetryApi(builder.Configuration);
 
 // ── ALERTING ──────────────────────────────────────────────────────────────────
 // Registers alert evaluation and the periodic background worker that drives it.
 // Depends on the read repositories and tenant context registered above.
 builder.Services.AddAlerting(builder.Configuration);
+
+// ── RETENTION ─────────────────────────────────────────────────────────────────
+// Registers the periodic background worker that sweeps old telemetry per the
+// DB-backed retention_settings row. Depends on IRetentionSettingsRepository,
+// registered above by AddKeryheTelemetryApi.
+builder.Services.AddRetention(builder.Configuration);
 
 var app = builder.Build();
 

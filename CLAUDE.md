@@ -142,8 +142,8 @@ behind two matching extension pairs:
 and `Keryhe.Telemetry.Server` calls **both** plus `AddAlerting` and the SPA static-file middleware.
 
 > **All-in-one constraint.** The Npgsql-backed providers (`PostgreSQL`, `Timescale`) register a
-> singleton `NpgsqlDataSource` in *both* `Add*WriteServices` (from `ConnectionStrings:Write`) and
-> `Add*ReadServices` (from `ConnectionStrings:Read`). In one container the last registration silently
+> singleton `NpgsqlDataSource` in *both* `Add*CollectorServices` (from `ConnectionStrings:Collector`) and
+> `Add*ApiServices` (from `ConnectionStrings:Api`). In one container the last registration silently
 > wins for both paths, so `Keryhe.Telemetry.Server` fails fast at startup
 > (`Program.EnsureSingleNpgsqlDataSource`) if the two connection strings differ. SqlServer,
 > ClickHouse, and MySql read their connection string per class and are unaffected.
@@ -152,7 +152,7 @@ and `Keryhe.Telemetry.Server` calls **both** plus `AddAlerting` and the SPA stat
 
 The database provider is selected at runtime by the **`Database:Provider`** config key
 (`"PostgreSQL"`, `"Timescale"`, `"SqlServer"`, `"ClickHouse"`, or `"MySql"`). Each provider project exposes
-`ServiceCollectionExtensions` with `Add<Provider>WriteServices` / `Add<Provider>ReadServices`,
+`ServiceCollectionExtensions` with `Add<Provider>CollectorServices` / `Add<Provider>ApiServices`,
 and the hosts `switch` on the config key to call the right one. An unknown/missing provider
 throws at startup.
 
@@ -183,9 +183,13 @@ Core interfaces (in `Keryhe.Telemetry.Core`), each implemented once per provider
 
 - `ITelemetryBulkWriter` — provider-specific bulk flush driven by the ingestion worker
   (SqlBulkCopy/MERGE for SqlServer; Npgsql binary COPY / `ON CONFLICT` for Postgres).
-- `ITelemetryWriteStore` — provider-specific `Delete*` DML for the write path.
 - `ITraceReadRepository`, `IMetricReadRepository`, `ILogReadRepository`,
-  `IAlertRuleRepository`, `ITenantCatalogRepository` — Dapper read repositories.
+  `IAlertRuleRepository`, `ITenantCatalogRepository`, `IRetentionSettingsRepository` — Dapper
+  read repositories, all registered on the API side (`ConnectionStrings:Api`,
+  `Add<Provider>ApiServices`). `IRetentionSettingsRepository` owns the DB-backed
+  `retention_settings` row and the three retention `Delete*` sweeps — see the retention notes
+  below; there is no write-side equivalent (the former `ITelemetryWriteStore` was retired when
+  retention moved here).
 - `ITenantResolver` — resolves the tenant owning a hashed API key. Every gRPC service resolves
   `Keryhe.Telemetry.Core.Data.CachingTenantResolver`, a provider-agnostic short-TTL cache wrapping
   the provider's `IApiKeyLookup` (the raw `SELECT`, implemented once per provider). Successful
@@ -194,7 +198,7 @@ Core interfaces (in `Keryhe.Telemetry.Core`), each implemented once per provider
   `UPDATE` on every request. ClickHouse's `IApiKeyTouchStore` is a deliberate no-op.
 
 Provider projects build a **singleton connection pool** (`NpgsqlDataSource` for Postgres) from
-`ConnectionStrings:Write` (ingestion host) or `ConnectionStrings:Read` (API host). Common
+`ConnectionStrings:Collector` (ingestion host) or `ConnectionStrings:Api` (API host). Common
 Dapper machinery (base repositories, JSONB/attribute type handler) lives in
 `Keryhe.Telemetry.Data` (`Read/*RepositoryBase.cs`, `Dapper/JsonAttributesTypeHandler.cs`) and
 is shared across providers.
@@ -206,8 +210,9 @@ is shared across providers.
 channel's own capacity but a paired `RecordCountGate` per signal, bounding resident RECORDS (spans,
 not traces, for the trace signal) rather than resident batches — an OTLP export's size is entirely
 client-controlled, so a batch-count bound does not actually cap memory. Write repositories
-(`TraceWriteRepository`, etc.) call `gate.AcquireAsync` before enqueuing and return; deletes are
-delegated to `ITelemetryWriteStore`. The Traces channel specifically carries flat `List<SpanModel>`,
+(`TraceWriteRepository`, etc.) call `gate.AcquireAsync` before enqueuing and return — they no
+longer carry a retention `Delete*` passthrough (see the retention notes below for where that
+lives now). The Traces channel specifically carries flat `List<SpanModel>`,
 not `List<TraceModel>`: `TraceWriteRepository` flattens each trace's spans and resolves each span's
 effective resource/scope (its own override, else its trace's) once, at that single point, so
 `ITelemetryBulkWriter.FlushTracesAsync` and every provider behind it read an already-flat,
@@ -266,7 +271,7 @@ Inserts use ON CONFLICT DO UPDATE (Postgres/Timescale), MERGE ... WITH (HOLDLOCK
 ON DUPLICATE KEY UPDATE (MySql) or `ReplacingMergeTree` (ClickHouse). A singleton
 `ResourceScopeCache` (`ConcurrentDictionary`) short-circuits DB lookups for all three, so a warm
 process resolves them with no round trip. The cache needs no invalidation because nothing deletes a
-resource, scope or metrics catalog row — `ITelemetryWriteStore` offers retention only. If a delete
+resource, scope or metrics catalog row — `IRetentionSettingsRepository` offers retention only. If a delete
 that removes catalog rows is ever added, it must clear the cache, or every data-point insert fails
 its foreign key on each subsequent batch until the process restarts.
 
@@ -306,12 +311,36 @@ tenants with enabled rules, dispatching each rule type to a registered `IAlertEv
 registers a background worker that drives `EvaluateAllAsync` — evaluation must be invoked
 explicitly if you wire it up.
 
+**Retention** (`Keryhe.Telemetry.Api/Retention/`): the single application-level mechanism for
+telemetry retention, on every provider including Timescale (schema 2.10.0 removed Timescale's
+native `add_retention_policy` jobs for `log_records` and the five metric data-point tables —
+`spans` never had one, since it is not a hypertable). `RetentionWorker`, a `BackgroundService`
+structurally mirroring `AlertEvaluationWorker`, wakes on `Retention:IntervalSeconds` (default
+3600s, config only — not part of the DB row), resolves the scoped `IRetentionSettingsRepository`,
+reads the current windows via `GetSettingsAsync`, then runs `DeleteOldTracesAsync`/
+`DeleteOldMetricDataPointsAsync`/`DeleteOldLogRecordsAsync` against them. `AddRetention()`
+registers it; called from `Api.Server` and `Server`'s `Program.cs` only, never
+`Collector.Server` — retention is entirely an API-host concern now (see
+`IRetentionSettingsRepository`'s doc comment for why it replaced the former write-side
+`ITelemetryWriteStore`). `SettingsController` (`GET`/`PUT /api/settings/retention`) exposes the
+same repository for the Angular settings page to edit — no caching layer, since the worker only
+reads the row once per sweep interval. The row itself (`retention_settings`) is a single global
+singleton (`id = 1`, `CHECK` on relational providers), seeded on install with today's implicit
+defaults (traces 90d, logs 90d, metrics 180d); `UpdateSettingsAsync` is always an `UPDATE`, never
+an `INSERT`. ClickHouse follows the same "control-plane is best-effort" pattern as its alert-rule
+CRUD: `UpdateSettingsAsync` is overridden to use `ALTER TABLE ... UPDATE` instead of the shared
+base's plain `UPDATE`.
+
 ### Database
 
 Providers: plain PostgreSQL, PostgreSQL + TimescaleDB, SQL Server, ClickHouse, or MySQL. Under TimescaleDB, the
 metric data-point tables and `log_records` are hypertables (partitioned on `time_unix_nano`);
-compression activates at 7 days; retention drops metrics at 180 days and logs at 90 days;
-`log_severity_stats_daily` is a continuous aggregate (refreshes every 5 minutes).
+compression activates at 7 days. As of schema 2.10.0, raw telemetry retention (spans, metrics,
+logs) is no longer a native Timescale policy — it is the application-level `RetentionWorker` (see
+the Retention notes above), the same as every other provider. `log_severity_stats_daily` is a
+continuous aggregate (refreshes every 5 minutes) with its own, unrelated, still-native retention
+policy that prunes the aggregate, not `log_records` (see `IRetentionSettingsRepository`'s
+"Decision 1" reasoning in `plans/telemetry-retention.md` for why that one stays).
 
 **`spans` index set (schema 2.8.0)**: four indexes were dropped as provably redundant on the
 four relational providers (Postgres, Timescale, SqlServer, MySql) — `idx_trace_id` (a left prefix
@@ -324,8 +353,9 @@ dropped: no query in the read path does JSONB containment on either column, veri
 `SELECT`. ClickHouse needed no equivalent change; its `ORDER BY (trace_id, span_id)` with a daily
 partition already covers what the dropped B-tree indexes gave the relational providers. Confirmed
 via `EXPLAIN` against a live Postgres container that the trace-detail lookup, the service-map
-query, and the trace-retention sweep (`PostgreSqlWriteStore`/`TimescaleWriteStore`) all still
-resolve to index scans, not sequential scans, without the dropped indexes.
+query, and the trace-retention sweep (`PostgreSqlRetentionSettingsRepository`/
+`TimescaleRetentionSettingsRepository`) all still resolve to index scans, not sequential scans,
+without the dropped indexes.
 
 **Telemetry (12)**: `resources`, `instrumentation_scopes`, `spans`, `span_events`, `span_links`,
 `metrics`, `gauge_data_points`, `sum_data_points`, `histogram_data_points`,
@@ -335,14 +365,16 @@ resolve to index scans, not sequential scans, without the dropped indexes.
 
 **Alerting (2)**: `alert_rules`, `alert_events`
 
+**Retention (1)**: `retention_settings`
+
 **Utility (1)**: `schema_version`
 
 Built-in views: `trace_summary`, `service_map`, `service_map_detailed`, `log_severity_stats`
 (compatibility alias over the continuous aggregate under Timescale).
 
 Connection strings (both hosts point at the same database):
-- Ingestion server reads `ConnectionStrings:Write` in `Keryhe.Telemetry.Collector.Server/appsettings.json`
-- API server reads `ConnectionStrings:Read` in `Keryhe.Telemetry.Api.Server/appsettings.json`
+- Ingestion server reads `ConnectionStrings:Collector` in `Keryhe.Telemetry.Collector.Server/appsettings.json`
+- API server reads `ConnectionStrings:Api` in `Keryhe.Telemetry.Api.Server/appsettings.json`
 - The all-in-one `Keryhe.Telemetry.Server` reads **both**, and requires them to be identical under
   the Npgsql-backed providers (see the all-in-one constraint above)
 - Both select the provider via the `Database:Provider` key in the same file

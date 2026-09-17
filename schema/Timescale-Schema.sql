@@ -425,13 +425,14 @@ SELECT add_compression_policy('exponential_histogram_data_points', BIGINT '60480
 SELECT add_compression_policy('summary_data_points', BIGINT '604800000000000', if_not_exists => TRUE);
 SELECT add_compression_policy('log_records', BIGINT '604800000000000', if_not_exists => TRUE);
 
--- Retention policies (drop old data).
-SELECT add_retention_policy('log_records', BIGINT '7776000000000000', if_not_exists => TRUE);
-SELECT add_retention_policy('gauge_data_points', BIGINT '15552000000000000', if_not_exists => TRUE);
-SELECT add_retention_policy('sum_data_points', BIGINT '15552000000000000', if_not_exists => TRUE);
-SELECT add_retention_policy('histogram_data_points', BIGINT '15552000000000000', if_not_exists => TRUE);
-SELECT add_retention_policy('exponential_histogram_data_points', BIGINT '15552000000000000', if_not_exists => TRUE);
-SELECT add_retention_policy('summary_data_points', BIGINT '15552000000000000', if_not_exists => TRUE);
+-- Retention (drop old data) is no longer a native TimescaleDB policy as of schema 2.10.0: the
+-- application-level RetentionWorker (Keryhe.Telemetry.Api) is now the one mechanism for
+-- retention on every provider, including Timescale, reading its windows from the
+-- retention_settings table below instead of a job registered here. See CLAUDE.md's telemetry
+-- retention notes. An UPGRADE from a pre-2.10.0 install must also run
+-- SELECT remove_retention_policy(...) for log_records and each of the five metric data-point
+-- tables — deleting these six lines from this script does not unregister an already-scheduled
+-- job on an existing database (see the upgrade notes near schema/apply-schema.sh).
 
 -- =============================================================================
 -- UTILITY TABLES
@@ -474,6 +475,29 @@ CREATE TABLE alert_events (
 );
 CREATE INDEX idx_alert_events_rule_id  ON alert_events ("rule_id");
 CREATE INDEX idx_alert_events_fired_at ON alert_events ("fired_at" DESC);
+
+-- =============================================================================
+-- RETENTION TABLES
+-- =============================================================================
+
+-- Single global row (id = 1, enforced by the CHECK below) — see
+-- IRetentionSettingsRepository for why this is untenanted and why UPDATE, never INSERT,
+-- is the only mutation the app issues against it after the seed row below. A plain table, not
+-- a hypertable: this is a one-row control-plane setting, not a time series.
+CREATE TABLE retention_settings (
+    "id"                    SMALLINT     PRIMARY KEY DEFAULT 1,
+    "trace_retention_days"   INTEGER      NOT NULL,
+    "log_retention_days"     INTEGER      NOT NULL,
+    "metric_retention_days"  INTEGER      NOT NULL,
+    "updated_at"             TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
+    CONSTRAINT chk_retention_settings_singleton CHECK ("id" = 1)
+);
+-- Seeded with today's implicit defaults (traces 90d, logs 90d, metrics 180d). ON CONFLICT
+-- DO NOTHING makes re-running this script against an already-seeded database a no-op rather
+-- than an error.
+INSERT INTO retention_settings ("id", "trace_retention_days", "log_retention_days", "metric_retention_days")
+VALUES (1, 90, 90, 180)
+ON CONFLICT ("id") DO NOTHING;
 
 -- =============================================================================
 -- VIEWS
@@ -601,7 +625,7 @@ FROM log_severity_stats_daily;
 -- =============================================================================
 -- Only reached when every statement above succeeded, so a partial apply cannot
 -- leave a false version marker for the apply-schema.sh gate.
-INSERT INTO schema_version ("version") VALUES ('2.9.0')
+INSERT INTO schema_version ("version") VALUES ('2.10.0')
 ON CONFLICT ("version") DO UPDATE
 SET "applied_at" = NOW();
 

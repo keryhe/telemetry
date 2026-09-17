@@ -51,7 +51,7 @@ Update `src/Keryhe.Telemetry.Collector.Server/appsettings.json` (gRPC ingestion 
     "Provider": "Timescale"
   },
   "ConnectionStrings": {
-    "Write": "Host=localhost;Port=5432;Database=telemetry;Username=postgres;Password=<password>"
+    "Collector": "Host=localhost;Port=5432;Database=telemetry;Username=postgres;Password=<password>"
   }
 }
 ```
@@ -63,7 +63,7 @@ Update `src/Keryhe.Telemetry.Api.Server/appsettings.json` (REST API / read path)
     "Provider": "Timescale"
   },
   "ConnectionStrings": {
-    "Read": "Host=localhost;Port=5432;Database=telemetry;Username=postgres;Password=<password>"
+    "Api": "Host=localhost;Port=5432;Database=telemetry;Username=postgres;Password=<password>"
   }
 }
 ```
@@ -75,9 +75,9 @@ Set `Database:Provider` to `PostgreSQL`, `Timescale`, `SqlServer`, `MySql`, or `
 > stay out of source control. Set them once per host:
 > ```bash
 > dotnet user-secrets --project src/Keryhe.Telemetry.Api.Server \
->   set "ConnectionStrings:Read"  "Host=localhost;Port=5432;Database=telemetry;Username=postgres;Password=<password>"
+>   set "ConnectionStrings:Api"  "Host=localhost;Port=5432;Database=telemetry;Username=postgres;Password=<password>"
 > dotnet user-secrets --project src/Keryhe.Telemetry.Collector.Server \
->   set "ConnectionStrings:Write" "Host=localhost;Port=5432;Database=telemetry;Username=postgres;Password=<password>"
+>   set "ConnectionStrings:Collector" "Host=localhost;Port=5432;Database=telemetry;Username=postgres;Password=<password>"
 > ```
 > A local TimescaleDB is easy to run via Docker:
 > ```bash
@@ -201,7 +201,7 @@ dotnet publish src/Keryhe.Telemetry.Server -c Release -o ./publish-server
 
 It listens on the same ports as the split hosts — `5117` (h2c) and `7057` (HTTP/2) for OTLP
 ingestion, `5188` and `7105` for the API and UI — configured as named Kestrel endpoints in its
-`appsettings.json`. It reads **both** `ConnectionStrings:Read` and `ConnectionStrings:Write`.
+`appsettings.json`. It reads **both** `ConnectionStrings:Api` and `ConnectionStrings:Collector`.
 
 > **Note.** Under the `PostgreSQL` and `Timescale` providers the read and write connection strings
 > must be identical — both sides share a single `NpgsqlDataSource` in one process. The host refuses

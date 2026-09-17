@@ -1,26 +1,28 @@
--- Migration: schema 2.6.0 -> 2.9.0 (SQL Server)
+-- Migration: schema 2.6.0 -> 2.10.0 (SQL Server)
 --
 -- Usage:
---   sqlcmd -d telemetry -b -I -i SqlServer-2.6.0-to-2.9.0.sql
+--   sqlcmd -d telemetry -b -I -i SqlServer-2.6.0-to-2.10.0.sql
 --
 -- -b matters: it makes sqlcmd stop on the first error instead of running the remaining batches
 -- against a rolled-back transaction. Requires SQL Server 2016 or later (DROP ... IF EXISTS).
 --
--- The SQL Server counterpart of PostgreSQL-2.6.0-to-2.9.0.sql. Same three version steps and the
+-- The SQL Server counterpart of PostgreSQL-2.6.0-to-2.10.0.sql. Same four version steps and the
 -- same logical outcome; the differences from the PostgreSQL script are only where the two engines
--- differ -- SQL Server has no GIN indexes to drop, and it needs the standalone time indexes that
+-- differ -- SQL Server has no GIN indexes to drop, it needs the standalone time indexes that
 -- PostgreSQL gets for free (from the TimescaleDB hypertable index, or from the BRIN index on
--- plain PostgreSQL).
+-- plain PostgreSQL), and it has no native retention-policy job to remove (that step is
+-- TimescaleDB-only and has no SQL Server counterpart).
 --
--- Every step is guarded, so this is also the correct script for a database already at 2.7.0 or
--- 2.8.0 -- the steps it has already had become no-ops. Re-running it on a database already at
--- 2.9.0 does nothing but refresh the schema_version timestamp.
+-- Every step is guarded, so this is also the correct script for a database already at 2.7.0,
+-- 2.8.0, or 2.9.0 -- the steps it has already had become no-ops. Re-running it on a database
+-- already at 2.10.0 does nothing but refresh the schema_version timestamp.
 --
--- It runs in ONE transaction: either the database ends up at 2.9.0 or it is left exactly as it
+-- It runs in ONE transaction: either the database ends up at 2.10.0 or it is left exactly as it
 -- was. XACT_ABORT is ON so any error rolls the whole thing back rather than continuing on a
 -- half-migrated database.
 --
--- What each version step changed, and why (see CLAUDE.md for the full rationale):
+-- What each version step changed, and why (see CLAUDE.md / plans/telemetry-retention.md for the
+-- full rationale):
 --
 --   2.7.0  metrics gained uk_metric_identity UNIQUE (resource_id, name, type, scope_id), so the
 --          catalog holds one row per metric identity instead of one row per OTLP export cycle.
@@ -34,6 +36,10 @@
 --   2.9.0  Exemplars moved onto the data point that owns them. The single exemplar_id column
 --          could hold only one exemplar where OTLP allows many, and no writer ever populated it,
 --          so no data is lost by dropping it or the shared exemplars table.
+--   2.10.0 Retention scheduling moved to a single application-level mechanism (Keryhe.Telemetry.
+--          Api's RetentionWorker) driven by a new retention_settings table, on every provider.
+--          SQL Server has no native retention-policy equivalent to remove, so this step is just
+--          the new table.
 
 SET QUOTED_IDENTIFIER ON;
 SET ANSI_NULLS ON;
@@ -150,11 +156,35 @@ DROP TABLE IF EXISTS exemplars;
 GO
 
 -- =============================================================================
+-- 2.10.0 -- retention_settings table (single global row)
+-- =============================================================================
+
+IF OBJECT_ID('retention_settings', 'U') IS NULL
+BEGIN
+    CREATE TABLE retention_settings (
+        [id]                    SMALLINT     NOT NULL PRIMARY KEY DEFAULT 1,
+        [trace_retention_days]   INT          NOT NULL,
+        [log_retention_days]     INT          NOT NULL,
+        [metric_retention_days]  INT          NOT NULL,
+        [updated_at]             DATETIME2    NOT NULL DEFAULT SYSUTCDATETIME(),
+        CONSTRAINT chk_retention_settings_singleton CHECK ([id] = 1)
+    );
+END
+GO
+
+-- Seeded with today's implicit defaults (traces 90d, logs 90d, metrics 180d). Guarded so
+-- re-running this migration never fails or duplicates the row.
+IF NOT EXISTS (SELECT 1 FROM retention_settings WHERE [id] = 1)
+    INSERT INTO retention_settings ([id], [trace_retention_days], [log_retention_days], [metric_retention_days])
+    VALUES (1, 90, 90, 180);
+GO
+
+-- =============================================================================
 -- Record the new version (matches what the full schema script writes)
 -- =============================================================================
 
 MERGE schema_version AS tgt
-USING (VALUES (N'2.9.0')) AS src (version)
+USING (VALUES (N'2.10.0')) AS src (version)
 ON tgt.version = src.version
 WHEN MATCHED THEN UPDATE SET applied_at = SYSDATETIME()
 WHEN NOT MATCHED THEN INSERT (version, applied_at) VALUES (src.version, SYSDATETIME());

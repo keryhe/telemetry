@@ -14,7 +14,7 @@ namespace Keryhe.Telemetry.SqlServer.Services;
 /// </summary>
 public class SqlServerApiKeyTouchStore(IConfiguration configuration) : IApiKeyTouchStore
 {
-    private readonly string _connectionString = configuration.GetConnectionString("Write")!;
+    private readonly string _connectionString = configuration.GetConnectionString("Collector")!;
 
     private const int ChunkSize = 1000;
 

@@ -44,7 +44,7 @@ public sealed class MySqlBulkWriter(
     ResourceScopeCache cache,
     ILogger<MySqlBulkWriter> logger) : ITelemetryBulkWriter
 {
-    private readonly string _connectionString = configuration.GetConnectionString("Write")!;
+    private readonly string _connectionString = configuration.GetConnectionString("Collector")!;
 
     // Chunk multi-row INSERTs so a single statement stays well under MySQL's
     // max_allowed_packet and placeholder limits.

@@ -56,7 +56,7 @@ public sealed class ClickHouseBulkWriter(
     ResourceScopeCache cache,
     ILogger<ClickHouseBulkWriter> logger) : ITelemetryBulkWriter, IAsyncDisposable
 {
-    private readonly string _connectionString = configuration.GetConnectionString("Write")!;
+    private readonly string _connectionString = configuration.GetConnectionString("Collector")!;
     private readonly ConcurrentDictionary<string, TableBulkCopy> _tableBulkCopies = new();
 
     // =========================================================================

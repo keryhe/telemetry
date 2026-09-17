@@ -14,7 +14,7 @@ public class Program
         // Add services to the container.
 
         // Registers gRPC, the ingestion channel + worker, the write repositories, and the
-        // active provider's write services (Database:Provider + ConnectionStrings:Write).
+        // active provider's write services (Database:Provider + ConnectionStrings:Collector).
         builder.Services.AddKeryheTelemetryCollector(builder.Configuration);
 
         // Add CORS for web clients if needed

@@ -66,6 +66,12 @@ export const routes: Routes = [
         loadComponent: () =>
           import('./features/alerts/alerts.component').then((m) => m.AlertsComponent),
       },
+      {
+        path: 'settings',
+        title: 'Sentinel - Settings',
+        loadComponent: () =>
+          import('./features/settings/settings.component').then((m) => m.SettingsComponent),
+      },
     ],
   },
 ];

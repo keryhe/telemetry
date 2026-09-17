@@ -334,6 +334,26 @@ ENGINE = MergeTree
 ORDER BY (rule_id, id);
 
 -- =============================================================================
+-- RETENTION
+-- =============================================================================
+
+-- Single global row (id always 1) — see IRetentionSettingsRepository for why this is
+-- untenanted. ReplacingMergeTree so ClickHouseRetentionSettingsRepository's
+-- ALTER TABLE ... UPDATE mutation (see its "control-plane is best-effort" notes, same
+-- pattern as alert_rules) collapses to one row at merge time, matching the alert_rules
+-- dedup strategy.
+CREATE TABLE IF NOT EXISTS retention_settings
+(
+    id                    Int8 DEFAULT 1,
+    trace_retention_days  Int32,
+    log_retention_days    Int32,
+    metric_retention_days Int32,
+    updated_at            DateTime64(9) DEFAULT now64(9)
+)
+ENGINE = ReplacingMergeTree
+ORDER BY id;
+
+-- =============================================================================
 -- UTILITY
 -- =============================================================================
 
@@ -410,14 +430,20 @@ FROM log_records
 WHERE time_unix_nano > 0
 GROUP BY severity_text, severity_number, log_date;
 
+-- Seeded with today's implicit defaults (traces 90d, logs 90d, metrics 180d).
+INSERT INTO retention_settings (id, trace_retention_days, log_retention_days, metric_retention_days)
+VALUES (1, 90, 90, 180);
+
 -- =============================================================================
 -- SCHEMA VERSION (recorded LAST)
 -- =============================================================================
 -- Only inserted when every statement above succeeded, so a partial apply cannot
 -- leave a false version marker for the apply-schema.sh gate.
+-- 2.10.0 adds retention_settings, backing the application-level RetentionWorker
+-- (Keryhe.Telemetry.Api) that is now the one retention mechanism across all five providers.
 -- 2.9.0 changes the metric data-point tables here exactly as it does everywhere else:
 -- exemplar_id out, exemplars_json in. 2.8.0 before it was a no-op bump for ClickHouse alone --
 -- spans' ORDER BY (trace_id, span_id) with a daily partition already gave it what the relational
 -- providers got from the four indexes they dropped (see PostgreSQL-Schema.sql), and it has no
 -- GIN-style JSONB index to carry the equivalent write cost of.
-INSERT INTO schema_version (version) VALUES ('2.9.0');
+INSERT INTO schema_version (version) VALUES ('2.10.0');

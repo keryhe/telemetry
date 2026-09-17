@@ -7,16 +7,13 @@ namespace Keryhe.Telemetry.Core.Data.Write;
 public class LogWriteRepository : ILogWriteRepository
 {
     private readonly TelemetryIngestionChannel _channel;
-    private readonly ITelemetryWriteStore _store;
     private readonly ILogger<LogWriteRepository> _logger;
 
     public LogWriteRepository(
         TelemetryIngestionChannel channel,
-        ITelemetryWriteStore store,
         ILogger<LogWriteRepository> logger)
     {
         _channel = channel;
-        _store = store;
         _logger = logger;
     }
 
@@ -39,9 +36,6 @@ public class LogWriteRepository : ILogWriteRepository
         _logger.LogDebug("Enqueued {Count} log records for async write", list.Count);
         return Enumerable.Empty<long>();
     }
-
-    public Task<int> DeleteOldLogRecordsAsync(TimeSpan retentionPeriod, CancellationToken cancellationToken = default)
-        => _store.DeleteOldLogRecordsAsync(retentionPeriod, cancellationToken);
 
     /// <summary>
     /// Reserves <c>records.Count</c> on <see cref="TelemetryIngestionChannel.LogGate"/> before

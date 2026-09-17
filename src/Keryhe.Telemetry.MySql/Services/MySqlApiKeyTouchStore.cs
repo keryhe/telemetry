@@ -13,7 +13,7 @@ namespace Keryhe.Telemetry.MySql.Services;
 /// </summary>
 public class MySqlApiKeyTouchStore(IConfiguration configuration) : IApiKeyTouchStore
 {
-    private readonly string _connectionString = configuration.GetConnectionString("Write")!;
+    private readonly string _connectionString = configuration.GetConnectionString("Collector")!;
 
     private const int ChunkSize = 500;
 
