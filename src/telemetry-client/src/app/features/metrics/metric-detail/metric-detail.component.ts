@@ -679,6 +679,12 @@ export class MetricDetailComponent implements OnInit {
     const useBar = delta && agg === 'none' && this.groupMode() === 'labels';
     const chartType = stacked ? (asRate ? 'area' : 'bar') : (useBar ? 'bar' : 'line');
 
+    // Gauges plot instantaneous levels in the metric's own unit, so unit-format the axis/tooltip
+    // like the distribution chart does. Sums can be a "/s" rate or a delta — formatUnitValue has
+    // no notion of "per second" and would mislabel a rate as a plain magnitude, so they're excluded.
+    const unit = multi.type === MetricType.Gauge ? this.metricUnit() : '';
+    const valueFormatter = (v: number) => (unit ? formatUnitValue(v, unit) : v.toFixed(2));
+
     this.chartOptions.set({
       chart: {
         type: chartType,
@@ -695,7 +701,8 @@ export class MetricDetailComponent implements OnInit {
       stroke: { curve: 'smooth', width: stacked && asRate ? 1 : 2 },
       fill: { opacity: stacked && asRate ? 0.7 : 1 },
       dataLabels: { enabled: false },
-      yaxis: { labels: { formatter: (v: number) => v.toFixed(2) } },
+      yaxis: { labels: { formatter: valueFormatter } },
+      tooltip: unit ? { y: { formatter: valueFormatter } } : undefined,
       grid: chartGrid(isDark),
       legend: { position: 'top' },
     });
@@ -832,8 +839,14 @@ export class MetricDetailComponent implements OnInit {
     return v != null ? v.toFixed(3) : '—';
   }
 
+  /** Stat cards unit-format for Gauge and every distribution type; Sum can be a "/s" rate or a
+   *  delta, which formatUnitValue can't represent, so it keeps the plain/rate formatting. */
+  protected statsUseUnit = computed(() => this.isDistribution() || this.metricType() === MetricType.Gauge);
+
   protected fmtStat(v: number | null | undefined): string {
-    return v != null ? `${v.toFixed(3)}${this.statsUnitSuffix()}` : '—';
+    if (v == null) return '—';
+    if (this.statsUseUnit()) return formatUnitValue(v, this.metricUnit());
+    return `${v.toFixed(3)}${this.statsUnitSuffix()}`;
   }
 
   /** Aggregation/top-N only re-shapes the already-loaded grouped series — no refetch needed. */

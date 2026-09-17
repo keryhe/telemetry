@@ -22,14 +22,21 @@
 
 .toolbar-controls {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 8px;
+  // A flex item's default min-width is auto (its content's min-content size), which for a
+  // descendant with `white-space: nowrap` (the time-range picker's label) equals that text's full
+  // rendered width — so without overriding it here, this row would refuse to ever shrink below
+  // the label's full width and overflow instead of letting the label ellipsis-truncate.
+  min-width: 0;
 }
 
 .toolbar-controls-secondary {
   display: flex;
   align-items: center;
   gap: 8px;
+  min-width: 0; // see .toolbar-controls above — same reason, one level down.
 }
 
 .app-icon {
@@ -137,37 +144,21 @@
 }
 
 // -------------------------------------------------------------------------------------------
-// Tablet wrap. Below 959.98px (the upper bound of Angular CDK's `Breakpoints.Small`, the same
-// "borrow a CDK constant" reasoning as the 599.98px handset threshold below) there isn't room
-// for the title block and the tenant select/time-range picker/theme toggle on one row, so the
-// whole `.toolbar-controls` group drops to its own second line. `flex-basis: 100%` is what
-// forces that: `.toolbar` is a flex-wrap row, and a 100%-basis child always starts a new line.
+// Both wrap points below are content-driven, not viewport-driven: `.toolbar` and
+// `.toolbar-controls` are plain `flex-wrap: wrap` rows with no forced `flex-basis`, so the
+// browser only drops `.toolbar-controls` to its own line under the title (and, within it,
+// `.toolbar-controls-secondary` to a further line under the tenant select) once they actually
+// stop fitting — which correctly accounts for variable-length content like the selected tenant
+// name, instead of wrapping at a fixed pixel width regardless of how much room is left.
 // -------------------------------------------------------------------------------------------
-@media (max-width: 959.98px) {
-  .toolbar-controls {
-    flex: 1 1 100%;
-    flex-wrap: wrap;
-    justify-content: flex-end;
-  }
-}
 
 // -------------------------------------------------------------------------------------------
 // Handset overflow. Below 599.98px (matching Angular CDK's own `Breakpoints.Handset` (portrait)
-// threshold, already used above for the drawer-toggle button) even the second line from the
-// query above is too narrow for the tenant select and the time-range picker/theme toggle
-// together, so `.toolbar-controls-secondary` gets the same `flex-basis: 100%` treatment and
-// drops to a third line, leaving the tenant select alone on line two.
+// threshold, already used above for the drawer-toggle button) the toolbar switches to a denser
+// visual style for phones — this is a cosmetic density change, independent of the content-driven
+// wrap points above.
 // -------------------------------------------------------------------------------------------
 @media (max-width: 599.98px) {
-  .toolbar-controls-secondary {
-    flex-basis: 100%;
-    justify-content: flex-end;
-  }
-
-  .toolbar {
-    gap: 2px;
-  }
-
   // The tagline doesn't earn its keep at this width; dropping it (not just visually hiding it —
   // `display: none` removes it from the flex row entirely) is the single biggest reclaim here.
   .app-subtitle {
@@ -185,10 +176,10 @@
     font-size: 16px;
   }
 
-  // The tenant select now gets its own full line (line two, above the time-range picker/theme
-  // toggle on line three) instead of sharing a row with them, so it no longer needs the
-  // aggressive 64–96px squeeze this block used when everything was crammed into one line —
-  // `.mat-mdc-select-value` still truncates long tenant names with an ellipsis regardless.
+  // At this width the tenant select has typically wrapped onto its own line, above the
+  // time-range picker, so it no longer needs the aggressive 64–96px squeeze this block used
+  // when everything was crammed into one line — `.mat-mdc-select-value` still truncates long
+  // tenant names with an ellipsis regardless.
   .tenant-select {
     min-width: 140px;
     max-width: none;

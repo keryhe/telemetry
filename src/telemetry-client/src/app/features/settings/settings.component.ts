@@ -1,4 +1,5 @@
-import { Component, OnInit, inject, signal } from '@angular/core';
+import { Component, DestroyRef, OnInit, inject, signal } from '@angular/core';
+import { takeUntilDestroyed } from '@angular/core/rxjs-interop';
 import { FormBuilder, ReactiveFormsModule, Validators } from '@angular/forms';
 import { MatButtonModule } from '@angular/material/button';
 import { MatCardModule } from '@angular/material/card';
@@ -10,7 +11,10 @@ import { MatSnackBar } from '@angular/material/snack-bar';
 import { MatTooltipModule } from '@angular/material/tooltip';
 
 import { SettingsApiService } from '../../core/services/api/settings-api.service';
+import { RetentionSettings } from '../../core/models/settings.models';
 import { ThemeMode, ThemeService } from '../../core/services/theme.service';
+
+type RetentionFormValue = Pick<RetentionSettings, 'traceRetentionDays' | 'logRetentionDays' | 'metricRetentionDays'>;
 
 @Component({
   selector: 'app-settings',
@@ -28,6 +32,7 @@ export class SettingsComponent implements OnInit {
   private readonly api = inject(SettingsApiService);
   private readonly fb = inject(FormBuilder);
   private readonly snack = inject(MatSnackBar);
+  private readonly destroyRef = inject(DestroyRef);
 
   protected loading = signal(true);
   protected saving = signal(false);
@@ -42,6 +47,11 @@ export class SettingsComponent implements OnInit {
     metricRetentionDays: [180, [Validators.required, Validators.min(1), Validators.max(this.maxRetentionDays)]],
   });
 
+  private lastSaved: RetentionFormValue = this.retentionForm.getRawValue();
+
+  protected readonly dirtyFields = signal<Set<keyof RetentionFormValue>>(new Set());
+  protected readonly retentionDirty = signal(false);
+
   protected readonly themeModes: { value: ThemeMode; icon: string; label: string }[] = [
     { value: 'light', icon: 'light_mode', label: 'Light' },
     { value: 'dark', icon: 'dark_mode', label: 'Dark' },
@@ -53,14 +63,34 @@ export class SettingsComponent implements OnInit {
     this.api.getRetentionSettings().subscribe({
       next: (settings) => {
         this.retentionForm.patchValue(settings);
+        this.lastSaved = this.retentionForm.getRawValue();
         this.loading.set(false);
       },
       error: () => this.loading.set(false),
+    });
+
+    this.retentionForm.valueChanges.pipe(takeUntilDestroyed(this.destroyRef)).subscribe((value) => {
+      const dirty = new Set<keyof RetentionFormValue>();
+      for (const key of Object.keys(this.lastSaved) as (keyof RetentionFormValue)[]) {
+        if (value[key] !== this.lastSaved[key]) {
+          dirty.add(key);
+        }
+      }
+      this.dirtyFields.set(dirty);
+      this.retentionDirty.set(dirty.size > 0);
     });
   }
 
   protected setTheme(mode: ThemeMode): void {
     this.themeService.setMode(mode);
+  }
+
+  protected isFieldDirty(field: keyof RetentionFormValue): boolean {
+    return this.dirtyFields().has(field);
+  }
+
+  protected cancelRetention(): void {
+    this.retentionForm.reset(this.lastSaved);
   }
 
   protected saveRetention(): void {
@@ -74,6 +104,9 @@ export class SettingsComponent implements OnInit {
     this.api.updateRetentionSettings(value).subscribe({
       next: (settings) => {
         this.retentionForm.patchValue(settings);
+        this.lastSaved = this.retentionForm.getRawValue();
+        this.dirtyFields.set(new Set());
+        this.retentionDirty.set(false);
         this.saving.set(false);
         this.snack.open('Retention settings saved', undefined, { duration: 3000 });
       },

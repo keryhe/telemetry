@@ -4,9 +4,13 @@
   gap: 16px;
 }
 
+mat-card-header {
+  margin-bottom: 16px;
+}
+
 .settings-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(160px, 220px));
   gap: 16px;
 }
 
@@ -34,6 +38,28 @@
     font-size: 28px;
     width: 28px;
     height: 28px;
+  }
+}
+
+.field-dirty {
+  position: relative;
+
+  &::after {
+    content: '';
+    position: absolute;
+    top: 8px;
+    right: 8px;
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--mat-sys-tertiary);
+    z-index: 1;
+  }
+
+  ::ng-deep .mat-mdc-text-field-wrapper {
+    outline: 1px solid var(--mat-sys-tertiary);
+    outline-offset: 2px;
+    border-radius: 4px;
   }
 }
 
