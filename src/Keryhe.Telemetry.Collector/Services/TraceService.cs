@@ -95,8 +95,6 @@ public class TraceService : OpenTelemetry.Proto.Collector.Trace.V1.TraceService.
             // accepted onto the ingestion channel -- see the honesty note on this method's doc
             // comment for what that does and does not guarantee.
             await _traceRepository.StoreTracesBatchAsync(traces, context.CancellationToken);
-            // Debug, not Information -- see LogService.Export's identical note.
-            _logger.LogDebug("Enqueued {TraceCount} traces with {TotalSpanCount} spans", traces.Count, totalSpanCount);
         }
         catch (OperationCanceledException)
         {

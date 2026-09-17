@@ -129,12 +129,16 @@ export class MetricListComponent {
   });
 
   // True distinct metric-name counts per type across the full range (not just the capped table fetch).
-  private countFor(type: MetricType): number {
-    return this.summary().countsByType.find((c) => c.type === type)?.count ?? 0;
+  private countFor(...types: MetricType[]): number {
+    const counts = this.summary().countsByType;
+    return types.reduce((sum, t) => sum + (counts.find((c) => c.type === t)?.count ?? 0), 0);
   }
   protected gaugeCount = computed(() => this.countFor(MetricType.Gauge));
   protected counterCount = computed(() => this.countFor(MetricType.Sum));
-  protected histogramCount = computed(() => this.countFor(MetricType.Histogram));
+  // Both OTLP histogram flavours — explicit-bucket and exponential — count as histograms here.
+  protected histogramCount = computed(() =>
+    this.countFor(MetricType.Histogram, MetricType.ExponentialHistogram)
+  );
 
   protected readonly uniqueCols = ['name', 'type', 'unit', 'instances', 'services', 'lastSeen'];
   protected readonly allCols = ['name', 'type', 'unit', 'service', 'lastSeen'];

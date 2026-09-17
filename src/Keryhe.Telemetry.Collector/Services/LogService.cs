@@ -83,14 +83,8 @@ public class LogService : OpenTelemetry.Proto.Collector.Logs.V1.LogsService.Logs
             }
 
             // Store log records using the repository
-            var storedIds = await _logRepository.StoreLogRecordsBatchAsync(logRecords, context.CancellationToken);
+            await _logRepository.StoreLogRecordsBatchAsync(logRecords, context.CancellationToken);
             storedLogCount = logRecords.Count;
-            // Debug, not Information: this fires on every single Export call, so at Information
-            // level (commonly enabled by default in production) it is a per-request logging cost
-            // on the hot path for no operational benefit -- the enqueue counts are already visible
-            // via normal request volume, and a drop (the thing actually worth alerting on) is its
-            // own LogError plus IngestionMetrics' records_dropped counter, not this line.
-            _logger.LogDebug("Enqueued {LogCount} log records", logRecords.Count);
         }
         catch (OperationCanceledException)
         {
@@ -171,7 +165,7 @@ public class LogService : OpenTelemetry.Proto.Collector.Logs.V1.LogsService.Logs
     /// <summary>
     /// Converts OTLP InstrumentationScope to InstrumentationScopeModel
     /// </summary>
-    private InstrumentationScopeModel? ConvertInstrumentationScope(OpenTelemetry.Proto.Logs.V1.ScopeLogs? scopeLogs)
+    private InstrumentationScopeModel? ConvertInstrumentationScope(ScopeLogs? scopeLogs)
     {
         if (scopeLogs?.Scope == null)
             return null;

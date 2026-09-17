@@ -86,12 +86,9 @@ public class MetricService : MetricsService.MetricsServiceBase
             }
 
             // Store metrics using the repository
-            var storedMetricIds = await _metricRepository.StoreMetricsBatchAsync(metrics, context.CancellationToken);
+            await _metricRepository.StoreMetricsBatchAsync(metrics, context.CancellationToken);
             totalDataPointCount = CalculateTotalDataPoints(metrics);
             storedDataPointCount = totalDataPointCount;
-            // Debug, not Information -- see LogService.Export's identical note.
-            _logger.LogDebug("Enqueued {MetricCount} metrics with {TotalDataPointCount} data points", metrics.Count, totalDataPointCount);
-            
         }
         catch (OperationCanceledException)
         {
