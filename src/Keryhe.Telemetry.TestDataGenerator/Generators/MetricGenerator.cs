@@ -7,10 +7,16 @@ namespace Keryhe.Telemetry.TestDataGenerator.Generators;
 /// Generates gauges, sums (monotonic + up/down), explicit histograms, and one exponential histogram
 /// (http.request.duration_exp_ms, made exponential via an AddView in Program.cs). OTLP Summary is a
 /// legacy type the .NET SDK cannot emit, so it is not produced here.
+///
+/// Each simulated request's measurements are recorded inside an <see cref="Activity"/>. That is what
+/// makes exemplars possible: Program.cs sets ExemplarFilterType.TraceBased, which only samples a
+/// measurement taken under a sampled activity, and it is that activity's trace/span id the exemplar
+/// carries. Recording outside one -- as this did before -- yields no exemplars at all.
 /// </summary>
 public class MetricGenerator
 {
     private readonly Meter _meter;
+    private readonly ActivitySource? _activitySource;
     private readonly Random _random;
     private readonly DateTime _startTime = DateTime.UtcNow;
     private long _requestCount = 0;
@@ -25,9 +31,10 @@ public class MetricGenerator
     private Histogram<double>? _requestDurationExp;
     private Histogram<long>? _responseSize;
 
-    public MetricGenerator(Meter meter)
+    public MetricGenerator(Meter meter, ActivitySource? activitySource = null)
     {
         _meter = meter;
+        _activitySource = activitySource;
         _random = new Random();
         InitializeMetrics();
     }
@@ -103,6 +110,14 @@ public class MetricGenerator
             var endpoint = new[] { "/api/users", "/api/products", "/api/orders", "/api/health" }[_random.Next(4)];
             var method = new[] { "GET", "POST", "PUT", "DELETE" }[_random.Next(4)];
             var statusCode = _random.Next(0, 100) < 95 ? "200" : (_random.Next(0, 100) < 50 ? "400" : "500");
+
+            // The measurements below are recorded inside this activity so the SDK's TraceBased
+            // exemplar filter can attach its trace/span id to them. Disposed at the end of the
+            // iteration, so each simulated request gets its own span to link back to.
+            using var activity = _activitySource?.StartActivity($"{method} {endpoint}", ActivityKind.Server);
+            activity?.SetTag("http.request.method", method);
+            activity?.SetTag("url.path", endpoint);
+            activity?.SetTag("http.response.status_code", statusCode);
 
             // Increment request count
             _requestCounter?.Add(1, 

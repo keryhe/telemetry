@@ -203,7 +203,7 @@ public sealed class ClickHouseBulkWriter(
                     gaugeRows.AddRange(metric.GaugeDataPoints.Select(d => new object?[]
                     {
                         metricId, d.StartTimeUnixNano, d.TimeUnixNano, d.ValueDouble, d.ValueInt, d.Flags,
-                        SerializeJsonOrNull(d.Attributes)
+                        SerializeJsonOrNull(d.Attributes), SerializeJsonOrNull(d.Exemplars)
                     }));
                     break;
                 case MetricType.SUM when metric.SumDataPoints?.Count > 0:
@@ -211,7 +211,7 @@ public sealed class ClickHouseBulkWriter(
                     {
                         metricId, d.StartTimeUnixNano, d.TimeUnixNano, d.ValueDouble, d.ValueInt,
                         d.AggregationTemporality.ToString(), (byte)(d.IsMonotonic ? 1 : 0), d.Flags,
-                        SerializeJsonOrNull(d.Attributes)
+                        SerializeJsonOrNull(d.Attributes), SerializeJsonOrNull(d.Exemplars)
                     }));
                     break;
                 case MetricType.HISTOGRAM when metric.HistogramDataPoints?.Count > 0:
@@ -220,7 +220,7 @@ public sealed class ClickHouseBulkWriter(
                         metricId, d.StartTimeUnixNano, d.TimeUnixNano, d.Count, d.Sum,
                         SerializeJsonOrNull(d.BucketCounts), SerializeJsonOrNull(d.ExplicitBounds),
                         d.AggregationTemporality.ToString(), d.Flags, d.Min, d.Max,
-                        SerializeJsonOrNull(d.Attributes)
+                        SerializeJsonOrNull(d.Attributes), SerializeJsonOrNull(d.Exemplars)
                     }));
                     break;
                 case MetricType.EXPONENTIAL_HISTOGRAM when metric.ExponentialHistogramDataPoints?.Count > 0:
@@ -230,7 +230,7 @@ public sealed class ClickHouseBulkWriter(
                         d.PositiveOffset, SerializeJsonOrNull(d.PositiveBucketCounts),
                         d.NegativeOffset, SerializeJsonOrNull(d.NegativeBucketCounts),
                         d.AggregationTemporality.ToString(), d.Flags, d.Min, d.Max,
-                        SerializeJsonOrNull(d.Attributes)
+                        SerializeJsonOrNull(d.Attributes), SerializeJsonOrNull(d.Exemplars)
                     }));
                     break;
                 case MetricType.SUMMARY when metric.SummaryDataPoints?.Count > 0:
@@ -310,19 +310,22 @@ public sealed class ClickHouseBulkWriter(
         ["id", "resource_id", "scope_id", "name", "description", "unit", "type"];
 
     private static readonly string[] GaugeColumns =
-        ["metric_id", "start_time_unix_nano", "time_unix_nano", "value_double", "value_int", "flags", "attributes_json"];
+    [
+        "metric_id", "start_time_unix_nano", "time_unix_nano", "value_double", "value_int",
+        "flags", "attributes_json", "exemplars_json"
+    ];
 
     private static readonly string[] SumColumns =
     [
         "metric_id", "start_time_unix_nano", "time_unix_nano", "value_double", "value_int",
-        "aggregation_temporality", "is_monotonic", "flags", "attributes_json"
+        "aggregation_temporality", "is_monotonic", "flags", "attributes_json", "exemplars_json"
     ];
 
     private static readonly string[] HistogramColumns =
     [
         "metric_id", "start_time_unix_nano", "time_unix_nano", "count", "sum_value",
         "bucket_counts", "explicit_bounds", "aggregation_temporality", "flags",
-        "min_value", "max_value", "attributes_json"
+        "min_value", "max_value", "attributes_json", "exemplars_json"
     ];
 
     private static readonly string[] ExpHistogramColumns =
@@ -330,7 +333,7 @@ public sealed class ClickHouseBulkWriter(
         "metric_id", "start_time_unix_nano", "time_unix_nano", "count", "sum_value",
         "scale", "zero_count", "positive_offset", "positive_bucket_counts",
         "negative_offset", "negative_bucket_counts", "aggregation_temporality", "flags",
-        "min_value", "max_value", "attributes_json"
+        "min_value", "max_value", "attributes_json", "exemplars_json"
     ];
 
     private static readonly string[] SummaryColumns =

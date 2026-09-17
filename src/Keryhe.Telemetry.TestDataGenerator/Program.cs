@@ -149,6 +149,13 @@ var meterProvider = Sdk.CreateMeterProviderBuilder()
     .SetResourceBuilder(ResourceBuilder.CreateDefault()
         .AddService(config.ServiceName, serviceVersion: config.ServiceVersion))
     .AddMeter(config.ServiceName)
+    // Exemplars are off by default in the .NET SDK (ExemplarFilterType.AlwaysOff), so without this
+    // the generator exports none at all and the collector's exemplar path is never exercised.
+    // TraceBased rather than AlwaysOn: it only samples a measurement recorded inside a sampled
+    // Activity, which is what gives each exemplar the trace/span id the UI links to. MetricGenerator
+    // records inside an activity for exactly this reason. Note that observable instruments (the two
+    // ObservableGauges) cannot carry exemplars at all -- expect them on the counters and histograms.
+    .SetExemplarFilter(ExemplarFilterType.TraceBased)
     // Emit http.request.duration_exp_ms as a base-2 exponential histogram so the exp-histogram
     // rendering path has real data to exercise.
     .AddView("http.request.duration_exp_ms", new Base2ExponentialBucketHistogramConfiguration())

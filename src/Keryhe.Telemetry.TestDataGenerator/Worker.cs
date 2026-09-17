@@ -70,7 +70,7 @@ public class TelemetryGeneratorWorker : BackgroundService
 
         if (_meter != null)
         {
-            _metricGenerator = new MetricGenerator(_meter);
+            _metricGenerator = new MetricGenerator(_meter, _activitySource);
         }
 
         _logGenerator = new LogGenerator(_loggerForLogGen, _activitySource);

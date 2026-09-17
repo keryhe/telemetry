@@ -38,9 +38,9 @@ public interface ITelemetryWriteStore
     Task<int> DeleteOldTracesAsync(TimeSpan retentionPeriod, CancellationToken cancellationToken = default);
 
     /// <summary>
-    /// Removes metric data points recorded before <c>UtcNow - retentionPeriod</c>, across
-    /// <see cref="Keryhe.Telemetry.Core.ITelemetryWriteStore"/>'s six time-pruned tables -- the five
-    /// data-point tables plus <c>exemplars</c>, each filtered on its own <c>time_unix_nano</c>.
+    /// Removes metric data points recorded before <c>UtcNow - retentionPeriod</c>, across the five
+    /// data-point tables, each filtered on its own <c>time_unix_nano</c>. A point's exemplars live
+    /// in a column on the point itself (schema 2.9.0), so they go with it.
     ///
     /// Deliberately does NOT touch the <c>metrics</c> catalog row, and deliberately does not key off
     /// <c>metrics.created_at</c>. Since the 2.7.0 dedup that column means "first ever seen" and never
@@ -48,7 +48,7 @@ public interface ITelemetryWriteStore
     /// that metric's entire history, including points written seconds ago. A metric that goes quiet
     /// keeps its catalog row and stays listable.
     ///
-    /// Returns data-point and exemplar rows removed.
+    /// Returns data-point rows removed.
     /// </summary>
     Task<int> DeleteOldMetricDataPointsAsync(TimeSpan retentionPeriod, CancellationToken cancellationToken = default);
 

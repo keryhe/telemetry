@@ -21,7 +21,7 @@ import { MetricsApiService } from '../../../core/services/api/metrics-api.servic
 import { TimeRangeService } from '../../../core/services/time-range.service';
 import { ThemeService } from '../../../core/services/theme.service';
 import {
-  AggregationTemporality, MetricDataPoint, MetricInfo, MetricSeries, MetricType,
+  AggregationTemporality, ExemplarModel, MetricDataPoint, MetricInfo, MetricSeries, MetricType,
   MultiSeriesMetricData, NamedMetricSeries,
 } from '../../../core/models/metric.models';
 import { StatCardComponent } from '../../../shared/components/stat-card/stat-card.component';
@@ -73,6 +73,18 @@ const TEMPORALITY_LABELS: Record<AggregationTemporality, string> = {
 };
 
 const val = (p: MetricDataPoint): number => p.doubleValue ?? p.intValue ?? 0;
+
+/** One table row on the Exemplars tab: the exemplar plus the data point it was sampled from. */
+interface ExemplarRow {
+  exemplar: ExemplarModel;
+  seriesName: string;
+  pointTimestamp: Date;
+  /** Preformatted parent value — the point's own value for scalars, its observation count for
+   *  distributions, where a single "value" does not exist. */
+  pointValue: string;
+  /** The exemplar's own measurement, formatted in the metric's unit. */
+  value: string;
+}
 
 @Component({
   selector: 'app-metric-detail',
@@ -329,11 +341,55 @@ export class MetricDetailComponent implements OnInit {
     return rows;
   });
 
-  protected exemplars = computed(() =>
-    this.points()
-      .flatMap((p) => p.exemplars ?? [])
-      .filter((e) => e.traceIdHex)
-  );
+  /**
+   * Every loaded series as {name, points}. Unlike points(), which narrows scalar metrics to the
+   * single largest series so the stat cards stay meaningful, this keeps all of them — an exemplar
+   * belongs to whichever series produced it, and dropping the other series hid most of them.
+   */
+  private allSeries = computed<{ name: string; points: MetricDataPoint[] }[]>(() => {
+    const single = this.series();
+    const fallback = single ? [{ name: single.name, points: single.points }] : [];
+    if (this.isDistribution()) return fallback;
+    const grouped = this.multiSeries()?.series ?? [];
+    return grouped.length ? grouped.map((g) => ({ name: g.seriesName, points: g.points })) : fallback;
+  });
+
+  /**
+   * Flattened exemplars, newest first, each carrying the data point it was sampled from. Exemplars
+   * without a trace id are kept: an SDK can record one whenever a measurement is taken outside a
+   * sampled span, and silently hiding those made the tab under-report its own count.
+   */
+  protected exemplars = computed<ExemplarRow[]>(() => {
+    const unit = this.metricUnit();
+    const distribution = this.isDistribution();
+    const rows: ExemplarRow[] = [];
+
+    for (const s of this.allSeries()) {
+      for (const p of s.points) {
+        for (const e of p.exemplars ?? []) {
+          const measured = e.valueDouble ?? e.valueInt;
+          rows.push({
+            exemplar: e,
+            seriesName: s.name,
+            pointTimestamp: new Date(p.timestamp),
+            pointValue: distribution
+              ? `${p.count ?? 0} obs`
+              : formatUnitValue(val(p), unit),
+            value: measured == null ? '—' : formatUnitValue(measured, unit),
+          });
+        }
+      }
+    }
+
+    return rows.sort((a, b) => b.exemplar.timeUnixNano - a.exemplar.timeUnixNano);
+  });
+
+  protected readonly exemplarColumns = ['time', 'value', 'series', 'point', 'traceId', 'spanId', 'attrs'];
+
+  /** OTLP timestamps are nanoseconds since the epoch; JS dates are milliseconds. */
+  protected nanoToDate(nano: number): Date {
+    return new Date(nano / 1_000_000);
+  }
 
   constructor() {
     // Slide relative preset windows to "now" on (re)entry so navigating back refreshes.

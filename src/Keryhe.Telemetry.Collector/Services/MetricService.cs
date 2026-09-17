@@ -251,7 +251,8 @@ public class MetricService : MetricsService.MetricsServiceBase
             ValueDouble = dp.ValueCase == NumberDataPoint.ValueOneofCase.AsDouble ? dp.AsDouble : null,
             ValueInt = dp.ValueCase == NumberDataPoint.ValueOneofCase.AsInt ? dp.AsInt : null,
             Flags = (int)dp.Flags,
-            Attributes = ConvertAttributes(dp.Attributes)
+            Attributes = ConvertAttributes(dp.Attributes),
+            Exemplars = ConvertExemplars(dp.Exemplars)
         }).ToList();
     }
 
@@ -269,7 +270,8 @@ public class MetricService : MetricsService.MetricsServiceBase
             AggregationTemporality = ConvertAggregationTemporality(sum.AggregationTemporality),
             IsMonotonic = sum.IsMonotonic,
             Flags = (int)dp.Flags,
-            Attributes = ConvertAttributes(dp.Attributes)
+            Attributes = ConvertAttributes(dp.Attributes),
+            Exemplars = ConvertExemplars(dp.Exemplars)
         }).ToList();
     }
 
@@ -290,7 +292,8 @@ public class MetricService : MetricsService.MetricsServiceBase
             Flags = (int)dp.Flags,
             Min = dp.HasMin ? dp.Min : null,
             Max = dp.HasMax ? dp.Max : null,
-            Attributes = ConvertAttributes(dp.Attributes)
+            Attributes = ConvertAttributes(dp.Attributes),
+            Exemplars = ConvertExemplars(dp.Exemplars)
         }).ToList();
     }
 
@@ -315,7 +318,8 @@ public class MetricService : MetricsService.MetricsServiceBase
             Flags = (int)dp.Flags,
             Min = dp.HasMin ? dp.Min : null,
             Max = dp.HasMax ? dp.Max : null,
-            Attributes = ConvertAttributes(dp.Attributes)
+            Attributes = ConvertAttributes(dp.Attributes),
+            Exemplars = ConvertExemplars(dp.Exemplars)
         }).ToList();
     }
 
@@ -340,21 +344,77 @@ public class MetricService : MetricsService.MetricsServiceBase
         }).ToList();
     }
 
-    // Exemplars are deliberately NOT converted from the OTLP payload (this file no longer builds
-    // ExemplarModel at all): no bulk writer on any provider has ever inserted into `exemplars` or
-    // set a data point's `exemplar_id` (ingestion-performance.md §2.7), so every exemplar built
-    // here was pure allocation with nowhere to go. The read path (MetricReadRepositoryBase's
-    // BuildExemplarList/ExemplarColumns) already joins on `exemplar_id` and returns null when it
-    // is unset, which is the state that produces today, so removing the conversion changes no
-    // observable behavior -- only removes the wasted work building it.
-    //
-    // This is a deliberate stop here, not silence: writing exemplars properly needs its own design
-    // pass, not a rider on this cleanup. The schema gives each data point row exactly one
-    // `exemplar_id`, but OTLP's NumberDataPoint (gauge/sum) carries `repeated Exemplar exemplars`
-    // -- the model already truncated that to a single `Exemplar` even before this change, which a
-    // real implementation should fix (widen to a list, or accept the truncation explicitly) rather
-    // than carry forward silently.
-    //
+    /// <summary>
+    /// Converts a data point's OTLP exemplars. Returns null rather than an empty list when the
+    /// point carries none -- which is the overwhelmingly common case -- so the bulk writers store
+    /// SQL NULL in exemplars_json instead of the string "[]" on every row, and so no list is
+    /// allocated for a point that has nothing to put in it.
+    ///
+    /// Every exemplar is kept. OTLP declares `repeated Exemplar exemplars` on NumberDataPoint,
+    /// HistogramDataPoint and ExponentialHistogramDataPoint alike (Summary has none), and a
+    /// histogram's reservoir typically holds one per bucket, so truncating to the first -- as the
+    /// gauge/sum models did before 2.9.0 -- threw away most of what an SDK sent.
+    /// </summary>
+    private List<ExemplarModel>? ConvertExemplars(Google.Protobuf.Collections.RepeatedField<Exemplar>? exemplars)
+    {
+        if (exemplars == null || exemplars.Count == 0)
+            return null;
+
+        var result = new List<ExemplarModel>(exemplars.Count);
+        foreach (var e in exemplars)
+        {
+            // Exemplars are stored as JSON on the data point row, so an empty attribute bag would
+            // be serialized literally as {} on every one of them; null drops the key entirely.
+            var filtered = ConvertAttributes(e.FilteredAttributes);
+            result.Add(new ExemplarModel
+            {
+                FilteredAttributes = filtered.Count == 0 ? null : filtered,
+                TimeUnixNano = (long)e.TimeUnixNano,
+                ValueDouble = e.ValueCase == Exemplar.ValueOneofCase.AsDouble ? e.AsDouble : null,
+                ValueInt = e.ValueCase == Exemplar.ValueOneofCase.AsInt ? e.AsInt : null,
+                SpanIdHex = ConvertSpanId(e.SpanId),
+                TraceIdHex = ConvertTraceId(e.TraceId)
+            });
+        }
+        return result;
+    }
+
+    /// <summary>
+    /// Converts trace ID bytes to hex string representation
+    /// </summary>
+    private string? ConvertTraceId(Google.Protobuf.ByteString? traceId)
+    {
+        if (traceId == null || traceId.IsEmpty)
+            return null;
+
+        var bytes = traceId.ToByteArray();
+        if (bytes.Length != 16)
+        {
+            _logger.LogWarning("Invalid trace ID length: {Length}, expected 16 bytes", bytes.Length);
+            return null;
+        }
+
+        return Convert.ToHexString(bytes).ToLowerInvariant();
+    }
+
+    /// <summary>
+    /// Converts span ID bytes to hex string representation
+    /// </summary>
+    private string? ConvertSpanId(Google.Protobuf.ByteString? spanId)
+    {
+        if (spanId == null || spanId.IsEmpty)
+            return null;
+
+        var bytes = spanId.ToByteArray();
+        if (bytes.Length != 8)
+        {
+            _logger.LogWarning("Invalid span ID length: {Length}, expected 8 bytes", bytes.Length);
+            return null;
+        }
+
+        return Convert.ToHexString(bytes).ToLowerInvariant();
+    }
+
     /// <summary>
     /// Converts OTLP AggregationTemporality to local AggregationTemporality enum
     /// </summary>

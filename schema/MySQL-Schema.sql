@@ -187,6 +187,13 @@ CREATE INDEX idx_metrics_name  ON metrics (name);
 CREATE INDEX idx_type          ON metrics (type);
 -- idx_resource_name (resource_id, name) dropped in 2.7.0: now a left prefix of uk_metric_identity.
 
+-- exemplars_json (2.9.0) replaces the former single exemplar_id column and the shared
+-- `exemplars` table, which no writer ever populated. OTLP declares `repeated Exemplar
+-- exemplars` on every data point except Summary, so one id per row could never hold more than
+-- the first. The list is stored as JSON on the data point itself: a child table would need each
+-- data point's generated id, which the bulk-load path (binary COPY / bulk copy) does not hand
+-- back, and JSON is already how bucket_counts, explicit_bounds and quantile_values are stored.
+-- Trade-off: an exemplar's trace_id is no longer indexable. No read path queries it.
 -- Gauge data points.
 CREATE TABLE gauge_data_points (
     id                   BIGINT AUTO_INCREMENT PRIMARY KEY,
@@ -196,8 +203,8 @@ CREATE TABLE gauge_data_points (
     value_double         DOUBLE,
     value_int            BIGINT,
     flags                INT    DEFAULT 0,
-    exemplar_id          BIGINT,
     attributes_json      JSON,
+    exemplars_json       JSON,
     CONSTRAINT fk_gauge_data_points_metrics FOREIGN KEY (metric_id) REFERENCES metrics (id) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 CREATE INDEX idx_gauge_metric_time ON gauge_data_points (metric_id, time_unix_nano DESC);
@@ -215,8 +222,8 @@ CREATE TABLE sum_data_points (
         CHECK (aggregation_temporality IN ('UNSPECIFIED', 'DELTA', 'CUMULATIVE')),
     is_monotonic            TINYINT(1)  DEFAULT 0,
     flags                   INT         DEFAULT 0,
-    exemplar_id             BIGINT,
     attributes_json         JSON,
+    exemplars_json          JSON,
     CONSTRAINT fk_sum_data_points_metrics FOREIGN KEY (metric_id) REFERENCES metrics (id) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 -- Standalone time index added in 2.7.0: metric retention now deletes from the data-point
@@ -240,8 +247,8 @@ CREATE TABLE histogram_data_points (
     flags                   INT         DEFAULT 0,
     min_value               DOUBLE,
     max_value               DOUBLE,
-    exemplar_id             BIGINT,
     attributes_json         JSON,
+    exemplars_json          JSON,
     CONSTRAINT fk_histogram_data_points_metrics FOREIGN KEY (metric_id) REFERENCES metrics (id) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 CREATE INDEX idx_histogram_metric_time ON histogram_data_points (metric_id, time_unix_nano DESC);
@@ -266,8 +273,8 @@ CREATE TABLE exponential_histogram_data_points (
     flags                   INT         DEFAULT 0,
     min_value               DOUBLE,
     max_value               DOUBLE,
-    exemplar_id             BIGINT,
     attributes_json         JSON,
+    exemplars_json          JSON,
     CONSTRAINT fk_exponential_histogram_data_points_metrics FOREIGN KEY (metric_id) REFERENCES metrics (id) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 CREATE INDEX idx_exp_histogram_metric_time ON exponential_histogram_data_points (metric_id, time_unix_nano DESC);
@@ -288,19 +295,6 @@ CREATE TABLE summary_data_points (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 CREATE INDEX idx_summary_metric_time ON summary_data_points (metric_id, time_unix_nano DESC);
 CREATE INDEX idx_summary_time        ON summary_data_points (time_unix_nano DESC);
-
--- Exemplars (regular table, soft-referenced by data point tables via exemplar_id).
-CREATE TABLE exemplars (
-    id                  BIGINT AUTO_INCREMENT PRIMARY KEY,
-    filtered_attributes JSON,
-    time_unix_nano      BIGINT NOT NULL,
-    value_double        DOUBLE,
-    value_int           BIGINT,
-    span_id             CHAR(16),
-    trace_id            CHAR(32)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
-CREATE INDEX idx_exemplar_time       ON exemplars (time_unix_nano);
-CREATE INDEX idx_exemplar_trace_span ON exemplars (trace_id, span_id);
 
 -- =============================================================================
 -- LOGS TABLES
@@ -482,7 +476,7 @@ GROUP BY severity_text, severity_number, day_bucket;
 -- Only inserted when every statement above succeeded, so a partial apply cannot
 -- leave a false version marker for the apply-schema.sh gate.
 INSERT INTO schema_version (version, applied_at)
-VALUES ('2.8.0', CURRENT_TIMESTAMP(6))
+VALUES ('2.9.0', CURRENT_TIMESTAMP(6))
 ON DUPLICATE KEY UPDATE applied_at = CURRENT_TIMESTAMP(6);
 
 -- =============================================================================

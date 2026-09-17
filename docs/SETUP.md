@@ -238,8 +238,7 @@ When deploying `Keryhe.Telemetry.Api.Server` this way, the gRPC ingestion host
 - `spans` — Trace span data
 - `span_events`, `span_links` — Span child records
 - `metrics` — Base metric metadata
-- `gauge_data_points`, `sum_data_points`, `histogram_data_points`, `exponential_histogram_data_points`, `summary_data_points` — Type-specific metric data
-- `exemplars` — Metric exemplars with trace correlation
+- `gauge_data_points`, `sum_data_points`, `histogram_data_points`, `exponential_histogram_data_points`, `summary_data_points` — Type-specific metric data, each carrying its own exemplars (with trace correlation) in an `exemplars_json` column
 - `log_records` — Log entries with severity and trace correlation
 - `tenants` — Tenant registry (a `default` tenant is seeded on first run)
 - `api_keys` — Hashed API keys scoped to a tenant, used for ingestion auth

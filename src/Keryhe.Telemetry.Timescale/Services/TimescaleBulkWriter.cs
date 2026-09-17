@@ -651,8 +651,11 @@ public sealed class TimescaleBulkWriter(
         return ids;
     }
 
-    private const string GaugeCopySql =
-        "COPY gauge_data_points (metric_id, start_time_unix_nano, time_unix_nano, value_double, value_int, flags, attributes_json) FROM STDIN (FORMAT BINARY)";
+    private const string GaugeCopySql = """
+        COPY gauge_data_points (metric_id, start_time_unix_nano, time_unix_nano, value_double, value_int,
+                                flags, attributes_json, exemplars_json)
+        FROM STDIN (FORMAT BINARY)
+        """;
 
     private static async Task BulkInsertGaugeDataPointsAsync(
         NpgsqlConnection conn,
@@ -670,13 +673,14 @@ public sealed class TimescaleBulkWriter(
             await WriteNullableAsync(writer, d.ValueInt, NpgsqlDbType.Bigint, ct);
             await writer.WriteAsync(d.Flags, NpgsqlDbType.Integer, ct);
             await WriteNullableAsync(writer, SerializeJsonOrNull(d.Attributes), NpgsqlDbType.Jsonb, ct);
+            await WriteNullableAsync(writer, SerializeJsonOrNull(d.Exemplars), NpgsqlDbType.Jsonb, ct);
         }
         await writer.CompleteAsync(ct);
     }
 
     private const string SumCopySql = """
         COPY sum_data_points (metric_id, start_time_unix_nano, time_unix_nano, value_double, value_int,
-                              aggregation_temporality, is_monotonic, flags, attributes_json)
+                              aggregation_temporality, is_monotonic, flags, attributes_json, exemplars_json)
         FROM STDIN (FORMAT BINARY)
         """;
 
@@ -698,6 +702,7 @@ public sealed class TimescaleBulkWriter(
             await writer.WriteAsync(d.IsMonotonic, NpgsqlDbType.Boolean, ct);
             await writer.WriteAsync(d.Flags, NpgsqlDbType.Integer, ct);
             await WriteNullableAsync(writer, SerializeJsonOrNull(d.Attributes), NpgsqlDbType.Jsonb, ct);
+            await WriteNullableAsync(writer, SerializeJsonOrNull(d.Exemplars), NpgsqlDbType.Jsonb, ct);
         }
         await writer.CompleteAsync(ct);
     }
@@ -706,7 +711,7 @@ public sealed class TimescaleBulkWriter(
         COPY histogram_data_points (
             metric_id, start_time_unix_nano, time_unix_nano, count, sum_value,
             bucket_counts, explicit_bounds, aggregation_temporality,
-            flags, min_value, max_value, attributes_json)
+            flags, min_value, max_value, attributes_json, exemplars_json)
         FROM STDIN (FORMAT BINARY)
         """;
 
@@ -731,6 +736,7 @@ public sealed class TimescaleBulkWriter(
             await WriteNullableAsync(writer, d.Min, NpgsqlDbType.Double, ct);
             await WriteNullableAsync(writer, d.Max, NpgsqlDbType.Double, ct);
             await WriteNullableAsync(writer, SerializeJsonOrNull(d.Attributes), NpgsqlDbType.Jsonb, ct);
+            await WriteNullableAsync(writer, SerializeJsonOrNull(d.Exemplars), NpgsqlDbType.Jsonb, ct);
         }
         await writer.CompleteAsync(ct);
     }
@@ -740,7 +746,7 @@ public sealed class TimescaleBulkWriter(
             metric_id, start_time_unix_nano, time_unix_nano, count, sum_value,
             scale, zero_count, positive_offset, positive_bucket_counts,
             negative_offset, negative_bucket_counts,
-            aggregation_temporality, flags, min_value, max_value, attributes_json)
+            aggregation_temporality, flags, min_value, max_value, attributes_json, exemplars_json)
         FROM STDIN (FORMAT BINARY)
         """;
 
@@ -769,6 +775,7 @@ public sealed class TimescaleBulkWriter(
             await WriteNullableAsync(writer, d.Min, NpgsqlDbType.Double, ct);
             await WriteNullableAsync(writer, d.Max, NpgsqlDbType.Double, ct);
             await WriteNullableAsync(writer, SerializeJsonOrNull(d.Attributes), NpgsqlDbType.Jsonb, ct);
+            await WriteNullableAsync(writer, SerializeJsonOrNull(d.Exemplars), NpgsqlDbType.Jsonb, ct);
         }
         await writer.CompleteAsync(ct);
     }

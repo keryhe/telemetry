@@ -601,7 +601,10 @@ public sealed class SqlServerBulkWriter(
     // =========================================================================
 
     private static readonly string[] GaugeColumns =
-        ["metric_id", "start_time_unix_nano", "time_unix_nano", "value_double", "value_int", "flags", "attributes_json"];
+    [
+        "metric_id", "start_time_unix_nano", "time_unix_nano", "value_double", "value_int",
+        "flags", "attributes_json", "exemplars_json"
+    ];
 
     private static async Task BulkInsertGaugeDataPointsAsync(
         SqlConnection conn,
@@ -611,7 +614,8 @@ public sealed class SqlServerBulkWriter(
         var values = new List<object?[]>(rows.Count);
         foreach (var (metricId, d) in rows)
             values.Add([metricId, BoxOrNull(d.StartTimeUnixNano), d.TimeUnixNano,
-                BoxOrNull(d.ValueDouble), BoxOrNull(d.ValueInt), d.Flags, SerializeJsonOrNull(d.Attributes)]);
+                BoxOrNull(d.ValueDouble), BoxOrNull(d.ValueInt), d.Flags,
+                SerializeJsonOrNull(d.Attributes), SerializeJsonOrNull(d.Exemplars)]);
 
         using var bulk = CreateBulkCopy(conn, tx, "gauge_data_points");
         for (var i = 0; i < GaugeColumns.Length; i++)
@@ -623,7 +627,7 @@ public sealed class SqlServerBulkWriter(
     private static readonly string[] SumColumns =
     [
         "metric_id", "start_time_unix_nano", "time_unix_nano", "value_double", "value_int",
-        "aggregation_temporality", "is_monotonic", "flags", "attributes_json"
+        "aggregation_temporality", "is_monotonic", "flags", "attributes_json", "exemplars_json"
     ];
 
     private static async Task BulkInsertSumDataPointsAsync(
@@ -635,7 +639,8 @@ public sealed class SqlServerBulkWriter(
         foreach (var (metricId, d) in rows)
             values.Add([metricId, BoxOrNull(d.StartTimeUnixNano), d.TimeUnixNano,
                 BoxOrNull(d.ValueDouble), BoxOrNull(d.ValueInt),
-                d.AggregationTemporality.ToString(), d.IsMonotonic, d.Flags, SerializeJsonOrNull(d.Attributes)]);
+                d.AggregationTemporality.ToString(), d.IsMonotonic, d.Flags,
+                SerializeJsonOrNull(d.Attributes), SerializeJsonOrNull(d.Exemplars)]);
 
         using var bulk = CreateBulkCopy(conn, tx, "sum_data_points");
         for (var i = 0; i < SumColumns.Length; i++)
@@ -648,7 +653,7 @@ public sealed class SqlServerBulkWriter(
     [
         "metric_id", "start_time_unix_nano", "time_unix_nano", "count", "sum_value",
         "bucket_counts", "explicit_bounds", "aggregation_temporality", "flags",
-        "min_value", "max_value", "attributes_json"
+        "min_value", "max_value", "attributes_json", "exemplars_json"
     ];
 
     private static async Task BulkInsertHistogramDataPointsAsync(
@@ -662,7 +667,8 @@ public sealed class SqlServerBulkWriter(
                 d.Count, BoxOrNull(d.Sum),
                 SerializeJsonOrNull(d.BucketCounts), SerializeJsonOrNull(d.ExplicitBounds),
                 d.AggregationTemporality.ToString(), d.Flags,
-                BoxOrNull(d.Min), BoxOrNull(d.Max), SerializeJsonOrNull(d.Attributes)]);
+                BoxOrNull(d.Min), BoxOrNull(d.Max),
+                SerializeJsonOrNull(d.Attributes), SerializeJsonOrNull(d.Exemplars)]);
 
         using var bulk = CreateBulkCopy(conn, tx, "histogram_data_points");
         for (var i = 0; i < HistogramColumns.Length; i++)
@@ -676,7 +682,7 @@ public sealed class SqlServerBulkWriter(
         "metric_id", "start_time_unix_nano", "time_unix_nano", "count", "sum_value",
         "scale", "zero_count", "positive_offset", "positive_bucket_counts",
         "negative_offset", "negative_bucket_counts", "aggregation_temporality",
-        "flags", "min_value", "max_value", "attributes_json"
+        "flags", "min_value", "max_value", "attributes_json", "exemplars_json"
     ];
 
     private static async Task BulkInsertExpHistogramDataPointsAsync(
@@ -691,7 +697,8 @@ public sealed class SqlServerBulkWriter(
                 BoxOrNull(d.PositiveOffset), SerializeJsonOrNull(d.PositiveBucketCounts),
                 BoxOrNull(d.NegativeOffset), SerializeJsonOrNull(d.NegativeBucketCounts),
                 d.AggregationTemporality.ToString(), d.Flags,
-                BoxOrNull(d.Min), BoxOrNull(d.Max), SerializeJsonOrNull(d.Attributes)]);
+                BoxOrNull(d.Min), BoxOrNull(d.Max),
+                SerializeJsonOrNull(d.Attributes), SerializeJsonOrNull(d.Exemplars)]);
 
         using var bulk = CreateBulkCopy(conn, tx, "exponential_histogram_data_points");
         for (var i = 0; i < ExpHistogramColumns.Length; i++)

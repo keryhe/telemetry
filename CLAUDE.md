@@ -272,11 +272,23 @@ its foreign key on each subsequent batch until the process restarts.
 
 Because `metrics.created_at` now means "first seen" rather than approximately the data timestamp,
 metric retention prunes `TelemetryIngestionHelpers.TimePrunedMetricTables` — the five data-point
-tables plus `exemplars` — on `time_unix_nano`, instead of cascading from `metrics`.
+tables — on `time_unix_nano`, instead of cascading from `metrics`.
 
 **JSONB for attributes**: OpenTelemetry key-value attributes are stored as JSONB/`nvarchar`
 columns (`Attributes`, `FilteredAttributes`) rather than normalized tables; Dapper maps them
 via `JsonAttributesTypeHandler`.
+
+**Exemplars live on the data point** (schema 2.9.0). OTLP declares `repeated Exemplar exemplars` on
+every data point except Summary, so the former single `exemplar_id` column plus shared `exemplars`
+table could not represent the signal — and no writer ever populated it. The list is now an
+`exemplars_json` column on `gauge_data_points`, `sum_data_points`, `histogram_data_points` and
+`exponential_histogram_data_points`, serialized by `MetricService.ConvertExemplars` and read back by
+`MetricReadRepositoryBase.DeserializeExemplars`. A child table was rejected because it would need
+each data point's generated id, which none of the bulk-load paths (binary `COPY`, `SqlBulkCopy`,
+`ClickHouseBulkCopy`) hands back. Trade-off: an exemplar's `trace_id` is no longer indexable; no read
+path queries it. Note the .NET SDK emits no exemplars unless a meter provider sets `SetExemplarFilter`
+— `Keryhe.Telemetry.TestDataGenerator` does, and records its measurements inside an `Activity` so
+they carry trace ids.
 
 **Multi-tenant architecture**: Telemetry is tenant-scoped *through* `resources.tenant_id` — only
 `resources`, `api_keys` and `alert_rules` carry a `tenant_id` column, while every signal table
@@ -315,9 +327,9 @@ via `EXPLAIN` against a live Postgres container that the trace-detail lookup, th
 query, and the trace-retention sweep (`PostgreSqlWriteStore`/`TimescaleWriteStore`) all still
 resolve to index scans, not sequential scans, without the dropped indexes.
 
-**Telemetry (13)**: `resources`, `instrumentation_scopes`, `spans`, `span_events`, `span_links`,
+**Telemetry (12)**: `resources`, `instrumentation_scopes`, `spans`, `span_events`, `span_links`,
 `metrics`, `gauge_data_points`, `sum_data_points`, `histogram_data_points`,
-`exponential_histogram_data_points`, `summary_data_points`, `exemplars`, `log_records`
+`exponential_histogram_data_points`, `summary_data_points`, `log_records`
 
 **Multi-tenant/auth (2)**: `tenants`, `api_keys`
 

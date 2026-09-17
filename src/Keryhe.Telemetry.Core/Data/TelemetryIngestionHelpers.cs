@@ -14,16 +14,14 @@ namespace Keryhe.Telemetry.Core.Data;
 public static class TelemetryIngestionHelpers
 {
     /// <summary>
-    /// Every table the metric retention sweep prunes: the five data-point tables plus
-    /// <c>exemplars</c>, each on its own <c>time_unix_nano</c>. Kept in one place so all five
-    /// providers agree -- a sixth table added later without updating five separate copies is
-    /// exactly how orphaned rows appear.
+    /// Every table the metric retention sweep prunes: the five data-point tables, each on its own
+    /// <c>time_unix_nano</c>. Kept in one place so all five providers agree -- a table added later
+    /// without updating five separate copies is exactly how orphaned rows appear.
     ///
-    /// <c>exemplars</c> belongs here even though it is not a data-point table. It is only
-    /// soft-referenced (data points carry an <c>exemplar_id</c> with no foreign key), so no
-    /// cascade or metric-scoped delete has ever been able to reach it -- but it carries its own
-    /// timestamp, so retention can prune it, and must, or it grows without bound while everything
-    /// around it is trimmed.
+    /// Exemplars need no entry of their own. Since schema 2.9.0 they live in an
+    /// <c>exemplars_json</c> column on the data point that owns them rather than in a separate,
+    /// soft-referenced <c>exemplars</c> table, so pruning the data point takes its exemplars with
+    /// it and there is nothing left to orphan.
     /// </summary>
     public static readonly string[] TimePrunedMetricTables =
     [
@@ -31,8 +29,7 @@ public static class TelemetryIngestionHelpers
         "sum_data_points",
         "histogram_data_points",
         "exponential_histogram_data_points",
-        "summary_data_points",
-        "exemplars"
+        "summary_data_points"
     ];
 
     /// <summary>

@@ -31,7 +31,7 @@ public class GaugeDataPointModel
     public long? ValueInt { get; set; }
     public int Flags { get; set; } = 0;
     public Dictionary<string, object>? Attributes { get; set; }
-    public ExemplarModel? Exemplar { get; set; }
+    public List<ExemplarModel>? Exemplars { get; set; }
 }
 
 public class SumDataPointModel
@@ -44,7 +44,7 @@ public class SumDataPointModel
     public bool IsMonotonic { get; set; } = false;
     public int Flags { get; set; } = 0;
     public Dictionary<string, object>? Attributes { get; set; }
-    public ExemplarModel? Exemplar { get; set; }
+    public List<ExemplarModel>? Exemplars { get; set; }
 }
 
 public class HistogramDataPointModel

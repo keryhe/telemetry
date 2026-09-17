@@ -210,6 +210,13 @@ CREATE INDEX idx_type          ON metrics ([type]);
 -- idx_resource_name (resource_id, name) dropped in 2.7.0: now a left prefix of uk_metric_identity.
 GO
 
+-- exemplars_json (2.9.0) replaces the former single exemplar_id column and the shared
+-- `exemplars` table, which no writer ever populated. OTLP declares `repeated Exemplar
+-- exemplars` on every data point except Summary, so one id per row could never hold more than
+-- the first. The list is stored as JSON on the data point itself: a child table would need each
+-- data point's generated id, which the bulk-load path (binary COPY / bulk copy) does not hand
+-- back, and JSON is already how bucket_counts, explicit_bounds and quantile_values are stored.
+-- Trade-off: an exemplar's trace_id is no longer indexable. No read path queries it.
 -- Gauge data points.
 -- PostgreSQL used a TimescaleDB hypertable (no PRIMARY KEY); SQL Server uses a normal table.
 CREATE TABLE gauge_data_points (
@@ -220,8 +227,8 @@ CREATE TABLE gauge_data_points (
     value_double         FLOAT,
     value_int            BIGINT,
     flags                INT    DEFAULT 0,
-    exemplar_id          BIGINT,
     attributes_json      NVARCHAR(MAX),
+    exemplars_json       NVARCHAR(MAX),
     CONSTRAINT fk_gauge_data_points_metrics FOREIGN KEY (metric_id) REFERENCES metrics (id) ON DELETE CASCADE
 );
 CREATE INDEX idx_gauge_metric_time ON gauge_data_points (metric_id, time_unix_nano DESC);
@@ -240,8 +247,8 @@ CREATE TABLE sum_data_points (
         CHECK (aggregation_temporality IN ('UNSPECIFIED', 'DELTA', 'CUMULATIVE')),
     is_monotonic            BIT          DEFAULT 0,
     flags                   INT          DEFAULT 0,
-    exemplar_id             BIGINT,
     attributes_json         NVARCHAR(MAX),
+    exemplars_json          NVARCHAR(MAX),
     CONSTRAINT fk_sum_data_points_metrics FOREIGN KEY (metric_id) REFERENCES metrics (id) ON DELETE CASCADE
 );
 -- Standalone time index added in 2.7.0: metric retention now deletes from the data-point
@@ -266,8 +273,8 @@ CREATE TABLE histogram_data_points (
     flags                   INT          DEFAULT 0,
     min_value               FLOAT,
     max_value               FLOAT,
-    exemplar_id             BIGINT,
     attributes_json         NVARCHAR(MAX),
+    exemplars_json          NVARCHAR(MAX),
     CONSTRAINT fk_histogram_data_points_metrics FOREIGN KEY (metric_id) REFERENCES metrics (id) ON DELETE CASCADE
 );
 CREATE INDEX idx_histogram_metric_time ON histogram_data_points (metric_id, time_unix_nano DESC);
@@ -293,8 +300,8 @@ CREATE TABLE exponential_histogram_data_points (
     flags                   INT          DEFAULT 0,
     min_value               FLOAT,
     max_value               FLOAT,
-    exemplar_id             BIGINT,
     attributes_json         NVARCHAR(MAX),
+    exemplars_json          NVARCHAR(MAX),
     CONSTRAINT fk_exponential_histogram_data_points_metrics FOREIGN KEY (metric_id) REFERENCES metrics (id) ON DELETE CASCADE
 );
 CREATE INDEX idx_exp_histogram_metric_time ON exponential_histogram_data_points (metric_id, time_unix_nano DESC);
@@ -316,20 +323,6 @@ CREATE TABLE summary_data_points (
 );
 CREATE INDEX idx_summary_metric_time ON summary_data_points (metric_id, time_unix_nano DESC);
 CREATE INDEX idx_summary_time        ON summary_data_points (time_unix_nano DESC);
-GO
-
--- Exemplars (regular table, soft-referenced by data point tables via exemplar_id).
-CREATE TABLE exemplars (
-    id                  BIGINT IDENTITY(1,1) PRIMARY KEY,
-    filtered_attributes NVARCHAR(MAX),
-    time_unix_nano      BIGINT NOT NULL,
-    value_double        FLOAT,
-    value_int           BIGINT,
-    span_id             CHAR(16),
-    trace_id            CHAR(32)
-);
-CREATE INDEX idx_exemplar_time       ON exemplars (time_unix_nano);
-CREATE INDEX idx_exemplar_trace_span ON exemplars (trace_id, span_id);
 GO
 
 -- =============================================================================
@@ -525,7 +518,7 @@ GO
 -- Only reached when every statement above succeeded, so a partial apply cannot
 -- leave a false version marker for the apply-schema.sh gate.
 MERGE schema_version AS target
-USING (VALUES (N'2.8.0')) AS src (version)
+USING (VALUES (N'2.9.0')) AS src (version)
 ON target.version = src.version
 WHEN MATCHED     THEN UPDATE SET applied_at = SYSDATETIME()
 WHEN NOT MATCHED THEN INSERT (version, applied_at) VALUES (src.version, SYSDATETIME());

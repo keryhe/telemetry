@@ -642,7 +642,7 @@ public sealed class MySqlBulkWriter(
         var columns = new[]
         {
             "metric_id", "start_time_unix_nano", "time_unix_nano",
-            "value_double", "value_int", "flags", "attributes_json"
+            "value_double", "value_int", "flags", "attributes_json", "exemplars_json"
         };
 
         var values = new List<object?[]>(rows.Count);
@@ -651,7 +651,8 @@ public sealed class MySqlBulkWriter(
             {
                 metricId, BoxOrNull(d.StartTimeUnixNano), d.TimeUnixNano,
                 BoxOrNull(d.ValueDouble), BoxOrNull(d.ValueInt), d.Flags,
-                (object?)SerializeJsonOrNull(d.Attributes) ?? DBNull.Value
+                (object?)SerializeJsonOrNull(d.Attributes) ?? DBNull.Value,
+                (object?)SerializeJsonOrNull(d.Exemplars) ?? DBNull.Value
             });
 
         await BulkInsertAsync(conn, tx, "gauge_data_points", columns, values, ct);
@@ -665,7 +666,7 @@ public sealed class MySqlBulkWriter(
         var columns = new[]
         {
             "metric_id", "start_time_unix_nano", "time_unix_nano", "value_double", "value_int",
-            "aggregation_temporality", "is_monotonic", "flags", "attributes_json"
+            "aggregation_temporality", "is_monotonic", "flags", "attributes_json", "exemplars_json"
         };
 
         var values = new List<object?[]>(rows.Count);
@@ -675,7 +676,8 @@ public sealed class MySqlBulkWriter(
                 metricId, BoxOrNull(d.StartTimeUnixNano), d.TimeUnixNano,
                 BoxOrNull(d.ValueDouble), BoxOrNull(d.ValueInt),
                 d.AggregationTemporality.ToString(), d.IsMonotonic, d.Flags,
-                (object?)SerializeJsonOrNull(d.Attributes) ?? DBNull.Value
+                (object?)SerializeJsonOrNull(d.Attributes) ?? DBNull.Value,
+                (object?)SerializeJsonOrNull(d.Exemplars) ?? DBNull.Value
             });
 
         await BulkInsertAsync(conn, tx, "sum_data_points", columns, values, ct);
@@ -690,7 +692,7 @@ public sealed class MySqlBulkWriter(
         {
             "metric_id", "start_time_unix_nano", "time_unix_nano", "count", "sum_value",
             "bucket_counts", "explicit_bounds", "aggregation_temporality", "flags",
-            "min_value", "max_value", "attributes_json"
+            "min_value", "max_value", "attributes_json", "exemplars_json"
         };
 
         var values = new List<object?[]>(rows.Count);
@@ -703,7 +705,8 @@ public sealed class MySqlBulkWriter(
                 (object?)SerializeJsonOrNull(d.ExplicitBounds) ?? DBNull.Value,
                 d.AggregationTemporality.ToString(), d.Flags,
                 BoxOrNull(d.Min), BoxOrNull(d.Max),
-                (object?)SerializeJsonOrNull(d.Attributes) ?? DBNull.Value
+                (object?)SerializeJsonOrNull(d.Attributes) ?? DBNull.Value,
+                (object?)SerializeJsonOrNull(d.Exemplars) ?? DBNull.Value
             });
 
         await BulkInsertAsync(conn, tx, "histogram_data_points", columns, values, ct);
@@ -719,7 +722,7 @@ public sealed class MySqlBulkWriter(
             "metric_id", "start_time_unix_nano", "time_unix_nano", "count", "sum_value",
             "scale", "zero_count", "positive_offset", "positive_bucket_counts",
             "negative_offset", "negative_bucket_counts", "aggregation_temporality",
-            "flags", "min_value", "max_value", "attributes_json"
+            "flags", "min_value", "max_value", "attributes_json", "exemplars_json"
         };
 
         var values = new List<object?[]>(rows.Count);
@@ -734,7 +737,8 @@ public sealed class MySqlBulkWriter(
                 (object?)SerializeJsonOrNull(d.NegativeBucketCounts) ?? DBNull.Value,
                 d.AggregationTemporality.ToString(), d.Flags,
                 BoxOrNull(d.Min), BoxOrNull(d.Max),
-                (object?)SerializeJsonOrNull(d.Attributes) ?? DBNull.Value
+                (object?)SerializeJsonOrNull(d.Attributes) ?? DBNull.Value,
+                (object?)SerializeJsonOrNull(d.Exemplars) ?? DBNull.Value
             });
 
         await BulkInsertAsync(conn, tx, "exponential_histogram_data_points", columns, values, ct);

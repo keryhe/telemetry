@@ -402,9 +402,9 @@ public abstract class MetricReadRepositoryBase : DapperReadRepository, IMetricRe
         var (timeClause, tp) = TimeRange(startTime, endTime);
         var rows = await conn.QueryAsync<GaugeRow>(new CommandDefinition($"""
             SELECT dp.start_time_unix_nano AS StartTimeUnixNano, dp.time_unix_nano AS TimeUnixNano,
-                   dp.value_double AS ValueDouble, dp.value_int AS ValueInt, dp.flags AS Flags, dp.attributes_json AS AttributesJson,
-                   dp.exemplar_id AS ExemplarId, {ExemplarColumns}
-            FROM gauge_data_points dp LEFT JOIN exemplars e ON dp.exemplar_id = e.id
+                   dp.value_double AS ValueDouble, dp.value_int AS ValueInt, dp.flags AS Flags,
+                   dp.attributes_json AS AttributesJson, dp.exemplars_json AS ExemplarsJson
+            FROM gauge_data_points dp
             WHERE dp.metric_id IN ({IdInList(metricIds)}){timeClause}
             ORDER BY dp.time_unix_nano
             """, tp, cancellationToken: ct));
@@ -417,7 +417,7 @@ public abstract class MetricReadRepositoryBase : DapperReadRepository, IMetricRe
             IntValue = r.ValueInt,
             Flags = r.Flags,
             Attributes = DeserializeAttributes(r.AttributesJson),
-            Exemplars = BuildExemplarList(r)
+            Exemplars = DeserializeExemplars(r.ExemplarsJson)
         }).ToList();
 
         return FilterByLabelFilters(points, labelFilters);
@@ -431,9 +431,9 @@ public abstract class MetricReadRepositoryBase : DapperReadRepository, IMetricRe
             SELECT dp.start_time_unix_nano AS StartTimeUnixNano, dp.time_unix_nano AS TimeUnixNano,
                    dp.value_double AS ValueDouble, dp.value_int AS ValueInt,
                    dp.aggregation_temporality AS AggregationTemporality, dp.is_monotonic AS IsMonotonic,
-                   dp.flags AS Flags, dp.attributes_json AS AttributesJson,
-                   dp.exemplar_id AS ExemplarId, {ExemplarColumns}
-            FROM sum_data_points dp LEFT JOIN exemplars e ON dp.exemplar_id = e.id
+                   dp.flags AS Flags,
+                   dp.attributes_json AS AttributesJson, dp.exemplars_json AS ExemplarsJson
+            FROM sum_data_points dp
             WHERE dp.metric_id IN ({IdInList(metricIds)}){timeClause}
             ORDER BY dp.time_unix_nano
             """, tp, cancellationToken: ct));
@@ -448,7 +448,7 @@ public abstract class MetricReadRepositoryBase : DapperReadRepository, IMetricRe
             IsMonotonic = r.IsMonotonic,
             Flags = r.Flags,
             Attributes = DeserializeAttributes(r.AttributesJson),
-            Exemplars = BuildExemplarList(r)
+            Exemplars = DeserializeExemplars(r.ExemplarsJson)
         }).ToList();
 
         return FilterByLabelFilters(points, labelFilters);
@@ -462,9 +462,9 @@ public abstract class MetricReadRepositoryBase : DapperReadRepository, IMetricRe
             SELECT dp.start_time_unix_nano AS StartTimeUnixNano, dp.time_unix_nano AS TimeUnixNano,
                    dp.count AS Count, dp.sum_value AS SumValue, dp.min_value AS MinValue, dp.max_value AS MaxValue,
                    dp.aggregation_temporality AS AggregationTemporality, dp.flags AS Flags,
-                   dp.bucket_counts AS BucketCounts, dp.explicit_bounds AS ExplicitBounds, dp.attributes_json AS AttributesJson,
-                   dp.exemplar_id AS ExemplarId, {ExemplarColumns}
-            FROM histogram_data_points dp LEFT JOIN exemplars e ON dp.exemplar_id = e.id
+                   dp.bucket_counts AS BucketCounts, dp.explicit_bounds AS ExplicitBounds,
+                   dp.attributes_json AS AttributesJson, dp.exemplars_json AS ExemplarsJson
+            FROM histogram_data_points dp
             WHERE dp.metric_id IN ({IdInList(metricIds)}){timeClause}
             ORDER BY dp.time_unix_nano
             """, tp, cancellationToken: ct));
@@ -482,7 +482,7 @@ public abstract class MetricReadRepositoryBase : DapperReadRepository, IMetricRe
             BucketCounts = DeserializeArray<long>(r.BucketCounts)?.ToList() ?? new List<long>(),
             BucketBounds = DeserializeArray<double>(r.ExplicitBounds)?.ToList() ?? new List<double>(),
             Attributes = DeserializeAttributes(r.AttributesJson),
-            Exemplars = BuildExemplarList(r)
+            Exemplars = DeserializeExemplars(r.ExemplarsJson)
         }).ToList();
 
         return FilterByLabelFilters(points, labelFilters);
@@ -498,9 +498,9 @@ public abstract class MetricReadRepositoryBase : DapperReadRepository, IMetricRe
                    dp.scale AS Scale, dp.zero_count AS ZeroCount,
                    dp.positive_offset AS PositiveOffset, dp.positive_bucket_counts AS PositiveBucketCounts,
                    dp.negative_offset AS NegativeOffset, dp.negative_bucket_counts AS NegativeBucketCounts,
-                   dp.aggregation_temporality AS AggregationTemporality, dp.flags AS Flags, dp.attributes_json AS AttributesJson,
-                   dp.exemplar_id AS ExemplarId, {ExemplarColumns}
-            FROM exponential_histogram_data_points dp LEFT JOIN exemplars e ON dp.exemplar_id = e.id
+                   dp.aggregation_temporality AS AggregationTemporality, dp.flags AS Flags,
+                   dp.attributes_json AS AttributesJson, dp.exemplars_json AS ExemplarsJson
+            FROM exponential_histogram_data_points dp
             WHERE dp.metric_id IN ({IdInList(metricIds)}){timeClause}
             ORDER BY dp.time_unix_nano
             """, tp, cancellationToken: ct));
@@ -522,7 +522,7 @@ public abstract class MetricReadRepositoryBase : DapperReadRepository, IMetricRe
             AggregationTemporality = Enum.Parse<AggregationTemporality>(r.AggregationTemporality),
             Flags = r.Flags,
             Attributes = DeserializeAttributes(r.AttributesJson),
-            Exemplars = BuildExemplarList(r)
+            Exemplars = DeserializeExemplars(r.ExemplarsJson)
         }).ToList();
 
         return FilterByLabelFilters(points, labelFilters);
@@ -605,26 +605,14 @@ public abstract class MetricReadRepositoryBase : DapperReadRepository, IMetricRe
         _ => "gauge_data_points"
     };
 
-    private const string ExemplarColumns =
-        "e.filtered_attributes AS ExFilteredAttributes, e.time_unix_nano AS ExTimeUnixNano, e.value_double AS ExValueDouble, e.value_int AS ExValueInt, e.span_id AS ExSpanId, e.trace_id AS ExTraceId";
-
-    private static List<ExemplarModel>? BuildExemplarList(IExemplarCarrier r)
-    {
-        if (r.ExemplarId == null)
-            return null;
-        return new List<ExemplarModel>
-        {
-            new()
-            {
-                FilteredAttributes = DeserializeAttributes(r.ExFilteredAttributes),
-                TimeUnixNano = r.ExTimeUnixNano ?? 0,
-                ValueDouble = r.ExValueDouble,
-                ValueInt = r.ExValueInt,
-                SpanIdHex = r.ExSpanId,
-                TraceIdHex = r.ExTraceId
-            }
-        };
-    }
+    /// <summary>
+    /// A data point's exemplars, stored as a JSON array on the row itself (schema 2.9.0) rather
+    /// than joined from a separate table. Before 2.9.0 a data point carried one nullable
+    /// <c>exemplar_id</c>, so this could only ever return a single exemplar -- and in practice
+    /// returned null always, because no writer ever populated that column.
+    /// </summary>
+    private static List<ExemplarModel>? DeserializeExemplars(string? json)
+        => string.IsNullOrEmpty(json) ? null : JsonSerializer.Deserialize<List<ExemplarModel>>(json);
 
     private static List<MetricDataPoint> FilterByLabelFilters(List<MetricDataPoint> points, Dictionary<string, string>? labelFilters)
     {
@@ -751,29 +739,6 @@ public abstract class MetricReadRepositoryBase : DapperReadRepository, IMetricRe
     // ROW DTOs
     // =========================================================================
 
-    private interface IExemplarCarrier
-    {
-        long? ExemplarId { get; }
-        string? ExFilteredAttributes { get; }
-        long? ExTimeUnixNano { get; }
-        double? ExValueDouble { get; }
-        long? ExValueInt { get; }
-        string? ExSpanId { get; }
-        string? ExTraceId { get; }
-    }
-
-    private abstract class ExemplarCarrierRow : IExemplarCarrier
-    {
-        public long? ExemplarId { get; set; }
-        public string? ExFilteredAttributes { get; set; }
-        public long? ExTimeUnixNano { get; set; }
-        public double? ExValueDouble { get; set; }
-        public long? ExValueInt { get; set; }
-        public string? ExSpanId { get; set; }
-        public string? ExTraceId { get; set; }
-        long? IExemplarCarrier.ExemplarId => ExemplarId;
-    }
-
     /// <summary>All-time data-point window and count for a single metric.</summary>
     private sealed record MetricStat(DateTime First, DateTime Last, int Count);
 
@@ -804,7 +769,7 @@ public abstract class MetricReadRepositoryBase : DapperReadRepository, IMetricRe
         public string? ResourceAttributesJson { get; set; }
     }
 
-    private sealed class GaugeRow : ExemplarCarrierRow
+    private sealed class GaugeRow
     {
         public long? StartTimeUnixNano { get; set; }
         public long TimeUnixNano { get; set; }
@@ -812,9 +777,10 @@ public abstract class MetricReadRepositoryBase : DapperReadRepository, IMetricRe
         public long? ValueInt { get; set; }
         public int Flags { get; set; }
         public string? AttributesJson { get; set; }
+        public string? ExemplarsJson { get; set; }
     }
 
-    private sealed class SumRow : ExemplarCarrierRow
+    private sealed class SumRow
     {
         public long? StartTimeUnixNano { get; set; }
         public long TimeUnixNano { get; set; }
@@ -824,9 +790,10 @@ public abstract class MetricReadRepositoryBase : DapperReadRepository, IMetricRe
         public bool IsMonotonic { get; set; }
         public int Flags { get; set; }
         public string? AttributesJson { get; set; }
+        public string? ExemplarsJson { get; set; }
     }
 
-    private sealed class HistogramRow : ExemplarCarrierRow
+    private sealed class HistogramRow
     {
         public long? StartTimeUnixNano { get; set; }
         public long TimeUnixNano { get; set; }
@@ -839,9 +806,10 @@ public abstract class MetricReadRepositoryBase : DapperReadRepository, IMetricRe
         public string? BucketCounts { get; set; }
         public string? ExplicitBounds { get; set; }
         public string? AttributesJson { get; set; }
+        public string? ExemplarsJson { get; set; }
     }
 
-    private sealed class ExpHistogramRow : ExemplarCarrierRow
+    private sealed class ExpHistogramRow
     {
         public long? StartTimeUnixNano { get; set; }
         public long TimeUnixNano { get; set; }
@@ -858,6 +826,7 @@ public abstract class MetricReadRepositoryBase : DapperReadRepository, IMetricRe
         public string AggregationTemporality { get; set; } = null!;
         public int Flags { get; set; }
         public string? AttributesJson { get; set; }
+        public string? ExemplarsJson { get; set; }
     }
 
     private sealed class SummaryRow

@@ -172,6 +172,13 @@ CREATE TABLE IF NOT EXISTS metrics
 ENGINE = ReplacingMergeTree
 ORDER BY (resource_id, scope_id, name, type);
 
+-- exemplars_json (2.9.0) replaces the former single exemplar_id column and the shared
+-- `exemplars` table, which no writer ever populated. OTLP declares `repeated Exemplar
+-- exemplars` on every data point except Summary, so one id per row could never hold more than
+-- the first. The list is stored as JSON on the data point itself: a child table would need each
+-- data point's generated id, which the bulk-load path (binary COPY / bulk copy) does not hand
+-- back, and JSON is already how bucket_counts, explicit_bounds and quantile_values are stored.
+-- Trade-off: an exemplar's trace_id is no longer indexable. No read path queries it.
 CREATE TABLE IF NOT EXISTS gauge_data_points
 (
     id                   Int64 DEFAULT 0,
@@ -181,8 +188,8 @@ CREATE TABLE IF NOT EXISTS gauge_data_points
     value_double         Nullable(Float64),
     value_int            Nullable(Int64),
     flags                Int32 DEFAULT 0,
-    exemplar_id          Nullable(Int64),
-    attributes_json      Nullable(String)
+    attributes_json      Nullable(String),
+    exemplars_json       Nullable(String)
 )
 ENGINE = MergeTree
 PARTITION BY toYYYYMMDD(fromUnixTimestamp64Nano(time_unix_nano))
@@ -199,8 +206,8 @@ CREATE TABLE IF NOT EXISTS sum_data_points
     aggregation_temporality String DEFAULT 'UNSPECIFIED',
     is_monotonic            UInt8 DEFAULT 0,
     flags                   Int32 DEFAULT 0,
-    exemplar_id             Nullable(Int64),
-    attributes_json         Nullable(String)
+    attributes_json         Nullable(String),
+    exemplars_json          Nullable(String)
 )
 ENGINE = MergeTree
 PARTITION BY toYYYYMMDD(fromUnixTimestamp64Nano(time_unix_nano))
@@ -220,8 +227,8 @@ CREATE TABLE IF NOT EXISTS histogram_data_points
     flags                   Int32 DEFAULT 0,
     min_value               Nullable(Float64),
     max_value               Nullable(Float64),
-    exemplar_id             Nullable(Int64),
-    attributes_json         Nullable(String)
+    attributes_json         Nullable(String),
+    exemplars_json          Nullable(String)
 )
 ENGINE = MergeTree
 PARTITION BY toYYYYMMDD(fromUnixTimestamp64Nano(time_unix_nano))
@@ -245,8 +252,8 @@ CREATE TABLE IF NOT EXISTS exponential_histogram_data_points
     flags                   Int32 DEFAULT 0,
     min_value               Nullable(Float64),
     max_value               Nullable(Float64),
-    exemplar_id             Nullable(Int64),
-    attributes_json         Nullable(String)
+    attributes_json         Nullable(String),
+    exemplars_json          Nullable(String)
 )
 ENGINE = MergeTree
 PARTITION BY toYYYYMMDD(fromUnixTimestamp64Nano(time_unix_nano))
@@ -267,19 +274,6 @@ CREATE TABLE IF NOT EXISTS summary_data_points
 ENGINE = MergeTree
 PARTITION BY toYYYYMMDD(fromUnixTimestamp64Nano(time_unix_nano))
 ORDER BY (metric_id, time_unix_nano);
-
-CREATE TABLE IF NOT EXISTS exemplars
-(
-    id                  Int64 DEFAULT 0,
-    filtered_attributes Nullable(String),
-    time_unix_nano      Int64,
-    value_double        Nullable(Float64),
-    value_int           Nullable(Int64),
-    span_id             Nullable(String),
-    trace_id            Nullable(String)
-)
-ENGINE = MergeTree
-ORDER BY time_unix_nano;
 
 -- =============================================================================
 -- LOGS
@@ -421,9 +415,9 @@ GROUP BY severity_text, severity_number, log_date;
 -- =============================================================================
 -- Only inserted when every statement above succeeded, so a partial apply cannot
 -- leave a false version marker for the apply-schema.sh gate.
--- No DDL change for ClickHouse in 2.8.0: spans' ORDER BY (trace_id, span_id) with a daily
--- partition already gives it what the relational providers get from the four indexes dropped
--- from their spans table (see PostgreSQL-Schema.sql), and it has no GIN-style JSONB index to
--- carry the equivalent write cost of. Version bumped to keep schema_version in lockstep with
--- the other four providers.
-INSERT INTO schema_version (version) VALUES ('2.8.0');
+-- 2.9.0 changes the metric data-point tables here exactly as it does everywhere else:
+-- exemplar_id out, exemplars_json in. 2.8.0 before it was a no-op bump for ClickHouse alone --
+-- spans' ORDER BY (trace_id, span_id) with a daily partition already gave it what the relational
+-- providers got from the four indexes they dropped (see PostgreSQL-Schema.sql), and it has no
+-- GIN-style JSONB index to carry the equivalent write cost of.
+INSERT INTO schema_version (version) VALUES ('2.9.0');

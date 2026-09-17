@@ -97,3 +97,21 @@
 }
 
 .mono { font-family: monospace; font-size: 12px; }
+
+/* Exemplars tab: the parent data point a row was sampled from, and the em dash standing in for a
+   trace/span id an exemplar recorded outside a sampled span does not have. */
+.point-cell { white-space: nowrap; }
+/* A scalar series name carries its whole label set, which wraps to four lines and triples the row
+   height if left alone. One line, ellipsis, full text in the cell's tooltip. */
+.series-cell {
+  max-width: 260px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.point-value {
+  margin-left: 8px;
+  color: var(--mat-sys-on-surface-variant);
+  font-size: 12px;
+}
+.muted { color: var(--mat-sys-on-surface-variant); }

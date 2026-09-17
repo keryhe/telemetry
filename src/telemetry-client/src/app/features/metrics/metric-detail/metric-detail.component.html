@@ -220,34 +220,53 @@
             <table mat-table [dataSource]="exemplars()" class="full-width">
               <ng-container matColumnDef="time">
                 <th mat-header-cell *matHeaderCellDef>Time</th>
-                <td mat-cell *matCellDef="let e" class="mono">{{ (e.timeUnixNano / 1000000) | date:'MM/dd/yyyy, h:mm:ss a' }}</td>
+                <td mat-cell *matCellDef="let r" class="mono">
+                  {{ nanoToDate(r.exemplar.timeUnixNano) | date:'MM/dd/yyyy, h:mm:ss a' }}
+                </td>
               </ng-container>
               <ng-container matColumnDef="value">
                 <th mat-header-cell *matHeaderCellDef>Value</th>
-                <td mat-cell *matCellDef="let e">{{ e.valueDouble ?? e.valueInt }}</td>
+                <td mat-cell *matCellDef="let r" class="mono">{{ r.value }}</td>
+              </ng-container>
+              <ng-container matColumnDef="series">
+                <th mat-header-cell *matHeaderCellDef>Series</th>
+                <td mat-cell *matCellDef="let r" class="series-cell" [matTooltip]="r.seriesName">{{ r.seriesName }}</td>
+              </ng-container>
+              <ng-container matColumnDef="point">
+                <th mat-header-cell *matHeaderCellDef>Data point</th>
+                <td mat-cell *matCellDef="let r" class="point-cell">
+                  <span class="mono">{{ r.pointTimestamp | date:'h:mm:ss a' }}</span>
+                  <span class="point-value">{{ r.pointValue }}</span>
+                </td>
               </ng-container>
               <ng-container matColumnDef="traceId">
                 <th mat-header-cell *matHeaderCellDef>Trace ID</th>
-                <td mat-cell *matCellDef="let e" class="mono">
-                  <a [routerLink]="['/traces', e.traceIdHex]">{{ e.traceIdHex | slice:0:16 }}…</a>
+                <td mat-cell *matCellDef="let r" class="mono">
+                  @if (r.exemplar.traceIdHex) {
+                    <a [routerLink]="['/traces', r.exemplar.traceIdHex]">{{ r.exemplar.traceIdHex | slice:0:16 }}…</a>
+                  } @else {
+                    <span class="muted">—</span>
+                  }
                 </td>
               </ng-container>
               <ng-container matColumnDef="spanId">
                 <th mat-header-cell *matHeaderCellDef>Span ID</th>
-                <td mat-cell *matCellDef="let e" class="mono">{{ e.spanIdHex | slice:0:16 }}</td>
+                <td mat-cell *matCellDef="let r" class="mono">
+                  {{ r.exemplar.spanIdHex || '—' }}
+                </td>
               </ng-container>
               <ng-container matColumnDef="attrs">
                 <th mat-header-cell *matHeaderCellDef>Filtered Attributes</th>
-                <td mat-cell *matCellDef="let e" class="mono attrs-cell">
-                  @if (e.filteredAttributes) {
-                    @for (a of e.filteredAttributes | keyvalue; track a.key) {
+                <td mat-cell *matCellDef="let r" class="mono attrs-cell">
+                  @if (r.exemplar.filteredAttributes) {
+                    @for (a of r.exemplar.filteredAttributes | keyvalue; track a.key) {
                       <span class="attr-pill">{{ a.key }}={{ a.value }}</span>
                     }
                   }
                 </td>
               </ng-container>
-              <tr mat-header-row *matHeaderRowDef="['time','value','traceId','spanId','attrs']"></tr>
-              <tr mat-row *matRowDef="let row; columns: ['time','value','traceId','spanId','attrs']"></tr>
+              <tr mat-header-row *matHeaderRowDef="exemplarColumns"></tr>
+              <tr mat-row *matRowDef="let row; columns: exemplarColumns"></tr>
             </table>
           }
         </mat-card-content>
