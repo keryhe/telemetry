@@ -17,7 +17,11 @@ public static class MySqlServiceCollectionExtensions
     public static IServiceCollection AddMySqlWriteServices(this IServiceCollection services, IConfiguration configuration)
     {
         services.AddSingleton<ITelemetryBulkWriter, MySqlBulkWriter>();
-        services.AddScoped<ITenantResolver, MySqlTenantResolver>();
+        // The raw api_keys lookup and last_used_at bulk update. CachingTenantResolver (the
+        // ITenantResolver every gRPC service actually resolves) and ApiKeyTouchWorker are
+        // provider-agnostic and registered once, in AddKeryheTelemetryCollector.
+        services.AddScoped<IApiKeyLookup, MySqlTenantResolver>();
+        services.AddScoped<IApiKeyTouchStore, MySqlApiKeyTouchStore>();
         services.AddScoped<ITelemetryWriteStore, MySqlWriteStore>();
         return services;
     }

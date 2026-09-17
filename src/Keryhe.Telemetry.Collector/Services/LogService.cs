@@ -32,6 +32,16 @@ public class LogService : OpenTelemetry.Proto.Collector.Logs.V1.LogsService.Logs
     /// <summary>
     /// Handles the Export gRPC call for log data.
     /// Converts the incoming OTLP log data to Models and stores them using the LogRepository.
+    ///
+    /// <c>PartialSuccess.RejectedLogRecords</c> is honest only at ENQUEUE time, not at
+    /// durable-storage time: it is 0 once <see cref="ILogWriteRepository.StoreLogRecordsBatchAsync"/>
+    /// returns (the whole batch was accepted onto <c>TelemetryIngestionChannel</c>), or the full
+    /// record count if enqueueing itself threw. Storage is asynchronous past that point --
+    /// <c>TelemetryIngestionWorker</c> flushes the channel on a delay, with its own bounded retry,
+    /// and a batch that still fails after retries are exhausted is dropped with no way to signal
+    /// this caller, who has long since received its (successful) response. That drop is observable
+    /// via <c>Keryhe.Telemetry.Core.Data.IngestionMetrics</c>'s <c>records_dropped</c> counter and
+    /// the worker's "batch dropped" log line, never via this response.
     /// </summary>
     /// <param name="request">The ExportLogsServiceRequest containing log data</param>
     /// <param name="context">The gRPC server call context</param>
@@ -75,7 +85,12 @@ public class LogService : OpenTelemetry.Proto.Collector.Logs.V1.LogsService.Logs
             // Store log records using the repository
             var storedIds = await _logRepository.StoreLogRecordsBatchAsync(logRecords, context.CancellationToken);
             storedLogCount = logRecords.Count;
-            _logger.LogInformation("Received {LogCount} log records", logRecords.Count);
+            // Debug, not Information: this fires on every single Export call, so at Information
+            // level (commonly enabled by default in production) it is a per-request logging cost
+            // on the hot path for no operational benefit -- the enqueue counts are already visible
+            // via normal request volume, and a drop (the thing actually worth alerting on) is its
+            // own LogError plus IngestionMetrics' records_dropped counter, not this line.
+            _logger.LogDebug("Enqueued {LogCount} log records", logRecords.Count);
         }
         catch (OperationCanceledException)
         {

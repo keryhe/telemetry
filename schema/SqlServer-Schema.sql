@@ -125,16 +125,17 @@ CREATE TABLE spans (
     CONSTRAINT fk_spans_scopes    FOREIGN KEY (scope_id)    REFERENCES instrumentation_scopes (id),
     CONSTRAINT uk_trace_span      UNIQUE (trace_id, span_id)
 );
-CREATE INDEX idx_trace_id            ON spans (trace_id);
+-- idx_trace_id, idx_start_time, idx_kind and idx_status dropped in 2.8.0: idx_trace_id is a left
+-- prefix of uk_trace_span (trace_id, span_id); idx_start_time is a left prefix of idx_duration
+-- (start_time_unix_nano, end_time_unix_nano); idx_kind (6 distinct values) and idx_status (3
+-- distinct values) are too low-cardinality for the planner to ever choose. All three carried real
+-- write cost for zero read benefit.
 CREATE INDEX idx_span_id             ON spans (span_id);
 CREATE INDEX idx_parent_span         ON spans (parent_span_id);
 CREATE INDEX idx_spans_trace_parent  ON spans (trace_id, parent_span_id);
-CREATE INDEX idx_start_time          ON spans (start_time_unix_nano DESC);
 CREATE INDEX idx_end_time            ON spans (end_time_unix_nano DESC);
 CREATE INDEX idx_duration            ON spans (start_time_unix_nano, end_time_unix_nano);
 CREATE INDEX idx_spans_name          ON spans (name);
-CREATE INDEX idx_kind                ON spans (kind);
-CREATE INDEX idx_status              ON spans (status_code);
 CREATE INDEX idx_spans_resource_time ON spans (resource_id, start_time_unix_nano DESC);
 -- GIN index on attributes_json omitted: no SQL Server equivalent.
 GO
@@ -524,7 +525,7 @@ GO
 -- Only reached when every statement above succeeded, so a partial apply cannot
 -- leave a false version marker for the apply-schema.sh gate.
 MERGE schema_version AS target
-USING (VALUES (N'2.7.0')) AS src (version)
+USING (VALUES (N'2.8.0')) AS src (version)
 ON target.version = src.version
 WHEN MATCHED     THEN UPDATE SET applied_at = SYSDATETIME()
 WHEN NOT MATCHED THEN INSERT (version, applied_at) VALUES (src.version, SYSDATETIME());

@@ -4,9 +4,15 @@ using Keryhe.Telemetry.Core;
 
 namespace Keryhe.Telemetry.PostgreSQL.Services;
 
-public class TenantResolver(NpgsqlDataSource dataSource) : ITenantResolver
+/// <summary>
+/// PostgreSQL implementation of <see cref="IApiKeyLookup"/> — just the <c>SELECT</c> against
+/// <c>api_keys</c>. Caching and <c>last_used_at</c> maintenance are handled once,
+/// provider-agnostically, by <c>CachingTenantResolver</c> / <c>ApiKeyTouchWorker</c>; see
+/// <see cref="IApiKeyLookup"/>.
+/// </summary>
+public class TenantResolver(NpgsqlDataSource dataSource) : IApiKeyLookup
 {
-    public async Task<long> ResolveTenantIdAsync(string keyHash, CancellationToken cancellationToken)
+    public async Task<long> LookupTenantIdAsync(string keyHash, CancellationToken cancellationToken)
     {
         await using var conn = await dataSource.OpenConnectionAsync(cancellationToken);
 
@@ -21,21 +27,6 @@ public class TenantResolver(NpgsqlDataSource dataSource) : ITenantResolver
         await using var selectCmd = new NpgsqlCommand(selectSql, conn);
         selectCmd.Parameters.AddWithValue(NpgsqlDbType.Text, keyHash);
         var result = await selectCmd.ExecuteScalarAsync(cancellationToken);
-        var tenantId = result is long id ? id : 0L;
-
-        if (tenantId <= 0)
-            return 0;
-
-        const string updateSql = """
-            UPDATE api_keys
-            SET last_used_at = NOW()
-            WHERE key_hash = $1;
-            """;
-
-        await using var updateCmd = new NpgsqlCommand(updateSql, conn);
-        updateCmd.Parameters.AddWithValue(NpgsqlDbType.Text, keyHash);
-        await updateCmd.ExecuteNonQueryAsync(cancellationToken);
-
-        return tenantId;
+        return result is long id ? id : 0L;
     }
 }

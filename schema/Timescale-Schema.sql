@@ -104,18 +104,21 @@ CREATE TABLE spans (
     CONSTRAINT fk_spans_scopes    FOREIGN KEY ("scope_id")    REFERENCES instrumentation_scopes ("id"),
     CONSTRAINT uk_trace_span      UNIQUE ("trace_id", "span_id")
 );
-CREATE INDEX idx_trace_id           ON spans ("trace_id");
+-- idx_trace_id, idx_start_time, idx_kind, idx_status and idx_spans_attributes_gin dropped in
+-- 2.8.0: idx_trace_id is a left prefix of uk_trace_span (trace_id, span_id); idx_start_time is a
+-- left prefix of idx_duration (start_time_unix_nano, end_time_unix_nano); idx_kind (6 distinct
+-- values) and idx_status (3 distinct values) are too low-cardinality for the planner to ever
+-- choose; idx_spans_attributes_gin has no query in the read path that does JSONB containment on
+-- attributes_json -- every read of that column is a plain SELECT, verified by grep across
+-- TraceReadRepositoryBase and LogReadRepositoryBase. All five carried real write cost (index
+-- maintenance on every insert, GIN's most of all) for zero read benefit.
 CREATE INDEX idx_span_id            ON spans ("span_id");
 CREATE INDEX idx_parent_span        ON spans ("parent_span_id");
 CREATE INDEX idx_spans_trace_parent ON spans ("trace_id", "parent_span_id");
-CREATE INDEX idx_start_time         ON spans ("start_time_unix_nano" DESC);
 CREATE INDEX idx_end_time           ON spans ("end_time_unix_nano"   DESC);
 CREATE INDEX idx_duration           ON spans ("start_time_unix_nano", "end_time_unix_nano");
 CREATE INDEX idx_spans_name         ON spans ("name");
-CREATE INDEX idx_kind               ON spans ("kind");
-CREATE INDEX idx_status             ON spans ("status_code");
 CREATE INDEX idx_spans_resource_time ON spans ("resource_id", "start_time_unix_nano" DESC);
-CREATE INDEX idx_spans_attributes_gin ON spans USING GIN ("attributes_json");
 
 -- Span events
 CREATE TABLE span_events (
@@ -359,7 +362,8 @@ CREATE INDEX idx_severity          ON log_records ("severity_number");
 CREATE INDEX idx_log_severity_time ON log_records ("severity_number", "time_unix_nano" DESC);
 CREATE INDEX idx_log_trace_span    ON log_records ("trace_id", "span_id");
 CREATE INDEX idx_log_resource_time ON log_records ("resource_id", "time_unix_nano" DESC);
-CREATE INDEX idx_log_attributes_gin ON log_records USING GIN ("attributes_json");
+-- idx_log_attributes_gin dropped in 2.8.0, same reasoning as idx_spans_attributes_gin above:
+-- no read-path query does JSONB containment on attributes_json.
 
 -- =============================================================================
 -- TIMESCALEDB LIFECYCLE POLICIES (PHASE 2)
@@ -603,7 +607,7 @@ FROM log_severity_stats_daily;
 -- =============================================================================
 -- Only reached when every statement above succeeded, so a partial apply cannot
 -- leave a false version marker for the apply-schema.sh gate.
-INSERT INTO schema_version ("version") VALUES ('2.7.0')
+INSERT INTO schema_version ("version") VALUES ('2.8.0')
 ON CONFLICT ("version") DO UPDATE
 SET "applied_at" = NOW();
 

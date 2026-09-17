@@ -16,6 +16,28 @@ namespace Keryhe.Telemetry.MySql.Services;
 /// <c>INSERT ... ON DUPLICATE KEY UPDATE id = LAST_INSERT_ID(id)</c> upserts for
 /// resource/scope dedup. The channel-draining loop and the normalization/hashing helpers
 /// live in <c>Keryhe.Telemetry.Core.Data</c>. Targets MySQL 8.0+.
+///
+/// Each <c>Flush*Async</c> runs inside a single transaction, so a failure partway through
+/// leaves zero rows from that batch rather than a partially-applied flush. Every command
+/// below is enlisted via <c>Transaction = tx</c> -- MySqlConnector, unlike Npgsql, does not
+/// document ambient-transaction tracking as guaranteed, so this follows the explicit,
+/// always-correct pattern every provider in this codebase now uses. The transaction is
+/// never explicitly rolled back: <c>await using</c> disposes it without a matching
+/// <c>CommitAsync</c> whenever an exception propagates out of the block, and disposing an
+/// uncommitted <see cref="MySqlTransaction"/> rolls it back.
+///
+/// <see cref="ResourceScopeCache"/> writes for newly-upserted resources/scopes/metrics are
+/// DEFERRED until after <c>CommitAsync</c> succeeds, collected in a per-flush
+/// <c>postCommitCacheWrites</c> list rather than written the moment each upsert returns an
+/// id. This is load-bearing, not cosmetic: caching immediately, before commit, was verified
+/// live (against PostgreSQL, but the failure mode is provider-agnostic) to poison the cache
+/// on a rollback -- a resource upsert can succeed and be cached mid-transaction, then a
+/// later statement in the SAME flush fails and rolls the whole transaction back, leaving the
+/// cache pointing at a resources.id that was never actually persisted. Every subsequent
+/// flush that resolves that resource then hits the cache, skips re-inserting it, and fails
+/// its own FK constraint on the span/log/metric it tries to write -- permanently, since
+/// <see cref="ResourceScopeCache"/> entries are never evicted, until the process restarts.
+/// Deferring the write until after the commit that makes it true is what closes that gap.
 /// </summary>
 public sealed class MySqlBulkWriter(
     IConfiguration configuration,
@@ -36,52 +58,58 @@ public sealed class MySqlBulkWriter(
     {
         await using var conn = new MySqlConnection(_connectionString);
         await conn.OpenAsync(ct);
+        var tx = (MySqlTransaction)await conn.BeginTransactionAsync(ct);
+        await using (tx)
+        {
+            var postCommitCacheWrites = new List<Action>();
+            var resourceIds = await ResolveResourcesAsync(conn, tx, records.Select(r => r.Resource), postCommitCacheWrites, ct);
+            var scopeIds    = await ResolveScopesAsync(conn, tx, records.Select(r => r.InstrumentationScope), postCommitCacheWrites, ct);
 
-        var resourceIds = await ResolveResourcesAsync(conn, records.Select(r => r.Resource), ct);
-        var scopeIds    = await ResolveScopesAsync(conn, records.Select(r => r.InstrumentationScope), ct);
-
-        await BulkInsertLogsAsync(conn, records, resourceIds, scopeIds, ct);
-        logger.LogDebug("Flushed {Count} log records", records.Count);
+            await BulkInsertLogsAsync(conn, tx, records, resourceIds, scopeIds, ct);
+            await tx.CommitAsync(ct);
+            foreach (var write in postCommitCacheWrites) write();
+            logger.LogDebug("Flushed {Count} log records", records.Count);
+        }
     }
 
     // =========================================================================
     // FLUSH: TRACES
     // =========================================================================
 
-    public async Task FlushTracesAsync(List<TraceModel> traces, CancellationToken ct = default)
+    public async Task FlushTracesAsync(List<SpanModel> spans, CancellationToken ct = default)
     {
+        if (spans.Count == 0) return;
+
         await using var conn = new MySqlConnection(_connectionString);
         await conn.OpenAsync(ct);
 
-        var spans = traces
-            .SelectMany(t => t.Spans.Select(s => (
-                Span:     s,
-                Resource: s.Resource ?? t.Resource,
-                Scope:    s.InstrumentationScope ?? t.InstrumentationScope)))
-            .ToList();
-
-        if (spans.Count == 0) return;
-
-        var resourceIds = await ResolveResourcesAsync(conn, spans.Select(s => s.Resource), ct);
-        var scopeIds    = await ResolveScopesAsync(conn, spans.Select(s => s.Scope), ct);
-
-        var insertedSpanIds = await BulkInsertSpansAsync(conn, spans, resourceIds, scopeIds, ct);
-
-        var events = new List<(long SpanDbId, SpanEventModel Event)>();
-        var links  = new List<(long SpanDbId, SpanLinkModel  Link)>();
-
-        foreach (var (span, _, _) in spans)
+        var tx = (MySqlTransaction)await conn.BeginTransactionAsync(ct);
+        await using (tx)
         {
-            if (!insertedSpanIds.TryGetValue((span.TraceIdHex, span.SpanIdHex), out var dbId))
-                continue;
-            foreach (var e in span.Events) events.Add((dbId, e));
-            foreach (var l in span.Links)  links.Add((dbId, l));
+            var postCommitCacheWrites = new List<Action>();
+            var resourceIds = await ResolveResourcesAsync(conn, tx, spans.Select(s => s.Resource), postCommitCacheWrites, ct);
+            var scopeIds    = await ResolveScopesAsync(conn, tx, spans.Select(s => s.InstrumentationScope), postCommitCacheWrites, ct);
+
+            var insertedSpanIds = await BulkInsertSpansAsync(conn, tx, spans, resourceIds, scopeIds, ct);
+
+            var events = new List<(long SpanDbId, SpanEventModel Event)>();
+            var links  = new List<(long SpanDbId, SpanLinkModel  Link)>();
+
+            foreach (var span in spans)
+            {
+                if (!insertedSpanIds.TryGetValue((span.TraceIdHex, span.SpanIdHex), out var dbId))
+                    continue;
+                foreach (var e in span.Events) events.Add((dbId, e));
+                foreach (var l in span.Links)  links.Add((dbId, l));
+            }
+
+            if (events.Count > 0) await BulkInsertSpanEventsAsync(conn, tx, events, ct);
+            if (links.Count  > 0) await BulkInsertSpanLinksAsync(conn, tx, links, ct);
+
+            await tx.CommitAsync(ct);
+            foreach (var write in postCommitCacheWrites) write();
+            logger.LogDebug("Flushed {SpanCount} spans", spans.Count);
         }
-
-        if (events.Count > 0) await BulkInsertSpanEventsAsync(conn, events, ct);
-        if (links.Count  > 0) await BulkInsertSpanLinksAsync(conn, links, ct);
-
-        logger.LogDebug("Flushed {SpanCount} spans across {TraceCount} traces", spans.Count, traces.Count);
     }
 
     // =========================================================================
@@ -92,37 +120,61 @@ public sealed class MySqlBulkWriter(
     {
         await using var conn = new MySqlConnection(_connectionString);
         await conn.OpenAsync(ct);
-
-        var resourceIds = await ResolveResourcesAsync(conn, metrics.Select(m => m.Resource), ct);
-        var scopeIds    = await ResolveScopesAsync(conn, metrics.Select(m => m.InstrumentationScope), ct);
-
-        var metricIds = await ResolveMetricIdsAsync(conn, metrics, resourceIds, scopeIds, ct);
-
-        for (var i = 0; i < metrics.Count; i++)
+        var tx = (MySqlTransaction)await conn.BeginTransactionAsync(ct);
+        await using (tx)
         {
-            var metric   = metrics[i];
-            var metricId = metricIds[i];
-            switch (metric.Type)
-            {
-                case MetricType.GAUGE when metric.GaugeDataPoints?.Count > 0:
-                    await BulkInsertGaugeDataPointsAsync(conn, metricId, metric.GaugeDataPoints, ct);
-                    break;
-                case MetricType.SUM when metric.SumDataPoints?.Count > 0:
-                    await BulkInsertSumDataPointsAsync(conn, metricId, metric.SumDataPoints, ct);
-                    break;
-                case MetricType.HISTOGRAM when metric.HistogramDataPoints?.Count > 0:
-                    await BulkInsertHistogramDataPointsAsync(conn, metricId, metric.HistogramDataPoints, ct);
-                    break;
-                case MetricType.EXPONENTIAL_HISTOGRAM when metric.ExponentialHistogramDataPoints?.Count > 0:
-                    await BulkInsertExpHistogramDataPointsAsync(conn, metricId, metric.ExponentialHistogramDataPoints, ct);
-                    break;
-                case MetricType.SUMMARY when metric.SummaryDataPoints?.Count > 0:
-                    await BulkInsertSummaryDataPointsAsync(conn, metricId, metric.SummaryDataPoints, ct);
-                    break;
-            }
-        }
+            var postCommitCacheWrites = new List<Action>();
+            var resourceIds = await ResolveResourcesAsync(conn, tx, metrics.Select(m => m.Resource), postCommitCacheWrites, ct);
+            var scopeIds    = await ResolveScopesAsync(conn, tx, metrics.Select(m => m.InstrumentationScope), postCommitCacheWrites, ct);
 
-        logger.LogDebug("Flushed {Count} metrics", metrics.Count);
+            var metricIds = await ResolveMetricIdsAsync(conn, tx, metrics, resourceIds, scopeIds, postCommitCacheWrites, ct);
+
+            // Group data points by target table across the WHOLE batch, attaching each row's already
+            // -resolved metric_id as it is grouped. This is what turns a metric flush into AT MOST
+            // FIVE calls to BulkInsertAsync instead of one per metric: a naive per-metric loop here
+            // defeats the whole point of batching (up to MaxMetricFlushBatchSize round trips per
+            // flush) -- BulkInsertAsync's own 500-row chunking then applies once, across the grouped
+            // rows, rather than once per metric.
+            var gaugeRows = new List<(long MetricId, GaugeDataPointModel DataPoint)>();
+            var sumRows = new List<(long MetricId, SumDataPointModel DataPoint)>();
+            var histogramRows = new List<(long MetricId, HistogramDataPointModel DataPoint)>();
+            var expHistogramRows = new List<(long MetricId, ExponentialHistogramDataPointModel DataPoint)>();
+            var summaryRows = new List<(long MetricId, SummaryDataPointModel DataPoint)>();
+
+            for (var i = 0; i < metrics.Count; i++)
+            {
+                var metric   = metrics[i];
+                var metricId = metricIds[i];
+                switch (metric.Type)
+                {
+                    case MetricType.GAUGE when metric.GaugeDataPoints?.Count > 0:
+                        gaugeRows.AddRange(metric.GaugeDataPoints.Select(d => (metricId, d)));
+                        break;
+                    case MetricType.SUM when metric.SumDataPoints?.Count > 0:
+                        sumRows.AddRange(metric.SumDataPoints.Select(d => (metricId, d)));
+                        break;
+                    case MetricType.HISTOGRAM when metric.HistogramDataPoints?.Count > 0:
+                        histogramRows.AddRange(metric.HistogramDataPoints.Select(d => (metricId, d)));
+                        break;
+                    case MetricType.EXPONENTIAL_HISTOGRAM when metric.ExponentialHistogramDataPoints?.Count > 0:
+                        expHistogramRows.AddRange(metric.ExponentialHistogramDataPoints.Select(d => (metricId, d)));
+                        break;
+                    case MetricType.SUMMARY when metric.SummaryDataPoints?.Count > 0:
+                        summaryRows.AddRange(metric.SummaryDataPoints.Select(d => (metricId, d)));
+                        break;
+                }
+            }
+
+            if (gaugeRows.Count > 0) await BulkInsertGaugeDataPointsAsync(conn, tx, gaugeRows, ct);
+            if (sumRows.Count > 0) await BulkInsertSumDataPointsAsync(conn, tx, sumRows, ct);
+            if (histogramRows.Count > 0) await BulkInsertHistogramDataPointsAsync(conn, tx, histogramRows, ct);
+            if (expHistogramRows.Count > 0) await BulkInsertExpHistogramDataPointsAsync(conn, tx, expHistogramRows, ct);
+            if (summaryRows.Count > 0) await BulkInsertSummaryDataPointsAsync(conn, tx, summaryRows, ct);
+
+            await tx.CommitAsync(ct);
+            foreach (var write in postCommitCacheWrites) write();
+            logger.LogDebug("Flushed {Count} metrics", metrics.Count);
+        }
     }
 
     // =========================================================================
@@ -131,7 +183,9 @@ public sealed class MySqlBulkWriter(
 
     private async Task<Dictionary<string, long>> ResolveResourcesAsync(
         MySqlConnection conn,
+        MySqlTransaction tx,
         IEnumerable<ResourceModel?> resources,
+        List<Action> postCommitCacheWrites,
         CancellationToken ct)
     {
         // Keyed by ResourceKey, never by the bare hash: two tenants running the same service with the
@@ -154,8 +208,13 @@ public sealed class MySqlBulkWriter(
 
         foreach (var (key, entry) in pending)
         {
-            var id = await UpsertResourceAsync(conn, entry.Model, entry.Hash, ct);
-            cache.SetResource(entry.Model.TenantId, entry.Hash, id);
+            var id = await UpsertResourceAsync(conn, tx, entry.Model, entry.Hash, ct);
+            // Deferred: caching now, before the transaction commits, would let a later failure in
+            // this SAME flush roll back the row while the cache still claims it exists -- see the
+            // class doc comment.
+            var tenantId = entry.Model.TenantId;
+            var hash2 = entry.Hash;
+            postCommitCacheWrites.Add(() => cache.SetResource(tenantId, hash2, id));
             result[key] = id;
         }
 
@@ -164,7 +223,9 @@ public sealed class MySqlBulkWriter(
 
     private async Task<Dictionary<string, long>> ResolveScopesAsync(
         MySqlConnection conn,
+        MySqlTransaction tx,
         IEnumerable<InstrumentationScopeModel?> scopes,
+        List<Action> postCommitCacheWrites,
         CancellationToken ct)
     {
         var result  = new Dictionary<string, long>(StringComparer.Ordinal);
@@ -183,8 +244,9 @@ public sealed class MySqlBulkWriter(
 
         foreach (var (hash, model) in pending)
         {
-            var id = await UpsertScopeAsync(conn, model, hash, ct);
-            cache.SetScope(hash, id);
+            var id = await UpsertScopeAsync(conn, tx, model, hash, ct);
+            // Deferred -- see ResolveResourcesAsync.
+            postCommitCacheWrites.Add(() => cache.SetScope(hash, id));
             result[hash] = id;
         }
 
@@ -196,7 +258,7 @@ public sealed class MySqlBulkWriter(
     // key the assignment sets LAST_INSERT_ID() to the existing row's id. Either way
     // cmd.LastInsertedId yields the surrogate id the read repos join on.
     private static async Task<long> UpsertResourceAsync(
-        MySqlConnection conn, ResourceModel model, string hash, CancellationToken ct)
+        MySqlConnection conn, MySqlTransaction tx, ResourceModel model, string hash, CancellationToken ct)
     {
         const string sql = """
             INSERT INTO resources (attributes_json, resource_hash, schema_url, tenant_id)
@@ -204,7 +266,7 @@ public sealed class MySqlBulkWriter(
             ON DUPLICATE KEY UPDATE id = LAST_INSERT_ID(id)
             """;
 
-        await using var cmd = new MySqlCommand(sql, conn);
+        await using var cmd = new MySqlCommand(sql, conn) { Transaction = tx };
         cmd.Parameters.AddWithValue("@attrJson",  (object?)SerializeDeterministicJson(model.Attributes) ?? DBNull.Value);
         cmd.Parameters.AddWithValue("@hash",      hash);
         cmd.Parameters.AddWithValue("@schemaUrl", (object?)model.SchemaUrl ?? DBNull.Value);
@@ -214,7 +276,7 @@ public sealed class MySqlBulkWriter(
     }
 
     private static async Task<long> UpsertScopeAsync(
-        MySqlConnection conn, InstrumentationScopeModel model, string hash, CancellationToken ct)
+        MySqlConnection conn, MySqlTransaction tx, InstrumentationScopeModel model, string hash, CancellationToken ct)
     {
         const string sql = """
             INSERT INTO instrumentation_scopes (name, version, schema_url, scope_hash, attributes_json)
@@ -222,7 +284,7 @@ public sealed class MySqlBulkWriter(
             ON DUPLICATE KEY UPDATE id = LAST_INSERT_ID(id)
             """;
 
-        await using var cmd = new MySqlCommand(sql, conn);
+        await using var cmd = new MySqlCommand(sql, conn) { Transaction = tx };
         cmd.Parameters.AddWithValue("@name",      model.Name);
         cmd.Parameters.AddWithValue("@version",   (object?)model.Version   ?? DBNull.Value);
         cmd.Parameters.AddWithValue("@schemaUrl", (object?)model.SchemaUrl ?? DBNull.Value);
@@ -238,6 +300,7 @@ public sealed class MySqlBulkWriter(
 
     private static async Task BulkInsertLogsAsync(
         MySqlConnection conn,
+        MySqlTransaction tx,
         List<LogRecordModel> records,
         Dictionary<string, long> resourceIds,
         Dictionary<string, long> scopeIds,
@@ -272,52 +335,63 @@ public sealed class MySqlBulkWriter(
             });
         }
 
-        await BulkInsertAsync(conn, "log_records", columns, rows, ct);
+        await BulkInsertAsync(conn, tx, "log_records", columns, rows, ct);
     }
 
     // =========================================================================
     // BULK INSERT: SPANS
     // =========================================================================
 
+    private static readonly string[] SpanColumns =
+    [
+        "trace_id", "span_id", "parent_span_id", "resource_id", "scope_id",
+        "name", "kind", "start_time_unix_nano", "end_time_unix_nano",
+        "dropped_attributes_count", "dropped_events_count", "dropped_links_count",
+        "trace_state", "status_code", "status_message", "attributes_json", "flags"
+    ];
+
+    // Deliberately NOT a before/after diff against the whole key set (two extra chunked SELECTs
+    // -- up to 8 round trips per 2,000 spans -- to detect duplicates that usually do not exist,
+    // since span re-delivery is the exception, not the rule).
+    //
+    // Instead: for each chunk, run INSERT IGNORE and compare ExecuteNonQueryAsync's affected-row
+    // count against the chunk's row count. When they match -- the common case, zero duplicates --
+    // every row in the chunk was newly inserted, and MySQL/InnoDB assigns a fresh multi-row
+    // INSERT contiguous auto-increment ids in VALUES order (confirmed live: a 3-row all-new
+    // INSERT IGNORE returned affected=3 with ids starting at LAST_INSERT_ID() and running
+    // consecutively), so `LastInsertedId + rowIndex` gives every span's id with zero extra
+    // queries. Only when affected < chunk size (some keys already existed) does this fall back
+    // to a SELECT -- and only for that one chunk, not the whole batch. Confirmed live that a
+    // partial-duplicate chunk does NOT preserve that contiguous mapping (a skipped row can still
+    // reserve -- and waste -- an id), so the fallback there is load-bearing, not a belt-and-braces
+    // extra.
     private static async Task<Dictionary<(string TraceId, string SpanId), long>> BulkInsertSpansAsync(
         MySqlConnection conn,
-        List<(SpanModel Span, ResourceModel? Resource, InstrumentationScopeModel? Scope)> spans,
+        MySqlTransaction tx,
+        List<SpanModel> spans,
         Dictionary<string, long> resourceIds,
         Dictionary<string, long> scopeIds,
         CancellationToken ct)
     {
-        // Distinct natural keys in this batch.
+        // Distinct natural keys, built in the same pass as their rows so index i of one always
+        // matches index i of the other -- both dedup against the same `spans` list in the same
+        // order, so there is no need to build the key list separately and trust the two loops
+        // agree.
         var keys = new List<(string, string)>();
-        var keySet = new HashSet<(string, string)>();
-        foreach (var (span, _, _) in spans)
-            if (keySet.Add((span.TraceIdHex, span.SpanIdHex)))
-                keys.Add((span.TraceIdHex, span.SpanIdHex));
-
-        // Snapshot which keys already exist so that, after INSERT IGNORE, we can return ids only
-        // for the newly inserted spans (matching the SqlServer MERGE ... OUTPUT semantics and so
-        // avoiding duplicate span_events / span_links for pre-existing spans).
-        var before = await SelectSpanIdsAsync(conn, keys, ct);
-
-        var columns = new[]
-        {
-            "trace_id", "span_id", "parent_span_id", "resource_id", "scope_id",
-            "name", "kind", "start_time_unix_nano", "end_time_unix_nano",
-            "dropped_attributes_count", "dropped_events_count", "dropped_links_count",
-            "trace_state", "status_code", "status_message", "attributes_json", "flags"
-        };
-
-        var rows = new List<object?[]>(keys.Count);
+        var rows = new List<object?[]>();
         var added = new HashSet<(string, string)>();
-        foreach (var (span, resource, scope) in spans)
+        foreach (var span in spans)
         {
-            if (!added.Add((span.TraceIdHex, span.SpanIdHex))) continue;
+            var key = (span.TraceIdHex, span.SpanIdHex);
+            if (!added.Add(key)) continue;
+            keys.Add(key);
             rows.Add(new object?[]
             {
                 span.TraceIdHex,
                 span.SpanIdHex,
                 (object?)span.ParentSpanIdHex ?? DBNull.Value,
-                resourceIds[ResourceKey(resource)],
-                scopeIds[HashScope(NormalizeScope(scope))],
+                resourceIds[ResourceKey(span.Resource)],
+                scopeIds[HashScope(NormalizeScope(span.InstrumentationScope))],
                 span.Name,
                 span.Kind.ToString(),
                 span.StartTimeUnixNano,
@@ -333,20 +407,78 @@ public sealed class MySqlBulkWriter(
             });
         }
 
-        await BulkInsertAsync(conn, "spans", columns, rows, ct, ignore: true);
-
-        var after = await SelectSpanIdsAsync(conn, keys, ct);
-
         var inserted = new Dictionary<(string, string), long>();
-        foreach (var kv in after)
-            if (!before.ContainsKey(kv.Key))
-                inserted[kv.Key] = kv.Value;
+        if (rows.Count == 0) return inserted;
+
+        var colList = string.Join(", ", SpanColumns);
+
+        for (var offset = 0; offset < rows.Count; offset += ChunkSize)
+        {
+            var count = Math.Min(ChunkSize, rows.Count - offset);
+            var sb = new StringBuilder("INSERT IGNORE INTO spans (").Append(colList).Append(") VALUES ");
+            await using var cmd = new MySqlCommand { Connection = conn, Transaction = tx };
+            for (var r = 0; r < count; r++)
+            {
+                if (r > 0) sb.Append(',');
+                sb.Append('(');
+                var row = rows[offset + r];
+                for (var c = 0; c < SpanColumns.Length; c++)
+                {
+                    if (c > 0) sb.Append(',');
+                    var p = $"@r{r}c{c}";
+                    sb.Append(p);
+                    cmd.Parameters.AddWithValue(p, row[c] ?? DBNull.Value);
+                }
+                sb.Append(')');
+            }
+            cmd.CommandText = sb.ToString();
+
+            var affected = await cmd.ExecuteNonQueryAsync(ct);
+            if (affected == 0)
+            {
+                // Every key in this chunk already existed -- nothing new, no query needed: the
+                // whole point of this chunk's span_events/span_links is to attach only to spans
+                // THIS flush inserted, and it inserted none of them.
+                continue;
+            }
+
+            var firstId = (long)cmd.LastInsertedId;
+            if (affected == count)
+            {
+                // Zero duplicates -- the common case. A multi-row INSERT IGNORE where every row
+                // succeeds assigns auto-increment ids consecutively in VALUES order (confirmed
+                // live), so every id is derivable with no query at all.
+                for (var r = 0; r < count; r++)
+                    inserted[keys[offset + r]] = firstId + r;
+            }
+            else
+            {
+                // Some rows in this chunk were duplicates. MySQL still hands out ids for a
+                // partial-success multi-row insert from a pool starting at firstId, but which
+                // input position got skipped isn't recoverable client-side (confirmed live: a
+                // skipped row does not reserve/waste its positional slot, so `firstId + rowIndex`
+                // is NOT valid here the way it is in the zero-duplicate branch above).
+                //
+                // Resolve with one SELECT instead, and use firstId as a floor rather than a
+                // before/after diff: MySQL's auto-increment counter is strictly monotonic and
+                // global, so ANY row that already existed before this statement ran necessarily
+                // has an id < firstId (its id was allocated by some earlier statement, and the
+                // counter never goes backwards or reuses a value), while every id THIS statement
+                // produced is >= firstId. A key resolving to an id below firstId is therefore
+                // provably pre-existing -- no need to have captured a separate "before" snapshot.
+                var chunkKeys = keys.GetRange(offset, count);
+                var resolved = await SelectSpanIdsAsync(conn, tx, chunkKeys, ct);
+                foreach (var (key, id) in resolved)
+                    if (id >= firstId)
+                        inserted[key] = id;
+            }
+        }
 
         return inserted;
     }
 
     private static async Task<Dictionary<(string, string), long>> SelectSpanIdsAsync(
-        MySqlConnection conn, List<(string, string)> keys, CancellationToken ct)
+        MySqlConnection conn, MySqlTransaction tx, List<(string, string)> keys, CancellationToken ct)
     {
         var map = new Dictionary<(string, string), long>();
         if (keys.Count == 0) return map;
@@ -355,7 +487,7 @@ public sealed class MySqlBulkWriter(
         {
             var count = Math.Min(ChunkSize, keys.Count - offset);
             var sb = new StringBuilder("SELECT id, trace_id, span_id FROM spans WHERE (trace_id, span_id) IN (");
-            await using var cmd = new MySqlCommand { Connection = conn };
+            await using var cmd = new MySqlCommand { Connection = conn, Transaction = tx };
             for (var i = 0; i < count; i++)
             {
                 if (i > 0) sb.Append(',');
@@ -376,6 +508,7 @@ public sealed class MySqlBulkWriter(
 
     private static async Task BulkInsertSpanEventsAsync(
         MySqlConnection conn,
+        MySqlTransaction tx,
         List<(long SpanDbId, SpanEventModel Event)> events,
         CancellationToken ct)
     {
@@ -389,11 +522,12 @@ public sealed class MySqlBulkWriter(
                 (object?)SerializeJsonOrNull(e.Attributes) ?? DBNull.Value
             });
 
-        await BulkInsertAsync(conn, "span_events", columns, rows, ct);
+        await BulkInsertAsync(conn, tx, "span_events", columns, rows, ct);
     }
 
     private static async Task BulkInsertSpanLinksAsync(
         MySqlConnection conn,
+        MySqlTransaction tx,
         List<(long SpanDbId, SpanLinkModel Link)> links,
         CancellationToken ct)
     {
@@ -414,7 +548,7 @@ public sealed class MySqlBulkWriter(
                 l.Flags
             });
 
-        await BulkInsertAsync(conn, "span_links", columns, rows, ct);
+        await BulkInsertAsync(conn, tx, "span_links", columns, rows, ct);
     }
 
     // =========================================================================
@@ -427,9 +561,11 @@ public sealed class MySqlBulkWriter(
 
     private async Task<long[]> ResolveMetricIdsAsync(
         MySqlConnection conn,
+        MySqlTransaction tx,
         List<MetricModel> metrics,
         Dictionary<string, long> resourceIds,
         Dictionary<string, long> scopeIds,
+        List<Action> postCommitCacheWrites,
         CancellationToken ct)
     {
         // Same upsert-and-return idiom as UpsertResourceAsync: id = LAST_INSERT_ID(id) is what
@@ -474,7 +610,7 @@ public sealed class MySqlBulkWriter(
 
         foreach (var (key, resId, scoId, m) in pending)
         {
-            await using var cmd = new MySqlCommand(sql, conn);
+            await using var cmd = new MySqlCommand(sql, conn) { Transaction = tx };
             cmd.Parameters.AddWithValue("@resourceId",  resId);
             cmd.Parameters.AddWithValue("@scopeId",     scoId);
             cmd.Parameters.AddWithValue("@name",        m.Name);
@@ -485,7 +621,8 @@ public sealed class MySqlBulkWriter(
 
             var id = cmd.LastInsertedId;
             result[key] = id;
-            cache.SetMetric(key, id);
+            // Deferred -- see ResolveResourcesAsync.
+            postCommitCacheWrites.Add(() => cache.SetMetric(key, id));
         }
 
         var ids = new long[n];
@@ -498,8 +635,9 @@ public sealed class MySqlBulkWriter(
     // =========================================================================
 
     private static async Task BulkInsertGaugeDataPointsAsync(
-        MySqlConnection conn, long metricId,
-        List<GaugeDataPointModel> dataPoints, CancellationToken ct)
+        MySqlConnection conn,
+        MySqlTransaction tx,
+        List<(long MetricId, GaugeDataPointModel DataPoint)> rows, CancellationToken ct)
     {
         var columns = new[]
         {
@@ -507,21 +645,22 @@ public sealed class MySqlBulkWriter(
             "value_double", "value_int", "flags", "attributes_json"
         };
 
-        var rows = new List<object?[]>(dataPoints.Count);
-        foreach (var d in dataPoints)
-            rows.Add(new object?[]
+        var values = new List<object?[]>(rows.Count);
+        foreach (var (metricId, d) in rows)
+            values.Add(new object?[]
             {
                 metricId, BoxOrNull(d.StartTimeUnixNano), d.TimeUnixNano,
                 BoxOrNull(d.ValueDouble), BoxOrNull(d.ValueInt), d.Flags,
                 (object?)SerializeJsonOrNull(d.Attributes) ?? DBNull.Value
             });
 
-        await BulkInsertAsync(conn, "gauge_data_points", columns, rows, ct);
+        await BulkInsertAsync(conn, tx, "gauge_data_points", columns, values, ct);
     }
 
     private static async Task BulkInsertSumDataPointsAsync(
-        MySqlConnection conn, long metricId,
-        List<SumDataPointModel> dataPoints, CancellationToken ct)
+        MySqlConnection conn,
+        MySqlTransaction tx,
+        List<(long MetricId, SumDataPointModel DataPoint)> rows, CancellationToken ct)
     {
         var columns = new[]
         {
@@ -529,9 +668,9 @@ public sealed class MySqlBulkWriter(
             "aggregation_temporality", "is_monotonic", "flags", "attributes_json"
         };
 
-        var rows = new List<object?[]>(dataPoints.Count);
-        foreach (var d in dataPoints)
-            rows.Add(new object?[]
+        var values = new List<object?[]>(rows.Count);
+        foreach (var (metricId, d) in rows)
+            values.Add(new object?[]
             {
                 metricId, BoxOrNull(d.StartTimeUnixNano), d.TimeUnixNano,
                 BoxOrNull(d.ValueDouble), BoxOrNull(d.ValueInt),
@@ -539,12 +678,13 @@ public sealed class MySqlBulkWriter(
                 (object?)SerializeJsonOrNull(d.Attributes) ?? DBNull.Value
             });
 
-        await BulkInsertAsync(conn, "sum_data_points", columns, rows, ct);
+        await BulkInsertAsync(conn, tx, "sum_data_points", columns, values, ct);
     }
 
     private static async Task BulkInsertHistogramDataPointsAsync(
-        MySqlConnection conn, long metricId,
-        List<HistogramDataPointModel> dataPoints, CancellationToken ct)
+        MySqlConnection conn,
+        MySqlTransaction tx,
+        List<(long MetricId, HistogramDataPointModel DataPoint)> rows, CancellationToken ct)
     {
         var columns = new[]
         {
@@ -553,9 +693,9 @@ public sealed class MySqlBulkWriter(
             "min_value", "max_value", "attributes_json"
         };
 
-        var rows = new List<object?[]>(dataPoints.Count);
-        foreach (var d in dataPoints)
-            rows.Add(new object?[]
+        var values = new List<object?[]>(rows.Count);
+        foreach (var (metricId, d) in rows)
+            values.Add(new object?[]
             {
                 metricId, BoxOrNull(d.StartTimeUnixNano), d.TimeUnixNano,
                 d.Count, BoxOrNull(d.Sum),
@@ -566,12 +706,13 @@ public sealed class MySqlBulkWriter(
                 (object?)SerializeJsonOrNull(d.Attributes) ?? DBNull.Value
             });
 
-        await BulkInsertAsync(conn, "histogram_data_points", columns, rows, ct);
+        await BulkInsertAsync(conn, tx, "histogram_data_points", columns, values, ct);
     }
 
     private static async Task BulkInsertExpHistogramDataPointsAsync(
-        MySqlConnection conn, long metricId,
-        List<ExponentialHistogramDataPointModel> dataPoints, CancellationToken ct)
+        MySqlConnection conn,
+        MySqlTransaction tx,
+        List<(long MetricId, ExponentialHistogramDataPointModel DataPoint)> rows, CancellationToken ct)
     {
         var columns = new[]
         {
@@ -581,9 +722,9 @@ public sealed class MySqlBulkWriter(
             "flags", "min_value", "max_value", "attributes_json"
         };
 
-        var rows = new List<object?[]>(dataPoints.Count);
-        foreach (var d in dataPoints)
-            rows.Add(new object?[]
+        var values = new List<object?[]>(rows.Count);
+        foreach (var (metricId, d) in rows)
+            values.Add(new object?[]
             {
                 metricId, BoxOrNull(d.StartTimeUnixNano), d.TimeUnixNano,
                 d.Count, BoxOrNull(d.Sum), d.Scale, d.ZeroCount,
@@ -596,12 +737,13 @@ public sealed class MySqlBulkWriter(
                 (object?)SerializeJsonOrNull(d.Attributes) ?? DBNull.Value
             });
 
-        await BulkInsertAsync(conn, "exponential_histogram_data_points", columns, rows, ct);
+        await BulkInsertAsync(conn, tx, "exponential_histogram_data_points", columns, values, ct);
     }
 
     private static async Task BulkInsertSummaryDataPointsAsync(
-        MySqlConnection conn, long metricId,
-        List<SummaryDataPointModel> dataPoints, CancellationToken ct)
+        MySqlConnection conn,
+        MySqlTransaction tx,
+        List<(long MetricId, SummaryDataPointModel DataPoint)> rows, CancellationToken ct)
     {
         var columns = new[]
         {
@@ -609,9 +751,9 @@ public sealed class MySqlBulkWriter(
             "quantile_values", "flags", "attributes_json"
         };
 
-        var rows = new List<object?[]>(dataPoints.Count);
-        foreach (var d in dataPoints)
-            rows.Add(new object?[]
+        var values = new List<object?[]>(rows.Count);
+        foreach (var (metricId, d) in rows)
+            values.Add(new object?[]
             {
                 metricId, BoxOrNull(d.StartTimeUnixNano), d.TimeUnixNano,
                 d.Count, d.Sum,
@@ -620,47 +762,85 @@ public sealed class MySqlBulkWriter(
                 (object?)SerializeJsonOrNull(d.Attributes) ?? DBNull.Value
             });
 
-        await BulkInsertAsync(conn, "summary_data_points", columns, rows, ct);
+        await BulkInsertAsync(conn, tx, "summary_data_points", columns, values, ct);
     }
 
     // =========================================================================
     // PROVIDER-LOCAL HELPERS
     // =========================================================================
 
-    // Builds and executes chunked, parameterized multi-row INSERT statements. Pass
-    // ignore: true to emit INSERT IGNORE (used for spans, where the unique (trace_id, span_id)
-    // key deduplicates re-delivered spans).
+    // Builds and executes chunked, parameterized multi-row INSERT statements for every
+    // high-volume table except spans (which has its own id-recovering path above).
+    //
+    // Every full-size chunk has the IDENTICAL shape -- same column count, same row count, same
+    // placeholder layout -- so the command is built and Prepare()'d ONCE and then reused across
+    // every full chunk, just overwriting each parameter's Value in place, instead of rebuilding
+    // the SQL text and allocating a fresh MySqlCommand + ChunkSize*columns.Length MySqlParameters
+    // for every chunk. Prepare() also lets the server itself skip re-parsing/re-planning a shape
+    // it has already seen earlier in this same connection. Only the final, possibly-short,
+    // remainder chunk falls back to an ad hoc unprepared command, since it is a one-off shape by
+    // definition and not worth preparing.
     private static async Task BulkInsertAsync(
-        MySqlConnection conn, string table, string[] columns,
-        List<object?[]> rows, CancellationToken ct, bool ignore = false)
+        MySqlConnection conn, MySqlTransaction tx, string table, string[] columns,
+        List<object?[]> rows, CancellationToken ct)
     {
         if (rows.Count == 0) return;
 
         var colList = string.Join(", ", columns);
-        var verb = ignore ? "INSERT IGNORE INTO " : "INSERT INTO ";
+        var fullChunks = rows.Count / ChunkSize;
 
-        for (var offset = 0; offset < rows.Count; offset += ChunkSize)
+        if (fullChunks > 0)
         {
-            var count = Math.Min(ChunkSize, rows.Count - offset);
-            var sb = new StringBuilder(verb).Append(table).Append(" (").Append(colList).Append(") VALUES ");
-            await using var cmd = new MySqlCommand { Connection = conn };
-            for (var r = 0; r < count; r++)
-            {
-                if (r > 0) sb.Append(',');
-                sb.Append('(');
-                var row = rows[offset + r];
+            var sql = BuildInsertSql(table, colList, columns.Length, ChunkSize);
+            await using var cmd = new MySqlCommand(sql, conn) { Transaction = tx };
+            for (var r = 0; r < ChunkSize; r++)
                 for (var c = 0; c < columns.Length; c++)
+                    cmd.Parameters.Add(new MySqlParameter($"@r{r}c{c}", null));
+            await cmd.PrepareAsync(ct);
+
+            for (var chunk = 0; chunk < fullChunks; chunk++)
+            {
+                var offset = chunk * ChunkSize;
+                for (var r = 0; r < ChunkSize; r++)
                 {
-                    if (c > 0) sb.Append(',');
-                    var p = $"@r{r}c{c}";
-                    sb.Append(p);
-                    cmd.Parameters.AddWithValue(p, row[c] ?? DBNull.Value);
+                    var row = rows[offset + r];
+                    for (var c = 0; c < columns.Length; c++)
+                        cmd.Parameters[r * columns.Length + c].Value = row[c] ?? DBNull.Value;
                 }
-                sb.Append(')');
+                await cmd.ExecuteNonQueryAsync(ct);
             }
-            cmd.CommandText = sb.ToString();
-            await cmd.ExecuteNonQueryAsync(ct);
         }
+
+        var remainder = rows.Count - fullChunks * ChunkSize;
+        if (remainder == 0) return;
+
+        var remainderOffset = fullChunks * ChunkSize;
+        var remainderSql = BuildInsertSql(table, colList, columns.Length, remainder);
+        await using var remainderCmd = new MySqlCommand(remainderSql, conn) { Transaction = tx };
+        for (var r = 0; r < remainder; r++)
+        {
+            var row = rows[remainderOffset + r];
+            for (var c = 0; c < columns.Length; c++)
+                remainderCmd.Parameters.AddWithValue($"@r{r}c{c}", row[c] ?? DBNull.Value);
+        }
+        await remainderCmd.ExecuteNonQueryAsync(ct);
+    }
+
+    private static string BuildInsertSql(string table, string colList, int columnCount, int rowCount)
+    {
+        var sb = new StringBuilder("INSERT INTO ").Append(table).Append(" (").Append(colList).Append(") VALUES ");
+        for (var r = 0; r < rowCount; r++)
+        {
+            if (r > 0) sb.Append(',');
+            sb.Append('(');
+            for (var c = 0; c < columnCount; c++)
+            {
+                if (c > 0) sb.Append(',');
+                sb.Append('@').Append('r').Append(r).Append('c').Append(c);
+            }
+            sb.Append(')');
+        }
+        return sb.ToString();
     }
 
     // Boxes a nullable value type for ADO.NET, mapping null to DBNull.

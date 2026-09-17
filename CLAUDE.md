@@ -118,7 +118,7 @@ REST API consumed by an Angular single-page application.
 ```
 OpenTelemetry SDKs (any language)
   → OTLP gRPC (port 5117) → Keryhe.Telemetry.Collector (LogService/TraceService/MetricService)
-  → thin write repos (Data) enqueue → TelemetryIngestionChannel (bounded, 10k per signal)
+  → thin write repos (Data) enqueue → TelemetryIngestionChannel (gated on resident record/span count)
   → TelemetryIngestionWorker (background) → ITelemetryBulkWriter (active provider) → DB
 
 Angular UI (localhost:4201)
@@ -168,9 +168,11 @@ unchanged):
 - **Dedup via `ReplacingMergeTree`, not `ON CONFLICT`.** resources/scopes/spans/metrics collapse on their
   `ORDER BY` key at merge time, backed by `ResourceScopeCache` + per-batch dedup. Dedup is
   *eventual* — reads may briefly see a duplicate before a merge (`OPTIMIZE ... FINAL` forces it).
-- **Writes go through `ClickHouseBulkCopy`** (async batched insert); reads reuse the shared Dapper
-  bases unchanged (attributes are JSON text deserialized in C#; `service.name` uses
-  `JSONExtractString`).
+- **Writes go through `ClickHouseBulkCopy`** (async batched insert), one long-lived instance
+  cached per destination table for the life of the process (`ClickHouseBulkWriter`'s singleton
+  `TableBulkCopy` cache) rather than a fresh connection + `InitAsync()` schema-probe round trip on
+  every flush; reads reuse the shared Dapper bases unchanged (attributes are JSON text
+  deserialized in C#; `service.name` uses `JSONExtractString`).
 - **Deletes** are lightweight `DELETE FROM` with explicit child-row deletes (no FK cascades),
   applied as async mutations.
 - **Control-plane is best-effort.** Alert-rule CRUD uses `ALTER TABLE ... UPDATE` mutations and
@@ -184,7 +186,12 @@ Core interfaces (in `Keryhe.Telemetry.Core`), each implemented once per provider
 - `ITelemetryWriteStore` — provider-specific `Delete*` DML for the write path.
 - `ITraceReadRepository`, `IMetricReadRepository`, `ILogReadRepository`,
   `IAlertRuleRepository`, `ITenantCatalogRepository` — Dapper read repositories.
-- `ITenantResolver` — hashes the `Authorization: Bearer <key>` header against `api_keys`.
+- `ITenantResolver` — resolves the tenant owning a hashed API key. Every gRPC service resolves
+  `Keryhe.Telemetry.Core.Data.CachingTenantResolver`, a provider-agnostic short-TTL cache wrapping
+  the provider's `IApiKeyLookup` (the raw `SELECT`, implemented once per provider). Successful
+  lookups mark `ApiKeyTouchTracker`; a periodic `ApiKeyTouchWorker` batches those into one bulk
+  `last_used_at` write per provider's `IApiKeyTouchStore` per flush interval, instead of an
+  `UPDATE` on every request. ClickHouse's `IApiKeyTouchStore` is a deliberate no-op.
 
 Provider projects build a **singleton connection pool** (`NpgsqlDataSource` for Postgres) from
 `ConnectionStrings:Write` (ingestion host) or `ConnectionStrings:Read` (API host). Common
@@ -194,12 +201,28 @@ is shared across providers.
 
 ### Key Patterns
 
-**Write path decoupling — `TelemetryIngestionChannel`** (Data, singleton): three bounded
-`System.Threading.Channels` (one per signal type, capacity 10,000, `FullMode.Wait`). The thin
-write repositories (`TraceWriteRepository`, etc.) just enqueue models and return; deletes are
-delegated to `ITelemetryWriteStore`. `TelemetryIngestionWorker` drains the channels and calls
-the active provider's `ITelemetryBulkWriter`. This isolates gRPC latency from DB write latency
-and provides backpressure.
+**Write path decoupling — `TelemetryIngestionChannel`** (Data, singleton): three unbounded
+`System.Threading.Channels` (one per signal type, `SingleReader = false`). Backpressure is not the
+channel's own capacity but a paired `RecordCountGate` per signal, bounding resident RECORDS (spans,
+not traces, for the trace signal) rather than resident batches — an OTLP export's size is entirely
+client-controlled, so a batch-count bound does not actually cap memory. Write repositories
+(`TraceWriteRepository`, etc.) call `gate.AcquireAsync` before enqueuing and return; deletes are
+delegated to `ITelemetryWriteStore`. The Traces channel specifically carries flat `List<SpanModel>`,
+not `List<TraceModel>`: `TraceWriteRepository` flattens each trace's spans and resolves each span's
+effective resource/scope (its own override, else its trace's) once, at that single point, so
+`ITelemetryBulkWriter.FlushTracesAsync` and every provider behind it read an already-flat,
+already-resolved span list with no grouping to unwrap and no fallback to re-apply.
+`TelemetryIngestionWorker` runs `FlushConcurrency` concurrent
+drain loops per signal (`TelemetryIngestionOptions`, section `Telemetry:Ingestion`) so DB write
+latency overlaps instead of one flush blocking the next; the in-memory drain step itself stays
+serialized per signal via an internal lock, since interleaving it across loops would corrupt the
+batch-size accounting the gate release depends on. Each drained batch is merged up to a configurable
+per-signal size, flushed through the active provider's `ITelemetryBulkWriter` with bounded
+exponential-backoff retry (`MaxFlushRetries`), and the gate is released for what was drained
+regardless of outcome. A batch that still fails after retries are exhausted is dropped and recorded
+on `IngestionMetrics`'s `records_dropped` counter — the three gRPC `Export` methods' partial-success
+responses reflect only enqueue success, never this later, asynchronous drop; each documents that
+explicitly. This isolates gRPC latency from DB write latency and provides backpressure.
 
 **gRPC services** (`Keryhe.Telemetry.Collector/Services/`): inherit from protobuf-generated base
 classes, convert OTLP protobuf messages to Core domain models, delegate to write repositories,
@@ -222,6 +245,15 @@ resource identity in memory must go through `TelemetryIngestionHelpers.ResourceK
 `ResourceScopeCache.TryGetResource`/`SetResource` take the tenant as a parameter for exactly this
 reason. Scopes are the deliberate exception: `UNIQUE (scope_hash)` with no tenant, because a scope is
 an instrumentation library and is shared across tenants on purpose.
+
+**`HashResource`/`HashScope` memoize on the model instance** (`ResourceModel.CachedHash` /
+`InstrumentationScopeModel.CachedHash`, internal fields, never set outside these two methods). Each
+bulk writer hashes the same resource/scope twice per row — once resolving the batch's distinct
+resources, again per row rebuilding the lookup key — and the gRPC services hand every record under
+one `ResourceLogs`/`ResourceSpans`/`ResourceMetrics` block the *same* `ResourceModel` instance, so
+memoizing on the instance turns the second-and-later hash of a batch's dominant resource(s) into a
+field read. The cache is populated once and never invalidated within a model's lifetime — treat a
+`ResourceModel`/`InstrumentationScopeModel` as immutable once anything has hashed it.
 
 *Natural-keyed* — Metrics dedup on `uk_metric_identity UNIQUE (resource_id, name, type, scope_id)`,
 four bounded scalar columns already on the row, so there is no metric hash column. `type` is part
@@ -268,6 +300,20 @@ Providers: plain PostgreSQL, PostgreSQL + TimescaleDB, SQL Server, ClickHouse, o
 metric data-point tables and `log_records` are hypertables (partitioned on `time_unix_nano`);
 compression activates at 7 days; retention drops metrics at 180 days and logs at 90 days;
 `log_severity_stats_daily` is a continuous aggregate (refreshes every 5 minutes).
+
+**`spans` index set (schema 2.8.0)**: four indexes were dropped as provably redundant on the
+four relational providers (Postgres, Timescale, SqlServer, MySql) — `idx_trace_id` (a left prefix
+of `uk_trace_span (trace_id, span_id)`), `idx_start_time` (a left prefix of
+`idx_duration (start_time_unix_nano, end_time_unix_nano)`), and `idx_kind`/`idx_status` (6 and 3
+distinct values respectively, too low-cardinality for the planner to ever choose). The GIN indexes
+on `spans.attributes_json` and `log_records.attributes_json` (Postgres/Timescale only) were also
+dropped: no query in the read path does JSONB containment on either column, verified by grepping
+`TraceReadRepositoryBase`/`LogReadRepositoryBase` — every read of those columns is a plain
+`SELECT`. ClickHouse needed no equivalent change; its `ORDER BY (trace_id, span_id)` with a daily
+partition already covers what the dropped B-tree indexes gave the relational providers. Confirmed
+via `EXPLAIN` against a live Postgres container that the trace-detail lookup, the service-map
+query, and the trace-retention sweep (`PostgreSqlWriteStore`/`TimescaleWriteStore`) all still
+resolve to index scans, not sequential scans, without the dropped indexes.
 
 **Telemetry (13)**: `resources`, `instrumentation_scopes`, `spans`, `span_events`, `span_links`,
 `metrics`, `gauge_data_points`, `sum_data_points`, `histogram_data_points`,

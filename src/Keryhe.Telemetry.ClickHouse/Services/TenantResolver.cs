@@ -6,17 +6,17 @@ using Keryhe.Telemetry.Core;
 namespace Keryhe.Telemetry.ClickHouse.Services;
 
 /// <summary>
-/// ClickHouse implementation of <see cref="ITenantResolver"/>. Hashes the ingestion
-/// <c>Authorization</c> key against <c>api_keys</c>. Unlike the relational providers this
-/// does not bump <c>last_used_at</c> on every call: that would be an <c>ALTER TABLE ... UPDATE</c>
-/// mutation per gRPC request, which is prohibitively expensive on ClickHouse. The field is
-/// left to be maintained out-of-band if needed.
+/// ClickHouse implementation of <see cref="IApiKeyLookup"/> — just the <c>SELECT</c> against
+/// <c>api_keys</c>. Caching and <c>last_used_at</c> maintenance are handled once,
+/// provider-agnostically, by <c>CachingTenantResolver</c> / <c>ApiKeyTouchWorker</c>; see
+/// <see cref="IApiKeyLookup"/>. ClickHouse's <see cref="IApiKeyTouchStore"/>
+/// (<see cref="ClickHouseApiKeyTouchStore"/>) is a no-op — see that type for why.
 /// </summary>
-public class TenantResolver(IConfiguration configuration) : ITenantResolver
+public class TenantResolver(IConfiguration configuration) : IApiKeyLookup
 {
     private readonly string _connectionString = configuration.GetConnectionString("Write")!;
 
-    public async Task<long> ResolveTenantIdAsync(string keyHash, CancellationToken cancellationToken)
+    public async Task<long> LookupTenantIdAsync(string keyHash, CancellationToken cancellationToken)
     {
         await using var conn = new ClickHouseConnection(_connectionString);
         await conn.OpenAsync(cancellationToken);

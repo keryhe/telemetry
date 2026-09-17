@@ -11,11 +11,52 @@ namespace Keryhe.Telemetry.Timescale.Services;
 
 /// <summary>
 /// TimescaleDB (PostgreSQL) implementation of <see cref="ITelemetryBulkWriter"/>. Owns
-/// only the Npgsql bulk path: <c>unnest()</c> array expansion for set-based inserts,
-/// <c>ON CONFLICT DO NOTHING</c> dedup with <c>RETURNING</c>, and CTE upserts for
-/// resource/scope. The channel-draining loop and the normalization/hashing helpers live
-/// in <c>Keryhe.Telemetry.Core.Data</c>. The hypertable nature of the target tables is
-/// transparent to these inserts.
+/// only the Npgsql bulk path. The channel-draining loop and the normalization/hashing
+/// helpers live in <c>Keryhe.Telemetry.Core.Data</c>. The hypertable nature of the target
+/// tables is transparent to these inserts.
+///
+/// Two insert shapes, chosen per table by whether it needs conflict handling:
+/// - <b>Binary <c>COPY</c></b> (<c>NpgsqlBinaryImporter</c>, via <c>BeginBinaryImportAsync</c>) for
+///   every table that is a pure append with no dedup key to violate: <c>log_records</c>,
+///   <c>span_events</c>, <c>span_links</c>, and the five metric data-point tables. This is
+///   Npgsql's fastest bulk-load path, and safe here specifically because none of these tables
+///   can raise a conflict -- COPY has no <c>ON CONFLICT</c> equivalent, so it is NOT used for
+///   <c>spans</c>, where a re-delivered span hitting <c>uk_trace_span</c> must be silently
+///   skipped, not thrown.
+/// - <b><c>unnest()</c> array expansion with <c>ON CONFLICT ... RETURNING</c></b> for every table
+///   that dedups: <c>spans</c> (DO NOTHING, re-delivery is expected and must not error),
+///   <c>resources</c>/<c>instrumentation_scopes</c>/<c>metrics</c> (DO UPDATE, so RETURNING fires
+///   for both the newly-inserted AND the already-existing half of the batch in one round trip
+///   -- avoiding a DO-NOTHING-then-separate-SELECT fallback for the conflicting rows).
+///
+/// Both shapes run inside the connection's ambient transaction without explicit enlistment
+/// (confirmed live for COPY specifically, not just ordinary commands: a COPY that runs inside a
+/// flush that later fails rolls back with everything else, the same as the unnest form it
+/// replaced) -- Npgsql tracks it automatically, unlike <c>SqlClient</c>.
+///
+/// Each <c>Flush*Async</c> runs inside a single transaction, so a failure partway through
+/// leaves zero rows from that batch rather than a partially-applied flush -- previously a
+/// trace flush alone issued 3+ separate autocommitted statements. The transaction is never
+/// explicitly rolled back: <c>await using</c> disposes it without a matching
+/// <c>CommitAsync</c> whenever an exception propagates out of the block, and disposing an
+/// uncommitted <see cref="NpgsqlTransaction"/> rolls it back. Every command in these helpers
+/// is enlisted via <c>Transaction = tx</c> even though Npgsql's own docs say this is not
+/// strictly required (unlike <c>SqlClient</c>, it tracks the connection's ambient
+/// transaction automatically) -- explicit enlistment costs nothing and keeps every provider
+/// in this codebase following the same, unambiguous pattern.
+///
+/// <see cref="ResourceScopeCache"/> writes for newly-upserted resources/scopes/metrics are
+/// DEFERRED until after <c>CommitAsync</c> succeeds, collected in a per-flush
+/// <c>postCommitCacheWrites</c> list rather than written the moment each upsert returns an
+/// id. This is load-bearing, not cosmetic: caching immediately, before commit, was verified
+/// live to poison the cache on a rollback -- a resource upsert can succeed and be cached
+/// mid-transaction, then a later statement in the SAME flush fails and rolls the whole
+/// transaction back, leaving the cache pointing at a resources.id that was never actually
+/// persisted. Every subsequent flush that resolves that resource then hits the cache, skips
+/// re-inserting it, and fails its own FK constraint on the span/log/metric it tries to write
+/// -- permanently, since <see cref="ResourceScopeCache"/> entries are never evicted, until
+/// the process restarts. Deferring the write until after the commit that makes it true is
+/// what closes that gap.
 /// </summary>
 public sealed class TimescaleBulkWriter(
     NpgsqlDataSource dataSource,
@@ -29,11 +70,15 @@ public sealed class TimescaleBulkWriter(
     public async Task FlushLogsAsync(List<LogRecordModel> records, CancellationToken ct = default)
     {
         await using var conn = await dataSource.OpenConnectionAsync(ct);
+        await using var tx = await conn.BeginTransactionAsync(ct);
+        var postCommitCacheWrites = new List<Action>();
 
-        var resourceIds = await ResolveResourcesAsync(conn, records.Select(r => r.Resource), ct);
-        var scopeIds = await ResolveScopesAsync(conn, records.Select(r => r.InstrumentationScope), ct);
+        var resourceIds = await ResolveResourcesAsync(conn, tx, records.Select(r => r.Resource), postCommitCacheWrites, ct);
+        var scopeIds = await ResolveScopesAsync(conn, tx, records.Select(r => r.InstrumentationScope), postCommitCacheWrites, ct);
 
-        await BulkInsertLogsAsync(conn, records, resourceIds, scopeIds, ct);
+        await BulkInsertLogsAsync(conn, tx, records, resourceIds, scopeIds, ct);
+        await tx.CommitAsync(ct);
+        foreach (var write in postCommitCacheWrites) write();
         logger.LogDebug("Flushed {Count} log records", records.Count);
     }
 
@@ -41,29 +86,23 @@ public sealed class TimescaleBulkWriter(
     // FLUSH: TRACES
     // =========================================================================
 
-    public async Task FlushTracesAsync(List<TraceModel> traces, CancellationToken ct = default)
+    public async Task FlushTracesAsync(List<SpanModel> spans, CancellationToken ct = default)
     {
-        await using var conn = await dataSource.OpenConnectionAsync(ct);
-
-        // Flatten spans, resolving effective resource/scope per span
-        var spans = traces
-            .SelectMany(t => t.Spans.Select(s => (
-                Span: s,
-                Resource: s.Resource ?? t.Resource,
-                Scope: s.InstrumentationScope ?? t.InstrumentationScope)))
-            .ToList();
-
         if (spans.Count == 0) return;
 
-        var resourceIds = await ResolveResourcesAsync(conn, spans.Select(s => s.Resource), ct);
-        var scopeIds = await ResolveScopesAsync(conn, spans.Select(s => s.Scope), ct);
+        await using var conn = await dataSource.OpenConnectionAsync(ct);
+        await using var tx = await conn.BeginTransactionAsync(ct);
+        var postCommitCacheWrites = new List<Action>();
 
-        var insertedSpanIds = await BulkInsertSpansAsync(conn, spans, resourceIds, scopeIds, ct);
+        var resourceIds = await ResolveResourcesAsync(conn, tx, spans.Select(s => s.Resource), postCommitCacheWrites, ct);
+        var scopeIds = await ResolveScopesAsync(conn, tx, spans.Select(s => s.InstrumentationScope), postCommitCacheWrites, ct);
+
+        var insertedSpanIds = await BulkInsertSpansAsync(conn, tx, spans, resourceIds, scopeIds, ct);
 
         var events = new List<(long SpanDbId, SpanEventModel Event)>();
         var links = new List<(long SpanDbId, SpanLinkModel Link)>();
 
-        foreach (var (span, _, _) in spans)
+        foreach (var span in spans)
         {
             if (!insertedSpanIds.TryGetValue((span.TraceIdHex, span.SpanIdHex), out var dbId))
                 continue;
@@ -71,10 +110,12 @@ public sealed class TimescaleBulkWriter(
             foreach (var l in span.Links) links.Add((dbId, l));
         }
 
-        if (events.Count > 0) await BulkInsertSpanEventsAsync(conn, events, ct);
-        if (links.Count > 0) await BulkInsertSpanLinksAsync(conn, links, ct);
+        if (events.Count > 0) await BulkInsertSpanEventsAsync(conn, tx, events, ct);
+        if (links.Count > 0) await BulkInsertSpanLinksAsync(conn, tx, links, ct);
 
-        logger.LogDebug("Flushed {SpanCount} spans across {TraceCount} traces", spans.Count, traces.Count);
+        await tx.CommitAsync(ct);
+        foreach (var write in postCommitCacheWrites) write();
+        logger.LogDebug("Flushed {SpanCount} spans", spans.Count);
     }
 
     // =========================================================================
@@ -84,11 +125,24 @@ public sealed class TimescaleBulkWriter(
     public async Task FlushMetricsAsync(List<MetricModel> metrics, CancellationToken ct = default)
     {
         await using var conn = await dataSource.OpenConnectionAsync(ct);
+        await using var tx = await conn.BeginTransactionAsync(ct);
+        var postCommitCacheWrites = new List<Action>();
 
-        var resourceIds = await ResolveResourcesAsync(conn, metrics.Select(m => m.Resource), ct);
-        var scopeIds = await ResolveScopesAsync(conn, metrics.Select(m => m.InstrumentationScope), ct);
+        var resourceIds = await ResolveResourcesAsync(conn, tx, metrics.Select(m => m.Resource), postCommitCacheWrites, ct);
+        var scopeIds = await ResolveScopesAsync(conn, tx, metrics.Select(m => m.InstrumentationScope), postCommitCacheWrites, ct);
 
-        var metricIds = await ResolveMetricIdsAsync(conn, metrics, resourceIds, scopeIds, ct);
+        var metricIds = await ResolveMetricIdsAsync(conn, tx, metrics, resourceIds, scopeIds, postCommitCacheWrites, ct);
+
+        // Group data points by target table across the WHOLE batch, attaching each row's already
+        // -resolved metric_id as it is grouped. This is what turns a metric flush into AT MOST
+        // FIVE bulk inserts instead of one per metric: a naive per-metric loop here defeats the
+        // whole point of batching (up to MaxMetricFlushBatchSize round trips per flush), and on
+        // ClickHouse it also explodes into one tiny part per metric.
+        var gaugeRows = new List<(long MetricId, GaugeDataPointModel DataPoint)>();
+        var sumRows = new List<(long MetricId, SumDataPointModel DataPoint)>();
+        var histogramRows = new List<(long MetricId, HistogramDataPointModel DataPoint)>();
+        var expHistogramRows = new List<(long MetricId, ExponentialHistogramDataPointModel DataPoint)>();
+        var summaryRows = new List<(long MetricId, SummaryDataPointModel DataPoint)>();
 
         for (var i = 0; i < metrics.Count; i++)
         {
@@ -97,23 +151,31 @@ public sealed class TimescaleBulkWriter(
             switch (metric.Type)
             {
                 case MetricType.GAUGE when metric.GaugeDataPoints?.Count > 0:
-                    await BulkInsertGaugeDataPointsAsync(conn, metricId, metric.GaugeDataPoints, ct);
+                    gaugeRows.AddRange(metric.GaugeDataPoints.Select(d => (metricId, d)));
                     break;
                 case MetricType.SUM when metric.SumDataPoints?.Count > 0:
-                    await BulkInsertSumDataPointsAsync(conn, metricId, metric.SumDataPoints, ct);
+                    sumRows.AddRange(metric.SumDataPoints.Select(d => (metricId, d)));
                     break;
                 case MetricType.HISTOGRAM when metric.HistogramDataPoints?.Count > 0:
-                    await BulkInsertHistogramDataPointsAsync(conn, metricId, metric.HistogramDataPoints, ct);
+                    histogramRows.AddRange(metric.HistogramDataPoints.Select(d => (metricId, d)));
                     break;
                 case MetricType.EXPONENTIAL_HISTOGRAM when metric.ExponentialHistogramDataPoints?.Count > 0:
-                    await BulkInsertExpHistogramDataPointsAsync(conn, metricId, metric.ExponentialHistogramDataPoints, ct);
+                    expHistogramRows.AddRange(metric.ExponentialHistogramDataPoints.Select(d => (metricId, d)));
                     break;
                 case MetricType.SUMMARY when metric.SummaryDataPoints?.Count > 0:
-                    await BulkInsertSummaryDataPointsAsync(conn, metricId, metric.SummaryDataPoints, ct);
+                    summaryRows.AddRange(metric.SummaryDataPoints.Select(d => (metricId, d)));
                     break;
             }
         }
 
+        if (gaugeRows.Count > 0) await BulkInsertGaugeDataPointsAsync(conn, tx, gaugeRows, ct);
+        if (sumRows.Count > 0) await BulkInsertSumDataPointsAsync(conn, tx, sumRows, ct);
+        if (histogramRows.Count > 0) await BulkInsertHistogramDataPointsAsync(conn, tx, histogramRows, ct);
+        if (expHistogramRows.Count > 0) await BulkInsertExpHistogramDataPointsAsync(conn, tx, expHistogramRows, ct);
+        if (summaryRows.Count > 0) await BulkInsertSummaryDataPointsAsync(conn, tx, summaryRows, ct);
+
+        await tx.CommitAsync(ct);
+        foreach (var write in postCommitCacheWrites) write();
         logger.LogDebug("Flushed {Count} metrics", metrics.Count);
     }
 
@@ -123,7 +185,9 @@ public sealed class TimescaleBulkWriter(
 
     private async Task<Dictionary<string, long>> ResolveResourcesAsync(
         NpgsqlConnection conn,
+        NpgsqlTransaction tx,
         IEnumerable<ResourceModel?> resources,
+        List<Action> postCommitCacheWrites,
         CancellationToken ct)
     {
         // Keyed by ResourceKey, never by the bare hash: two tenants running the same service with the
@@ -145,19 +209,73 @@ public sealed class TimescaleBulkWriter(
                 pending.TryAdd(key, (hash, model));
         }
 
-        foreach (var (key, entry) in pending)
-        {
-            var id = await UpsertResourceAsync(conn, entry.Model, entry.Hash, ct);
-            cache.SetResource(entry.Model.TenantId, entry.Hash, id);
-            result[key] = id;
-        }
+        if (pending.Count > 0)
+            await UpsertResourcesAsync(conn, tx, pending, result, cache, postCommitCacheWrites, ct);
 
         return result;
     }
 
+    // Batches every distinct cold-start resource in this flush into ONE round trip instead of
+    // one UpsertResourceAsync call per resource (this is what most flushes hit, since a warm
+    // process resolves everything from the cache and never reaches here at all -- but the FIRST
+    // flush after a process start, or one touching brand-new resources, previously paid one round
+    // trip per distinct resource). DO UPDATE rather than DO NOTHING so RETURNING fires for
+    // conflicting rows too, one output row per input row -- same reasoning as ResolveMetricIdsAsync,
+    // and the same reason `pending` must already be deduped by key before this runs: PostgreSQL
+    // raises 21000 if one statement's ON CONFLICT DO UPDATE touches the same conflict target twice.
+    private static async Task UpsertResourcesAsync(
+        NpgsqlConnection conn, NpgsqlTransaction tx,
+        Dictionary<string, (string Hash, ResourceModel Model)> pending,
+        Dictionary<string, long> result, ResourceScopeCache cache, List<Action> postCommitCacheWrites, CancellationToken ct)
+    {
+        const string sql = """
+            INSERT INTO resources (attributes_json, created_at, resource_hash, schema_url, tenant_id)
+            SELECT unnest($1::jsonb[]), NOW(), unnest($2::text[]), unnest($3::text[]), unnest($4::bigint[])
+            ON CONFLICT (tenant_id, resource_hash) DO UPDATE
+                SET schema_url = EXCLUDED.schema_url
+            RETURNING id, tenant_id, resource_hash
+            """;
+
+        var entries = pending.Values.ToList();
+        var n = entries.Count;
+        var attrs = new string?[n];
+        var hashes = new string[n];
+        var schemaUrls = new string?[n];
+        var tenantIds = new long[n];
+        for (var i = 0; i < n; i++)
+        {
+            attrs[i] = SerializeDeterministicJson(entries[i].Model.Attributes);
+            hashes[i] = entries[i].Hash;
+            schemaUrls[i] = entries[i].Model.SchemaUrl;
+            tenantIds[i] = entries[i].Model.TenantId;
+        }
+
+        await using var cmd = new NpgsqlCommand(sql, conn) { Transaction = tx };
+        cmd.Parameters.Add(new NpgsqlParameter { Value = attrs, NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Jsonb });
+        cmd.Parameters.Add(new NpgsqlParameter { Value = hashes, NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Text });
+        cmd.Parameters.Add(new NpgsqlParameter { Value = schemaUrls, NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Text });
+        cmd.Parameters.Add(new NpgsqlParameter { Value = tenantIds, NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Bigint });
+
+        await using var reader = await cmd.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct))
+        {
+            var id = reader.GetInt64(0);
+            var tenantId = reader.GetInt64(1);
+            var hash = reader.GetString(2);
+            var key = ResourceKey(tenantId, hash);
+            result[key] = id;
+            // Deferred: caching now, before the transaction commits, would let a later failure in
+            // this SAME flush roll back the row while the cache still claims it exists -- see the
+            // class doc comment.
+            postCommitCacheWrites.Add(() => cache.SetResource(tenantId, hash, id));
+        }
+    }
+
     private async Task<Dictionary<string, long>> ResolveScopesAsync(
         NpgsqlConnection conn,
+        NpgsqlTransaction tx,
         IEnumerable<InstrumentationScopeModel?> scopes,
+        List<Action> postCommitCacheWrites,
         CancellationToken ct)
     {
         var result = new Dictionary<string, long>(StringComparer.Ordinal);
@@ -175,143 +293,107 @@ public sealed class TimescaleBulkWriter(
                 pending.TryAdd(hash, model);
         }
 
-        foreach (var (hash, model) in pending)
-        {
-            var id = await UpsertScopeAsync(conn, model, hash, ct);
-            cache.SetScope(hash, id);
-            result[hash] = id;
-        }
+        if (pending.Count > 0)
+            await UpsertScopesAsync(conn, tx, pending, result, cache, postCommitCacheWrites, ct);
 
         return result;
     }
 
-    // Single CTE that returns the ID whether the row was just inserted or already existed.
-    private static async Task<long> UpsertResourceAsync(
-        NpgsqlConnection conn, ResourceModel model, string hash, CancellationToken ct)
+    // Batched cold-start scope upsert -- see UpsertResourcesAsync, same reasoning.
+    private static async Task UpsertScopesAsync(
+        NpgsqlConnection conn, NpgsqlTransaction tx,
+        Dictionary<string, InstrumentationScopeModel> pending,
+        Dictionary<string, long> result, ResourceScopeCache cache, List<Action> postCommitCacheWrites, CancellationToken ct)
     {
         const string sql = """
-            WITH ins AS (
-                INSERT INTO resources (attributes_json, created_at, resource_hash, schema_url, tenant_id)
-                VALUES (CAST($1 AS jsonb), NOW(), $2, $3, $4)
-                ON CONFLICT (tenant_id, resource_hash) DO NOTHING
-                RETURNING id
-            )
-            SELECT id FROM ins
-            UNION ALL
-            SELECT id FROM resources WHERE tenant_id = $4 AND resource_hash = $2
-            LIMIT 1
+            INSERT INTO instrumentation_scopes (name, version, schema_url, scope_hash, created_at, attributes_json)
+            SELECT unnest($1::text[]), unnest($2::text[]), unnest($3::text[]), unnest($4::text[]), NOW(), unnest($5::jsonb[])
+            ON CONFLICT (scope_hash) DO UPDATE
+                SET schema_url = EXCLUDED.schema_url
+            RETURNING id, scope_hash
             """;
 
-        await using var cmd = new NpgsqlCommand(sql, conn);
-        cmd.Parameters.AddWithValue(NpgsqlDbType.Jsonb, SerializeDeterministicJson(model.Attributes));
-        cmd.Parameters.AddWithValue(NpgsqlDbType.Text, hash);
-        cmd.Parameters.AddWithValue(NpgsqlDbType.Text, (object?)model.SchemaUrl ?? DBNull.Value);
-        cmd.Parameters.AddWithValue(NpgsqlDbType.Bigint, model.TenantId);
-        return (long)(await cmd.ExecuteScalarAsync(ct))!;
-    }
+        var entries = pending.ToList();
+        var n = entries.Count;
+        var names = new string[n];
+        var versions = new string?[n];
+        var schemaUrls = new string?[n];
+        var hashes = new string[n];
+        var attrs = new string?[n];
+        for (var i = 0; i < n; i++)
+        {
+            var model = entries[i].Value;
+            names[i] = model.Name;
+            versions[i] = model.Version;
+            schemaUrls[i] = model.SchemaUrl;
+            hashes[i] = entries[i].Key;
+            attrs[i] = SerializeDeterministicJson(model.Attributes);
+        }
 
-    private static async Task<long> UpsertScopeAsync(
-        NpgsqlConnection conn, InstrumentationScopeModel model, string hash, CancellationToken ct)
-    {
-        const string sql = """
-            WITH ins AS (
-                INSERT INTO instrumentation_scopes (name, version, schema_url, scope_hash, created_at, attributes_json)
-                VALUES ($1, $2, $3, $4, NOW(), CAST($5 AS jsonb))
-                ON CONFLICT (scope_hash) DO NOTHING
-                RETURNING id
-            )
-            SELECT id FROM ins
-            UNION ALL
-            SELECT id FROM instrumentation_scopes WHERE scope_hash = $4
-            LIMIT 1
-            """;
+        await using var cmd = new NpgsqlCommand(sql, conn) { Transaction = tx };
+        cmd.Parameters.Add(new NpgsqlParameter { Value = names, NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Text });
+        cmd.Parameters.Add(new NpgsqlParameter { Value = versions, NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Text });
+        cmd.Parameters.Add(new NpgsqlParameter { Value = schemaUrls, NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Text });
+        cmd.Parameters.Add(new NpgsqlParameter { Value = hashes, NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Text });
+        cmd.Parameters.Add(new NpgsqlParameter { Value = attrs, NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Jsonb });
 
-        await using var cmd = new NpgsqlCommand(sql, conn);
-        cmd.Parameters.AddWithValue(NpgsqlDbType.Text, model.Name);
-        cmd.Parameters.AddWithValue(NpgsqlDbType.Text, (object?)model.Version ?? DBNull.Value);
-        cmd.Parameters.AddWithValue(NpgsqlDbType.Text, (object?)model.SchemaUrl ?? DBNull.Value);
-        cmd.Parameters.AddWithValue(NpgsqlDbType.Text, hash);
-        cmd.Parameters.AddWithValue(NpgsqlDbType.Jsonb, SerializeDeterministicJson(model.Attributes));
-        return (long)(await cmd.ExecuteScalarAsync(ct))!;
+        await using var reader = await cmd.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct))
+        {
+            var id = reader.GetInt64(0);
+            var hash = reader.GetString(1);
+            result[hash] = id;
+            // Deferred -- see ResolveResourcesAsync.
+            postCommitCacheWrites.Add(() => cache.SetScope(hash, id));
+        }
     }
 
     // =========================================================================
     // BULK INSERT: LOGS
     // =========================================================================
 
+    private const string LogsCopySql = """
+        COPY log_records (
+            resource_id, scope_id, time_unix_nano, observed_time_unix_nano,
+            severity_number, severity_text, body_type, body_value,
+            dropped_attributes_count, flags, trace_id, span_id, attributes_json, event_name)
+        FROM STDIN (FORMAT BINARY)
+        """;
+
+    // Binary COPY, not unnest($1::type[], ...) array parameters: log_records has no dedup /
+    // ON CONFLICT / RETURNING need (unlike spans), so nothing about COPY's "no conflict handling"
+    // restriction applies here -- it is a pure straight-line append, which is exactly what COPY's
+    // binary protocol is fastest at. The connection's ambient transaction covers COPY the same way
+    // it covers ordinary commands (confirmed live: a COPY inside this flush's transaction rolls
+    // back with everything else on failure, same as the unnest form it replaces).
     private static async Task BulkInsertLogsAsync(
         NpgsqlConnection conn,
+        NpgsqlTransaction tx,
         List<LogRecordModel> records,
         Dictionary<string, long> resourceIds,
         Dictionary<string, long> scopeIds,
         CancellationToken ct)
     {
-        const string sql = """
-            INSERT INTO log_records (
-                resource_id, scope_id, time_unix_nano, observed_time_unix_nano,
-                severity_number, severity_text, body_type, body_value,
-                dropped_attributes_count, flags, trace_id, span_id, attributes_json, event_name)
-            SELECT
-                unnest($1::bigint[]), unnest($2::bigint[]),
-                unnest($3::bigint[]), unnest($4::bigint[]),
-                unnest($5::int[]),    unnest($6::text[]),
-                unnest($7::text[]),   unnest($8::text[]),
-                unnest($9::int[]),    unnest($10::int[]),
-                unnest($11::text[]),  unnest($12::text[]),
-                unnest($13::jsonb[]), unnest($14::text[])
-            """;
-
-        var n = records.Count;
-        var resIds = new long[n];
-        var scoIds = new long[n];
-        var times = new long[n];
-        var obsTimes = new long?[n];
-        var sevNums = new int?[n];
-        var sevTexts = new string?[n];
-        var bodyTypes = new string?[n];
-        var bodyValues = new string?[n];
-        var dropped = new int[n];
-        var flags = new int[n];
-        var traceIds = new string?[n];
-        var spanIds = new string?[n];
-        var attrs = new string?[n];
-        var eventNames = new string?[n];
-
-        for (var i = 0; i < n; i++)
+        await using var writer = await conn.BeginBinaryImportAsync(LogsCopySql, ct);
+        foreach (var r in records)
         {
-            var r = records[i];
-            resIds[i] = resourceIds[ResourceKey(r.Resource)];
-            scoIds[i] = scopeIds[HashScope(NormalizeScope(r.InstrumentationScope))];
-            times[i] = r.TimeUnixNano ?? 0L;
-            obsTimes[i] = r.ObservedTimeUnixNano;
-            sevNums[i] = r.SeverityNumber;
-            sevTexts[i] = r.SeverityText;
-            bodyTypes[i] = r.BodyType?.ToString();
-            bodyValues[i] = r.BodyValue;
-            dropped[i] = r.DroppedAttributesCount;
-            flags[i] = r.Flags;
-            traceIds[i] = r.TraceIdHex;
-            spanIds[i] = r.SpanIdHex;
-            attrs[i] = r.Attributes.Count > 0 ? JsonSerializer.Serialize(r.Attributes) : null;
-            eventNames[i] = r.EventName;
+            await writer.StartRowAsync(ct);
+            await writer.WriteAsync(resourceIds[ResourceKey(r.Resource)], NpgsqlDbType.Bigint, ct);
+            await writer.WriteAsync(scopeIds[HashScope(NormalizeScope(r.InstrumentationScope))], NpgsqlDbType.Bigint, ct);
+            await writer.WriteAsync(r.TimeUnixNano ?? 0L, NpgsqlDbType.Bigint, ct);
+            await WriteNullableAsync(writer, r.ObservedTimeUnixNano, NpgsqlDbType.Bigint, ct);
+            await WriteNullableAsync(writer, r.SeverityNumber, NpgsqlDbType.Integer, ct);
+            await WriteNullableAsync(writer, r.SeverityText, NpgsqlDbType.Text, ct);
+            await WriteNullableAsync(writer, r.BodyType?.ToString(), NpgsqlDbType.Text, ct);
+            await WriteNullableAsync(writer, r.BodyValue, NpgsqlDbType.Text, ct);
+            await writer.WriteAsync(r.DroppedAttributesCount, NpgsqlDbType.Integer, ct);
+            await writer.WriteAsync(r.Flags, NpgsqlDbType.Integer, ct);
+            await WriteNullableAsync(writer, r.TraceIdHex, NpgsqlDbType.Text, ct);
+            await WriteNullableAsync(writer, r.SpanIdHex, NpgsqlDbType.Text, ct);
+            await WriteNullableAsync(writer, r.Attributes.Count > 0 ? JsonSerializer.Serialize(r.Attributes) : null, NpgsqlDbType.Jsonb, ct);
+            await WriteNullableAsync(writer, r.EventName, NpgsqlDbType.Text, ct);
         }
-
-        await using var cmd = new NpgsqlCommand(sql, conn);
-        cmd.Parameters.Add(new NpgsqlParameter { Value = resIds, NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Bigint });
-        cmd.Parameters.Add(new NpgsqlParameter { Value = scoIds, NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Bigint });
-        cmd.Parameters.Add(new NpgsqlParameter { Value = times, NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Bigint });
-        cmd.Parameters.Add(new NpgsqlParameter { Value = obsTimes, NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Bigint });
-        cmd.Parameters.Add(new NpgsqlParameter { Value = sevNums, NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Integer });
-        cmd.Parameters.Add(new NpgsqlParameter { Value = sevTexts, NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Text });
-        cmd.Parameters.Add(new NpgsqlParameter { Value = bodyTypes, NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Text });
-        cmd.Parameters.Add(new NpgsqlParameter { Value = bodyValues, NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Text });
-        cmd.Parameters.Add(new NpgsqlParameter { Value = dropped, NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Integer });
-        cmd.Parameters.Add(new NpgsqlParameter { Value = flags, NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Integer });
-        cmd.Parameters.Add(new NpgsqlParameter { Value = traceIds, NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Text });
-        cmd.Parameters.Add(new NpgsqlParameter { Value = spanIds, NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Text });
-        cmd.Parameters.Add(new NpgsqlParameter { Value = attrs, NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Jsonb });
-        cmd.Parameters.Add(new NpgsqlParameter { Value = eventNames, NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Text });
-        await cmd.ExecuteNonQueryAsync(ct);
+        await writer.CompleteAsync(ct);
     }
 
     // =========================================================================
@@ -320,7 +402,8 @@ public sealed class TimescaleBulkWriter(
 
     private static async Task<Dictionary<(string TraceId, string SpanId), long>> BulkInsertSpansAsync(
         NpgsqlConnection conn,
-        List<(SpanModel Span, ResourceModel? Resource, InstrumentationScopeModel? Scope)> spans,
+        NpgsqlTransaction tx,
+        List<SpanModel> spans,
         Dictionary<string, long> resourceIds,
         Dictionary<string, long> scopeIds,
         CancellationToken ct)
@@ -364,9 +447,9 @@ public sealed class TimescaleBulkWriter(
 
         for (var i = 0; i < n; i++)
         {
-            var (span, resource, scope) = spans[i];
-            resIds[i] = resourceIds[ResourceKey(resource)];
-            scoIds[i] = scopeIds[HashScope(NormalizeScope(scope))];
+            var span = spans[i];
+            resIds[i] = resourceIds[ResourceKey(span.Resource)];
+            scoIds[i] = scopeIds[HashScope(NormalizeScope(span.InstrumentationScope))];
             traceIds[i] = span.TraceIdHex;
             spanIds[i] = span.SpanIdHex;
             parentIds[i] = span.ParentSpanIdHex;
@@ -384,7 +467,7 @@ public sealed class TimescaleBulkWriter(
             flags[i] = span.Flags;
         }
 
-        await using var cmd = new NpgsqlCommand(sql, conn);
+        await using var cmd = new NpgsqlCommand(sql, conn) { Transaction = tx };
         cmd.Parameters.Add(new NpgsqlParameter { Value = traceIds, NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Text });
         cmd.Parameters.Add(new NpgsqlParameter { Value = spanIds, NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Text });
         cmd.Parameters.Add(new NpgsqlParameter { Value = parentIds, NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Text });
@@ -411,82 +494,50 @@ public sealed class TimescaleBulkWriter(
         return inserted;
     }
 
+    private const string SpanEventsCopySql =
+        "COPY span_events (span_id, name, time_unix_nano, dropped_attributes_count, attributes_json) FROM STDIN (FORMAT BINARY)";
+
     private static async Task BulkInsertSpanEventsAsync(
         NpgsqlConnection conn,
+        NpgsqlTransaction tx,
         List<(long SpanDbId, SpanEventModel Event)> events,
         CancellationToken ct)
     {
-        const string sql = """
-            INSERT INTO span_events (span_id, name, time_unix_nano, dropped_attributes_count, attributes_json)
-            SELECT unnest($1::bigint[]), unnest($2::text[]), unnest($3::bigint[]), unnest($4::int[]), unnest($5::jsonb[])
-            """;
-
-        var n = events.Count;
-        var spanIds = new long[n];
-        var names = new string[n];
-        var times = new long[n];
-        var dropped = new int[n];
-        var attrs = new string?[n];
-
-        for (var i = 0; i < n; i++)
+        await using var writer = await conn.BeginBinaryImportAsync(SpanEventsCopySql, ct);
+        foreach (var (spanId, e) in events)
         {
-            var (spanId, e) = events[i];
-            spanIds[i] = spanId;
-            names[i] = e.Name;
-            times[i] = e.TimeUnixNano;
-            dropped[i] = e.DroppedAttributesCount;
-            attrs[i] = e.Attributes?.Count > 0 ? JsonSerializer.Serialize(e.Attributes) : null;
+            await writer.StartRowAsync(ct);
+            await writer.WriteAsync(spanId, NpgsqlDbType.Bigint, ct);
+            await writer.WriteAsync(e.Name, NpgsqlDbType.Text, ct);
+            await writer.WriteAsync(e.TimeUnixNano, NpgsqlDbType.Bigint, ct);
+            await writer.WriteAsync(e.DroppedAttributesCount, NpgsqlDbType.Integer, ct);
+            await WriteNullableAsync(writer, e.Attributes?.Count > 0 ? JsonSerializer.Serialize(e.Attributes) : null, NpgsqlDbType.Jsonb, ct);
         }
-
-        await using var cmd = new NpgsqlCommand(sql, conn);
-        cmd.Parameters.Add(new NpgsqlParameter { Value = spanIds, NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Bigint });
-        cmd.Parameters.Add(new NpgsqlParameter { Value = names, NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Text });
-        cmd.Parameters.Add(new NpgsqlParameter { Value = times, NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Bigint });
-        cmd.Parameters.Add(new NpgsqlParameter { Value = dropped, NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Integer });
-        cmd.Parameters.Add(new NpgsqlParameter { Value = attrs, NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Jsonb });
-        await cmd.ExecuteNonQueryAsync(ct);
+        await writer.CompleteAsync(ct);
     }
+
+    private const string SpanLinksCopySql =
+        "COPY span_links (span_id, linked_trace_id, linked_span_id, trace_state, dropped_attributes_count, attributes_json, flags) FROM STDIN (FORMAT BINARY)";
 
     private static async Task BulkInsertSpanLinksAsync(
         NpgsqlConnection conn,
+        NpgsqlTransaction tx,
         List<(long SpanDbId, SpanLinkModel Link)> links,
         CancellationToken ct)
     {
-        const string sql = """
-            INSERT INTO span_links (span_id, linked_trace_id, linked_span_id, trace_state, dropped_attributes_count, attributes_json, flags)
-            SELECT unnest($1::bigint[]), unnest($2::text[]), unnest($3::text[]), unnest($4::text[]), unnest($5::int[]), unnest($6::jsonb[]), unnest($7::int[])
-            """;
-
-        var n = links.Count;
-        var spanIds = new long[n];
-        var linkedTraceIds = new string[n];
-        var linkedSpanIds = new string[n];
-        var traceStates = new string?[n];
-        var dropped = new int[n];
-        var attrs = new string?[n];
-        var flags = new int[n];
-
-        for (var i = 0; i < n; i++)
+        await using var writer = await conn.BeginBinaryImportAsync(SpanLinksCopySql, ct);
+        foreach (var (spanId, l) in links)
         {
-            var (spanId, l) = links[i];
-            spanIds[i] = spanId;
-            linkedTraceIds[i] = l.LinkedTraceIdHex;
-            linkedSpanIds[i] = l.LinkedSpanIdHex;
-            traceStates[i] = l.TraceState;
-            dropped[i] = l.DroppedAttributesCount;
-            attrs[i] = l.Attributes?.Count > 0 ? JsonSerializer.Serialize(l.Attributes) : null;
-            flags[i] = l.Flags;
+            await writer.StartRowAsync(ct);
+            await writer.WriteAsync(spanId, NpgsqlDbType.Bigint, ct);
+            await writer.WriteAsync(l.LinkedTraceIdHex, NpgsqlDbType.Text, ct);
+            await writer.WriteAsync(l.LinkedSpanIdHex, NpgsqlDbType.Text, ct);
+            await WriteNullableAsync(writer, l.TraceState, NpgsqlDbType.Text, ct);
+            await writer.WriteAsync(l.DroppedAttributesCount, NpgsqlDbType.Integer, ct);
+            await WriteNullableAsync(writer, l.Attributes?.Count > 0 ? JsonSerializer.Serialize(l.Attributes) : null, NpgsqlDbType.Jsonb, ct);
+            await writer.WriteAsync(l.Flags, NpgsqlDbType.Integer, ct);
         }
-
-        await using var cmd = new NpgsqlCommand(sql, conn);
-        cmd.Parameters.Add(new NpgsqlParameter { Value = spanIds, NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Bigint });
-        cmd.Parameters.Add(new NpgsqlParameter { Value = linkedTraceIds, NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Text });
-        cmd.Parameters.Add(new NpgsqlParameter { Value = linkedSpanIds, NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Text });
-        cmd.Parameters.Add(new NpgsqlParameter { Value = traceStates, NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Text });
-        cmd.Parameters.Add(new NpgsqlParameter { Value = dropped, NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Integer });
-        cmd.Parameters.Add(new NpgsqlParameter { Value = attrs, NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Jsonb });
-        cmd.Parameters.Add(new NpgsqlParameter { Value = flags, NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Integer });
-        await cmd.ExecuteNonQueryAsync(ct);
+        await writer.CompleteAsync(ct);
     }
 
     // =========================================================================
@@ -500,14 +551,17 @@ public sealed class TimescaleBulkWriter(
 
     private async Task<long[]> ResolveMetricIdsAsync(
         NpgsqlConnection conn,
+        NpgsqlTransaction tx,
         List<MetricModel> metrics,
         Dictionary<string, long> resourceIds,
         Dictionary<string, long> scopeIds,
+        List<Action> postCommitCacheWrites,
         CancellationToken ct)
     {
         // DO UPDATE rather than DO NOTHING so RETURNING fires for conflicting rows too, giving
-        // one output row per input row. That is what lets this skip the "WITH ins AS (...)
-        // UNION ALL SELECT ... LIMIT 1" fallback that UpsertResourceAsync needs.
+        // one output row per input row -- the same "WITH ins AS (...) ON CONFLICT DO NOTHING ...
+        // UNION ALL SELECT ... LIMIT 1" fallback UpsertResourcesAsync would otherwise need is
+        // avoided the same way there.
         //
         // Do NOT add a WHERE to the DO UPDATE to skip no-op writes: it would suppress RETURNING
         // for unchanged rows and bring that fallback straight back.
@@ -573,7 +627,7 @@ public sealed class TimescaleBulkWriter(
                 types[i] = m.Type.ToString();
             }
 
-            await using var cmd = new NpgsqlCommand(sql, conn);
+            await using var cmd = new NpgsqlCommand(sql, conn) { Transaction = tx };
             cmd.Parameters.Add(new NpgsqlParameter { Value = resIds, NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Bigint });
             cmd.Parameters.Add(new NpgsqlParameter { Value = scoIds, NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Bigint });
             cmd.Parameters.Add(new NpgsqlParameter { Value = names, NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Text });
@@ -587,7 +641,8 @@ public sealed class TimescaleBulkWriter(
                 var id = reader.GetInt64(0);
                 var key = MetricKey(reader.GetInt64(1), reader.GetInt64(2), reader.GetString(3), reader.GetString(4));
                 result[key] = id;
-                cache.SetMetric(key, id);
+                // Deferred -- see ResolveResourcesAsync.
+                postCommitCacheWrites.Add(() => cache.SetMetric(key, id));
             }
         }
 
@@ -596,169 +651,164 @@ public sealed class TimescaleBulkWriter(
         return ids;
     }
 
+    private const string GaugeCopySql =
+        "COPY gauge_data_points (metric_id, start_time_unix_nano, time_unix_nano, value_double, value_int, flags, attributes_json) FROM STDIN (FORMAT BINARY)";
+
     private static async Task BulkInsertGaugeDataPointsAsync(
-        NpgsqlConnection conn, long metricId,
-        List<GaugeDataPointModel> dataPoints, CancellationToken ct)
+        NpgsqlConnection conn,
+        NpgsqlTransaction tx,
+        List<(long MetricId, GaugeDataPointModel DataPoint)> rows, CancellationToken ct)
     {
-        const string sql = """
-            INSERT INTO gauge_data_points (metric_id, start_time_unix_nano, time_unix_nano, value_double, value_int, flags, attributes_json)
-            SELECT unnest($1::bigint[]), unnest($2::bigint[]), unnest($3::bigint[]),
-                   unnest($4::float8[]), unnest($5::bigint[]), unnest($6::int[]), unnest($7::jsonb[])
-            """;
-
-        var n = dataPoints.Count;
-        var mids = Repeat(metricId, n);
-        var startTimes = dataPoints.Select(d => d.StartTimeUnixNano).ToArray();
-        var times = dataPoints.Select(d => d.TimeUnixNano).ToArray();
-        var valDoubles = dataPoints.Select(d => d.ValueDouble).ToArray();
-        var valInts = dataPoints.Select(d => d.ValueInt).ToArray();
-        var flags = dataPoints.Select(d => d.Flags).ToArray();
-        var attrs = dataPoints.Select(d => SerializeJsonOrNull(d.Attributes)).ToArray();
-
-        await using var cmd = new NpgsqlCommand(sql, conn);
-        cmd.Parameters.Add(new NpgsqlParameter { Value = mids, NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Bigint });
-        cmd.Parameters.Add(new NpgsqlParameter { Value = startTimes, NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Bigint });
-        cmd.Parameters.Add(new NpgsqlParameter { Value = times, NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Bigint });
-        cmd.Parameters.Add(new NpgsqlParameter { Value = valDoubles, NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Double });
-        cmd.Parameters.Add(new NpgsqlParameter { Value = valInts, NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Bigint });
-        cmd.Parameters.Add(new NpgsqlParameter { Value = flags, NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Integer });
-        cmd.Parameters.Add(new NpgsqlParameter { Value = attrs, NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Jsonb });
-        await cmd.ExecuteNonQueryAsync(ct);
+        await using var writer = await conn.BeginBinaryImportAsync(GaugeCopySql, ct);
+        foreach (var (metricId, d) in rows)
+        {
+            await writer.StartRowAsync(ct);
+            await writer.WriteAsync(metricId, NpgsqlDbType.Bigint, ct);
+            await WriteNullableAsync(writer, d.StartTimeUnixNano, NpgsqlDbType.Bigint, ct);
+            await writer.WriteAsync(d.TimeUnixNano, NpgsqlDbType.Bigint, ct);
+            await WriteNullableAsync(writer, d.ValueDouble, NpgsqlDbType.Double, ct);
+            await WriteNullableAsync(writer, d.ValueInt, NpgsqlDbType.Bigint, ct);
+            await writer.WriteAsync(d.Flags, NpgsqlDbType.Integer, ct);
+            await WriteNullableAsync(writer, SerializeJsonOrNull(d.Attributes), NpgsqlDbType.Jsonb, ct);
+        }
+        await writer.CompleteAsync(ct);
     }
+
+    private const string SumCopySql = """
+        COPY sum_data_points (metric_id, start_time_unix_nano, time_unix_nano, value_double, value_int,
+                              aggregation_temporality, is_monotonic, flags, attributes_json)
+        FROM STDIN (FORMAT BINARY)
+        """;
 
     private static async Task BulkInsertSumDataPointsAsync(
-        NpgsqlConnection conn, long metricId,
-        List<SumDataPointModel> dataPoints, CancellationToken ct)
+        NpgsqlConnection conn,
+        NpgsqlTransaction tx,
+        List<(long MetricId, SumDataPointModel DataPoint)> rows, CancellationToken ct)
     {
-        const string sql = """
-            INSERT INTO sum_data_points (metric_id, start_time_unix_nano, time_unix_nano, value_double, value_int,
-                                         aggregation_temporality, is_monotonic, flags, attributes_json)
-            SELECT unnest($1::bigint[]), unnest($2::bigint[]), unnest($3::bigint[]),
-                   unnest($4::float8[]), unnest($5::bigint[]),
-                   unnest($6::text[]),   unnest($7::bool[]),   unnest($8::int[]), unnest($9::jsonb[])
-            """;
-
-        var n = dataPoints.Count;
-        await using var cmd = new NpgsqlCommand(sql, conn);
-        cmd.Parameters.Add(new NpgsqlParameter { Value = Repeat(metricId, n), NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Bigint });
-        cmd.Parameters.Add(new NpgsqlParameter { Value = dataPoints.Select(d => d.StartTimeUnixNano).ToArray(), NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Bigint });
-        cmd.Parameters.Add(new NpgsqlParameter { Value = dataPoints.Select(d => d.TimeUnixNano).ToArray(), NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Bigint });
-        cmd.Parameters.Add(new NpgsqlParameter { Value = dataPoints.Select(d => d.ValueDouble).ToArray(), NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Double });
-        cmd.Parameters.Add(new NpgsqlParameter { Value = dataPoints.Select(d => d.ValueInt).ToArray(), NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Bigint });
-        cmd.Parameters.Add(new NpgsqlParameter { Value = dataPoints.Select(d => d.AggregationTemporality.ToString()).ToArray(), NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Text });
-        cmd.Parameters.Add(new NpgsqlParameter { Value = dataPoints.Select(d => d.IsMonotonic).ToArray(), NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Boolean });
-        cmd.Parameters.Add(new NpgsqlParameter { Value = dataPoints.Select(d => d.Flags).ToArray(), NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Integer });
-        cmd.Parameters.Add(new NpgsqlParameter { Value = dataPoints.Select(d => SerializeJsonOrNull(d.Attributes)).ToArray(), NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Jsonb });
-        await cmd.ExecuteNonQueryAsync(ct);
+        await using var writer = await conn.BeginBinaryImportAsync(SumCopySql, ct);
+        foreach (var (metricId, d) in rows)
+        {
+            await writer.StartRowAsync(ct);
+            await writer.WriteAsync(metricId, NpgsqlDbType.Bigint, ct);
+            await WriteNullableAsync(writer, d.StartTimeUnixNano, NpgsqlDbType.Bigint, ct);
+            await writer.WriteAsync(d.TimeUnixNano, NpgsqlDbType.Bigint, ct);
+            await WriteNullableAsync(writer, d.ValueDouble, NpgsqlDbType.Double, ct);
+            await WriteNullableAsync(writer, d.ValueInt, NpgsqlDbType.Bigint, ct);
+            await writer.WriteAsync(d.AggregationTemporality.ToString(), NpgsqlDbType.Text, ct);
+            await writer.WriteAsync(d.IsMonotonic, NpgsqlDbType.Boolean, ct);
+            await writer.WriteAsync(d.Flags, NpgsqlDbType.Integer, ct);
+            await WriteNullableAsync(writer, SerializeJsonOrNull(d.Attributes), NpgsqlDbType.Jsonb, ct);
+        }
+        await writer.CompleteAsync(ct);
     }
+
+    private const string HistogramCopySql = """
+        COPY histogram_data_points (
+            metric_id, start_time_unix_nano, time_unix_nano, count, sum_value,
+            bucket_counts, explicit_bounds, aggregation_temporality,
+            flags, min_value, max_value, attributes_json)
+        FROM STDIN (FORMAT BINARY)
+        """;
 
     private static async Task BulkInsertHistogramDataPointsAsync(
-        NpgsqlConnection conn, long metricId,
-        List<HistogramDataPointModel> dataPoints, CancellationToken ct)
+        NpgsqlConnection conn,
+        NpgsqlTransaction tx,
+        List<(long MetricId, HistogramDataPointModel DataPoint)> rows, CancellationToken ct)
     {
-        const string sql = """
-            INSERT INTO histogram_data_points (
-                metric_id, start_time_unix_nano, time_unix_nano, count, sum_value,
-                bucket_counts, explicit_bounds, aggregation_temporality,
-                flags, min_value, max_value, attributes_json)
-            SELECT unnest($1::bigint[]), unnest($2::bigint[]), unnest($3::bigint[]),
-                   unnest($4::bigint[]), unnest($5::float8[]),
-                   unnest($6::jsonb[]),  unnest($7::jsonb[]),  unnest($8::text[]),
-                   unnest($9::int[]),    unnest($10::float8[]), unnest($11::float8[]),
-                   unnest($12::jsonb[])
-            """;
-
-        var n = dataPoints.Count;
-        await using var cmd = new NpgsqlCommand(sql, conn);
-        cmd.Parameters.Add(new NpgsqlParameter { Value = Repeat(metricId, n), NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Bigint });
-        cmd.Parameters.Add(new NpgsqlParameter { Value = dataPoints.Select(d => d.StartTimeUnixNano).ToArray(), NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Bigint });
-        cmd.Parameters.Add(new NpgsqlParameter { Value = dataPoints.Select(d => d.TimeUnixNano).ToArray(), NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Bigint });
-        cmd.Parameters.Add(new NpgsqlParameter { Value = dataPoints.Select(d => d.Count).ToArray(), NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Bigint });
-        cmd.Parameters.Add(new NpgsqlParameter { Value = dataPoints.Select(d => d.Sum).ToArray(), NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Double });
-        cmd.Parameters.Add(new NpgsqlParameter { Value = dataPoints.Select(d => SerializeJsonOrNull(d.BucketCounts)).ToArray(), NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Jsonb });
-        cmd.Parameters.Add(new NpgsqlParameter { Value = dataPoints.Select(d => SerializeJsonOrNull(d.ExplicitBounds)).ToArray(), NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Jsonb });
-        cmd.Parameters.Add(new NpgsqlParameter { Value = dataPoints.Select(d => d.AggregationTemporality.ToString()).ToArray(), NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Text });
-        cmd.Parameters.Add(new NpgsqlParameter { Value = dataPoints.Select(d => d.Flags).ToArray(), NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Integer });
-        cmd.Parameters.Add(new NpgsqlParameter { Value = dataPoints.Select(d => d.Min).ToArray(), NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Double });
-        cmd.Parameters.Add(new NpgsqlParameter { Value = dataPoints.Select(d => d.Max).ToArray(), NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Double });
-        cmd.Parameters.Add(new NpgsqlParameter { Value = dataPoints.Select(d => SerializeJsonOrNull(d.Attributes)).ToArray(), NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Jsonb });
-        await cmd.ExecuteNonQueryAsync(ct);
+        await using var writer = await conn.BeginBinaryImportAsync(HistogramCopySql, ct);
+        foreach (var (metricId, d) in rows)
+        {
+            await writer.StartRowAsync(ct);
+            await writer.WriteAsync(metricId, NpgsqlDbType.Bigint, ct);
+            await WriteNullableAsync(writer, d.StartTimeUnixNano, NpgsqlDbType.Bigint, ct);
+            await writer.WriteAsync(d.TimeUnixNano, NpgsqlDbType.Bigint, ct);
+            await writer.WriteAsync(d.Count, NpgsqlDbType.Bigint, ct);
+            await WriteNullableAsync(writer, d.Sum, NpgsqlDbType.Double, ct);
+            await WriteNullableAsync(writer, SerializeJsonOrNull(d.BucketCounts), NpgsqlDbType.Jsonb, ct);
+            await WriteNullableAsync(writer, SerializeJsonOrNull(d.ExplicitBounds), NpgsqlDbType.Jsonb, ct);
+            await writer.WriteAsync(d.AggregationTemporality.ToString(), NpgsqlDbType.Text, ct);
+            await writer.WriteAsync(d.Flags, NpgsqlDbType.Integer, ct);
+            await WriteNullableAsync(writer, d.Min, NpgsqlDbType.Double, ct);
+            await WriteNullableAsync(writer, d.Max, NpgsqlDbType.Double, ct);
+            await WriteNullableAsync(writer, SerializeJsonOrNull(d.Attributes), NpgsqlDbType.Jsonb, ct);
+        }
+        await writer.CompleteAsync(ct);
     }
+
+    private const string ExpHistogramCopySql = """
+        COPY exponential_histogram_data_points (
+            metric_id, start_time_unix_nano, time_unix_nano, count, sum_value,
+            scale, zero_count, positive_offset, positive_bucket_counts,
+            negative_offset, negative_bucket_counts,
+            aggregation_temporality, flags, min_value, max_value, attributes_json)
+        FROM STDIN (FORMAT BINARY)
+        """;
 
     private static async Task BulkInsertExpHistogramDataPointsAsync(
-        NpgsqlConnection conn, long metricId,
-        List<ExponentialHistogramDataPointModel> dataPoints, CancellationToken ct)
+        NpgsqlConnection conn,
+        NpgsqlTransaction tx,
+        List<(long MetricId, ExponentialHistogramDataPointModel DataPoint)> rows, CancellationToken ct)
     {
-        const string sql = """
-            INSERT INTO exponential_histogram_data_points (
-                metric_id, start_time_unix_nano, time_unix_nano, count, sum_value,
-                scale, zero_count, positive_offset, positive_bucket_counts,
-                negative_offset, negative_bucket_counts,
-                aggregation_temporality, flags, min_value, max_value, attributes_json)
-            SELECT unnest($1::bigint[]),  unnest($2::bigint[]),  unnest($3::bigint[]),
-                   unnest($4::bigint[]),  unnest($5::float8[]),
-                   unnest($6::int[]),     unnest($7::bigint[]),
-                   unnest($8::int[]),     unnest($9::jsonb[]),
-                   unnest($10::int[]),    unnest($11::jsonb[]),
-                   unnest($12::text[]),   unnest($13::int[]),
-                   unnest($14::float8[]), unnest($15::float8[]),
-                   unnest($16::jsonb[])
-            """;
-
-        var n = dataPoints.Count;
-        await using var cmd = new NpgsqlCommand(sql, conn);
-        cmd.Parameters.Add(new NpgsqlParameter { Value = Repeat(metricId, n), NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Bigint });
-        cmd.Parameters.Add(new NpgsqlParameter { Value = dataPoints.Select(d => d.StartTimeUnixNano).ToArray(), NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Bigint });
-        cmd.Parameters.Add(new NpgsqlParameter { Value = dataPoints.Select(d => d.TimeUnixNano).ToArray(), NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Bigint });
-        cmd.Parameters.Add(new NpgsqlParameter { Value = dataPoints.Select(d => d.Count).ToArray(), NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Bigint });
-        cmd.Parameters.Add(new NpgsqlParameter { Value = dataPoints.Select(d => d.Sum).ToArray(), NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Double });
-        cmd.Parameters.Add(new NpgsqlParameter { Value = dataPoints.Select(d => d.Scale).ToArray(), NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Integer });
-        cmd.Parameters.Add(new NpgsqlParameter { Value = dataPoints.Select(d => d.ZeroCount).ToArray(), NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Bigint });
-        cmd.Parameters.Add(new NpgsqlParameter { Value = dataPoints.Select(d => d.PositiveOffset).ToArray(), NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Integer });
-        cmd.Parameters.Add(new NpgsqlParameter { Value = dataPoints.Select(d => SerializeJsonOrNull(d.PositiveBucketCounts)).ToArray(), NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Jsonb });
-        cmd.Parameters.Add(new NpgsqlParameter { Value = dataPoints.Select(d => d.NegativeOffset).ToArray(), NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Integer });
-        cmd.Parameters.Add(new NpgsqlParameter { Value = dataPoints.Select(d => SerializeJsonOrNull(d.NegativeBucketCounts)).ToArray(), NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Jsonb });
-        cmd.Parameters.Add(new NpgsqlParameter { Value = dataPoints.Select(d => d.AggregationTemporality.ToString()).ToArray(), NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Text });
-        cmd.Parameters.Add(new NpgsqlParameter { Value = dataPoints.Select(d => d.Flags).ToArray(), NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Integer });
-        cmd.Parameters.Add(new NpgsqlParameter { Value = dataPoints.Select(d => d.Min).ToArray(), NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Double });
-        cmd.Parameters.Add(new NpgsqlParameter { Value = dataPoints.Select(d => d.Max).ToArray(), NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Double });
-        cmd.Parameters.Add(new NpgsqlParameter { Value = dataPoints.Select(d => SerializeJsonOrNull(d.Attributes)).ToArray(), NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Jsonb });
-        await cmd.ExecuteNonQueryAsync(ct);
+        await using var writer = await conn.BeginBinaryImportAsync(ExpHistogramCopySql, ct);
+        foreach (var (metricId, d) in rows)
+        {
+            await writer.StartRowAsync(ct);
+            await writer.WriteAsync(metricId, NpgsqlDbType.Bigint, ct);
+            await WriteNullableAsync(writer, d.StartTimeUnixNano, NpgsqlDbType.Bigint, ct);
+            await writer.WriteAsync(d.TimeUnixNano, NpgsqlDbType.Bigint, ct);
+            await writer.WriteAsync(d.Count, NpgsqlDbType.Bigint, ct);
+            await WriteNullableAsync(writer, d.Sum, NpgsqlDbType.Double, ct);
+            await writer.WriteAsync(d.Scale, NpgsqlDbType.Integer, ct);
+            await writer.WriteAsync(d.ZeroCount, NpgsqlDbType.Bigint, ct);
+            await WriteNullableAsync(writer, d.PositiveOffset, NpgsqlDbType.Integer, ct);
+            await WriteNullableAsync(writer, SerializeJsonOrNull(d.PositiveBucketCounts), NpgsqlDbType.Jsonb, ct);
+            await WriteNullableAsync(writer, d.NegativeOffset, NpgsqlDbType.Integer, ct);
+            await WriteNullableAsync(writer, SerializeJsonOrNull(d.NegativeBucketCounts), NpgsqlDbType.Jsonb, ct);
+            await writer.WriteAsync(d.AggregationTemporality.ToString(), NpgsqlDbType.Text, ct);
+            await writer.WriteAsync(d.Flags, NpgsqlDbType.Integer, ct);
+            await WriteNullableAsync(writer, d.Min, NpgsqlDbType.Double, ct);
+            await WriteNullableAsync(writer, d.Max, NpgsqlDbType.Double, ct);
+            await WriteNullableAsync(writer, SerializeJsonOrNull(d.Attributes), NpgsqlDbType.Jsonb, ct);
+        }
+        await writer.CompleteAsync(ct);
     }
 
-    private static async Task BulkInsertSummaryDataPointsAsync(
-        NpgsqlConnection conn, long metricId,
-        List<SummaryDataPointModel> dataPoints, CancellationToken ct)
-    {
-        const string sql = """
-            INSERT INTO summary_data_points (metric_id, start_time_unix_nano, time_unix_nano, count, sum_value, quantile_values, flags, attributes_json)
-            SELECT unnest($1::bigint[]), unnest($2::bigint[]), unnest($3::bigint[]),
-                   unnest($4::bigint[]), unnest($5::float8[]), unnest($6::jsonb[]),
-                   unnest($7::int[]),    unnest($8::jsonb[])
-            """;
+    private const string SummaryCopySql =
+        "COPY summary_data_points (metric_id, start_time_unix_nano, time_unix_nano, count, sum_value, quantile_values, flags, attributes_json) FROM STDIN (FORMAT BINARY)";
 
-        var n = dataPoints.Count;
-        await using var cmd = new NpgsqlCommand(sql, conn);
-        cmd.Parameters.Add(new NpgsqlParameter { Value = Repeat(metricId, n), NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Bigint });
-        cmd.Parameters.Add(new NpgsqlParameter { Value = dataPoints.Select(d => d.StartTimeUnixNano).ToArray(), NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Bigint });
-        cmd.Parameters.Add(new NpgsqlParameter { Value = dataPoints.Select(d => d.TimeUnixNano).ToArray(), NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Bigint });
-        cmd.Parameters.Add(new NpgsqlParameter { Value = dataPoints.Select(d => d.Count).ToArray(), NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Bigint });
-        cmd.Parameters.Add(new NpgsqlParameter { Value = dataPoints.Select(d => (double?)d.Sum).ToArray(), NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Double });
-        cmd.Parameters.Add(new NpgsqlParameter { Value = dataPoints.Select(d => SerializeJsonOrNull(d.QuantileValues)).ToArray(), NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Jsonb });
-        cmd.Parameters.Add(new NpgsqlParameter { Value = dataPoints.Select(d => d.Flags).ToArray(), NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Integer });
-        cmd.Parameters.Add(new NpgsqlParameter { Value = dataPoints.Select(d => SerializeJsonOrNull(d.Attributes)).ToArray(), NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Jsonb });
-        await cmd.ExecuteNonQueryAsync(ct);
+    private static async Task BulkInsertSummaryDataPointsAsync(
+        NpgsqlConnection conn,
+        NpgsqlTransaction tx,
+        List<(long MetricId, SummaryDataPointModel DataPoint)> rows, CancellationToken ct)
+    {
+        await using var writer = await conn.BeginBinaryImportAsync(SummaryCopySql, ct);
+        foreach (var (metricId, d) in rows)
+        {
+            await writer.StartRowAsync(ct);
+            await writer.WriteAsync(metricId, NpgsqlDbType.Bigint, ct);
+            await WriteNullableAsync(writer, d.StartTimeUnixNano, NpgsqlDbType.Bigint, ct);
+            await writer.WriteAsync(d.TimeUnixNano, NpgsqlDbType.Bigint, ct);
+            await writer.WriteAsync(d.Count, NpgsqlDbType.Bigint, ct);
+            await WriteNullableAsync(writer, (double?)d.Sum, NpgsqlDbType.Double, ct);
+            await WriteNullableAsync(writer, SerializeJsonOrNull(d.QuantileValues), NpgsqlDbType.Jsonb, ct);
+            await writer.WriteAsync(d.Flags, NpgsqlDbType.Integer, ct);
+            await WriteNullableAsync(writer, SerializeJsonOrNull(d.Attributes), NpgsqlDbType.Jsonb, ct);
+        }
+        await writer.CompleteAsync(ct);
     }
 
     // =========================================================================
     // PROVIDER-LOCAL HELPERS
     // =========================================================================
 
-    // Builds a constant-value array to broadcast a single metric_id across an unnest insert.
-    private static long[] Repeat(long value, int count)
-    {
-        var arr = new long[count];
-        Array.Fill(arr, value);
-        return arr;
-    }
+    // Every binary-COPY writer above needs the same null-vs-value branch for optional columns;
+    // NpgsqlBinaryImporter has no single WriteAsync overload that accepts a nullable value type
+    // directly, so this is the one place that branch lives instead of being repeated inline at
+    // every optional column of every COPY.
+    private static Task WriteNullableAsync<T>(NpgsqlBinaryImporter writer, T? value, NpgsqlDbType type, CancellationToken ct)
+        where T : struct
+        => value.HasValue ? writer.WriteAsync(value.Value, type, ct) : writer.WriteNullAsync(ct);
+
+    private static Task WriteNullableAsync(NpgsqlBinaryImporter writer, string? value, NpgsqlDbType type, CancellationToken ct)
+        => value != null ? writer.WriteAsync(value, type, ct) : writer.WriteNullAsync(ct);
 }

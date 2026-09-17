@@ -42,9 +42,13 @@ public sealed class PostgreSqlWriteStore(NpgsqlDataSource dataSource) : ITelemet
     /// primary key, which is not the case here.
     ///
     /// The <c>ORDER BY</c> makes the sweep remove oldest-first, so an interrupted run leaves a clean
-    /// prefix rather than holes scattered through the table. It costs nothing: <c>idx_start_time</c> is
-    /// DESC and Postgres reads it backwards without a sort. The <c>LIMIT</c> inside the CTE is what lets
-    /// the planner stop walking that index early instead of locating every matching row.
+    /// prefix rather than holes scattered through the table. It costs nothing: <c>idx_duration</c>'s
+    /// leading column is <c>start_time_unix_nano</c> ascending, so Postgres serves both the
+    /// <c>WHERE</c> and the <c>ORDER BY</c> as one forward index scan, no separate sort. (A dedicated
+    /// <c>idx_start_time</c> served this before it was dropped in schema 2.8.0 as redundant with
+    /// <c>idx_duration</c> -- confirmed via <c>EXPLAIN</c> that this query still avoids a sort node
+    /// without it.) The <c>LIMIT</c> inside the CTE is what lets the planner stop walking that index
+    /// early instead of locating every matching row.
     ///
     /// Not a <c>const</c>: C# constant interpolated strings require every hole to be a constant string,
     /// and <see cref="DeleteBatchSize"/> is an int.

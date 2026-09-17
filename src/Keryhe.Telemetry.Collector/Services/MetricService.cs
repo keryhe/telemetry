@@ -31,6 +31,16 @@ public class MetricService : MetricsService.MetricsServiceBase
     /// <summary>
     /// Handles the Export gRPC call for metric data.
     /// Converts the incoming OTLP metric data to Models and stores them using the MetricRepository.
+    ///
+    /// <c>PartialSuccess.RejectedDataPoints</c> is honest only at ENQUEUE time, not at
+    /// durable-storage time: it is 0 once <see cref="IMetricWriteRepository.StoreMetricsBatchAsync"/>
+    /// returns (the whole batch was accepted onto <c>TelemetryIngestionChannel</c>), or the full
+    /// data-point count if enqueueing itself threw. Storage is asynchronous past that point --
+    /// <c>TelemetryIngestionWorker</c> flushes the channel on a delay, with its own bounded retry,
+    /// and a batch that still fails after retries are exhausted is dropped with no way to signal
+    /// this caller, who has long since received its (successful) response. That drop is observable
+    /// via <c>Keryhe.Telemetry.Core.Data.IngestionMetrics</c>'s <c>records_dropped</c> counter and
+    /// the worker's "batch dropped" log line, never via this response.
     /// </summary>
     /// <param name="request">The ExportMetricsServiceRequest containing metric data</param>
     /// <param name="context">The gRPC server call context</param>
@@ -79,7 +89,8 @@ public class MetricService : MetricsService.MetricsServiceBase
             var storedMetricIds = await _metricRepository.StoreMetricsBatchAsync(metrics, context.CancellationToken);
             totalDataPointCount = CalculateTotalDataPoints(metrics);
             storedDataPointCount = totalDataPointCount;
-            _logger.LogInformation("Received {MetricCount} metrics with {TotalDataPointCount} data points", metrics.Count, totalDataPointCount);
+            // Debug, not Information -- see LogService.Export's identical note.
+            _logger.LogDebug("Enqueued {MetricCount} metrics with {TotalDataPointCount} data points", metrics.Count, totalDataPointCount);
             
         }
         catch (OperationCanceledException)
@@ -243,8 +254,7 @@ public class MetricService : MetricsService.MetricsServiceBase
             ValueDouble = dp.ValueCase == NumberDataPoint.ValueOneofCase.AsDouble ? dp.AsDouble : null,
             ValueInt = dp.ValueCase == NumberDataPoint.ValueOneofCase.AsInt ? dp.AsInt : null,
             Flags = (int)dp.Flags,
-            Attributes = ConvertAttributes(dp.Attributes),
-            Exemplar = dp.Exemplars.FirstOrDefault() != null ? ConvertExemplar(dp.Exemplars.First()) : null
+            Attributes = ConvertAttributes(dp.Attributes)
         }).ToList();
     }
 
@@ -262,8 +272,7 @@ public class MetricService : MetricsService.MetricsServiceBase
             AggregationTemporality = ConvertAggregationTemporality(sum.AggregationTemporality),
             IsMonotonic = sum.IsMonotonic,
             Flags = (int)dp.Flags,
-            Attributes = ConvertAttributes(dp.Attributes),
-            Exemplar = dp.Exemplars.FirstOrDefault() != null ? ConvertExemplar(dp.Exemplars.First()) : null
+            Attributes = ConvertAttributes(dp.Attributes)
         }).ToList();
     }
 
@@ -284,8 +293,7 @@ public class MetricService : MetricsService.MetricsServiceBase
             Flags = (int)dp.Flags,
             Min = dp.HasMin ? dp.Min : null,
             Max = dp.HasMax ? dp.Max : null,
-            Attributes = ConvertAttributes(dp.Attributes),
-            Exemplars = dp.Exemplars.Select(ConvertExemplar).ToList()
+            Attributes = ConvertAttributes(dp.Attributes)
         }).ToList();
     }
 
@@ -310,8 +318,7 @@ public class MetricService : MetricsService.MetricsServiceBase
             Flags = (int)dp.Flags,
             Min = dp.HasMin ? dp.Min : null,
             Max = dp.HasMax ? dp.Max : null,
-            Attributes = ConvertAttributes(dp.Attributes),
-            Exemplars = dp.Exemplars.Select(ConvertExemplar).ToList()
+            Attributes = ConvertAttributes(dp.Attributes)
         }).ToList();
     }
 
@@ -336,22 +343,21 @@ public class MetricService : MetricsService.MetricsServiceBase
         }).ToList();
     }
 
-    /// <summary>
-    /// Converts OTLP Exemplar to ExemplarModel
-    /// </summary>
-    private ExemplarModel ConvertExemplar(Exemplar exemplar)
-    {
-        return new ExemplarModel
-        {
-            FilteredAttributes = ConvertAttributes(exemplar.FilteredAttributes),
-            TimeUnixNano = (long)exemplar.TimeUnixNano,
-            ValueDouble = exemplar.ValueCase == Exemplar.ValueOneofCase.AsDouble ? exemplar.AsDouble : null,
-            ValueInt = exemplar.ValueCase == Exemplar.ValueOneofCase.AsInt ? exemplar.AsInt : null,
-            SpanIdHex = ConvertSpanId(exemplar.SpanId),
-            TraceIdHex = ConvertTraceId(exemplar.TraceId)
-        };
-    }
-
+    // Exemplars are deliberately NOT converted from the OTLP payload (this file no longer builds
+    // ExemplarModel at all): no bulk writer on any provider has ever inserted into `exemplars` or
+    // set a data point's `exemplar_id` (ingestion-performance.md §2.7), so every exemplar built
+    // here was pure allocation with nowhere to go. The read path (MetricReadRepositoryBase's
+    // BuildExemplarList/ExemplarColumns) already joins on `exemplar_id` and returns null when it
+    // is unset, which is the state that produces today, so removing the conversion changes no
+    // observable behavior -- only removes the wasted work building it.
+    //
+    // This is a deliberate stop here, not silence: writing exemplars properly needs its own design
+    // pass, not a rider on this cleanup. The schema gives each data point row exactly one
+    // `exemplar_id`, but OTLP's NumberDataPoint (gauge/sum) carries `repeated Exemplar exemplars`
+    // -- the model already truncated that to a single `Exemplar` even before this change, which a
+    // real implementation should fix (widen to a list, or accept the truncation explicitly) rather
+    // than carry forward silently.
+    //
     /// <summary>
     /// Converts OTLP AggregationTemporality to local AggregationTemporality enum
     /// </summary>
@@ -439,42 +445,6 @@ public class MetricService : MetricsService.MetricsServiceBase
         }
 
         return result;
-    }
-
-    /// <summary>
-    /// Converts trace ID bytes to hex string representation
-    /// </summary>
-    private string? ConvertTraceId(Google.Protobuf.ByteString? traceId)
-    {
-        if (traceId == null || traceId.IsEmpty)
-            return null;
-
-        var bytes = traceId.ToByteArray();
-        if (bytes.Length != 16)
-        {
-            _logger.LogWarning("Invalid trace ID length: {Length}, expected 16 bytes", bytes.Length);
-            return null;
-        }
-
-        return Convert.ToHexString(bytes).ToLowerInvariant();
-    }
-
-    /// <summary>
-    /// Converts span ID bytes to hex string representation
-    /// </summary>
-    private string? ConvertSpanId(Google.Protobuf.ByteString? spanId)
-    {
-        if (spanId == null || spanId.IsEmpty)
-            return null;
-
-        var bytes = spanId.ToByteArray();
-        if (bytes.Length != 8)
-        {
-            _logger.LogWarning("Invalid span ID length: {Length}, expected 8 bytes", bytes.Length);
-            return null;
-        }
-
-        return Convert.ToHexString(bytes).ToLowerInvariant();
     }
 
     /// <summary>

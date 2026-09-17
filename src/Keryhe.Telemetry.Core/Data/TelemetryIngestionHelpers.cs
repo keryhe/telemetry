@@ -56,16 +56,32 @@ public static class TelemetryIngestionHelpers
     public static InstrumentationScopeModel NormalizeScope(InstrumentationScopeModel? model)
         => model ?? new InstrumentationScopeModel { Name = "unknown" };
 
+    /// <summary>
+    /// Hashes a resource's schema URL + attributes. Memoized on the instance
+    /// (<see cref="ResourceModel.CachedHash"/>): a bulk writer hashes the same model twice per
+    /// row (once resolving the batch's distinct resources, once per row rebuilding the key), and
+    /// the gRPC services hand down one shared instance per <c>ResourceLogs</c>/<c>ResourceSpans</c>
+    /// block, so the second call on any given instance is a field read, not a re-hash. The cache
+    /// only ever holds this exact algorithm's output, so it cannot make a resource hash diverge
+    /// from what it would have been uncached.
+    /// </summary>
     public static string HashResource(ResourceModel model)
     {
+        if (model.CachedHash != null) return model.CachedHash;
         var content = $"{model.SchemaUrl ?? ""}__{SerializeDeterministicJson(model.Attributes)}";
-        return Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(content))).ToLowerInvariant();
+        var hash = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(content))).ToLowerInvariant();
+        model.CachedHash = hash;
+        return hash;
     }
 
+    /// <summary>Memoized the same way as <see cref="HashResource"/> -- see its doc comment.</summary>
     public static string HashScope(InstrumentationScopeModel model)
     {
+        if (model.CachedHash != null) return model.CachedHash;
         var content = $"{model.Name}__{model.Version ?? ""}__{model.SchemaUrl ?? ""}__{SerializeDeterministicJson(model.Attributes)}";
-        return Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(content))).ToLowerInvariant();
+        var hash = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(content))).ToLowerInvariant();
+        model.CachedHash = hash;
+        return hash;
     }
 
     /// <summary>
@@ -117,9 +133,10 @@ public static class TelemetryIngestionHelpers
 
     public static string SerializeDeterministicJson(Dictionary<string, object>? attributes)
     {
-        var ordered = (attributes ?? new Dictionary<string, object>())
-            .OrderBy(kvp => kvp.Key, StringComparer.Ordinal)
-            .ToDictionary(kvp => kvp.Key, kvp => kvp.Value);
+        // SortedDictionary keeps the same Ordinal key order as the OrderBy+ToDictionary this
+        // replaced -- same enumeration order in, same JSON out -- without LINQ's intermediate
+        // allocations for every hash computed.
+        var ordered = new SortedDictionary<string, object>(attributes ?? new Dictionary<string, object>(), StringComparer.Ordinal);
         return JsonSerializer.Serialize(ordered);
     }
 

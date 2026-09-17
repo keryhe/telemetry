@@ -17,7 +17,11 @@ public static class PostgreSqlServiceCollectionExtensions
     {
         services.AddSingleton(_ => NpgsqlDataSource.Create(configuration.GetConnectionString("Write")!));
         services.AddSingleton<ITelemetryBulkWriter, PostgreSqlBulkWriter>();
-        services.AddScoped<ITenantResolver, TenantResolver>();
+        // The raw api_keys lookup and last_used_at bulk update. CachingTenantResolver (the
+        // ITenantResolver every gRPC service actually resolves) and ApiKeyTouchWorker are
+        // provider-agnostic and registered once, in AddKeryheTelemetryCollector.
+        services.AddScoped<IApiKeyLookup, TenantResolver>();
+        services.AddScoped<IApiKeyTouchStore, PostgreSqlApiKeyTouchStore>();
         services.AddScoped<ITelemetryWriteStore, PostgreSqlWriteStore>();
         return services;
     }

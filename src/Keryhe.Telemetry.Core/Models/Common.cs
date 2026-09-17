@@ -6,7 +6,16 @@ public class ResourceModel
 
     public long TenantId { get; set; } = DefaultTenantId;
     public string? SchemaUrl { get; set; }
-    public Dictionary<string, object> Attributes { get; set; } = new  Dictionary<string, object>(); 
+    public Dictionary<string, object> Attributes { get; set; } = new  Dictionary<string, object>();
+
+    /// <summary>
+    /// Memoized <c>TelemetryIngestionHelpers.HashResource</c> result for this exact instance.
+    /// The gRPC services share one <see cref="ResourceModel"/> across every record under a single
+    /// <c>ResourceLogs</c>/<c>ResourceSpans</c>/<c>ResourceMetrics</c> block, so a flush that
+    /// touches the same instance repeatedly (resolving it, then again per row) pays for the
+    /// SHA-256 once instead of once per touch. Never set outside <c>HashResource</c>.
+    /// </summary>
+    internal string? CachedHash;
 }
 
 public class InstrumentationScopeModel
@@ -15,6 +24,9 @@ public class InstrumentationScopeModel
     public string? Version { get; set; }
     public string? SchemaUrl { get; set; }
     public Dictionary<string, object> Attributes { get; set; } = new Dictionary<string, object>();
+
+    /// <summary>Memoized <c>TelemetryIngestionHelpers.HashScope</c> result -- see <see cref="ResourceModel.CachedHash"/>.</summary>
+    internal string? CachedHash;
 }
 
 // =============================================================================

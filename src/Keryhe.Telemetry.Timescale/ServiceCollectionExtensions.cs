@@ -18,7 +18,11 @@ public static class TimescaleServiceCollectionExtensions
     {
         services.AddSingleton(_ => NpgsqlDataSource.Create(configuration.GetConnectionString("Write")!));
         services.AddSingleton<ITelemetryBulkWriter, TimescaleBulkWriter>();
-        services.AddScoped<ITenantResolver, TenantResolver>();
+        // The raw api_keys lookup and last_used_at bulk update. CachingTenantResolver (the
+        // ITenantResolver every gRPC service actually resolves) and ApiKeyTouchWorker are
+        // provider-agnostic and registered once, in AddKeryheTelemetryCollector.
+        services.AddScoped<IApiKeyLookup, TenantResolver>();
+        services.AddScoped<IApiKeyTouchStore, TimescaleApiKeyTouchStore>();
         services.AddScoped<ITelemetryWriteStore, TimescaleWriteStore>();
         return services;
     }

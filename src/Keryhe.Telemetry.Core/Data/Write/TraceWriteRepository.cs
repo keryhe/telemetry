@@ -26,7 +26,7 @@ public class TraceWriteRepository : ITraceWriteRepository
     {
         if (trace == null) throw new ArgumentNullException(nameof(trace));
         if (!trace.Spans.Any()) throw new ArgumentException("Trace must contain at least one span");
-        await _channel.Traces.Writer.WriteAsync([trace], cancellationToken);
+        await WriteTracesAsync([trace], trace.Spans.Count, cancellationToken);
         return trace.Spans.First().TraceIdHex;
     }
 
@@ -41,7 +41,7 @@ public class TraceWriteRepository : ITraceWriteRepository
             Resource = span.Resource,
             InstrumentationScope = span.InstrumentationScope
         };
-        await _channel.Traces.Writer.WriteAsync([trace], cancellationToken);
+        await WriteTracesAsync([trace], 1, cancellationToken);
         return -1;
     }
 
@@ -53,7 +53,7 @@ public class TraceWriteRepository : ITraceWriteRepository
             .Where(t => t.Spans.Count > 0)
             .ToList();
         if (list.Count == 0) return [];
-        await _channel.Traces.Writer.WriteAsync(list, cancellationToken);
+        await WriteTracesAsync(list, list.Sum(t => t.Spans.Count), cancellationToken);
         _logger.LogDebug("Enqueued {Count} traces for async write", list.Count);
         return list.Select(t => t.Spans.First().TraceIdHex);
     }
@@ -70,10 +70,49 @@ public class TraceWriteRepository : ITraceWriteRepository
             Resource = s.Resource,
             InstrumentationScope = s.InstrumentationScope
         }).ToList();
-        await _channel.Traces.Writer.WriteAsync(traces, cancellationToken);
+        await WriteTracesAsync(traces, list.Count, cancellationToken);
         return Enumerable.Empty<long>();
     }
 
     public Task<int> DeleteOldTracesAsync(TimeSpan retentionPeriod, CancellationToken cancellationToken = default)
         => _store.DeleteOldTracesAsync(retentionPeriod, cancellationToken);
+
+    /// <summary>
+    /// Reserves <paramref name="spanCount"/> spans on <see cref="TelemetryIngestionChannel.TraceGate"/>
+    /// before writing — spans, not <see cref="TraceModel"/> instances, are the unit the gate
+    /// bounds (see the gate's own doc comment). Releases on a failed write so a cancelled or
+    /// otherwise-failed enqueue cannot leak the reservation forever.
+    ///
+    /// Flattens <paramref name="traces"/> into a flat span list here, the one place it needs to
+    /// happen, instead of leaving every provider's bulk writer to re-flatten the same
+    /// <c>TraceModel</c> grouping on every flush. Each span's effective resource/scope -- its own
+    /// override if it has one, else its trace's -- is resolved onto the span right here too, so
+    /// <see cref="ITelemetryBulkWriter.FlushTracesAsync"/> and everything downstream of it can read
+    /// <c>SpanModel.Resource</c>/<c>InstrumentationScope</c> directly with no fallback logic of its
+    /// own to duplicate.
+    /// </summary>
+    private async Task WriteTracesAsync(List<TraceModel> traces, int spanCount, CancellationToken cancellationToken)
+    {
+        var spans = new List<SpanModel>(spanCount);
+        foreach (var trace in traces)
+        {
+            foreach (var span in trace.Spans)
+            {
+                span.Resource ??= trace.Resource;
+                span.InstrumentationScope ??= trace.InstrumentationScope;
+                spans.Add(span);
+            }
+        }
+
+        await _channel.TraceGate.AcquireAsync(spanCount, cancellationToken);
+        try
+        {
+            await _channel.Traces.Writer.WriteAsync(spans, cancellationToken);
+        }
+        catch
+        {
+            _channel.TraceGate.Release(spanCount);
+            throw;
+        }
+    }
 }

@@ -18,7 +18,12 @@ public static class ClickHouseServiceCollectionExtensions
     public static IServiceCollection AddClickHouseWriteServices(this IServiceCollection services, IConfiguration configuration)
     {
         services.AddSingleton<ITelemetryBulkWriter, ClickHouseBulkWriter>();
-        services.AddScoped<ITenantResolver, TenantResolver>();
+        // The raw api_keys lookup and last_used_at bulk update. CachingTenantResolver (the
+        // ITenantResolver every gRPC service actually resolves) and ApiKeyTouchWorker are
+        // provider-agnostic and registered once, in AddKeryheTelemetryCollector.
+        // ClickHouseApiKeyTouchStore is a deliberate no-op — see that type.
+        services.AddScoped<IApiKeyLookup, TenantResolver>();
+        services.AddScoped<IApiKeyTouchStore, ClickHouseApiKeyTouchStore>();
         services.AddScoped<ITelemetryWriteStore, ClickHouseWriteStore>();
         return services;
     }

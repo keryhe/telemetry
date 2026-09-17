@@ -30,12 +30,25 @@ public class TraceService : OpenTelemetry.Proto.Collector.Trace.V1.TraceService.
     /// <summary>
     /// Handles the Export gRPC call for trace data.
     /// Converts the incoming OTLP trace data to Models and stores them using the TraceRepository.
+    ///
+    /// <c>PartialSuccess.RejectedSpans</c> is honest only at ENQUEUE time, not at durable-storage
+    /// time: it is 0 once <see cref="ITraceWriteRepository.StoreTracesBatchAsync"/> returns (the
+    /// whole batch was accepted onto <c>TelemetryIngestionChannel</c>), or the full span count if
+    /// enqueueing itself threw. Storage is asynchronous past that point --
+    /// <c>TelemetryIngestionWorker</c> flushes the channel on a delay, with its own bounded retry,
+    /// and a batch that still fails after retries are exhausted is dropped with no way to signal
+    /// this caller, who has long since received its (successful) response. That drop is observable
+    /// via <c>Keryhe.Telemetry.Core.Data.IngestionMetrics</c>'s <c>records_dropped</c> counter and
+    /// the worker's "batch dropped" log line, never via this response. This was previously
+    /// disguised as a real check (`storedTraceIds.Contains(...)`) that in fact always evaluated to
+    /// "everything succeeded," an O(n²) computation for a foregone conclusion; reporting the
+    /// honest, cheaper number in its place is deliberate, not a regression.
     /// </summary>
     /// <param name="request">The ExportTraceServiceRequest containing trace data</param>
     /// <param name="context">The gRPC server call context</param>
     /// <returns>ExportTraceServiceResponse indicating success or failure</returns>
     public override async Task<ExportTraceServiceResponse> Export(
-        ExportTraceServiceRequest request, 
+        ExportTraceServiceRequest request,
         ServerCallContext context)
     {
         if (request == null)
@@ -43,11 +56,10 @@ public class TraceService : OpenTelemetry.Proto.Collector.Trace.V1.TraceService.
             _logger.LogError("Received null ExportTraceServiceRequest");
             throw new RpcException(new Grpc.Core.Status(StatusCode.InvalidArgument, "Request cannot be null"));
         }
-        
+
         var errorMessage = string.Empty;
         var traces = new List<TraceModel>();
         var totalSpanCount = 0;
-        var storedSpanCount = 0;
         try
         {
             string? keyHash = ApiKeyHelper.GetKeyHash(context);
@@ -55,7 +67,7 @@ public class TraceService : OpenTelemetry.Proto.Collector.Trace.V1.TraceService.
             if (tenantId <= 0)
                 throw new RpcException(new Grpc.Core.Status(StatusCode.Unauthenticated, "Invalid API key."));
 
-            _logger.LogDebug("Received traces export request with {ResourceSpansCount} resource spans", 
+            _logger.LogDebug("Received traces export request with {ResourceSpansCount} resource spans",
                 request.ResourceSpans?.Count ?? 0);
 
             // Convert protobuf message to Models
@@ -74,12 +86,17 @@ public class TraceService : OpenTelemetry.Proto.Collector.Trace.V1.TraceService.
                 };
             }
 
-            // Store traces using the repository
-            var storedTraceIds = await _traceRepository.StoreTracesBatchAsync(traces, context.CancellationToken);
-            var storedTraceCount = storedTraceIds.Count();
+            // Computed before the store call (not after) so that if enqueueing itself throws,
+            // totalSpanCount is still populated and the catch-path response below reports the
+            // full span count as rejected instead of silently defaulting to 0.
             totalSpanCount = traces.Sum(t => t.Spans.Count);
-            storedSpanCount = traces.Where(t => storedTraceIds.Contains(t.Spans.FirstOrDefault()?.TraceIdHex ?? "")) .Sum(t => t.Spans.Count);
-            _logger.LogInformation("Received {TraceCount} traces with {TotalSpanCount} spans", storedTraceCount, totalSpanCount);
+
+            // Store traces using the repository. A successful return means the whole batch was
+            // accepted onto the ingestion channel -- see the honesty note on this method's doc
+            // comment for what that does and does not guarantee.
+            await _traceRepository.StoreTracesBatchAsync(traces, context.CancellationToken);
+            // Debug, not Information -- see LogService.Export's identical note.
+            _logger.LogDebug("Enqueued {TraceCount} traces with {TotalSpanCount} spans", traces.Count, totalSpanCount);
         }
         catch (OperationCanceledException)
         {
@@ -96,12 +113,12 @@ public class TraceService : OpenTelemetry.Proto.Collector.Trace.V1.TraceService.
             errorMessage = "Error processing trace export request";
             _logger.LogError(ex, errorMessage);
         }
-        
+
         return new ExportTraceServiceResponse
         {
             PartialSuccess = new ExportTracePartialSuccess
             {
-                RejectedSpans = Math.Max(0, totalSpanCount - storedSpanCount),
+                RejectedSpans = string.IsNullOrEmpty(errorMessage) ? 0 : totalSpanCount,
                 ErrorMessage = errorMessage
             }
         };
@@ -145,7 +162,7 @@ public class TraceService : OpenTelemetry.Proto.Collector.Trace.V1.TraceService.
                         traceGroups[traceIdHex] = trace;
                     }
 
-                    var spanModel = ConvertSpan(span, resourceModel, instrumentationScopeModel);
+                    var spanModel = ConvertSpan(span, traceIdHex, resourceModel, instrumentationScopeModel);
                     trace.Spans.Add(spanModel);
                 }
             }
@@ -194,11 +211,13 @@ public class TraceService : OpenTelemetry.Proto.Collector.Trace.V1.TraceService.
     }
 
     /// <summary>
-    /// Converts OTLP Span to SpanModel
+    /// Converts OTLP Span to SpanModel. <paramref name="traceIdHex"/> is passed in rather than
+    /// re-derived from <c>span.TraceId</c>: the caller (<see cref="ConvertToTraceModels"/>) already
+    /// converted it once to group spans by trace, so re-converting here would hex-encode the same
+    /// 16 bytes a second time for every span.
     /// </summary>
-    private SpanModel ConvertSpan(Span span, ResourceModel? resource, InstrumentationScopeModel? scope)
+    private SpanModel ConvertSpan(Span span, string traceIdHex, ResourceModel? resource, InstrumentationScopeModel? scope)
     {
-        var traceIdHex = ConvertTraceId(span.TraceId);
         var spanIdHex = ConvertSpanId(span.SpanId);
         var parentSpanIdHex = ConvertSpanId(span.ParentSpanId);
 

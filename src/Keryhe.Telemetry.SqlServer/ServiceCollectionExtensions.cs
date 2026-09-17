@@ -16,7 +16,11 @@ public static class SqlServerServiceCollectionExtensions
     public static IServiceCollection AddSqlServerWriteServices(this IServiceCollection services, IConfiguration configuration)
     {
         services.AddSingleton<ITelemetryBulkWriter, SqlServerBulkWriter>();
-        services.AddScoped<ITenantResolver, TenantResolver>();
+        // The raw api_keys lookup and last_used_at bulk update. CachingTenantResolver (the
+        // ITenantResolver every gRPC service actually resolves) and ApiKeyTouchWorker are
+        // provider-agnostic and registered once, in AddKeryheTelemetryCollector.
+        services.AddScoped<IApiKeyLookup, TenantResolver>();
+        services.AddScoped<IApiKeyTouchStore, SqlServerApiKeyTouchStore>();
         services.AddScoped<ITelemetryWriteStore, SqlServerWriteStore>();
         return services;
     }

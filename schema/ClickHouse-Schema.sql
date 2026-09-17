@@ -421,4 +421,9 @@ GROUP BY severity_text, severity_number, log_date;
 -- =============================================================================
 -- Only inserted when every statement above succeeded, so a partial apply cannot
 -- leave a false version marker for the apply-schema.sh gate.
-INSERT INTO schema_version (version) VALUES ('2.7.0');
+-- No DDL change for ClickHouse in 2.8.0: spans' ORDER BY (trace_id, span_id) with a daily
+-- partition already gives it what the relational providers get from the four indexes dropped
+-- from their spans table (see PostgreSQL-Schema.sql), and it has no GIN-style JSONB index to
+-- carry the equivalent write cost of. Version bumped to keep schema_version in lockstep with
+-- the other four providers.
+INSERT INTO schema_version (version) VALUES ('2.8.0');
