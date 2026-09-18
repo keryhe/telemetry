@@ -4,10 +4,10 @@
 
 <app-page-header>
   <div class="stat-grid">
-    <app-stat-card label="Unique Metrics" icon="category" [value]="summary().uniqueMetricCount" />
+    <app-stat-card label="Unique Metrics" icon="bar_chart" [value]="summary().uniqueMetricCount" />
     <app-stat-card label="Gauges" icon="speed" [value]="gaugeCount()" />
     <app-stat-card label="Counters" icon="trending_up" [value]="counterCount()" />
-    <app-stat-card label="Histograms" icon="bar_chart" [value]="histogramCount()" />
+    <app-stat-card label="Histograms" icon="equalizer" [value]="histogramCount()" />
   </div>
 
   <div class="filter-bar">
