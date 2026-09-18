@@ -25,15 +25,16 @@ namespace Keryhe.Telemetry.ClickHouse.Services;
 /// in a transaction. ClickHouse has no multi-statement transactions to wrap it in -- each
 /// <c>ClickHouseBulkCopy</c> call against each table is already its own independent,
 /// atomic-per-table operation, and there is no server-side construct that could make
-/// "insert into resources, then spans, then span_events" atomic as one unit the way
+/// "insert into resources, then metrics, then the data points" atomic as one unit the way
 /// <c>BEGIN</c>/<c>COMMIT</c> does on the relational providers. A flush that fails partway
-/// through (e.g. spans succeed, span_events fails) is therefore possible here and only
-/// here: some tables end up with rows from this batch, others do not. Retry logic added on
-/// top of this writer (ingestion-performance.md Phase 5) MUST tolerate that partial
-/// application for ClickHouse specifically -- re-flushing the same batch is safe for the
-/// dedup-keyed tables (<c>ReplacingMergeTree</c> collapses the repeat), but
-/// <c>span_events</c>/<c>span_links</c> have no dedup key, so a retried partial flush can
-/// double-insert whichever of them already succeeded.
+/// through is therefore possible here and only here: some tables end up with rows from this
+/// batch, others do not. Retry logic added on top of this writer (ingestion-performance.md
+/// Phase 5) MUST tolerate that partial application for ClickHouse specifically. Re-flushing is
+/// safe for the dedup-keyed tables, which <c>ReplacingMergeTree</c> collapses on the repeat --
+/// and since schema 2.11.0 that covers the whole trace path, because a span's events and links
+/// are JSON columns on the deduped spans row rather than the un-keyed <c>span_events</c>/
+/// <c>span_links</c> tables a retry used to be able to double-insert. The append-only metric
+/// data-point tables still have no dedup key.
 ///
 /// <c>ClickHouseBulkCopy.InitAsync()</c> is a real round trip (it fetches column type metadata
 /// to serialize RowBinary correctly -- confirmed live, ~3.5ms) and the library exposes no way to
@@ -109,8 +110,6 @@ public sealed class ClickHouseBulkWriter(
         var resourceIds = await ResolveResourcesAsync(spans.Select(s => s.Resource), ct);
         var scopeIds    = await ResolveScopesAsync(spans.Select(s => s.InstrumentationScope), ct);
 
-        // Computed once per span and reused below for both the spans row and its events/links,
-        // instead of re-hashing "{TraceIdHex}__{SpanIdHex}" a second time.
         var dbIds = spans.Select(s => ClickHouseIds.FromKey($"{s.TraceIdHex}__{s.SpanIdHex}")).ToArray();
 
         // Span db-id is deterministic from (trace_id, span_id); no RETURNING needed. Dedup
@@ -134,25 +133,16 @@ public sealed class ClickHouseBulkWriter(
             span.StatusCode.ToString(),
             span.StatusMessage,
             SerializeJsonOrNull(span.Attributes),
-            span.Flags
+            span.Flags,
+            SerializeListOrNull(span.Events),
+            SerializeListOrNull(span.Links)
         });
 
+        // One insert, into a ReplacingMergeTree keyed on (trace_id, span_id). Since schema 2.11.0
+        // events and links ride along as JSON columns on this same row, so a retried flush can no
+        // longer double-insert them the way the separate span_events/span_links MergeTree tables
+        // could -- there is nothing left to insert separately.
         await BulkInsertAsync("spans", SpanColumns, spanRows, ct);
-
-        var events = new List<object?[]>();
-        var links  = new List<object?[]>();
-        for (var i = 0; i < spans.Count; i++)
-        {
-            var span = spans[i];
-            var dbId = dbIds[i];
-            foreach (var e in span.Events)
-                events.Add([RowId.Next(), dbId, e.Name, e.TimeUnixNano, e.DroppedAttributesCount, SerializeJsonOrNull(e.Attributes)]);
-            foreach (var l in span.Links)
-                links.Add([RowId.Next(), dbId, l.LinkedTraceIdHex, l.LinkedSpanIdHex, l.TraceState, l.DroppedAttributesCount, SerializeJsonOrNull(l.Attributes), l.Flags]);
-        }
-
-        if (events.Count > 0) await BulkInsertAsync("span_events", SpanEventColumns, events, ct);
-        if (links.Count  > 0) await BulkInsertAsync("span_links",  SpanLinkColumns,  links,  ct);
 
         logger.LogDebug("Flushed {SpanCount} spans", spans.Count);
     }
@@ -162,14 +152,9 @@ public sealed class ClickHouseBulkWriter(
         "id", "trace_id", "span_id", "parent_span_id", "resource_id", "scope_id",
         "name", "kind", "start_time_unix_nano", "end_time_unix_nano",
         "dropped_attributes_count", "dropped_events_count", "dropped_links_count",
-        "trace_state", "status_code", "status_message", "attributes_json", "flags"
+        "trace_state", "status_code", "status_message", "attributes_json", "flags",
+        "events_json", "links_json"
     ];
-
-    private static readonly string[] SpanEventColumns =
-        ["id", "span_id", "name", "time_unix_nano", "dropped_attributes_count", "attributes_json"];
-
-    private static readonly string[] SpanLinkColumns =
-        ["id", "span_id", "linked_trace_id", "linked_span_id", "trace_state", "dropped_attributes_count", "attributes_json", "flags"];
 
     // =========================================================================
     // FLUSH: METRICS

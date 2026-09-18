@@ -75,11 +75,13 @@ CREATE INDEX idx_name_version ON instrumentation_scopes ("name", "version");
 -- TRACES TABLES
 -- =============================================================================
 
--- Trace spans: regular PostgreSQL table (not a hypertable).
--- span_events and span_links hold FK references to spans("id"), which requires
--- a simple primary key. Use idx_start_time for time-range queries instead.
+-- Trace spans: TimescaleDB hypertable partitioned on "start_time_unix_nano" (schema 2.11.0).
+-- Events and links live in the "events_json"/"links_json" columns on this row rather than
+-- child tables; removing those child tables' FK references to spans("id") is what allowed
+-- the primary key to be widened to include the partition column and the table to become a
+-- hypertable (and therefore to be compressed).
 CREATE TABLE spans (
-    "id"                     BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    "id"                     BIGINT GENERATED ALWAYS AS IDENTITY,
     "trace_id"                CHAR(32)     NOT NULL,
     "span_id"                 CHAR(16)     NOT NULL,
     "parent_span_id"           CHAR(16),
@@ -100,9 +102,19 @@ CREATE TABLE spans (
     "status_message"          TEXT,
     "created_at"              TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
     "attributes_json"         JSONB,
+    "events_json"             JSONB,
+    "links_json"              JSONB,
     CONSTRAINT fk_spans_resources FOREIGN KEY ("resource_id") REFERENCES resources ("id"),
     CONSTRAINT fk_spans_scopes    FOREIGN KEY ("scope_id")    REFERENCES instrumentation_scopes ("id"),
-    CONSTRAINT uk_trace_span      UNIQUE ("trace_id", "span_id")
+    -- Both unique constraints include the partition column, as TimescaleDB requires on a
+    -- hypertable. "id" remains globally unique in practice (identity sequence); nothing
+    -- FK-references it any more, so the composite PK costs no read path anything.
+    CONSTRAINT pk_spans           PRIMARY KEY ("id", "start_time_unix_nano"),
+    CONSTRAINT uk_trace_span      UNIQUE ("trace_id", "span_id", "start_time_unix_nano")
+);
+SELECT create_hypertable('spans', 'start_time_unix_nano',
+    chunk_time_interval => 21600000000000,
+    if_not_exists => TRUE
 );
 -- idx_trace_id, idx_start_time, idx_kind, idx_status and idx_spans_attributes_gin dropped in
 -- 2.8.0: idx_trace_id is a left prefix of uk_trace_span (trace_id, span_id); idx_start_time is a
@@ -120,31 +132,9 @@ CREATE INDEX idx_duration           ON spans ("start_time_unix_nano", "end_time_
 CREATE INDEX idx_spans_name         ON spans ("name");
 CREATE INDEX idx_spans_resource_time ON spans ("resource_id", "start_time_unix_nano" DESC);
 
--- Span events
-CREATE TABLE span_events (
-    "id"                     BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-    "span_id"                 BIGINT       NOT NULL,
-    "name"                   VARCHAR(255) NOT NULL,
-    "time_unix_nano"           BIGINT       NOT NULL,
-    "dropped_attributes_count" INTEGER      DEFAULT 0,
-    "attributes_json"         JSONB,
-    CONSTRAINT fk_span_events_spans FOREIGN KEY ("span_id") REFERENCES spans ("id") ON DELETE CASCADE
-);
-CREATE INDEX idx_span_time ON span_events ("span_id", "time_unix_nano");
-
--- Span links
-CREATE TABLE span_links (
-    "id"                     BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-    "span_id"                 BIGINT    NOT NULL,
-    "linked_trace_id"          CHAR(32)  NOT NULL,
-    "linked_span_id"           CHAR(16)  NOT NULL,
-    "trace_state"             TEXT,
-    "flags"                  INTEGER   DEFAULT 0,
-    "dropped_attributes_count" INTEGER   DEFAULT 0,
-    "attributes_json"         JSONB,
-    CONSTRAINT fk_span_links_spans FOREIGN KEY ("span_id") REFERENCES spans ("id") ON DELETE CASCADE
-);
-CREATE INDEX idx_span_link ON span_links ("span_id", "linked_trace_id", "linked_span_id");
+-- span_events and span_links were dropped in 2.11.0: neither was ever read or written
+-- independently of its parent span, so both collapsed into spans."events_json"/"links_json",
+-- which in turn removed the FK that kept spans from being a hypertable.
 
 -- =============================================================================
 -- METRICS TABLES
@@ -378,6 +368,7 @@ AS $$
 $$;
 
 -- Register integer-now function for each hypertable.
+SELECT set_integer_now_func('spans', 'telemetry_now_ns');
 SELECT set_integer_now_func('gauge_data_points', 'telemetry_now_ns');
 SELECT set_integer_now_func('sum_data_points', 'telemetry_now_ns');
 SELECT set_integer_now_func('histogram_data_points', 'telemetry_now_ns');
@@ -386,6 +377,13 @@ SELECT set_integer_now_func('summary_data_points', 'telemetry_now_ns');
 SELECT set_integer_now_func('log_records', 'telemetry_now_ns');
 
 -- Enable compression with segment/order strategy tuned for common query paths.
+-- spans segments by "resource_id": it is the column idx_spans_resource_time already pairs
+-- with start_time_unix_nano, and it is what every tenant-scoped read filters through.
+ALTER TABLE spans SET (
+    timescaledb.compress,
+    timescaledb.compress_segmentby = '"resource_id"',
+    timescaledb.compress_orderby = '"start_time_unix_nano" DESC'
+);
 ALTER TABLE gauge_data_points SET (
     timescaledb.compress,
     timescaledb.compress_segmentby = '"metric_id"',
@@ -418,6 +416,7 @@ ALTER TABLE log_records SET (
 );
 
 -- Compression policies (cold data).
+SELECT add_compression_policy('spans', BIGINT '604800000000000', if_not_exists => TRUE);
 SELECT add_compression_policy('gauge_data_points', BIGINT '604800000000000', if_not_exists => TRUE);
 SELECT add_compression_policy('sum_data_points', BIGINT '604800000000000', if_not_exists => TRUE);
 SELECT add_compression_policy('histogram_data_points', BIGINT '604800000000000', if_not_exists => TRUE);
@@ -625,7 +624,7 @@ FROM log_severity_stats_daily;
 -- =============================================================================
 -- Only reached when every statement above succeeded, so a partial apply cannot
 -- leave a false version marker for the apply-schema.sh gate.
-INSERT INTO schema_version ("version") VALUES ('2.10.0')
+INSERT INTO schema_version ("version") VALUES ('2.11.0')
 ON CONFLICT ("version") DO UPDATE
 SET "applied_at" = NOW();
 
@@ -649,22 +648,25 @@ SET "applied_at" = NOW();
 -- 12. CONVERT(NVARCHAR, col)      col::TEXT
 -- 13. CAST(x AS FLOAT)     CAST(x AS DOUBLE PRECISION)
 -- 14. GO batch separator    Removed (not used in PostgreSQL)
--- 15. uk_trace_span         (TraceId, SpanId)  spans is a regular table;
---                            hypertable requirement was removed for spans
+-- 15. uk_trace_span         (TraceId, SpanId, StartTimeUnixNano) -- widened in 2.11.0
+--                            so it includes spans' partition column
 -- 16. Index names are globally unique (prefixed by table abbreviation where needed)
 --
--- TimescaleDB hypertables (partitioned by TimeUnixNano):
+-- TimescaleDB hypertables (partitioned by TimeUnixNano, or StartTimeUnixNano for spans):
+--   spans                              = 6-hour chunks (2.11.0)
 --   log_records                        = 6-hour chunks
 --   gauge_data_points, sum_data_points = 12-hour chunks
 --   histogram_data_points,
 --   exponential_histogram_data_points,
 --   summary_data_points                = 1-day chunks
 --
--- Why spans is NOT a hypertable:
---   span_events and span_links hold FK references to spans("id"). TimescaleDB
---   requires all unique/PK constraints to include the partition column, which
---   would break these normalized FK relationships. spans uses idx_start_time
---   for time-range query performance instead.
+-- spans became a hypertable in schema 2.11.0:
+--   span_events and span_links used to hold FK references to spans("id"), which
+--   TimescaleDB cannot support once spans is chunked (every unique/PK constraint must
+--   include the partition column). 2.11.0 collapsed both child tables into the
+--   "events_json"/"links_json" columns on spans, so the PK could be widened to
+--   (id, start_time_unix_nano) and uk_trace_span to (trace_id, span_id,
+--   start_time_unix_nano) -- and spans finally gets native compression.
 --
 -- Hypertable leaf tables have no PRIMARY KEY constraint (only GENERATED ALWAYS
 -- AS IDENTITY). TimescaleDB disallows unique constraints that exclude the
@@ -700,7 +702,7 @@ SET "applied_at" = NOW();
 --    SELECT hypertable_name, chunk_interval
 --    FROM timescaledb_information.dimensions
 --    WHERE hypertable_name IN (
---      'log_records', 'gauge_data_points', 'sum_data_points',
+--      'spans', 'log_records', 'gauge_data_points', 'sum_data_points',
 --      'histogram_data_points', 'exponential_histogram_data_points',
 --      'summary_data_points'
 --    )
@@ -710,7 +712,7 @@ SET "applied_at" = NOW();
 --    SELECT hypertable_name, compression_enabled
 --    FROM timescaledb_information.hypertables
 --    WHERE hypertable_name IN (
---      'log_records', 'gauge_data_points', 'sum_data_points',
+--      'spans', 'log_records', 'gauge_data_points', 'sum_data_points',
 --      'histogram_data_points', 'exponential_histogram_data_points',
 --      'summary_data_points'
 --    )

@@ -75,7 +75,9 @@ CREATE INDEX idx_name_version ON instrumentation_scopes ("name", "version");
 -- TRACES TABLES
 -- =============================================================================
 
--- Trace spans. span_events and span_links hold FK references to spans("id").
+-- Trace spans. Events and links live in the "events_json"/"links_json" columns on this
+-- row (schema 2.11.0) rather than child tables -- they are always read and written as a
+-- whole alongside their owning span, exactly like metric data points' "exemplars_json".
 CREATE TABLE spans (
     "id"                     BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     "trace_id"                CHAR(32)     NOT NULL,
@@ -98,6 +100,8 @@ CREATE TABLE spans (
     "status_message"          TEXT,
     "created_at"              TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
     "attributes_json"         JSONB,
+    "events_json"             JSONB,
+    "links_json"              JSONB,
     CONSTRAINT fk_spans_resources FOREIGN KEY ("resource_id") REFERENCES resources ("id"),
     CONSTRAINT fk_spans_scopes    FOREIGN KEY ("scope_id")    REFERENCES instrumentation_scopes ("id"),
     CONSTRAINT uk_trace_span      UNIQUE ("trace_id", "span_id")
@@ -118,31 +122,8 @@ CREATE INDEX idx_duration           ON spans ("start_time_unix_nano", "end_time_
 CREATE INDEX idx_spans_name         ON spans ("name");
 CREATE INDEX idx_spans_resource_time ON spans ("resource_id", "start_time_unix_nano" DESC);
 
--- Span events
-CREATE TABLE span_events (
-    "id"                     BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-    "span_id"                 BIGINT       NOT NULL,
-    "name"                   VARCHAR(255) NOT NULL,
-    "time_unix_nano"           BIGINT       NOT NULL,
-    "dropped_attributes_count" INTEGER      DEFAULT 0,
-    "attributes_json"         JSONB,
-    CONSTRAINT fk_span_events_spans FOREIGN KEY ("span_id") REFERENCES spans ("id") ON DELETE CASCADE
-);
-CREATE INDEX idx_span_time ON span_events ("span_id", "time_unix_nano");
-
--- Span links
-CREATE TABLE span_links (
-    "id"                     BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-    "span_id"                 BIGINT    NOT NULL,
-    "linked_trace_id"          CHAR(32)  NOT NULL,
-    "linked_span_id"           CHAR(16)  NOT NULL,
-    "trace_state"             TEXT,
-    "flags"                  INTEGER   DEFAULT 0,
-    "dropped_attributes_count" INTEGER   DEFAULT 0,
-    "attributes_json"         JSONB,
-    CONSTRAINT fk_span_links_spans FOREIGN KEY ("span_id") REFERENCES spans ("id") ON DELETE CASCADE
-);
-CREATE INDEX idx_span_link ON span_links ("span_id", "linked_trace_id", "linked_span_id");
+-- span_events and span_links were dropped in 2.11.0: neither was ever read or written
+-- independently of its parent span, so both collapsed into spans."events_json"/"links_json".
 
 -- =============================================================================
 -- METRICS TABLES
@@ -487,7 +468,7 @@ GROUP BY
 -- =============================================================================
 -- Only reached when every statement above succeeded, so a partial apply cannot
 -- leave a false version marker for the apply-schema.sh gate.
-INSERT INTO schema_version ("version") VALUES ('2.10.0')
+INSERT INTO schema_version ("version") VALUES ('2.11.0')
 ON CONFLICT ("version") DO UPDATE
 SET "applied_at" = NOW();
 

@@ -121,6 +121,8 @@ CREATE TABLE spans (
     status_message           NVARCHAR(MAX),
     created_at               DATETIME2     NOT NULL DEFAULT SYSDATETIME(),
     attributes_json          NVARCHAR(MAX),
+    events_json              NVARCHAR(MAX),
+    links_json               NVARCHAR(MAX),
     CONSTRAINT fk_spans_resources FOREIGN KEY (resource_id) REFERENCES resources (id),
     CONSTRAINT fk_spans_scopes    FOREIGN KEY (scope_id)    REFERENCES instrumentation_scopes (id),
     CONSTRAINT uk_trace_span      UNIQUE (trace_id, span_id)
@@ -140,33 +142,8 @@ CREATE INDEX idx_spans_resource_time ON spans (resource_id, start_time_unix_nano
 -- GIN index on attributes_json omitted: no SQL Server equivalent.
 GO
 
--- Span events.
-CREATE TABLE span_events (
-    id                       BIGINT IDENTITY(1,1) PRIMARY KEY,
-    span_id                  BIGINT        NOT NULL,
-    name                     NVARCHAR(255) NOT NULL,
-    time_unix_nano           BIGINT        NOT NULL,
-    dropped_attributes_count INT           DEFAULT 0,
-    attributes_json          NVARCHAR(MAX),
-    CONSTRAINT fk_span_events_spans FOREIGN KEY (span_id) REFERENCES spans (id) ON DELETE CASCADE
-);
-CREATE INDEX idx_span_time ON span_events (span_id, time_unix_nano);
-GO
-
--- Span links.
-CREATE TABLE span_links (
-    id                       BIGINT IDENTITY(1,1) PRIMARY KEY,
-    span_id                  BIGINT   NOT NULL,
-    linked_trace_id          CHAR(32) NOT NULL,
-    linked_span_id           CHAR(16) NOT NULL,
-    trace_state              NVARCHAR(MAX),
-    flags                    INT      DEFAULT 0,
-    dropped_attributes_count INT      DEFAULT 0,
-    attributes_json          NVARCHAR(MAX),
-    CONSTRAINT fk_span_links_spans FOREIGN KEY (span_id) REFERENCES spans (id) ON DELETE CASCADE
-);
-CREATE INDEX idx_span_link ON span_links (span_id, linked_trace_id, linked_span_id);
-GO
+-- span_events and span_links were dropped in 2.11.0: neither was ever read or written
+-- independently of its parent span, so both collapsed into spans.events_json/links_json.
 
 -- =============================================================================
 -- METRICS TABLES
@@ -539,7 +516,7 @@ GO
 -- Only reached when every statement above succeeded, so a partial apply cannot
 -- leave a false version marker for the apply-schema.sh gate.
 MERGE schema_version AS target
-USING (VALUES (N'2.10.0')) AS src (version)
+USING (VALUES (N'2.11.0')) AS src (version)
 ON target.version = src.version
 WHEN MATCHED     THEN UPDATE SET applied_at = SYSDATETIME()
 WHEN NOT MATCHED THEN INSERT (version, applied_at) VALUES (src.version, SYSDATETIME());

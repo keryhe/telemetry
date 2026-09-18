@@ -156,10 +156,11 @@ public sealed class TelemetryIngestionWorker(
     /// <paramref name="flush"/> from scratch, which on the four transactional providers is safe
     /// by construction: a failed flush's transaction was rolled back in full (see
     /// <c>PostgreSqlBulkWriter</c> et al.'s class doc comments), so re-running it duplicates
-    /// nothing. ClickHouse has no such guarantee -- a retry there can double-insert
-    /// <c>span_events</c>/<c>span_links</c> if an earlier attempt partially succeeded; that is
-    /// the documented, accepted trade-off in <c>ClickHouseBulkWriter</c>, not a bug introduced
-    /// here.
+    /// nothing. ClickHouse has no transaction to roll back, but a retried trace flush is
+    /// nonetheless idempotent since schema 2.11.0: spans is a <c>ReplacingMergeTree</c> keyed on
+    /// (trace_id, span_id) with app-derived ids, and a span's events and links now ride along as
+    /// JSON columns on that same row rather than as separate <c>span_events</c>/<c>span_links</c>
+    /// inserts, which were the one part of a trace flush a retry could genuinely duplicate.
     ///
     /// Returns <c>true</c> if the flush eventually succeeded, <c>false</c> if every attempt
     /// failed and the batch is being dropped.

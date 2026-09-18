@@ -234,9 +234,9 @@ public class ClickHouseAlertRuleRepository(IConfiguration configuration, ITenant
 /// <see cref="UpdateSettingsAsync"/> overrides the base's plain <c>UPDATE</c> with an
 /// <c>ALTER TABLE ... UPDATE</c> mutation, since ClickHouse has no in-place row update.
 ///
-/// There are no foreign keys and so no cascades. Child rows are deleted explicitly, and the trace
-/// sweep must remove <c>span_events</c> and <c>span_links</c> before the spans they hang off,
-/// because once the parent rows are gone the subquery that identifies the children matches nothing.
+/// There are no foreign keys and so no cascades, so any child rows must be deleted explicitly.
+/// The trace sweep has none left to delete: since schema 2.11.0 a span's events and links are JSON
+/// columns on the span row, so deleting the span takes them with it.
 /// A lightweight <c>DELETE</c> is an asynchronous mutation that reports no row count, so every
 /// sweep pre-counts what it is about to remove. That count is the return value; it is taken before
 /// the mutation is issued and is therefore a snapshot, not a receipt.
@@ -285,14 +285,6 @@ public class ClickHouseRetentionSettingsRepository(IConfiguration configuration)
             "SELECT count() FROM spans WHERE start_time_unix_nano < @cutoff",
             args, cancellationToken: cancellationToken));
 
-        // Children first: these subqueries resolve against spans, so they must run while the
-        // parent rows still exist.
-        await conn.ExecuteAsync(new CommandDefinition(
-            "DELETE FROM span_events WHERE span_id IN (SELECT id FROM spans WHERE start_time_unix_nano < @cutoff)",
-            args, cancellationToken: cancellationToken));
-        await conn.ExecuteAsync(new CommandDefinition(
-            "DELETE FROM span_links WHERE span_id IN (SELECT id FROM spans WHERE start_time_unix_nano < @cutoff)",
-            args, cancellationToken: cancellationToken));
         await conn.ExecuteAsync(new CommandDefinition(
             "DELETE FROM spans WHERE start_time_unix_nano < @cutoff",
             args, cancellationToken: cancellationToken));

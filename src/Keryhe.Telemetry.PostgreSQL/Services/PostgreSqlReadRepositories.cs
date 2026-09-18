@@ -103,6 +103,13 @@ public class PostgreSqlRetentionSettingsRepository(NpgsqlDataSource dataSource)
     /// key) with an <c>ORDER BY start_time_unix_nano</c> that costs nothing extra: <c>idx_duration</c>'s
     /// leading column already serves both the <c>WHERE</c> and the <c>ORDER BY</c> as one forward
     /// index scan, so the sweep removes oldest-first without a separate sort.
+    ///
+    /// The <c>DELETE</c> repeats the cutoff predicate even though every row the CTE selected
+    /// already satisfies it. That is redundant on plain Postgres but load-bearing on Timescale,
+    /// which subclasses this repository unchanged: <c>spans</c> became a hypertable in schema
+    /// 2.11.0, and a <c>DELETE ... WHERE id IN (...)</c> with no predicate on the partition column
+    /// has to visit every chunk. Naming <c>start_time_unix_nano</c> lets chunk exclusion confine
+    /// the delete to the oldest chunks, which is where all of its rows are anyway.
     /// </summary>
     private static readonly string TraceSweepSql = $"""
         WITH doomed AS (
@@ -111,7 +118,8 @@ public class PostgreSqlRetentionSettingsRepository(NpgsqlDataSource dataSource)
             ORDER BY start_time_unix_nano
             LIMIT {DeleteBatchSize}
         )
-        DELETE FROM spans WHERE id IN (SELECT id FROM doomed)
+        DELETE FROM spans
+        WHERE start_time_unix_nano < @cutoff AND id IN (SELECT id FROM doomed)
         """;
 
     public override async Task<int> DeleteOldTracesAsync(TimeSpan retentionPeriod, CancellationToken cancellationToken = default)

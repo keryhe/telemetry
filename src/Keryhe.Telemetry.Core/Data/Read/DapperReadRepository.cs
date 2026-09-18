@@ -64,6 +64,19 @@ public abstract class DapperReadRepository
             ? null
             : JsonSerializer.Deserialize<Dictionary<string, object>>(attributesJson);
 
+    /// <summary>
+    /// Reads a child collection stored as a JSON-text column back into a list, treating NULL and
+    /// empty text as an empty list. Write paths store <c>null</c> rather than <c>"[]"</c> for the
+    /// common empty case (see <c>TelemetryIngestionHelpers.SerializeListOrNull</c>), so the null
+    /// branch here is the usual one, not an error path. Mirrors
+    /// <c>MetricReadRepositoryBase.DeserializeExemplars</c>, which returns null instead because
+    /// <c>MetricDataPoint.Exemplars</c> is itself nullable; span events/links are not.
+    /// </summary>
+    protected static List<T> DeserializeList<T>(string? json)
+        => string.IsNullOrEmpty(json)
+            ? new List<T>()
+            : JsonSerializer.Deserialize<List<T>>(json) ?? new List<T>();
+
     protected static string? ExtractServiceName(Dictionary<string, object>? attributes)
     {
         if (attributes == null || !attributes.ContainsKey("service.name"))

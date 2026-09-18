@@ -78,6 +78,8 @@ public abstract class TraceReadRepositoryBase : DapperReadRepository, ITraceRead
                 s.status_code               AS StatusCode,
                 s.status_message            AS StatusMessage,
                 s.attributes_json           AS AttributesJson,
+                s.events_json               AS EventsJson,
+                s.links_json                AS LinksJson,
                 r.schema_url                AS ResourceSchemaUrl,
                 r.attributes_json           AS ResourceAttributesJson,
                 sc.name                     AS ScopeName,
@@ -91,26 +93,16 @@ public abstract class TraceReadRepositoryBase : DapperReadRepository, ITraceRead
             {orderClause}
             """;
 
+        // One query. Since schema 2.11.0 a span's events and links come back as JSON columns on
+        // the span row itself, so the two extra batched SELECTs against span_events/span_links
+        // this method used to issue are gone -- as are the tables.
         var rows = (await conn.QueryAsync<FullSpanRow>(new CommandDefinition(sql, parameters, cancellationToken: ct))).ToList();
         if (rows.Count == 0) return new List<SpanModel>();
 
-        // span_id values are DB-generated bigint primary keys, so they are safe to inline
-        // directly into the IN(...) list. This avoids relying on Dapper list-parameter
-        // expansion, which Npgsql rejects (it receives a single array param -> "IN $1").
-        var idList = string.Join(",", rows.Select(r => r.Id));
-
-        var events = (await conn.QueryAsync<SpanEventRow>(new CommandDefinition(
-            $"SELECT span_id AS SpanDbId, name AS Name, time_unix_nano AS TimeUnixNano, dropped_attributes_count AS DroppedAttributesCount, attributes_json AS AttributesJson FROM span_events WHERE span_id IN ({idList}) ORDER BY id",
-            cancellationToken: ct))).ToLookup(e => e.SpanDbId);
-
-        var links = (await conn.QueryAsync<SpanLinkRow>(new CommandDefinition(
-            $"SELECT span_id AS SpanDbId, linked_trace_id AS LinkedTraceId, linked_span_id AS LinkedSpanId, trace_state AS TraceState, flags AS Flags, dropped_attributes_count AS DroppedAttributesCount, attributes_json AS AttributesJson FROM span_links WHERE span_id IN ({idList}) ORDER BY id",
-            cancellationToken: ct))).ToLookup(l => l.SpanDbId);
-
-        return rows.Select(r => MapSpan(r, events[r.Id], links[r.Id])).ToList();
+        return rows.Select(MapSpan).ToList();
     }
 
-    private static SpanModel MapSpan(FullSpanRow r, IEnumerable<SpanEventRow> events, IEnumerable<SpanLinkRow> links) => new()
+    private static SpanModel MapSpan(FullSpanRow r) => new()
     {
         TraceIdHex = r.TraceId,
         SpanIdHex = r.SpanId,
@@ -127,22 +119,8 @@ public abstract class TraceReadRepositoryBase : DapperReadRepository, ITraceRead
         StatusCode = Enum.Parse<SpanStatusCode>(r.StatusCode),
         StatusMessage = r.StatusMessage,
         Attributes = DeserializeAttributes(r.AttributesJson),
-        Events = events.Select(e => new SpanEventModel
-        {
-            Name = e.Name,
-            TimeUnixNano = e.TimeUnixNano,
-            DroppedAttributesCount = e.DroppedAttributesCount,
-            Attributes = DeserializeAttributes(e.AttributesJson)
-        }).ToList(),
-        Links = links.Select(l => new SpanLinkModel
-        {
-            LinkedTraceIdHex = l.LinkedTraceId,
-            LinkedSpanIdHex = l.LinkedSpanId,
-            TraceState = l.TraceState,
-            Flags = l.Flags,
-            DroppedAttributesCount = l.DroppedAttributesCount,
-            Attributes = DeserializeAttributes(l.AttributesJson)
-        }).ToList(),
+        Events = DeserializeList<SpanEventModel>(r.EventsJson),
+        Links = DeserializeList<SpanLinkModel>(r.LinksJson),
         Resource = new ResourceModel
         {
             SchemaUrl = r.ResourceSchemaUrl,
@@ -1015,32 +993,14 @@ public abstract class TraceReadRepositoryBase : DapperReadRepository, ITraceRead
         public string StatusCode { get; set; } = null!;
         public string? StatusMessage { get; set; }
         public string? AttributesJson { get; set; }
+        public string? EventsJson { get; set; }
+        public string? LinksJson { get; set; }
         public string? ResourceSchemaUrl { get; set; }
         public string? ResourceAttributesJson { get; set; }
         public string ScopeName { get; set; } = null!;
         public string? ScopeVersion { get; set; }
         public string? ScopeSchemaUrl { get; set; }
         public string? ScopeAttributesJson { get; set; }
-    }
-
-    private sealed class SpanEventRow
-    {
-        public long SpanDbId { get; set; }
-        public string Name { get; set; } = null!;
-        public long TimeUnixNano { get; set; }
-        public int DroppedAttributesCount { get; set; }
-        public string? AttributesJson { get; set; }
-    }
-
-    private sealed class SpanLinkRow
-    {
-        public long SpanDbId { get; set; }
-        public string LinkedTraceId { get; set; } = null!;
-        public string LinkedSpanId { get; set; } = null!;
-        public string? TraceState { get; set; }
-        public int Flags { get; set; }
-        public int DroppedAttributesCount { get; set; }
-        public string? AttributesJson { get; set; }
     }
 
     private sealed class DependencyRow

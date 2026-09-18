@@ -90,21 +90,7 @@ public sealed class MySqlBulkWriter(
             var resourceIds = await ResolveResourcesAsync(conn, tx, spans.Select(s => s.Resource), postCommitCacheWrites, ct);
             var scopeIds    = await ResolveScopesAsync(conn, tx, spans.Select(s => s.InstrumentationScope), postCommitCacheWrites, ct);
 
-            var insertedSpanIds = await BulkInsertSpansAsync(conn, tx, spans, resourceIds, scopeIds, ct);
-
-            var events = new List<(long SpanDbId, SpanEventModel Event)>();
-            var links  = new List<(long SpanDbId, SpanLinkModel  Link)>();
-
-            foreach (var span in spans)
-            {
-                if (!insertedSpanIds.TryGetValue((span.TraceIdHex, span.SpanIdHex), out var dbId))
-                    continue;
-                foreach (var e in span.Events) events.Add((dbId, e));
-                foreach (var l in span.Links)  links.Add((dbId, l));
-            }
-
-            if (events.Count > 0) await BulkInsertSpanEventsAsync(conn, tx, events, ct);
-            if (links.Count  > 0) await BulkInsertSpanLinksAsync(conn, tx, links, ct);
+            await BulkInsertSpansAsync(conn, tx, spans, resourceIds, scopeIds, ct);
 
             await tx.CommitAsync(ct);
             foreach (var write in postCommitCacheWrites) write();
@@ -347,25 +333,15 @@ public sealed class MySqlBulkWriter(
         "trace_id", "span_id", "parent_span_id", "resource_id", "scope_id",
         "name", "kind", "start_time_unix_nano", "end_time_unix_nano",
         "dropped_attributes_count", "dropped_events_count", "dropped_links_count",
-        "trace_state", "status_code", "status_message", "attributes_json", "flags"
+        "trace_state", "status_code", "status_message", "attributes_json", "flags",
+        "events_json", "links_json"
     ];
 
-    // Deliberately NOT a before/after diff against the whole key set (two extra chunked SELECTs
-    // -- up to 8 round trips per 2,000 spans -- to detect duplicates that usually do not exist,
-    // since span re-delivery is the exception, not the rule).
-    //
-    // Instead: for each chunk, run INSERT IGNORE and compare ExecuteNonQueryAsync's affected-row
-    // count against the chunk's row count. When they match -- the common case, zero duplicates --
-    // every row in the chunk was newly inserted, and MySQL/InnoDB assigns a fresh multi-row
-    // INSERT contiguous auto-increment ids in VALUES order (confirmed live: a 3-row all-new
-    // INSERT IGNORE returned affected=3 with ids starting at LAST_INSERT_ID() and running
-    // consecutively), so `LastInsertedId + rowIndex` gives every span's id with zero extra
-    // queries. Only when affected < chunk size (some keys already existed) does this fall back
-    // to a SELECT -- and only for that one chunk, not the whole batch. Confirmed live that a
-    // partial-duplicate chunk does NOT preserve that contiguous mapping (a skipped row can still
-    // reserve -- and waste -- an id), so the fallback there is load-bearing, not a belt-and-braces
-    // extra.
-    private static async Task<Dictionary<(string TraceId, string SpanId), long>> BulkInsertSpansAsync(
+    // INSERT IGNORE, chunked. Since schema 2.11.0 a span's events and links are JSON columns on
+    // the span row itself, so nothing downstream needs each inserted span's generated id -- the
+    // affected-row accounting and the LAST_INSERT_ID()/SELECT id-recovery fallback this method
+    // used to carry existed only to attach child span_events/span_links rows, and both are gone.
+    private static async Task BulkInsertSpansAsync(
         MySqlConnection conn,
         MySqlTransaction tx,
         List<SpanModel> spans,
@@ -373,18 +349,13 @@ public sealed class MySqlBulkWriter(
         Dictionary<string, long> scopeIds,
         CancellationToken ct)
     {
-        // Distinct natural keys, built in the same pass as their rows so index i of one always
-        // matches index i of the other -- both dedup against the same `spans` list in the same
-        // order, so there is no need to build the key list separately and trust the two loops
-        // agree.
-        var keys = new List<(string, string)>();
+        // Dedup within the batch on the natural key, so a chunk never carries the same
+        // (trace_id, span_id) twice.
         var rows = new List<object?[]>();
         var added = new HashSet<(string, string)>();
         foreach (var span in spans)
         {
-            var key = (span.TraceIdHex, span.SpanIdHex);
-            if (!added.Add(key)) continue;
-            keys.Add(key);
+            if (!added.Add((span.TraceIdHex, span.SpanIdHex))) continue;
             rows.Add(new object?[]
             {
                 span.TraceIdHex,
@@ -403,12 +374,13 @@ public sealed class MySqlBulkWriter(
                 span.StatusCode.ToString(),
                 (object?)span.StatusMessage ?? DBNull.Value,
                 (object?)SerializeJsonOrNull(span.Attributes) ?? DBNull.Value,
-                span.Flags
+                span.Flags,
+                (object?)SerializeListOrNull(span.Events) ?? DBNull.Value,
+                (object?)SerializeListOrNull(span.Links)  ?? DBNull.Value
             });
         }
 
-        var inserted = new Dictionary<(string, string), long>();
-        if (rows.Count == 0) return inserted;
+        if (rows.Count == 0) return;
 
         var colList = string.Join(", ", SpanColumns);
 
@@ -433,122 +405,8 @@ public sealed class MySqlBulkWriter(
             }
             cmd.CommandText = sb.ToString();
 
-            var affected = await cmd.ExecuteNonQueryAsync(ct);
-            if (affected == 0)
-            {
-                // Every key in this chunk already existed -- nothing new, no query needed: the
-                // whole point of this chunk's span_events/span_links is to attach only to spans
-                // THIS flush inserted, and it inserted none of them.
-                continue;
-            }
-
-            var firstId = (long)cmd.LastInsertedId;
-            if (affected == count)
-            {
-                // Zero duplicates -- the common case. A multi-row INSERT IGNORE where every row
-                // succeeds assigns auto-increment ids consecutively in VALUES order (confirmed
-                // live), so every id is derivable with no query at all.
-                for (var r = 0; r < count; r++)
-                    inserted[keys[offset + r]] = firstId + r;
-            }
-            else
-            {
-                // Some rows in this chunk were duplicates. MySQL still hands out ids for a
-                // partial-success multi-row insert from a pool starting at firstId, but which
-                // input position got skipped isn't recoverable client-side (confirmed live: a
-                // skipped row does not reserve/waste its positional slot, so `firstId + rowIndex`
-                // is NOT valid here the way it is in the zero-duplicate branch above).
-                //
-                // Resolve with one SELECT instead, and use firstId as a floor rather than a
-                // before/after diff: MySQL's auto-increment counter is strictly monotonic and
-                // global, so ANY row that already existed before this statement ran necessarily
-                // has an id < firstId (its id was allocated by some earlier statement, and the
-                // counter never goes backwards or reuses a value), while every id THIS statement
-                // produced is >= firstId. A key resolving to an id below firstId is therefore
-                // provably pre-existing -- no need to have captured a separate "before" snapshot.
-                var chunkKeys = keys.GetRange(offset, count);
-                var resolved = await SelectSpanIdsAsync(conn, tx, chunkKeys, ct);
-                foreach (var (key, id) in resolved)
-                    if (id >= firstId)
-                        inserted[key] = id;
-            }
+            await cmd.ExecuteNonQueryAsync(ct);
         }
-
-        return inserted;
-    }
-
-    private static async Task<Dictionary<(string, string), long>> SelectSpanIdsAsync(
-        MySqlConnection conn, MySqlTransaction tx, List<(string, string)> keys, CancellationToken ct)
-    {
-        var map = new Dictionary<(string, string), long>();
-        if (keys.Count == 0) return map;
-
-        for (var offset = 0; offset < keys.Count; offset += ChunkSize)
-        {
-            var count = Math.Min(ChunkSize, keys.Count - offset);
-            var sb = new StringBuilder("SELECT id, trace_id, span_id FROM spans WHERE (trace_id, span_id) IN (");
-            await using var cmd = new MySqlCommand { Connection = conn, Transaction = tx };
-            for (var i = 0; i < count; i++)
-            {
-                if (i > 0) sb.Append(',');
-                sb.Append("(@t").Append(i).Append(",@s").Append(i).Append(')');
-                cmd.Parameters.AddWithValue($"@t{i}", keys[offset + i].Item1);
-                cmd.Parameters.AddWithValue($"@s{i}", keys[offset + i].Item2);
-            }
-            sb.Append(')');
-            cmd.CommandText = sb.ToString();
-
-            await using var reader = await cmd.ExecuteReaderAsync(ct);
-            while (await reader.ReadAsync(ct))
-                map[(reader.GetString(1), reader.GetString(2))] = reader.GetInt64(0);
-        }
-
-        return map;
-    }
-
-    private static async Task BulkInsertSpanEventsAsync(
-        MySqlConnection conn,
-        MySqlTransaction tx,
-        List<(long SpanDbId, SpanEventModel Event)> events,
-        CancellationToken ct)
-    {
-        var columns = new[] { "span_id", "name", "time_unix_nano", "dropped_attributes_count", "attributes_json" };
-
-        var rows = new List<object?[]>(events.Count);
-        foreach (var (spanId, e) in events)
-            rows.Add(new object?[]
-            {
-                spanId, e.Name, e.TimeUnixNano, e.DroppedAttributesCount,
-                (object?)SerializeJsonOrNull(e.Attributes) ?? DBNull.Value
-            });
-
-        await BulkInsertAsync(conn, tx, "span_events", columns, rows, ct);
-    }
-
-    private static async Task BulkInsertSpanLinksAsync(
-        MySqlConnection conn,
-        MySqlTransaction tx,
-        List<(long SpanDbId, SpanLinkModel Link)> links,
-        CancellationToken ct)
-    {
-        var columns = new[]
-        {
-            "span_id", "linked_trace_id", "linked_span_id", "trace_state",
-            "dropped_attributes_count", "attributes_json", "flags"
-        };
-
-        var rows = new List<object?[]>(links.Count);
-        foreach (var (spanId, l) in links)
-            rows.Add(new object?[]
-            {
-                spanId, l.LinkedTraceIdHex, l.LinkedSpanIdHex,
-                (object?)l.TraceState ?? DBNull.Value,
-                l.DroppedAttributesCount,
-                (object?)SerializeJsonOrNull(l.Attributes) ?? DBNull.Value,
-                l.Flags
-            });
-
-        await BulkInsertAsync(conn, tx, "span_links", columns, rows, ct);
     }
 
     // =========================================================================

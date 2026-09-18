@@ -139,4 +139,16 @@ public static class TelemetryIngestionHelpers
 
     public static string? SerializeJsonOrNull(object? value)
         => value == null ? null : JsonSerializer.Serialize(value);
+
+    /// <summary>
+    /// Serializes a child collection to JSON, or to <c>null</c> when it is absent or empty.
+    ///
+    /// This is the null-for-empty convention exemplars already use (<c>MetricService.ConvertExemplars</c>
+    /// returns null rather than an empty list) and that spans' <c>events_json</c>/<c>links_json</c>
+    /// columns follow since schema 2.11.0: the overwhelming majority of spans carry no events and no
+    /// links, and writing the literal string <c>"[]"</c> on every one of those rows would cost real
+    /// bytes on the largest table in the system for no information at all.
+    /// </summary>
+    public static string? SerializeListOrNull<T>(List<T>? items)
+        => items is { Count: > 0 } ? JsonSerializer.Serialize(items) : null;
 }

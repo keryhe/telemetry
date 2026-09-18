@@ -15,7 +15,6 @@
 --          carry no tenant and are shared across tenants by design).
 --        - spans.id is derived deterministically from (trace_id, span_id).
 --        - metrics.id is derived deterministically from (resource_id, scope_id, name, type).
---        - span_events.id, span_links.id use a monotonic in-process generator.
 --   2. No UNIQUE constraints / ON CONFLICT. Dedup of resources, scopes, spans, and metrics is
 --      handled by ReplacingMergeTree (collapses rows sharing the ORDER BY key at merge
 --      time), backed by an in-process cache + per-batch dedup on the write side.
@@ -109,37 +108,16 @@ CREATE TABLE IF NOT EXISTS spans
     status_code              String DEFAULT 'UNSET',
     status_message           Nullable(String),
     created_at               DateTime64(9) DEFAULT now64(9),
-    attributes_json          Nullable(String)
+    attributes_json          Nullable(String),
+    events_json              Nullable(String),
+    links_json               Nullable(String)
 )
 ENGINE = ReplacingMergeTree
 PARTITION BY toYYYYMMDD(fromUnixTimestamp64Nano(start_time_unix_nano))
 ORDER BY (trace_id, span_id);
 
-CREATE TABLE IF NOT EXISTS span_events
-(
-    id                       Int64,
-    span_id                  Int64,
-    name                     String,
-    time_unix_nano           Int64,
-    dropped_attributes_count Int32 DEFAULT 0,
-    attributes_json          Nullable(String)
-)
-ENGINE = MergeTree
-ORDER BY (span_id, id);
-
-CREATE TABLE IF NOT EXISTS span_links
-(
-    id                       Int64,
-    span_id                  Int64,
-    linked_trace_id          String,
-    linked_span_id           String,
-    trace_state              Nullable(String),
-    flags                    Int32 DEFAULT 0,
-    dropped_attributes_count Int32 DEFAULT 0,
-    attributes_json          Nullable(String)
-)
-ENGINE = MergeTree
-ORDER BY (span_id, id);
+-- span_events and span_links were dropped in 2.11.0: neither was ever read or written
+-- independently of its parent span, so both collapsed into spans.events_json/links_json.
 
 -- =============================================================================
 -- METRICS
@@ -439,6 +417,9 @@ VALUES (1, 90, 90, 180);
 -- =============================================================================
 -- Only inserted when every statement above succeeded, so a partial apply cannot
 -- leave a false version marker for the apply-schema.sh gate.
+-- 2.11.0 drops span_events and span_links, folding both into spans.events_json/links_json --
+-- which also removes the retried-flush double-insert risk those two MergeTree tables carried,
+-- since there is nothing left to insert alongside the ReplacingMergeTree-deduped spans row.
 -- 2.10.0 adds retention_settings, backing the application-level RetentionWorker
 -- (Keryhe.Telemetry.Api) that is now the one retention mechanism across all five providers.
 -- 2.9.0 changes the metric data-point tables here exactly as it does everywhere else:
@@ -446,4 +427,4 @@ VALUES (1, 90, 90, 180);
 -- spans' ORDER BY (trace_id, span_id) with a daily partition already gave it what the relational
 -- providers got from the four indexes they dropped (see PostgreSQL-Schema.sql), and it has no
 -- GIN-style JSONB index to carry the equivalent write cost of.
-INSERT INTO schema_version (version) VALUES ('2.10.0');
+INSERT INTO schema_version (version) VALUES ('2.11.0');

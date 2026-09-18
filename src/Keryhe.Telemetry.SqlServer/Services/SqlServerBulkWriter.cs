@@ -100,21 +100,7 @@ public sealed class SqlServerBulkWriter(
             var resourceIds = await ResolveResourcesAsync(conn, tx, spans.Select(s => s.Resource), postCommitCacheWrites, ct);
             var scopeIds    = await ResolveScopesAsync(conn, tx, spans.Select(s => s.InstrumentationScope), postCommitCacheWrites, ct);
 
-            var insertedSpanIds = await BulkInsertSpansAsync(conn, tx, spans, resourceIds, scopeIds, ct);
-
-            var events = new List<(long SpanDbId, SpanEventModel Event)>();
-            var links  = new List<(long SpanDbId, SpanLinkModel  Link)>();
-
-            foreach (var span in spans)
-            {
-                if (!insertedSpanIds.TryGetValue((span.TraceIdHex, span.SpanIdHex), out var dbId))
-                    continue;
-                foreach (var e in span.Events) events.Add((dbId, e));
-                foreach (var l in span.Links)  links.Add((dbId, l));
-            }
-
-            if (events.Count > 0) await BulkInsertSpanEventsAsync(conn, tx, events, ct);
-            if (links.Count  > 0) await BulkInsertSpanLinksAsync(conn, tx, links, ct);
+            await BulkInsertSpansAsync(conn, tx, spans, resourceIds, scopeIds, ct);
 
             await tx.CommitAsync(ct);
             foreach (var write in postCommitCacheWrites) write();
@@ -362,10 +348,11 @@ public sealed class SqlServerBulkWriter(
         "trace_id", "span_id", "parent_span_id", "resource_id", "scope_id",
         "name", "kind", "start_time_unix_nano", "end_time_unix_nano",
         "dropped_attributes_count", "dropped_events_count", "dropped_links_count",
-        "trace_state", "status_code", "status_message", "attributes_json", "flags"
+        "trace_state", "status_code", "status_message", "attributes_json", "flags",
+        "events_json", "links_json"
     ];
 
-    private static async Task<Dictionary<(string TraceId, string SpanId), long>> BulkInsertSpansAsync(
+    private static async Task BulkInsertSpansAsync(
         SqlConnection conn,
         SqlTransaction tx,
         List<SpanModel> spans,
@@ -373,8 +360,8 @@ public sealed class SqlServerBulkWriter(
         Dictionary<string, long> scopeIds,
         CancellationToken ct)
     {
-        // Stage spans into a temp table, then MERGE from it so we get OUTPUT rows
-        // only for newly inserted spans (matching ON CONFLICT DO NOTHING + RETURNING).
+        // Stage spans into a temp table, then MERGE from it so an already-stored span is left
+        // alone (matching ON CONFLICT DO NOTHING on the Postgres providers).
         // The temp table lives only for the lifetime of this connection's session, so its
         // creation, the bulk copy into it, and the MERGE that reads it must all run inside
         // the same transaction as everything else in this flush.
@@ -404,6 +391,8 @@ public sealed class SqlServerBulkWriter(
                 status_message           NVARCHAR(MAX),
                 attributes_json          NVARCHAR(MAX),
                 flags                    INT           NOT NULL,
+                events_json              NVARCHAR(MAX),
+                links_json               NVARCHAR(MAX),
                 CONSTRAINT pk_spans_stage PRIMARY KEY CLUSTERED (trace_id, span_id)
             )
             """, conn, tx))
@@ -431,7 +420,9 @@ public sealed class SqlServerBulkWriter(
                 span.StatusCode.ToString(),
                 span.StatusMessage,
                 SerializeJsonOrNull(span.Attributes),
-                span.Flags
+                span.Flags,
+                SerializeListOrNull(span.Events),
+                SerializeListOrNull(span.Links)
             ]);
 
         using (var bulk = CreateBulkCopy(conn, tx, "#spans_stage"))
@@ -450,63 +441,19 @@ public sealed class SqlServerBulkWriter(
                 INSERT (trace_id, span_id, parent_span_id, resource_id, scope_id,
                         name, kind, start_time_unix_nano, end_time_unix_nano,
                         dropped_attributes_count, dropped_events_count, dropped_links_count,
-                        trace_state, status_code, status_message, created_at, attributes_json, flags)
+                        trace_state, status_code, status_message, created_at, attributes_json, flags,
+                        events_json, links_json)
                 VALUES (source.trace_id, source.span_id, source.parent_span_id,
                         source.resource_id, source.scope_id,
                         source.name, source.kind, source.start_time_unix_nano, source.end_time_unix_nano,
                         source.dropped_attributes_count, source.dropped_events_count, source.dropped_links_count,
                         source.trace_state, source.status_code, source.status_message,
-                        SYSDATETIME(), source.attributes_json, source.flags)
-            OUTPUT INSERTED.id, INSERTED.trace_id, INSERTED.span_id;
+                        SYSDATETIME(), source.attributes_json, source.flags,
+                        source.events_json, source.links_json);
             """;
 
-        var inserted = new Dictionary<(string, string), long>();
         await using var mergeCmd = new SqlCommand(mergeSql, conn, tx);
-        await using var reader = await mergeCmd.ExecuteReaderAsync(ct);
-        while (await reader.ReadAsync(ct))
-            inserted[(reader.GetString(1), reader.GetString(2))] = reader.GetInt64(0);
-
-        return inserted;
-    }
-
-    private static readonly string[] SpanEventColumns =
-        ["span_id", "name", "time_unix_nano", "dropped_attributes_count", "attributes_json"];
-
-    private static async Task BulkInsertSpanEventsAsync(
-        SqlConnection conn,
-        SqlTransaction tx,
-        List<(long SpanDbId, SpanEventModel Event)> events,
-        CancellationToken ct)
-    {
-        var rows = new List<object?[]>(events.Count);
-        foreach (var (spanId, e) in events)
-            rows.Add([spanId, e.Name, e.TimeUnixNano, e.DroppedAttributesCount, SerializeJsonOrNull(e.Attributes)]);
-
-        using var bulk = CreateBulkCopy(conn, tx, "span_events");
-        for (var i = 0; i < SpanEventColumns.Length; i++)
-            bulk.ColumnMappings.Add(i, SpanEventColumns[i]);
-        using var reader = new ArrayDataReader(rows);
-        await bulk.WriteToServerAsync(reader, ct);
-    }
-
-    private static readonly string[] SpanLinkColumns =
-        ["span_id", "linked_trace_id", "linked_span_id", "trace_state", "dropped_attributes_count", "attributes_json", "flags"];
-
-    private static async Task BulkInsertSpanLinksAsync(
-        SqlConnection conn,
-        SqlTransaction tx,
-        List<(long SpanDbId, SpanLinkModel Link)> links,
-        CancellationToken ct)
-    {
-        var rows = new List<object?[]>(links.Count);
-        foreach (var (spanId, l) in links)
-            rows.Add([spanId, l.LinkedTraceIdHex, l.LinkedSpanIdHex, l.TraceState, l.DroppedAttributesCount, SerializeJsonOrNull(l.Attributes), l.Flags]);
-
-        using var bulk = CreateBulkCopy(conn, tx, "span_links");
-        for (var i = 0; i < SpanLinkColumns.Length; i++)
-            bulk.ColumnMappings.Add(i, SpanLinkColumns[i]);
-        using var reader = new ArrayDataReader(rows);
-        await bulk.WriteToServerAsync(reader, ct);
+        await mergeCmd.ExecuteNonQueryAsync(ct);
     }
 
     // =========================================================================

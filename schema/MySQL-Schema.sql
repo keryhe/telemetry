@@ -103,6 +103,8 @@ CREATE TABLE spans (
     status_message           TEXT,
     created_at               DATETIME(6)  NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
     attributes_json          JSON,
+    events_json              JSON,
+    links_json               JSON,
     CONSTRAINT fk_spans_resources FOREIGN KEY (resource_id) REFERENCES resources (id),
     CONSTRAINT fk_spans_scopes    FOREIGN KEY (scope_id)    REFERENCES instrumentation_scopes (id),
     CONSTRAINT uk_trace_span      UNIQUE (trace_id, span_id)
@@ -120,31 +122,8 @@ CREATE INDEX idx_duration            ON spans (start_time_unix_nano, end_time_un
 CREATE INDEX idx_spans_name          ON spans (name);
 CREATE INDEX idx_spans_resource_time ON spans (resource_id, start_time_unix_nano DESC);
 
--- Span events.
-CREATE TABLE span_events (
-    id                       BIGINT AUTO_INCREMENT PRIMARY KEY,
-    span_id                  BIGINT       NOT NULL,
-    name                     VARCHAR(255) NOT NULL,
-    time_unix_nano           BIGINT       NOT NULL,
-    dropped_attributes_count INT          DEFAULT 0,
-    attributes_json          JSON,
-    CONSTRAINT fk_span_events_spans FOREIGN KEY (span_id) REFERENCES spans (id) ON DELETE CASCADE
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
-CREATE INDEX idx_span_time ON span_events (span_id, time_unix_nano);
-
--- Span links.
-CREATE TABLE span_links (
-    id                       BIGINT AUTO_INCREMENT PRIMARY KEY,
-    span_id                  BIGINT   NOT NULL,
-    linked_trace_id          CHAR(32) NOT NULL,
-    linked_span_id           CHAR(16) NOT NULL,
-    trace_state              TEXT,
-    flags                    INT      DEFAULT 0,
-    dropped_attributes_count INT      DEFAULT 0,
-    attributes_json          JSON,
-    CONSTRAINT fk_span_links_spans FOREIGN KEY (span_id) REFERENCES spans (id) ON DELETE CASCADE
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
-CREATE INDEX idx_span_link ON span_links (span_id, linked_trace_id, linked_span_id);
+-- span_events and span_links were dropped in 2.11.0: neither was ever read or written
+-- independently of its parent span, so both collapsed into spans.events_json/links_json.
 
 -- =============================================================================
 -- METRICS TABLES
@@ -495,7 +474,7 @@ GROUP BY severity_text, severity_number, day_bucket;
 -- Only inserted when every statement above succeeded, so a partial apply cannot
 -- leave a false version marker for the apply-schema.sh gate.
 INSERT INTO schema_version (version, applied_at)
-VALUES ('2.10.0', CURRENT_TIMESTAMP(6))
+VALUES ('2.11.0', CURRENT_TIMESTAMP(6))
 ON DUPLICATE KEY UPDATE applied_at = CURRENT_TIMESTAMP(6);
 
 -- =============================================================================
