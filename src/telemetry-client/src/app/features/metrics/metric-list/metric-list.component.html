@@ -67,7 +67,7 @@
           <ng-container matColumnDef="type">
             <th mat-header-cell *matHeaderCellDef>Type</th>
             <td mat-cell *matCellDef="let m">
-              <mat-chip [highlighted]="false">{{ typeLabel(m.type) }}</mat-chip>
+              <mat-chip [highlighted]="false" [style.--mat-chip-outline-color]="typeColor(m.type)">{{ typeLabel(m.type) }}</mat-chip>
             </td>
           </ng-container>
           <ng-container matColumnDef="unit">
@@ -99,7 +99,7 @@
           </ng-container>
           <ng-container matColumnDef="type">
             <th mat-header-cell *matHeaderCellDef>Type</th>
-            <td mat-cell *matCellDef="let m"><mat-chip>{{ typeLabel(m.type) }}</mat-chip></td>
+            <td mat-cell *matCellDef="let m"><mat-chip [style.--mat-chip-outline-color]="typeColor(m.type)">{{ typeLabel(m.type) }}</mat-chip></td>
           </ng-container>
           <ng-container matColumnDef="unit">
             <th mat-header-cell *matHeaderCellDef>Unit</th>

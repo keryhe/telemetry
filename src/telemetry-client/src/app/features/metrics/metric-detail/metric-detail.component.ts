@@ -22,7 +22,7 @@ import { TimeRangeService } from '../../../core/services/time-range.service';
 import { ThemeService } from '../../../core/services/theme.service';
 import {
   AggregationTemporality, ExemplarModel, MetricDataPoint, MetricInfo, MetricSeries, MetricType,
-  MultiSeriesMetricData, NamedMetricSeries,
+  MultiSeriesMetricData, NamedMetricSeries, TYPE_LABELS, getTypeColor,
 } from '../../../core/models/metric.models';
 import { StatCardComponent } from '../../../shared/components/stat-card/stat-card.component';
 import { EmptyStateComponent } from '../../../shared/components/empty-state/empty-state.component';
@@ -59,12 +59,6 @@ const AGG_MODES: { value: AggMode; label: string }[] = [
 
 /** Series rendered individually before the rest are folded into an "others" line. */
 const MAX_SERIES = 8;
-
-const TYPE_LABELS: Record<MetricType, string> = {
-  [MetricType.Gauge]: 'Gauge', [MetricType.Sum]: 'Counter',
-  [MetricType.Histogram]: 'Histogram', [MetricType.ExponentialHistogram]: 'Exp. Histogram',
-  [MetricType.Summary]: 'Summary',
-};
 
 const TEMPORALITY_LABELS: Record<AggregationTemporality, string> = {
   [AggregationTemporality.Unspecified]: 'Unspecified',
@@ -226,6 +220,7 @@ export class MetricDetailComponent implements OnInit {
     return aggregateSeries(list, start, end, this.effectiveFold(), this.isCounter() && !this.showRaw());
   });
   protected typeLabel = computed(() => TYPE_LABELS[this.metricType()] ?? 'Unknown');
+  protected typeColor = computed(() => getTypeColor(this.metricType()));
 
   /** Stats are rates only for a cumulative counter when not showing raw values. */
   protected statsAreRates = computed(() => this.isCounter() && !this.showRaw());

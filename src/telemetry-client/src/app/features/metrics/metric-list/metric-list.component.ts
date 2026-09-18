@@ -19,7 +19,7 @@ import { FormsModule } from '@angular/forms';
 import { MetricsApiService } from '../../../core/services/api/metrics-api.service';
 import { MetricSearchHelpDialogComponent } from '../metric-search-help-dialog/metric-search-help-dialog.component';
 import { TimeRangeService } from '../../../core/services/time-range.service';
-import { MetricInfo, MetricType, MetricsSummary } from '../../../core/models/metric.models';
+import { MetricInfo, MetricType, MetricsSummary, TYPE_LABELS, getTypeColor, getTypeLabel } from '../../../core/models/metric.models';
 import { StatCardComponent } from '../../../shared/components/stat-card/stat-card.component';
 import { EmptyStateComponent } from '../../../shared/components/empty-state/empty-state.component';
 import { PageHeaderComponent } from '../../../shared/components/page-header/page-header.component';
@@ -36,14 +36,6 @@ interface UniqueMetric {
   services: string[];
   lastSeen: string;
 }
-
-const TYPE_LABELS: Record<MetricType, string> = {
-  [MetricType.Gauge]: 'Gauge',
-  [MetricType.Sum]: 'Counter',
-  [MetricType.Histogram]: 'Histogram',
-  [MetricType.ExponentialHistogram]: 'Exp. Histogram',
-  [MetricType.Summary]: 'Summary',
-};
 
 @Component({
   selector: 'app-metric-list',
@@ -142,7 +134,8 @@ export class MetricListComponent {
 
   protected readonly uniqueCols = ['name', 'type', 'unit', 'instances', 'services', 'lastSeen'];
   protected readonly allCols = ['name', 'type', 'unit', 'service', 'lastSeen'];
-  protected readonly typeLabel = (t: MetricType) => TYPE_LABELS[t] ?? 'Unknown';
+  protected readonly typeLabel = getTypeLabel;
+  protected readonly typeColor = getTypeColor;
 
   constructor() {
     // Slide relative preset windows to "now" on (re)entry so navigating back refreshes.

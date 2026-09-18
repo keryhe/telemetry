@@ -80,11 +80,12 @@ export class ShellComponent {
     .pipe(map((r) => r.matches));
 
   /**
-   * True on pages that opt out of the per-tenant chrome — the nav rail and the tenant picker.
-   * Both are tenant-scoped controls: every nav item routes to a page that reads one tenant, and
-   * the picker chooses which. On the cross-tenant Global Dashboard neither has anything to act
-   * on, so the page declares `data: { chrome: 'global' }` and the shell drops them, keeping the
-   * toolbar (branding, time range, theme) that still applies.
+   * True on pages that opt out of the per-tenant chrome — the tenant picker, and every nav item
+   * except Settings. Those are tenant-scoped controls: the picker chooses a tenant, and each
+   * other nav item routes to a page that reads one. On the cross-tenant Global Dashboard none of
+   * that has anything to act on, so the page declares `data: { chrome: 'global' }` and the shell
+   * drops the picker and narrows the rail to Settings, keeping the toolbar (branding, time range,
+   * theme) and Settings itself, which isn't tenant-scoped.
    *
    * Driven by route data rather than a URL test so a second chromeless page costs one line.
    */

@@ -12,6 +12,34 @@ export enum AggregationTemporality {
   Cumulative = 2,
 }
 
+export const TYPE_LABELS: Record<MetricType, string> = {
+  [MetricType.Gauge]: 'Gauge',
+  [MetricType.Sum]: 'Counter',
+  [MetricType.Histogram]: 'Histogram',
+  [MetricType.ExponentialHistogram]: 'Exp. Histogram',
+  [MetricType.Summary]: 'Summary',
+};
+
+// Chosen to stay legible as a chip outline in both light and dark mode (contrast-checked against
+// each theme's --mat-sys-background) and to stay clear of colors already meaningful elsewhere in
+// the app — the red/orange/green severity palette (log.models.ts SEVERITY_COLORS) and the primary
+// blue used for info/ok states.
+export const TYPE_COLORS: Record<MetricType, string> = {
+  [MetricType.Gauge]: '#5C6BC0',
+  [MetricType.Sum]: '#0097A7',
+  [MetricType.Histogram]: '#D81B60',
+  [MetricType.ExponentialHistogram]: '#7E57C2',
+  [MetricType.Summary]: '#827717',
+};
+
+export function getTypeLabel(type: MetricType): string {
+  return TYPE_LABELS[type] ?? 'Unknown';
+}
+
+export function getTypeColor(type: MetricType): string {
+  return TYPE_COLORS[type] ?? '#9e9e9e';
+}
+
 export interface MetricInfo {
   id: number;
   name: string;

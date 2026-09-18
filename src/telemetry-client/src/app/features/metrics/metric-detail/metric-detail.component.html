@@ -6,7 +6,7 @@
   <div class="breadcrumb">
     <a mat-button routerLink="/metrics"><mat-icon>arrow_back</mat-icon> Metrics</a>
     <span class="metric-name">{{ metricName() }}</span>
-    <mat-chip>{{ typeLabel() }}</mat-chip>
+    <mat-chip [style.--mat-chip-outline-color]="typeColor()">{{ typeLabel() }}</mat-chip>
     @if (instances()[0]?.unit) {
       <mat-chip>{{ instances()[0].unit }}</mat-chip>
     }
