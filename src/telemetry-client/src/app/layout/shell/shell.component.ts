@@ -12,6 +12,7 @@ import { MatToolbarModule } from '@angular/material/toolbar';
 import { MatTooltipModule } from '@angular/material/tooltip';
 import { ActivatedRoute, NavigationEnd, Router, RouterLink, RouterLinkActive, RouterOutlet } from '@angular/router';
 import { filter, map, startWith } from 'rxjs/operators';
+import { APP_CONFIG } from '../../core/config/app-config';
 import { ThemeService } from '../../core/services/theme.service';
 import { TenantService } from '../../core/services/tenant.service';
 import { TimeRangePickerComponent } from '../../shared/components/time-range-picker/time-range-picker.component';
@@ -73,6 +74,9 @@ export class ShellComponent {
   private readonly breakpoints = inject(BreakpointObserver);
   private readonly router = inject(Router);
   private readonly route = inject(ActivatedRoute);
+
+  /** Header bar text — configurable per host, see AppConfig.brandName/brandTagline. */
+  protected readonly brand = inject(APP_CONFIG);
 
   /** True below COMPACT_QUERY: hamburger + overlay drawer instead of the permanent nav rail. */
   protected readonly isCompact$ = this.breakpoints

@@ -1,0 +1,128 @@
+<Project Sdk="Microsoft.NET.Sdk.Razor">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <GeneratePackageOnBuild>true</GeneratePackageOnBuild>
+    <Version>1.2.0</Version>
+    <Authors>Keith Heard</Authors>
+    <Product>Telemetry</Product>
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
+    <PackageProjectUrl>https://github.com/keryhe/telemetry</PackageProjectUrl>
+    <PackageTags>Keryhe Telemetry Ui Angular</PackageTags>
+    <AssemblyVersion>1.2.0.0</AssemblyVersion>
+    <FileVersion>1.2.0.0</FileVersion>
+    <Description>Prebuilt Angular UI for Keryhe Telemetry, packaged as static web assets</Description>
+    <Copyright>Copyright 2026</Copyright>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <!-- Static content only — no .razor/.cshtml in this project, no MVC views to add. -->
+    <AddRazorSupportForMvc>false</AddRazorSupportForMvc>
+    <!-- The Razor SDK auto-globs wwwroot\** as Content at project evaluation time — before
+         IncludeAngularClient (below) has populated it on a clean build, and duplicating its own
+         explicit items on every later one (wwwroot already exists on disk by then). Turned off so
+         IncludeAngularClient's dynamically-added items are the one source of truth. -->
+    <EnableDefaultContentItems>false</EnableDefaultContentItems>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <None Include="README.md" Pack="true" PackagePath="\" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
+  </ItemGroup>
+
+  <!-- ── ANGULAR CLIENT ──────────────────────────────────────────────────────────────────────
+       Builds src/telemetry-client and stages its output into THIS project's wwwroot, so the SDK's
+       static web asset pipeline picks it up like any other RCL asset: consumers get it at
+       _content/Keryhe.Telemetry.Ui/ via a plain ProjectReference or PackageReference, no npm and
+       no Node required on their machine.
+
+       Runs on ordinary `dotnet build`, not just publish — unlike the old per-host targets this
+       replaces, this project's whole purpose is to be built once and then just referenced, so the
+       SPA must be in `wwwroot` before the static web asset manifest is generated (which happens at
+       build). Two guards keep that affordable:
+         - Inputs/Outputs make the target a no-op once the stamp file is newer than every input, so
+           an unrelated `dotnet build Telemetry.sln` after the first one costs one timestamp check.
+         - `npm ci` (which deletes and reinstalls node_modules) runs only when node_modules is
+           absent; an incremental rebuild uses the faster `npm run build` alone.
+       Set -p:BuildSpa=false to skip this entirely and package whatever is already in wwwroot (a CI
+       stage that built the SPA separately, or a repeat build within the same session). -->
+  <PropertyGroup>
+    <SpaRoot>..\telemetry-client\</SpaRoot>
+    <SpaDist>$(SpaRoot)dist\telemetry-client\browser\</SpaDist>
+    <BuildSpa Condition="'$(BuildSpa)' == ''">true</BuildSpa>
+    <!-- $(BaseIntermediateOutputPath) ("obj\"), not $(IntermediateOutputPath) ("obj\Debug\net10.0\"):
+         the latter depends on Configuration/TargetFramework resolution that is not reliably
+         complete this early in project evaluation — on a clean tree it resolved to nothing here
+         and the stamp was written to the project root instead of under obj\. One stamp shared
+         across Debug/Release is also the right behavior anyway: the Angular production build
+         these inputs feed does not vary with the .NET build configuration. -->
+    <SpaBuildStampFile>$(BaseIntermediateOutputPath)spa-build.stamp</SpaBuildStampFile>
+  </PropertyGroup>
+
+  <!-- Declared at the project level, not inside the target below: MSBuild evaluates a target's
+       own Inputs/Outputs for its up-to-date check before the target body runs, so an item group
+       populated only by that body is empty at the moment it would matter and the target — wrongly
+       — never looks stale. -->
+  <ItemGroup Condition="'$(BuildSpa)' == 'true'">
+    <SpaSourceInputs Include="$(SpaRoot)src\**\*;$(SpaRoot)public\**\*;$(SpaRoot)angular.json;$(SpaRoot)package.json;$(SpaRoot)package-lock.json" />
+  </ItemGroup>
+
+  <Target Name="BuildAngularClient"
+          BeforeTargets="AssignTargetPaths"
+          Condition="'$(BuildSpa)' == 'true'"
+          Inputs="@(SpaSourceInputs)"
+          Outputs="$(SpaBuildStampFile)">
+    <!-- Node is a build-time-only dependency of *this* project, never of a consumer. A missing
+         toolchain should not fail `dotnet build Telemetry.sln` for someone working only on the
+         .NET side — it should leave wwwroot empty and let them know why. -->
+    <Exec Command="npm --version" ContinueOnError="true" StandardOutputImportance="low" StandardErrorImportance="low">
+      <Output TaskParameter="ExitCode" PropertyName="_NpmCheckExitCode" />
+    </Exec>
+
+    <Warning Condition="'$(_NpmCheckExitCode)' != '0'"
+             Text="npm was not found on PATH — skipping the Angular build. Keryhe.Telemetry.Ui will package with an empty UI. Install Node.js, or pass -p:BuildSpa=false to build against an already-published dist (see src/telemetry-client/dist)." />
+
+    <Exec Condition="'$(_NpmCheckExitCode)' == '0' AND !Exists('$(SpaRoot)node_modules')"
+          Command="npm ci"
+          WorkingDirectory="$(SpaRoot)" />
+    <Exec Condition="'$(_NpmCheckExitCode)' == '0'"
+          Command="npm run build"
+          WorkingDirectory="$(SpaRoot)" />
+
+    <Touch Files="$(SpaBuildStampFile)" AlwaysCreate="true" />
+  </Target>
+
+  <!-- Runs after BuildAngularClient: the item group is only correct once dist exists (or, if npm
+       was skipped above, once we know for certain it does not and the glob below is empty).
+
+       Copies into a real wwwroot\ under this project, rather than declaring <Content Link="..."/>
+       items that leave the files sitting under dist\ — a plain Link is a virtual rename for the
+       build manifest, not a file on disk at that path, and the static web assets loader used by
+       `dotnet run` with a project reference constructs a PhysicalFileProvider rooted at each
+       referenced RCL's literal wwwroot\ folder unconditionally, before it looks at what static web
+       assets that RCL declares. A wwwroot\ that does not physically exist crashes host startup
+       outright (DirectoryNotFoundException), not just a 404 for the UI — this bit us in exactly
+       that shape once, wired through Api.Server, and is why the fix is a real copy. wwwroot\ is
+       gitignored, same as any other project's build output. -->
+  <Target Name="IncludeAngularClient"
+          AfterTargets="BuildAngularClient"
+          BeforeTargets="AssignTargetPaths"
+          Condition="'$(BuildSpa)' == 'true'">
+    <ItemGroup>
+      <_SpaFiles Include="$(SpaDist)**\*" />
+      <_SpaWwwrootFiles Include="@(_SpaFiles->'wwwroot\%(RecursiveDir)%(Filename)%(Extension)')" />
+    </ItemGroup>
+
+    <Copy SourceFiles="@(_SpaFiles)" DestinationFiles="@(_SpaWwwrootFiles)" SkipUnchangedFiles="true" />
+
+    <ItemGroup>
+      <Content Include="wwwroot\**\*">
+        <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+      </Content>
+    </ItemGroup>
+  </Target>
+
+</Project>

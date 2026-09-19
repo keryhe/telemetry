@@ -1,13 +1,13 @@
 import { Injectable, inject } from '@angular/core';
 import { HttpClient } from '@angular/common/http';
 import { Observable } from 'rxjs';
-import { environment } from '../../../../environments/environment';
+import { APP_CONFIG } from '../../config/app-config';
 import { Tenant } from '../../models/alert.models';
 
 @Injectable({ providedIn: 'root' })
 export class TenantsApiService {
   private readonly http = inject(HttpClient);
-  private readonly base = environment.apiUrl;
+  private readonly base = inject(APP_CONFIG).apiUrl;
 
   getTenants(): Observable<Tenant[]> {
     return this.http.get<Tenant[]>(`${this.base}/tenants`);

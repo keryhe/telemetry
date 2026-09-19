@@ -1,7 +1,7 @@
 import { Injectable, inject } from '@angular/core';
 import { HttpClient, HttpParams } from '@angular/common/http';
 import { Observable } from 'rxjs';
-import { environment } from '../../../../environments/environment';
+import { APP_CONFIG } from '../../config/app-config';
 import {
   MetricInfo,
   MetricSeries,
@@ -13,7 +13,7 @@ import {
 @Injectable({ providedIn: 'root' })
 export class MetricsApiService {
   private readonly http = inject(HttpClient);
-  private readonly base = `${environment.apiUrl}/metrics`;
+  private readonly base = `${inject(APP_CONFIG).apiUrl}/metrics`;
 
   getAllMetrics(start?: Date, end?: Date, limit = 500): Observable<MetricInfo[]> {
     let params = new HttpParams().set('limit', limit);

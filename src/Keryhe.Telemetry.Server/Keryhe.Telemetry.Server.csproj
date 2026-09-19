@@ -23,38 +23,11 @@
     <ProjectReference Include="..\Keryhe.Telemetry.Timescale\Keryhe.Telemetry.Timescale.csproj" />
     <ProjectReference Include="..\Keryhe.Telemetry.ClickHouse\Keryhe.Telemetry.ClickHouse.csproj" />
     <ProjectReference Include="..\Keryhe.Telemetry.MySql\Keryhe.Telemetry.MySql.csproj" />
+    <!-- Prebuilt Angular UI, packaged as static web assets — see Keryhe.Telemetry.Ui's own
+         csproj for how src/telemetry-client gets built and staged into it. Referencing it here
+         (rather than the former per-host BuildAngularClient/IncludeAngularClient targets) is what
+         makes the UI available to `dotnet run` too, not just a publish — see Program.cs. -->
+    <ProjectReference Include="..\Keryhe.Telemetry.Ui\Keryhe.Telemetry.Ui.csproj" />
   </ItemGroup>
-
-  <!-- ── ANGULAR CLIENT ──────────────────────────────────────────────────────
-       On publish, build src/telemetry-client and stage its output into the
-       published wwwroot so this host serves the UI alongside /api. Nothing is
-       written into the source tree, and a plain `dotnet build` never runs npm.
-       Set -p:BuildSpaOnPublish=false to publish against an already-built dist
-       (e.g. a CI stage that builds the UI separately).                        -->
-  <PropertyGroup>
-    <SpaRoot>..\telemetry-client\</SpaRoot>
-    <SpaDist>$(SpaRoot)dist\telemetry-client\browser\</SpaDist>
-    <BuildSpaOnPublish Condition="'$(BuildSpaOnPublish)' == ''">true</BuildSpaOnPublish>
-  </PropertyGroup>
-
-  <Target Name="BuildAngularClient"
-          BeforeTargets="PrepareForPublish"
-          Condition="'$(BuildSpaOnPublish)' == 'true'">
-    <Exec Command="npm ci" WorkingDirectory="$(SpaRoot)" />
-    <Exec Command="npm run build" WorkingDirectory="$(SpaRoot)" />
-  </Target>
-
-  <!-- Runs after BuildAngularClient: the item group is only correct once dist exists. -->
-  <Target Name="IncludeAngularClient"
-          AfterTargets="BuildAngularClient"
-          BeforeTargets="PrepareForPublish">
-    <ItemGroup>
-      <_SpaFiles Include="$(SpaDist)**\*" />
-      <ResolvedFileToPublish Include="@(_SpaFiles)">
-        <RelativePath>wwwroot\%(RecursiveDir)%(Filename)%(Extension)</RelativePath>
-        <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
-      </ResolvedFileToPublish>
-    </ItemGroup>
-  </Target>
 
 </Project>

@@ -35,9 +35,10 @@ read/write implementation and is selected by the host at startup.
 | `Keryhe.Telemetry.Collector` / `.Collector.Server` | gRPC OTLP ingestion (class library + thin host) |
 | `Keryhe.Telemetry.Api` / `.Api.Server` | REST API controllers and tenant middleware (class library + thin host) |
 | `Keryhe.Telemetry.Server` | All-in-one host: gRPC ingestion, REST API, and the Angular UI in a single process |
+| `Keryhe.Telemetry.Ui` | Prebuilt Angular UI, packaged as static web assets — see [Build your own host](#build-your-own-host) below |
 | `Keryhe.Telemetry.Alerting` | Alert rule evaluators, webhook delivery, periodic evaluation worker |
 | `Keryhe.Telemetry.TestDataGenerator` | Worker service that emits synthetic telemetry |
-| `src/telemetry-client` | Angular 20 SPA (Dashboard, Traces, Metrics, Logs, Alerts) |
+| `src/telemetry-client` | Angular 20 SPA source (Dashboard, Traces, Metrics, Logs, Alerts) — built into `Keryhe.Telemetry.Ui`, not part of the .sln |
 
 See [CLAUDE.md](CLAUDE.md) for a deeper architectural walkthrough (composition roots, ingestion
 pipeline, multi-tenancy, provider-specific caveats).
@@ -70,6 +71,60 @@ in the full setup guide.
 For other database providers (TimescaleDB, SQL Server, MySQL, ClickHouse), Docker recipes,
 running the split hosts, deploying to production, the full schema reference, and alerting
 configuration, see **[docs/SETUP.md](docs/SETUP.md)**.
+
+## Build your own host
+
+Every piece of this stack ships as a NuGet package — `Keryhe.Telemetry.Core`, `.Api`,
+`.Collector`, `.Ui`, and the five database providers — so you can compose your own ASP.NET Core
+host instead of running `Keryhe.Telemetry.Api.Server`/`.Server` as-is: add your own middleware,
+combine it with an existing application, or change what gets exposed.
+
+```xml
+<ItemGroup>
+  <PackageReference Include="Keryhe.Telemetry.Api" Version="1.2.0" />
+  <PackageReference Include="Keryhe.Telemetry.Ui" Version="1.2.0" />
+  <!-- Plus exactly one provider package, matching Database:Provider below: -->
+  <PackageReference Include="Keryhe.Telemetry.Timescale" Version="1.2.0" />
+</ItemGroup>
+```
+
+```csharp
+var builder = WebApplication.CreateBuilder(args);
+
+builder.Services.AddKeryheTelemetryApi(builder.Configuration); // reads Database:Provider, ConnectionStrings:Api
+
+var app = builder.Build();
+
+// Before any tenant-scoped middleware, and paired with an explicit UseRouting() call right after
+// it — see CLAUDE.md's "UI hosting" section for why that second part matters.
+app.UseKeryheTelemetryUi();
+app.UseRouting();
+
+app.UseKeryheTelemetryApi();
+app.MapControllers();
+app.MapKeryheTelemetryUiFallback();
+
+app.Run();
+```
+
+`Keryhe.Telemetry.Ui` ships the compiled Angular bundle prebuilt — no Node, no npm, nothing to
+build — and serves it at `/`, same-origin with the API at `/api` by default. If your host mounts
+the API somewhere else, or wants its own product name in the header bar and browser tab instead of
+"Sentinel", tell the UI at startup rather than rebuilding it:
+
+```csharp
+app.UseKeryheTelemetryUi(options =>
+{
+    options.ApiBasePath = "/telemetry/api";
+    options.BrandName = "Acme Watchtower";
+    options.BrandTagline = "Custom Consumer Branding";
+});
+```
+
+Add `Keryhe.Telemetry.Collector` (plus `AddKeryheTelemetryCollector()`/`MapKeryheTelemetryCollector()`)
+the same way if your host should also ingest OTLP, mirroring what `Keryhe.Telemetry.Server` does
+internally. Pin the UI and API packages to the same version — they ship in lockstep, and a
+mismatch fails silently (a field goes missing from a rendered page) rather than with an error.
 
 ## License
 

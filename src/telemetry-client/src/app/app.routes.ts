@@ -13,7 +13,7 @@ export const routes: Routes = [
         // what the shell reads to drop the nav rail and the tenant picker — both are per-tenant
         // controls with nothing to act on here.
         path: 'global',
-        title: 'Sentinel - Global',
+        title: 'Global',
         data: { chrome: 'global' },
         loadComponent: () =>
           import('./features/global-dashboard/global-dashboard.component').then(
@@ -22,13 +22,13 @@ export const routes: Routes = [
       },
       {
         path: 'dashboard',
-        title: 'Sentinel - Dashboard',
+        title: 'Dashboard',
         loadComponent: () =>
           import('./features/dashboard/dashboard.component').then((m) => m.DashboardComponent),
       },
       {
         path: 'traces',
-        title: 'Sentinel - Traces',
+        title: 'Traces',
         loadComponent: () =>
           import('./features/traces/trace-list/trace-list.component').then((m) => m.TraceListComponent),
       },
@@ -41,7 +41,7 @@ export const routes: Routes = [
       },
       {
         path: 'metrics',
-        title: 'Sentinel - Metrics',
+        title: 'Metrics',
         loadComponent: () =>
           import('./features/metrics/metric-list/metric-list.component').then(
             (m) => m.MetricListComponent
@@ -56,19 +56,19 @@ export const routes: Routes = [
       },
       {
         path: 'logs',
-        title: 'Sentinel - Logs',
+        title: 'Logs',
         loadComponent: () =>
           import('./features/logs/logs.component').then((m) => m.LogsComponent),
       },
       {
         path: 'alerts',
-        title: 'Sentinel - Alerts',
+        title: 'Alerts',
         loadComponent: () =>
           import('./features/alerts/alerts.component').then((m) => m.AlertsComponent),
       },
       {
         path: 'settings',
-        title: 'Sentinel - Settings',
+        title: 'Settings',
         loadComponent: () =>
           import('./features/settings/settings.component').then((m) => m.SettingsComponent),
       },

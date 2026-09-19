@@ -2,7 +2,7 @@ import { Injectable, inject } from '@angular/core';
 import { HttpClient, HttpParams } from '@angular/common/http';
 import { Observable } from 'rxjs';
 import { map } from 'rxjs/operators';
-import { environment } from '../../../../environments/environment';
+import { APP_CONFIG } from '../../config/app-config';
 import { LogRecord } from '../../models/log.models';
 import { PagedResult } from '../../models/paged.models';
 import { LogBucket } from '../../../shared/utils/chart.utils';
@@ -40,7 +40,7 @@ interface LogVolumeBucketDto {
 @Injectable({ providedIn: 'root' })
 export class LogsApiService {
   private readonly http = inject(HttpClient);
-  private readonly base = `${environment.apiUrl}/logs`;
+  private readonly base = `${inject(APP_CONFIG).apiUrl}/logs`;
 
   getLogs(start: Date, end: Date): Observable<LogRecord[]> {
     const params = new HttpParams()

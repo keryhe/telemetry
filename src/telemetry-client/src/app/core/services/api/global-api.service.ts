@@ -2,7 +2,7 @@ import { Injectable, inject } from '@angular/core';
 import { HttpClient, HttpParams } from '@angular/common/http';
 import { Observable } from 'rxjs';
 import { map } from 'rxjs/operators';
-import { environment } from '../../../../environments/environment';
+import { APP_CONFIG } from '../../config/app-config';
 import { TimeBucket } from '../../../shared/utils/chart.utils';
 
 /** One tenant's card on the Global Dashboard. */
@@ -39,7 +39,7 @@ export interface GlobalOverview {
 @Injectable({ providedIn: 'root' })
 export class GlobalApiService {
   private readonly http = inject(HttpClient);
-  private readonly base = `${environment.apiUrl}/global`;
+  private readonly base = `${inject(APP_CONFIG).apiUrl}/global`;
 
   /**
    * One request for every tenant's card. Deliberately not N calls to `/traces/overview` from the

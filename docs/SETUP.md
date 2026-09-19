@@ -215,16 +215,27 @@ needs no separate web server for the SPA and no CORS configuration.
 dotnet publish src/Keryhe.Telemetry.Api.Server -c Release -o ./publish
 ```
 
-Publishing runs `npm ci && npm run build` in `src/telemetry-client` and stages the output
-into the published `wwwroot`. The resulting host serves the UI at `/` and the API under
-`/api` on the same origin — deep links like `/traces/<id>` are handled by an SPA fallback
-to `index.html`.
+The Angular UI is packaged separately, as `Keryhe.Telemetry.Ui` (a NuGet package like the other
+class libraries — see the [README](../README.md#build-your-own-host) if you're composing your own
+host rather than running this one as-is). `Keryhe.Telemetry.Api.Server` references it via a plain
+`ProjectReference`, so publishing it also builds `src/telemetry-client` (`npm ci && npm run build`)
+and stages the output into `Keryhe.Telemetry.Ui`'s own `wwwroot`, from where it flows into the
+published host as static web assets. The resulting host serves the UI at `/` and the API under
+`/api` on the same origin — deep links like `/traces/<id>` are handled by an SPA fallback to
+`index.html`.
 
-- Plain `dotnet build` never invokes npm, so normal .NET builds stay fast.
-- Pass `-p:BuildSpaOnPublish=false` to publish against an already-built
-  `src/telemetry-client/dist` (useful when CI builds the UI in a separate stage).
-- The production build uses `src/environments/environment.prod.ts`, which points `apiUrl`
-  at a relative `/api`. The app assumes it is served from the origin root (`<base href="/">`).
+- Plain `dotnet build` never invokes npm — `Keryhe.Telemetry.Ui`'s build is incremental (a stamp
+  file skips the npm build once it's already current) so this stays true even across a full
+  solution build, not only a build of that one project.
+- Pass `-p:BuildSpa=false` to publish against an already-built `src/telemetry-client/dist`
+  (useful when CI builds the UI in a separate stage). The flag lives on `Keryhe.Telemetry.Ui`, not
+  the host, but propagates transitively through the `ProjectReference`.
+- The API's location is **runtime** configuration, not baked into the compiled bundle: the client
+  fetches `GET /config.json` before it bootstraps and reads `apiUrl` from it (served by
+  `UseKeryheTelemetryUi()`, defaulting to the conventional same-origin `/api` this section
+  describes). This is what lets the same published bundle work for a host that mounts the API
+  somewhere else — see the README's `ApiBasePath` example. The app still assumes it is served from
+  the origin root (`<base href="/">`); sub-path UI hosting isn't supported.
 
 When deploying `Keryhe.Telemetry.Api.Server` this way, the gRPC ingestion host
 (`Keryhe.Telemetry.Collector.Server`) is deployed separately.

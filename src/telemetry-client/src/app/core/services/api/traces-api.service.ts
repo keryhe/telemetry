@@ -2,7 +2,7 @@ import { Injectable, inject } from '@angular/core';
 import { HttpClient, HttpParams } from '@angular/common/http';
 import { Observable } from 'rxjs';
 import { map } from 'rxjs/operators';
-import { environment } from '../../../../environments/environment';
+import { APP_CONFIG } from '../../config/app-config';
 import { OperationStats, ServiceDependency, ServiceStats, SpanModel, TraceFilter, TraceInfo } from '../../models/trace.models';
 import { PagedResult } from '../../models/paged.models';
 import { TimeBucket } from '../../../shared/utils/chart.utils';
@@ -43,7 +43,7 @@ export interface TraceOverview {
 @Injectable({ providedIn: 'root' })
 export class TracesApiService {
   private readonly http = inject(HttpClient);
-  private readonly base = `${environment.apiUrl}/traces`;
+  private readonly base = `${inject(APP_CONFIG).apiUrl}/traces`;
 
   getTraces(filter: TraceFilter): Observable<TraceInfo[]> {
     let params = new HttpParams()

@@ -1,13 +1,13 @@
 import { Injectable, inject } from '@angular/core';
 import { HttpClient, HttpParams } from '@angular/common/http';
 import { Observable } from 'rxjs';
-import { environment } from '../../../../environments/environment';
+import { APP_CONFIG } from '../../config/app-config';
 import { AlertEvent, AlertRule } from '../../models/alert.models';
 
 @Injectable({ providedIn: 'root' })
 export class AlertsApiService {
   private readonly http = inject(HttpClient);
-  private readonly base = `${environment.apiUrl}/alerts`;
+  private readonly base = `${inject(APP_CONFIG).apiUrl}/alerts`;
 
   getRules(): Observable<AlertRule[]> {
     return this.http.get<AlertRule[]>(`${this.base}/rules`);

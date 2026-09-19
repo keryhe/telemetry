@@ -2,7 +2,11 @@
 <html lang="en">
 <head>
   <meta charset="utf-8">
-  <title>TelemetryClient</title>
+  <!-- Overwritten by main.ts as soon as config.json loads, and by BrandedTitleStrategy on the
+       first route change after that. This static value is only ever visible for the brief window
+       before either runs — kept generic, since it can't reflect a host's configured brand name
+       (nothing has executed yet). -->
+  <title>Telemetry</title>
   <base href="/">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <link rel="icon" type="image/x-icon" href="favicon.ico">

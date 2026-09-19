@@ -69,12 +69,16 @@ public class Program
         // redirect the plaintext h2c ingestion endpoint and break OTLP exporters.
 
         // ── ANGULAR CLIENT ────────────────────────────────────────────────────────
-        // Serves the compiled SPA from wwwroot (populated at publish time from
-        // src/telemetry-client). Placed before the tenant middleware so asset requests
-        // skip scoped tenant resolution entirely. In development wwwroot is empty and
-        // these are no-ops — the UI runs on the Angular dev server instead.
-        app.UseDefaultFiles();
-        app.UseStaticFiles();
+        // Serves the prebuilt SPA from the referenced Keryhe.Telemetry.Ui package's static web
+        // assets, at "/" rather than the RCL default of /_content/Keryhe.Telemetry.Ui/. Placed
+        // before the tenant middleware so asset requests — including GET /config.json, answered
+        // here with this host's API location — skip scoped tenant resolution entirely. Static web
+        // assets flow through a plain ProjectReference/PackageReference at build time, not only at
+        // publish, so unlike the old per-host BuildAngularClient/IncludeAngularClient targets this
+        // also serves the UI under `dotnet run` — see plans/ui-packaging-runtime-config.md
+        // Decision 7. The Angular dev server (`npm start`, proxying /api to this host) remains the
+        // tool for UI development; this is what a consumer following the README will actually run.
+        app.UseKeryheTelemetryUi();
 
         app.UseRouting();
 
@@ -92,7 +96,7 @@ public class Program
         // Anything not matched by an api/* controller, a gRPC service, or a real file is
         // an Angular client-side route (/traces/:id, /metrics/:name, ...) — serve the SPA
         // shell so deep links and hard reloads work.
-        app.MapFallbackToFile("index.html");
+        app.MapKeryheTelemetryUiFallback();
 
         app.Run();
     }

@@ -22,12 +22,13 @@ dotnet run --project src/Keryhe.Telemetry.Api.Server
 # Run the Angular UI (dev server on http://localhost:4201 — development only)
 cd src/telemetry-client && npm install && npm start
 
-# Publish the all-in-one host (also builds + bundles the Angular UI into wwwroot)
+# Publish the all-in-one host (also builds + bundles the Angular UI, via Keryhe.Telemetry.Ui)
 dotnet publish src/Keryhe.Telemetry.Server -c Release -o ./publish-server
 # The API-only host publishes the UI the same way:
 dotnet publish src/Keryhe.Telemetry.Api.Server -c Release -o ./publish
-# ...and to publish against an already-built src/telemetry-client/dist instead:
-dotnet publish src/Keryhe.Telemetry.Api.Server -c Release -p:BuildSpaOnPublish=false
+# ...and to publish against an already-built src/telemetry-client/dist instead (the flag is on
+# Keryhe.Telemetry.Ui, not the host, but propagates transitively through the ProjectReference):
+dotnet publish src/Keryhe.Telemetry.Api.Server -c Release -p:BuildSpa=false
 
 # Run the test data generator (sends synthetic OTLP data to the gRPC server)
 dotnet run --project src/Keryhe.Telemetry.TestDataGenerator
@@ -66,20 +67,61 @@ Kestrel endpoints in its `appsettings.json`: `Grpc` (5117, h2c/`Http2`), `GrpcTl
 collapse the per-endpoint `Protocols`, breaking h2c gRPC on 5117. It also omits `UseHttpsRedirection()`
 for the same reason.
 
-The Angular dev config points at `https://localhost:7105/api` (`src/telemetry-client/src/environments/environment.ts`),
-which is why the API host has a CORS policy. The **production** build swaps in
-`environment.prod.ts` (`apiUrl: '/api'`) via `fileReplacements` in `angular.json`, so a
-published deployment is same-origin and needs no CORS.
+The API location is **runtime**, not build-time, configuration: the client fetches
+`GET /config.json` before it bootstraps (`src/telemetry-client/src/app/core/config/load-config.ts`)
+and reads `apiUrl` from it, rather than the response being baked into the compiled bundle via an
+Angular `fileReplacements` swap (there used to be one; there is no `environments/` folder anymore).
+This is what lets one published bundle work regardless of where a given host mounts the API —
+required once the UI ships as the standalone `Keryhe.Telemetry.Ui` package (see below), since a
+consumer bundling it can't rebuild it to point at their own API path. The Angular dev server
+(`npm start`) proxies `/api` to `https://localhost:7105` (`src/telemetry-client/proxy.conf.json`),
+so development and production both resolve the API at the same relative path, `/api` — that
+same-origin shape is also why the API host's CORS policy is no longer load-bearing for local
+development (it still matters for a UI hosted on a different origin than its API).
 
-### UI hosting (published builds)
+### UI hosting
 
-`Keryhe.Telemetry.Api.Server` serves the SPA from `wwwroot`: `UseDefaultFiles`/`UseStaticFiles`
-run before the tenant middleware, and `MapFallbackToFile("index.html")` runs *after*
-`MapControllers` so Angular deep links (`/traces/:id`) survive a hard reload while `/api/*`
-and `/openapi/*` are never swallowed. The `BuildAngularClient`/`IncludeAngularClient` MSBuild
-targets in `Keryhe.Telemetry.Api.Server.csproj` build the SPA and stage `dist/telemetry-client/browser`
-into the published `wwwroot` — on publish only, so plain `dotnet build` never runs npm, and
-nothing is written into the source tree (there is no checked-in `wwwroot`).
+The Angular UI ships as `Keryhe.Telemetry.Ui`, a Razor class library packaging the compiled SPA
+as static web assets — the same NuGet-package story as the other class libraries, so a consumer
+building their own host from the `Keryhe.Telemetry.Api`/`.Collector` packages gets the UI too,
+without cloning `src/telemetry-client` or installing Node (see
+[plans/ui-packaging-runtime-config.md](plans/ui-packaging-runtime-config.md)). Its own csproj
+builds `src/telemetry-client` (`npm ci`/`npm run build`) and stages `dist/telemetry-client/browser`
+into *its own* `wwwroot` — incrementally (a stamp file plus MSBuild `Inputs`/`Outputs` skip the
+npm build once it's already current) and gracefully (a missing Node toolchain warns and packages
+an empty UI rather than failing the solution build). `Keryhe.Telemetry.Api.Server` and
+`Keryhe.Telemetry.Server` reference it via a plain `ProjectReference`; nothing else needs to know
+it exists.
+
+`app.UseKeryheTelemetryUi()` serves the packaged bundle at `/` (rather than the Razor class
+library default of `/_content/Keryhe.Telemetry.Ui/`) and answers `GET /config.json` with the
+host's configured `TelemetryUiOptions` — API location plus `BrandName`/`BrandTagline`, the
+consumer-facing product name and tagline shown in the header bar and, via the Angular client's
+`BrandedTitleStrategy`, in every route's browser tab title. Both default to this UI's own
+out-of-the-box branding ("Sentinel" / "OpenTelemetry Visualization"), so a host that sets nothing
+sees exactly what it always has. It must run before the tenant middleware, so UI asset requests —
+`/config.json` included — skip scoped tenant resolution, and it also negotiates `.br`/`.gz`
+variants that the SDK generates automatically at the *host's* publish (`Keryhe.Telemetry.Ui`
+itself has no compressed variants — `MapStaticAssets()` would give that negotiation for free but
+can't be re-rooted to `/` for a referenced class library's assets, so
+`TelemetryUiApplicationBuilderExtensions` reimplements just that piece). `MapKeryheTelemetryUiFallback()`
+runs *after* `MapControllers()` so Angular deep links (`/traces/:id`) survive a hard reload while
+`/api/*` and `/openapi/*` are never swallowed. **The host must call `app.UseRouting()` explicitly,
+immediately after `UseKeryheTelemetryUi()`** — left to `WebApplication`'s own implicit insertion,
+it lands ahead of that method's middleware (since a `Map*` call exists later in every such host),
+so routing pre-selects the fallback endpoint for any extensionless path — `/` included — before the
+UI's own static-file middleware runs, and `UseStaticFiles` correctly defers to an already-selected
+endpoint rather than serving. The practical symptom is silent: the fallback still serves the same
+`index.html`, just uncompressed, while the `Content-Encoding` header this method already wrote
+stays attached to that response — a real browser rejects the mismatch
+(`net::ERR_CONTENT_DECODING_FAILED`); `curl` does not, since it never validates the header against
+the bytes it receives.
+
+Because static web assets flow through a plain `ProjectReference` at *build* time, not only at
+publish, `dotnet run --project src/Keryhe.Telemetry.Api.Server` now serves the UI too — unlike the
+former per-host `BuildAngularClient`/`IncludeAngularClient` MSBuild targets this replaced, where
+`wwwroot` was genuinely empty in development. The Angular dev server (`npm start`) remains the
+tool for UI development (HMR); this is what a consumer following the README will actually run.
 
 ## Architecture
 
@@ -104,9 +146,10 @@ REST API consumed by an Angular single-page application.
 | `Keryhe.Telemetry.Api` | REST API controllers, tenant middleware, and read-service wiring (class library) |
 | `Keryhe.Telemetry.Api.Server` | Thin ASP.NET Core host that composes the API + OpenAPI + CORS |
 | `Keryhe.Telemetry.Server` | All-in-one host: gRPC ingestion + REST API + Angular UI in one process |
+| `Keryhe.Telemetry.Ui` | Prebuilt Angular UI, packaged as static web assets (Razor class library; no .razor/.cshtml) |
 | `Keryhe.Telemetry.Alerting` | Alert rule evaluation with pluggable evaluators and webhook delivery |
 | `Keryhe.Telemetry.TestDataGenerator` | Worker service that emits synthetic telemetry via the OpenTelemetry SDK |
-| `src/telemetry-client` | Angular 20 UI (Angular Material, ApexCharts, ngx-graph) — not part of the .sln |
+| `src/telemetry-client` | Angular 20 UI source (Angular Material, ApexCharts, ngx-graph) — not part of the .sln; built by `Keryhe.Telemetry.Ui`, not by any host directly |
 
 > The former `Keryhe.Telemetry.Server` (monolithic gRPC host) and `Keryhe.Telemetry.Client`
 > (Blazor UI) have been removed. Stale `bin`/`obj` directories may remain on disk but are not
