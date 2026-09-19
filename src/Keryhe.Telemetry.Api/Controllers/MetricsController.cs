@@ -39,17 +39,6 @@ public class MetricsController : ControllerBase
         return Ok(summary);
     }
 
-    // GET /api/metrics/services?start=&end=
-    [HttpGet("services")]
-    public async Task<ActionResult<List<string>>> GetDistinctServices(
-        [FromQuery] DateTime? start,
-        [FromQuery] DateTime? end,
-        CancellationToken ct = default)
-    {
-        var services = await _metrics.GetDistinctServicesAsync(start, end, ct);
-        return Ok(services);
-    }
-
     // GET /api/metrics/by-name/{name}
     [HttpGet("by-name/{name}")]
     public async Task<ActionResult<List<MetricInfo>>> GetMetricsByName(string name, CancellationToken ct = default)

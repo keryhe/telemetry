@@ -30,6 +30,7 @@ public static class SqlServerServiceCollectionExtensions
         services.AddScoped<ITraceReadRepository, SqlServerTraceReadRepository>();
         services.AddScoped<IMetricReadRepository, SqlServerMetricReadRepository>();
         services.AddScoped<ILogReadRepository, SqlServerLogReadRepository>();
+        services.AddScoped<IResourceReadRepository, SqlServerResourceReadRepository>();
         services.AddScoped<IAlertRuleRepository, SqlServerAlertRuleRepository>();
         services.AddScoped<ITenantCatalogRepository, SqlServerTenantCatalogRepository>();
         services.AddScoped<IRetentionSettingsRepository, SqlServerRetentionSettingsRepository>();

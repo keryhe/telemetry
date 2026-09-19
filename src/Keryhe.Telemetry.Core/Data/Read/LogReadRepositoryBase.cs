@@ -76,34 +76,6 @@ public abstract class LogReadRepositoryBase : DapperReadRepository, ILogReadRepo
         return rows.Select(Map).ToList();
     }
 
-    public async Task<List<string>> GetDistinctServicesAsync(DateTime? startTime = null, DateTime? endTime = null, CancellationToken cancellationToken = default)
-    {
-        var sql = """
-            SELECT DISTINCT r.attributes_json
-            FROM log_records lr
-            JOIN resources r ON lr.resource_id = r.id
-            WHERE r.tenant_id = @tenantId
-            """;
-        if (startTime.HasValue) sql += " AND lr.time_unix_nano >= @start";
-        if (endTime.HasValue)   sql += " AND lr.time_unix_nano <= @end";
-
-        await using var conn = await OpenConnectionAsync(cancellationToken);
-        var rows = await conn.QueryAsync<string>(new CommandDefinition(sql, new
-        {
-            tenantId = TenantId,
-            start = startTime.HasValue ? TimeConversion.DateTimeToUnixNano(startTime.Value) : (long?)null,
-            end   = endTime.HasValue   ? TimeConversion.DateTimeToUnixNano(endTime.Value)   : (long?)null
-        }, cancellationToken: cancellationToken));
-
-        return rows
-            .Select(json => ExtractServiceName(DeserializeAttributes(json)))
-            .Where(s => !string.IsNullOrEmpty(s))
-            .Select(s => s!)
-            .Distinct()
-            .OrderBy(s => s)
-            .ToList();
-    }
-
     public async Task<PagedResult<LogRecordModel>> QueryLogRecordsAsync(LogQuery query, CancellationToken cancellationToken = default)
     {
         if (query.Start >= query.End)

@@ -20,6 +20,7 @@ import type { ApexOptions } from 'ng-apexcharts';
 import { FormsModule } from '@angular/forms';
 
 import { LogsApiService } from '../../core/services/api/logs-api.service';
+import { ResourcesApiService } from '../../core/services/api/resources-api.service';
 import { TimeRangeService } from '../../core/services/time-range.service';
 import { ThemeService } from '../../core/services/theme.service';
 import { LogRecord, getSeverityLabel, getSeverityColor, getSeverityBg, getServiceName, getTimestamp } from '../../core/models/log.models';
@@ -78,6 +79,7 @@ function splitTerms(query: string): string[] {
 })
 export class LogsComponent {
   private readonly api = inject(LogsApiService);
+  private readonly resourcesApi = inject(ResourcesApiService);
   private readonly timeRange = inject(TimeRangeService);
   private readonly theme = inject(ThemeService);
   private readonly route = inject(ActivatedRoute);
@@ -274,7 +276,12 @@ export class LogsComponent {
     const traceId = this.route.snapshot.queryParamMap.get('traceId');
     if (traceId) this.traceIdFilter.set(traceId);
 
-    // Overview + services + total: reload when the time range or any server-side filter changes.
+    // Tenant-wide, signal-agnostic — fetched once, not on every overview reload.
+    this.resourcesApi.getServices().subscribe({
+      next: (services) => this.services.set(services),
+    });
+
+    // Overview + total: reload when the time range or any server-side filter changes.
     effect(() => {
       const activeTrace = this.activeTraceId();
       this.selectedService();
@@ -286,7 +293,7 @@ export class LogsComponent {
         if (!this.firstOverview) this.pageIndex.set(0);
         this.firstOverview = false;
         if (activeTrace) this.loadByTrace(activeTrace);
-        else { this.loadOverview(); this.loadServices(); }
+        else this.loadOverview();
       });
     });
 
@@ -363,11 +370,6 @@ export class LogsComponent {
       q: this.serverQuery() || undefined,
       limit: this.pageSize(), offset: this.pageIndex() * this.pageSize(),
     }).subscribe({ next: (res) => this.serverPage.set(res.items) });
-  }
-
-  private loadServices(): void {
-    const { start, end } = this.timeRange.range();
-    this.api.getServices(start, end).subscribe({ next: (s) => this.services.set(s) });
   }
 
   private loadByTrace(traceId: string): void {

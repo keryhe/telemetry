@@ -33,6 +33,7 @@ public static class TimescaleServiceCollectionExtensions
         services.AddScoped<ITraceReadRepository, TimescaleTraceReadRepository>();
         services.AddScoped<IMetricReadRepository, TimescaleMetricReadRepository>();
         services.AddScoped<ILogReadRepository, TimescaleLogReadRepository>();
+        services.AddScoped<IResourceReadRepository, TimescaleResourceReadRepository>();
         services.AddScoped<IAlertRuleRepository, TimescaleAlertRuleRepository>();
         services.AddScoped<ITenantCatalogRepository, TimescaleTenantCatalogRepository>();
         services.AddScoped<IRetentionSettingsRepository, TimescaleRetentionSettingsRepository>();

@@ -17,6 +17,7 @@ import { MatTooltipModule } from '@angular/material/tooltip';
 import { FormsModule } from '@angular/forms';
 
 import { MetricsApiService } from '../../../core/services/api/metrics-api.service';
+import { ResourcesApiService } from '../../../core/services/api/resources-api.service';
 import { MetricSearchHelpDialogComponent } from '../metric-search-help-dialog/metric-search-help-dialog.component';
 import { TimeRangeService } from '../../../core/services/time-range.service';
 import { MetricInfo, MetricType, MetricsSummary, TYPE_LABELS, getTypeColor, getTypeLabel } from '../../../core/models/metric.models';
@@ -53,6 +54,7 @@ interface UniqueMetric {
 })
 export class MetricListComponent {
   private readonly api = inject(MetricsApiService);
+  private readonly resourcesApi = inject(ResourcesApiService);
   private readonly timeRange = inject(TimeRangeService);
   private readonly router = inject(Router);
   private readonly dialog = inject(MatDialog);
@@ -74,9 +76,7 @@ export class MetricListComponent {
   protected readonly MetricType = MetricType;
   protected readonly metricTypes = Object.values(MetricType).filter((v) => typeof v === 'number') as MetricType[];
 
-  protected services = computed(() => [
-    ...new Set(this.allMetrics().map((m) => m.serviceName).filter(Boolean) as string[]),
-  ]);
+  protected services = signal<string[]>([]);
 
   protected uniqueMetrics = computed<UniqueMetric[]>(() => {
     const groups = new Map<string, MetricInfo[]>();
@@ -140,6 +140,11 @@ export class MetricListComponent {
   constructor() {
     // Slide relative preset windows to "now" on (re)entry so navigating back refreshes.
     this.timeRange.refreshRelativeWindow();
+
+    // Tenant-wide, signal-agnostic — fetched once, not derived from the (capped) loaded metrics.
+    this.resourcesApi.getServices().subscribe({
+      next: (services) => this.services.set(services),
+    });
 
     effect(() => {
       this.timeRange.range();

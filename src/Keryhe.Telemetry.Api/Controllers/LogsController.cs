@@ -76,17 +76,6 @@ public class LogsController : ControllerBase
         return Ok(result);
     }
 
-    // GET /api/logs/services?start=&end=
-    [HttpGet("services")]
-    public async Task<ActionResult<List<string>>> GetDistinctServices(
-        [FromQuery] DateTime? start,
-        [FromQuery] DateTime? end,
-        CancellationToken ct = default)
-    {
-        var services = await _logs.GetDistinctServicesAsync(start, end, ct);
-        return Ok(services);
-    }
-
     // GET /api/logs/by-trace/{traceId}
     [HttpGet("by-trace/{traceId}")]
     public async Task<ActionResult<IEnumerable<LogRecordModel>>> GetLogsByTrace(

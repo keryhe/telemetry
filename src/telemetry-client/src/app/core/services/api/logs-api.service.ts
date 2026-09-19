@@ -92,11 +92,4 @@ export class LogsApiService {
     if (service) params = params.set('service', service);
     return this.http.get<LogRecord[]>(`${this.base}/context`, { params });
   }
-
-  getServices(start?: Date, end?: Date): Observable<string[]> {
-    let params = new HttpParams();
-    if (start) params = params.set('start', start.toISOString());
-    if (end)   params = params.set('end',   end.toISOString());
-    return this.http.get<string[]>(`${this.base}/services`, { params });
-  }
 }

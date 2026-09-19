@@ -66,6 +66,19 @@ public class MySqlLogReadRepository(IConfiguration configuration, ITenantContext
     protected override string BucketIndexExpr(string numerator, string denominator) => $"({numerator} DIV {denominator})";
 }
 
+public class MySqlResourceReadRepository(IConfiguration configuration, ITenantContext tenantContext)
+    : ResourceReadRepositoryBase(tenantContext)
+{
+    private readonly string _connectionString = configuration.GetConnectionString("Api")!;
+
+    protected override async Task<DbConnection> OpenConnectionAsync(CancellationToken cancellationToken)
+    {
+        var conn = new MySqlConnection(_connectionString);
+        await conn.OpenAsync(cancellationToken);
+        return conn;
+    }
+}
+
 public class MySqlTenantCatalogRepository(IConfiguration configuration)
     : TenantCatalogRepositoryBase
 {

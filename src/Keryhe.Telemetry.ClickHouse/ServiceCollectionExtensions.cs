@@ -33,6 +33,7 @@ public static class ClickHouseServiceCollectionExtensions
         services.AddScoped<ITraceReadRepository, ClickHouseTraceReadRepository>();
         services.AddScoped<IMetricReadRepository, ClickHouseMetricReadRepository>();
         services.AddScoped<ILogReadRepository, ClickHouseLogReadRepository>();
+        services.AddScoped<IResourceReadRepository, ClickHouseResourceReadRepository>();
         services.AddScoped<IAlertRuleRepository, ClickHouseAlertRuleRepository>();
         services.AddScoped<ITenantCatalogRepository, ClickHouseTenantCatalogRepository>();
         services.AddScoped<IRetentionSettingsRepository, ClickHouseRetentionSettingsRepository>();

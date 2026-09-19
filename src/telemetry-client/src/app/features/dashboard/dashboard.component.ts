@@ -1,8 +1,7 @@
 import { Component, DestroyRef, OnInit, computed, effect, inject, signal, untracked } from '@angular/core';
 import { DatePipe, DecimalPipe, PercentPipe } from '@angular/common';
 import { Router, RouterLink } from '@angular/router';
-import { Subscription, forkJoin, interval, of } from 'rxjs';
-import { catchError } from 'rxjs/operators';
+import { Subscription, forkJoin, interval } from 'rxjs';
 import { MatCardModule } from '@angular/material/card';
 import { MatTableModule } from '@angular/material/table';
 import { MatIconModule } from '@angular/material/icon';
@@ -19,6 +18,7 @@ import type { ApexOptions } from 'ng-apexcharts';
 import { TracesApiService } from '../../core/services/api/traces-api.service';
 import { LogsApiService } from '../../core/services/api/logs-api.service';
 import { MetricsApiService } from '../../core/services/api/metrics-api.service';
+import { ResourcesApiService } from '../../core/services/api/resources-api.service';
 import { TimeRangeService, recommendedRefreshIntervalMs } from '../../core/services/time-range.service';
 import { ThemeService } from '../../core/services/theme.service';
 import { ServiceStats, TraceInfo } from '../../core/models/trace.models';
@@ -55,6 +55,7 @@ export class DashboardComponent {
   private readonly tracesApi = inject(TracesApiService);
   private readonly logsApi = inject(LogsApiService);
   private readonly metricsApi = inject(MetricsApiService);
+  private readonly resourcesApi = inject(ResourcesApiService);
   private readonly timeRange = inject(TimeRangeService);
   private readonly theme = inject(ThemeService);
   private readonly router = inject(Router);
@@ -171,6 +172,11 @@ export class DashboardComponent {
     // Slide relative preset windows to "now" on (re)entry so navigating back refreshes.
     this.timeRange.refreshRelativeWindow();
 
+    // Tenant-wide, signal-agnostic — fetched once, not on every time-range/refresh cycle.
+    this.resourcesApi.getServices().subscribe({
+      next: (services) => this.availableServices.set(services),
+    });
+
     effect(() => {
       this.timeRange.range();
       this.selectedService();
@@ -218,17 +224,12 @@ export class DashboardComponent {
       // one backend scan grouped two ways, not an additional request. See Phase 5 of the plan.
       overview:   this.tracesApi.getTraceOverview({ start, end, service: svc || undefined }),
       logHist:    this.logsApi.getLogHistogram({ start, end, service: svc || undefined }),
-      traceSvcs:  this.tracesApi.getServices(start, end).pipe(catchError(() => of([]))),
-      logSvcs:    this.logsApi.getServices(start, end).pipe(catchError(() => of([]))),
-      metricSvcs: this.metricsApi.getServices(start, end).pipe(catchError(() => of([]))),
     }).subscribe({
-      next: ({ traces, overview, logHist, traceSvcs, logSvcs, metricSvcs }) => {
+      next: ({ traces, overview, logHist }) => {
         this.traces.set(traces);
         this.traceHistogram.set(overview.buckets);
         this.serviceStats.set(overview.services);
         this.logHistogram.set(logHist);
-        const services = [...new Set([...traceSvcs, ...logSvcs, ...metricSvcs])].sort();
-        if (services.length > 0) this.availableServices.set(services);
         this.buildCharts(overview.buckets);
         this.loading.set(false);
       },

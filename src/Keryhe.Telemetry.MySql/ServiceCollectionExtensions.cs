@@ -31,6 +31,7 @@ public static class MySqlServiceCollectionExtensions
         services.AddScoped<ITraceReadRepository, MySqlTraceReadRepository>();
         services.AddScoped<IMetricReadRepository, MySqlMetricReadRepository>();
         services.AddScoped<ILogReadRepository, MySqlLogReadRepository>();
+        services.AddScoped<IResourceReadRepository, MySqlResourceReadRepository>();
         services.AddScoped<IAlertRuleRepository, MySqlAlertRuleRepository>();
         services.AddScoped<ITenantCatalogRepository, MySqlTenantCatalogRepository>();
         services.AddScoped<IRetentionSettingsRepository, MySqlRetentionSettingsRepository>();

@@ -18,6 +18,7 @@ import { NgApexchartsModule } from 'ng-apexcharts';
 import type { ApexOptions } from 'ng-apexcharts';
 
 import { MetricsApiService } from '../../../core/services/api/metrics-api.service';
+import { ResourcesApiService } from '../../../core/services/api/resources-api.service';
 import { TimeRangeService } from '../../../core/services/time-range.service';
 import { ThemeService } from '../../../core/services/theme.service';
 import {
@@ -97,6 +98,7 @@ export class MetricDetailComponent implements OnInit {
   @Input() name!: string;
 
   private readonly api = inject(MetricsApiService);
+  private readonly resourcesApi = inject(ResourcesApiService);
   private readonly timeRange = inject(TimeRangeService);
   private readonly theme = inject(ThemeService);
   private readonly title = inject(Title);
@@ -226,9 +228,7 @@ export class MetricDetailComponent implements OnInit {
   protected statsAreRates = computed(() => this.isCounter() && !this.showRaw());
   protected statsUnitSuffix = computed(() => (this.statsAreRates() ? '/s' : ''));
 
-  protected services = computed(() =>
-    [...new Set(this.instances().map((i) => i.serviceName).filter(Boolean) as string[])]
-  );
+  protected services = signal<string[]>([]);
   protected labelKeys = computed(() => Object.keys(this.labels()));
 
   protected chartOptions = signal<ApexOptions>({});
@@ -390,6 +390,11 @@ export class MetricDetailComponent implements OnInit {
     // Slide relative preset windows to "now" on (re)entry so navigating back refreshes.
     this.timeRange.refreshRelativeWindow();
 
+    // Tenant-wide, signal-agnostic — fetched once, not derived from this metric's instances.
+    this.resourcesApi.getServices().subscribe({
+      next: (services) => this.services.set(services),
+    });
+
     effect(() => {
       this.timeRange.range();
       untracked(() => this.loadAll());
@@ -473,6 +478,19 @@ export class MetricDetailComponent implements OnInit {
       ? this.instances().find((i) => i.serviceName === svc)?.id
       : undefined;
     const labelFilters = Object.keys(this.selectedLabels()).length > 0 ? this.selectedLabels() : undefined;
+
+    // A service can be selected (from the tenant-wide list) with no instance of this particular
+    // metric. Rather than querying with metricId=undefined — which means "no filter" and would
+    // silently show every service's data — render the same "no data" empty state as a genuinely
+    // empty range.
+    if (svc && metricId === undefined) {
+      const empty: MultiSeriesMetricData = { name, type: this.metricType(), series: [] };
+      this.multiSeries.set(empty);
+      this.series.set(this.flattenSeries(empty));
+      if (this.isDistribution()) this.buildChart();
+      else this.buildMultiChart(empty);
+      return;
+    }
 
     // Distributions (histogram, exp-histogram, summary): fetch the real per-series data for a correct
     // windowed aggregate, but keep a flattened merged series so stats/exemplars/export/Metadata work.

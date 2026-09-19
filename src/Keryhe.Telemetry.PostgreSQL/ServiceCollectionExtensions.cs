@@ -32,6 +32,7 @@ public static class PostgreSqlServiceCollectionExtensions
         services.AddScoped<ITraceReadRepository, PostgreSqlTraceReadRepository>();
         services.AddScoped<IMetricReadRepository, PostgreSqlMetricReadRepository>();
         services.AddScoped<ILogReadRepository, PostgreSqlLogReadRepository>();
+        services.AddScoped<IResourceReadRepository, PostgreSqlResourceReadRepository>();
         services.AddScoped<IAlertRuleRepository, PostgreSqlAlertRuleRepository>();
         services.AddScoped<ITenantCatalogRepository, PostgreSqlTenantCatalogRepository>();
         services.AddScoped<IRetentionSettingsRepository, PostgreSqlRetentionSettingsRepository>();

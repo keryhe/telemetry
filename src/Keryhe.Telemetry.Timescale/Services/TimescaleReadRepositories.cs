@@ -23,6 +23,9 @@ public sealed class TimescaleMetricReadRepository(NpgsqlDataSource dataSource, I
 public sealed class TimescaleLogReadRepository(NpgsqlDataSource dataSource, ITenantContext tenantContext)
     : PostgreSqlLogReadRepository(dataSource, tenantContext);
 
+public sealed class TimescaleResourceReadRepository(NpgsqlDataSource dataSource, ITenantContext tenantContext)
+    : PostgreSqlResourceReadRepository(dataSource, tenantContext);
+
 public sealed class TimescaleAlertRuleRepository(NpgsqlDataSource dataSource, ITenantContext tenantContext)
     : PostgreSqlAlertRuleRepository(dataSource, tenantContext);
 

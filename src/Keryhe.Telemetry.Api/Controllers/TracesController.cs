@@ -164,28 +164,6 @@ public class TracesController : ControllerBase
         return Ok(spans);
     }
 
-    // GET /api/traces/services?start=&end=
-    [HttpGet("services")]
-    public async Task<ActionResult<List<string>>> GetDistinctServices(
-        [FromQuery] DateTime? start,
-        [FromQuery] DateTime? end,
-        CancellationToken ct = default)
-    {
-        var traces = await _traces.GetTracesByTimeRangeAsync(
-            start ?? DateTime.UtcNow.AddDays(-7),
-            end   ?? DateTime.UtcNow,
-            limit: 1000, ct);
-
-        var services = traces
-            .Where(t => !string.IsNullOrEmpty(t.ServiceName))
-            .Select(t => t.ServiceName!)
-            .Distinct()
-            .OrderBy(s => s)
-            .ToList();
-
-        return Ok(services);
-    }
-
     // GET /api/traces/dependencies?start=&end=
     [HttpGet("dependencies")]
     public async Task<ActionResult<List<ServiceDependency>>> GetDependencies(

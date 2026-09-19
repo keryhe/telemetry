@@ -19,7 +19,6 @@ public interface ILogReadRepository
 
     /// <summary>True volume-by-severity histogram (fixed bucket count over the full filtered range) for the logs list/dashboard chart, unaffected by any row-count cap.</summary>
     Task<List<LogVolumeBucket>> GetLogHistogramAsync(HistogramQuery query, CancellationToken cancellationToken = default);
-    Task<List<string>> GetDistinctServicesAsync(DateTime? startTime = null, DateTime? endTime = null, CancellationToken cancellationToken = default);
 
     /// <summary>
     /// The <paramref name="before"/> log records immediately preceding and <paramref name="after"/>

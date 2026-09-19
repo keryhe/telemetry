@@ -345,27 +345,6 @@ public abstract class MetricReadRepositoryBase : DapperReadRepository, IMetricRe
         return labelDictionary.ToDictionary(kvp => kvp.Key, kvp => kvp.Value.OrderBy(v => v).ToList());
     }
 
-    public async Task<List<string>> GetDistinctServicesAsync(DateTime? startTime = null, DateTime? endTime = null, CancellationToken cancellationToken = default)
-    {
-        await using var conn = await OpenConnectionAsync(cancellationToken);
-        var rows = await conn.QueryAsync<string>(new CommandDefinition(
-            """
-            SELECT DISTINCT r.attributes_json
-            FROM metrics m
-            JOIN resources r ON m.resource_id = r.id
-            WHERE r.tenant_id = @tenantId
-            """,
-            new { tenantId = TenantId }, cancellationToken: cancellationToken));
-
-        return rows
-            .Select(json => ExtractServiceName(DeserializeAttributes(json)))
-            .Where(s => !string.IsNullOrEmpty(s))
-            .Select(s => s!)
-            .Distinct()
-            .OrderBy(s => s)
-            .ToList();
-    }
-
     // =========================================================================
     // DATA POINT FETCH
     // =========================================================================

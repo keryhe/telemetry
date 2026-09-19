@@ -37,6 +37,13 @@ public class PostgreSqlLogReadRepository(NpgsqlDataSource dataSource, ITenantCon
         => await dataSource.OpenConnectionAsync(cancellationToken);
 }
 
+public class PostgreSqlResourceReadRepository(NpgsqlDataSource dataSource, ITenantContext tenantContext)
+    : ResourceReadRepositoryBase(tenantContext)
+{
+    protected override async Task<DbConnection> OpenConnectionAsync(CancellationToken cancellationToken)
+        => await dataSource.OpenConnectionAsync(cancellationToken);
+}
+
 public class PostgreSqlTenantCatalogRepository(NpgsqlDataSource dataSource)
     : TenantCatalogRepositoryBase
 {

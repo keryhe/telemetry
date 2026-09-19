@@ -61,6 +61,19 @@ public class SqlServerLogReadRepository(IConfiguration configuration, ITenantCon
         => value.Replace("[", "[[]").Replace("%", "[%]").Replace("_", "[_]");
 }
 
+public class SqlServerResourceReadRepository(IConfiguration configuration, ITenantContext tenantContext)
+    : ResourceReadRepositoryBase(tenantContext)
+{
+    private readonly string _connectionString = configuration.GetConnectionString("Api")!;
+
+    protected override async Task<DbConnection> OpenConnectionAsync(CancellationToken cancellationToken)
+    {
+        var conn = new SqlConnection(_connectionString);
+        await conn.OpenAsync(cancellationToken);
+        return conn;
+    }
+}
+
 public class SqlServerTenantCatalogRepository(IConfiguration configuration)
     : TenantCatalogRepositoryBase
 {

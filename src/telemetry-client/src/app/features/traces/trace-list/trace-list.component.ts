@@ -24,6 +24,7 @@ import { NgApexchartsModule } from 'ng-apexcharts';
 import type { ApexOptions } from 'ng-apexcharts';
 
 import { TracesApiService } from '../../../core/services/api/traces-api.service';
+import { ResourcesApiService } from '../../../core/services/api/resources-api.service';
 import { TimeRangeService } from '../../../core/services/time-range.service';
 import { ThemeService } from '../../../core/services/theme.service';
 import { TraceInfo, ServiceDependency, OperationStats } from '../../../core/models/trace.models';
@@ -88,6 +89,7 @@ const TAG_KEY_SEP = '\u001F';
 })
 export class TraceListComponent {
   private readonly api = inject(TracesApiService);
+  private readonly resourcesApi = inject(ResourcesApiService);
   private readonly timeRange = inject(TimeRangeService);
   private readonly theme = inject(ThemeService);
   private readonly router = inject(Router);
@@ -338,6 +340,11 @@ export class TraceListComponent {
     // Slide relative preset windows to "now" on (re)entry so navigating back refreshes.
     this.timeRange.refreshRelativeWindow();
 
+    // Tenant-wide, signal-agnostic — fetched once, not on every time-range change.
+    this.resourcesApi.getServices().subscribe({
+      next: (services) => this.services.set(services),
+    });
+
     // Overview + total: reload when the time range or any server-side filter/sort changes.
     effect(() => {
       this.timeRange.range();
@@ -356,7 +363,7 @@ export class TraceListComponent {
       });
     });
 
-    // Services + dependencies (service map): reload on time-range change only.
+    // Dependencies (service map): reload on time-range change only.
     effect(() => {
       this.timeRange.range();
       untracked(() => this.loadMeta());
@@ -482,11 +489,7 @@ export class TraceListComponent {
 
   private loadMeta(): void {
     const { start, end } = this.timeRange.range();
-    forkJoin({
-      services: this.api.getServices(start, end),
-      dependencies: this.api.getDependencies(start, end),
-    }).subscribe(({ services, dependencies }) => {
-      this.services.set(services);
+    this.api.getDependencies(start, end).subscribe((dependencies) => {
       this.dependencies.set(dependencies);
     });
   }

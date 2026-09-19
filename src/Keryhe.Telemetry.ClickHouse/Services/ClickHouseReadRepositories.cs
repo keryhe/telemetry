@@ -63,6 +63,15 @@ public class ClickHouseLogReadRepository(IConfiguration configuration, ITenantCo
     protected override string BucketIndexExpr(string numerator, string denominator) => $"intDiv({numerator}, {denominator})";
 }
 
+public class ClickHouseResourceReadRepository(IConfiguration configuration, ITenantContext tenantContext)
+    : ResourceReadRepositoryBase(tenantContext)
+{
+    private readonly string _connectionString = configuration.GetConnectionString("Api")!;
+
+    protected override Task<DbConnection> OpenConnectionAsync(CancellationToken cancellationToken)
+        => ClickHouseConnectionFactory.OpenReadAsync(_connectionString, cancellationToken);
+}
+
 public class ClickHouseTenantCatalogRepository(IConfiguration configuration)
     : TenantCatalogRepositoryBase
 {

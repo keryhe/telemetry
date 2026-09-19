@@ -111,13 +111,6 @@ export class TracesApiService {
     return this.http.get<SpanModel[]>(`${this.base}/${traceId}/spans`);
   }
 
-  getServices(start?: Date, end?: Date): Observable<string[]> {
-    let params = new HttpParams();
-    if (start) params = params.set('start', start.toISOString());
-    if (end) params = params.set('end', end.toISOString());
-    return this.http.get<string[]>(`${this.base}/services`, { params });
-  }
-
   getDependencies(start?: Date, end?: Date): Observable<ServiceDependency[]> {
     let params = new HttpParams();
     if (start) params = params.set('start', start.toISOString());
