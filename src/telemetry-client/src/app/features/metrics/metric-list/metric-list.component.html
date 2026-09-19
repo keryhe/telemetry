@@ -5,9 +5,9 @@
 <app-page-header>
   <div class="stat-grid">
     <app-stat-card label="Unique Metrics" icon="bar_chart" [value]="summary().uniqueMetricCount" />
-    <app-stat-card label="Gauges" icon="speed" [value]="gaugeCount()" />
-    <app-stat-card label="Counters" icon="trending_up" [value]="counterCount()" />
-    <app-stat-card label="Histograms" icon="equalizer" [value]="histogramCount()" />
+    <app-stat-card label="Gauges" icon="speed" [value]="gaugeCount()" [iconColor]="typeColor(MetricType.Gauge)" />
+    <app-stat-card label="Counters" icon="trending_up" [value]="counterCount()" [iconColor]="typeColor(MetricType.Sum)" />
+    <app-stat-card label="Histograms" icon="insert_chart_outlined" [value]="histogramCount()" [iconColor]="typeColor(MetricType.Histogram)" />
   </div>
 
   <div class="filter-bar">

@@ -18,12 +18,15 @@ export interface TraceInfo {
   spanCount: number;
   traceStartTime: string;
   traceEndTime: string;
+  /** Whole-trace duration, or the filtered service's own duration when a service filter matched this trace. */
   traceDuration: string;
   serviceName: string | null;
   rootOperationName: string | null;
   hasErrors: boolean;
   services: string[];
   rootSpanAttributes: Record<string, unknown> | null;
+  /** The trace's true root span, or the filtered service's entry span when a service filter matched this trace. Used to deep-link into trace-detail. */
+  displaySpanIdHex: string | null;
 }
 
 export interface SpanModel {

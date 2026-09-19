@@ -173,7 +173,7 @@ public abstract class TraceReadRepositoryBase : DapperReadRepository, ITraceRead
         return groups
             .Where(t => t.RootSpan.ParentSpanId == null || !existingParentIds.Contains(t.RootSpan.ParentSpanId))
             .Take(limit)
-            .Select(t => ToTraceInfo(t.TraceIdHex, t.SpanCount, t.MinStartTimeNano, t.MaxEndTimeNano, t.HasErrors, t.ServiceName, t.RootSpan))
+            .Select(t => ToTraceInfo(t.TraceIdHex, t.SpanCount, t.MinStartTimeNano, t.MaxEndTimeNano, t.MinStartTimeNano, t.MaxEndTimeNano, t.HasErrors, t.ServiceName, t.RootSpan))
             .ToList();
     }
 
@@ -187,19 +187,27 @@ public abstract class TraceReadRepositoryBase : DapperReadRepository, ITraceRead
 
         var groups = raw
             .GroupBy(s => s.TraceId)
-            .Select(g => new
+            .Select(g =>
             {
-                TraceIdHex = g.Key,
-                SpanCount = g.Count(),
-                MinStartTimeNano = g.Min(s => s.StartTimeUnixNano),
-                MaxEndTimeNano = g.Max(s => s.EndTimeUnixNano),
-                HasErrors = g.Any(s => s.StatusCode == "ERROR"),
-                RootSpan = g.FirstOrDefault(s => s.ParentSpanId == null) ?? g.OrderBy(s => s.StartTimeUnixNano).First(),
-                InvolvesService = g.Any(s => MatchesService(s, serviceName))
+                var spans = g.ToList();
+                // Every span belonging to the filtered service — guaranteed non-empty by the
+                // InvolvesService filter below. The row represents this service's own
+                // involvement in the trace (aggregated over just these spans), anchored on the
+                // earliest one for its name/id, not the trace's true root.
+                var serviceSpans = spans.Where(s => MatchesService(s, serviceName)).ToList();
+                return new
+                {
+                    TraceIdHex = g.Key,
+                    SpanCount = spans.Count,
+                    MinStartTimeNano = spans.Min(s => s.StartTimeUnixNano),
+                    MaxEndTimeNano = spans.Max(s => s.EndTimeUnixNano),
+                    RootSpan = spans.FirstOrDefault(s => s.ParentSpanId == null) ?? spans.OrderBy(s => s.StartTimeUnixNano).First(),
+                    ServiceSpans = serviceSpans,
+                };
             })
             // Matched at the trace level: filtering the spans first would strip the root span of
             // any trace whose entry point lives in another service, dropping the trace outright.
-            .Where(t => t.InvolvesService)
+            .Where(t => t.ServiceSpans.Count > 0)
             .OrderByDescending(t => t.MinStartTimeNano)
             .ToList();
 
@@ -210,7 +218,15 @@ public abstract class TraceReadRepositoryBase : DapperReadRepository, ITraceRead
         return groups
             .Where(t => t.RootSpan.ParentSpanId == null || !existingParentIds.Contains(t.RootSpan.ParentSpanId))
             .Take(limit)
-            .Select(t => ToTraceInfo(t.TraceIdHex, t.SpanCount, t.MinStartTimeNano, t.MaxEndTimeNano, t.HasErrors, serviceName, t.RootSpan))
+            .Select(t =>
+            {
+                var anchorSpan = t.ServiceSpans.OrderBy(s => s.StartTimeUnixNano).First();
+                var hasErrors = t.ServiceSpans.Any(s => s.StatusCode == "ERROR");
+                var displayStartNano = t.ServiceSpans.Min(s => s.StartTimeUnixNano);
+                var displayEndNano = t.ServiceSpans.Max(s => s.EndTimeUnixNano);
+                return ToTraceInfo(t.TraceIdHex, t.SpanCount, t.MinStartTimeNano, t.MaxEndTimeNano,
+                    displayStartNano, displayEndNano, hasErrors, serviceName, anchorSpan);
+            })
             .ToList();
     }
 
@@ -247,7 +263,7 @@ public abstract class TraceReadRepositoryBase : DapperReadRepository, ITraceRead
         return groups
             .Where(t => t.RootSpan.ParentSpanId == null || !existingParentIds.Contains(t.RootSpan.ParentSpanId))
             .Take(limit)
-            .Select(t => ToTraceInfo(t.TraceIdHex, t.SpanCount, t.MinStartTimeNano, t.MaxEndTimeNano, t.HasErrors, t.ServiceName, t.RootSpan))
+            .Select(t => ToTraceInfo(t.TraceIdHex, t.SpanCount, t.MinStartTimeNano, t.MaxEndTimeNano, t.MinStartTimeNano, t.MaxEndTimeNano, t.HasErrors, t.ServiceName, t.RootSpan))
             .ToList();
     }
 
@@ -281,7 +297,7 @@ public abstract class TraceReadRepositoryBase : DapperReadRepository, ITraceRead
         return groups
             .Where(t => t.RootSpan.ParentSpanId == null || !existingParentIds.Contains(t.RootSpan.ParentSpanId))
             .Take(limit)
-            .Select(t => ToTraceInfo(t.TraceIdHex, t.SpanCount, t.MinStartTimeNano, t.MaxEndTimeNano, t.HasErrors, t.ServiceName, t.RootSpan))
+            .Select(t => ToTraceInfo(t.TraceIdHex, t.SpanCount, t.MinStartTimeNano, t.MaxEndTimeNano, t.MinStartTimeNano, t.MaxEndTimeNano, t.HasErrors, t.ServiceName, t.RootSpan))
             .ToList();
     }
 
@@ -529,25 +545,55 @@ public abstract class TraceReadRepositoryBase : DapperReadRepository, ITraceRead
                     : t.Spans.Any(s => MatchesTag(s, tag))))
             .ToList();
 
-        // Order: explicit sort key when supplied, otherwise the mode default (slow → worst
-        // duration first; all/errors → most-recent first).
-        var asc = string.Equals(query.Dir, "asc", StringComparison.OrdinalIgnoreCase);
-        groups = ((query.Sort?.ToLowerInvariant()) switch
+        // Per-service display values: when a service filter is active, the row represents that
+        // service's own involvement in the trace — aggregated over just its own spans (error/
+        // duration) and anchored on its earliest-started span (name/id) — rather than the
+        // trace's true root. The preceding service `.Where` guarantees at least one match exists
+        // whenever `service != null`, so `ServiceSpans` is never empty here. `RootSpan` (the true
+        // root, or the trace's earliest span as fallback) is carried through unchanged for the
+        // root-detection filter below, which must keep working off the real root.
+        var display = groups.Select(t =>
         {
-            "duration"  => asc ? groups.OrderBy(t => t.DurationNano)      : groups.OrderByDescending(t => t.DurationNano),
-            "spans"     => asc ? groups.OrderBy(t => t.SpanCount)         : groups.OrderByDescending(t => t.SpanCount),
-            "time"      => asc ? groups.OrderBy(t => t.MinStartTimeNano)  : groups.OrderByDescending(t => t.MinStartTimeNano),
-            "service"   => asc ? groups.OrderBy(t => t.ServiceName)       : groups.OrderByDescending(t => t.ServiceName),
-            "operation" => asc ? groups.OrderBy(t => t.RootSpan.Name)     : groups.OrderByDescending(t => t.RootSpan.Name),
-            _           => isSlow ? groups.OrderByDescending(t => t.DurationNano) : groups.OrderByDescending(t => t.MinStartTimeNano),
+            var serviceSpans = service == null ? null : t.Spans.Where(s => MatchesService(s, service)).ToList();
+            var anchorSpan = serviceSpans?.OrderBy(s => s.StartTimeUnixNano).First() ?? t.RootSpan;
+            return new
+            {
+                t.TraceIdHex,
+                t.SpanCount,
+                t.MinStartTimeNano,
+                t.MaxEndTimeNano,
+                t.RootSpan,
+                AnchorSpan = anchorSpan,
+                DisplayServiceName = serviceSpans != null ? anchorSpan.ServiceName : t.ServiceName,
+                DisplayHasErrors = serviceSpans?.Any(s => s.StatusCode == "ERROR") ?? t.HasErrors,
+                DisplayStartNano = serviceSpans != null ? serviceSpans.Min(s => s.StartTimeUnixNano) : t.MinStartTimeNano,
+                DisplayEndNano = serviceSpans != null ? serviceSpans.Max(s => s.EndTimeUnixNano) : t.MaxEndTimeNano,
+            };
+        }).ToList();
+
+        // Order: explicit sort key when supplied, otherwise the mode default (slow → worst
+        // duration first; all/errors → most-recent first). "service"/"operation"/"duration"
+        // follow the same display values shown in the row when a service filter is active;
+        // "spans"/"time" stay trace-wide — they're structural properties of the whole trace, not
+        // something a per-service subset has a clean analog for.
+        var asc = string.Equals(query.Dir, "asc", StringComparison.OrdinalIgnoreCase);
+        display = ((query.Sort?.ToLowerInvariant()) switch
+        {
+            "duration"  => asc ? display.OrderBy(t => t.DisplayEndNano - t.DisplayStartNano)      : display.OrderByDescending(t => t.DisplayEndNano - t.DisplayStartNano),
+            "spans"     => asc ? display.OrderBy(t => t.SpanCount)         : display.OrderByDescending(t => t.SpanCount),
+            "time"      => asc ? display.OrderBy(t => t.MinStartTimeNano)  : display.OrderByDescending(t => t.MinStartTimeNano),
+            "service"   => asc ? display.OrderBy(t => t.DisplayServiceName)       : display.OrderByDescending(t => t.DisplayServiceName),
+            "operation" => asc ? display.OrderBy(t => t.AnchorSpan.Name)     : display.OrderByDescending(t => t.AnchorSpan.Name),
+            _           => isSlow ? display.OrderByDescending(t => t.DisplayEndNano - t.DisplayStartNano) : display.OrderByDescending(t => t.MinStartTimeNano),
         }).ToList();
 
         var existingParentIds = await CheckSpanIdsExistAsync(
-            groups.Where(t => t.RootSpan.ParentSpanId != null).Select(t => t.RootSpan.ParentSpanId!).Distinct(), ct);
+            display.Where(t => t.RootSpan.ParentSpanId != null).Select(t => t.RootSpan.ParentSpanId!).Distinct(), ct);
 
-        return groups
+        return display
             .Where(t => t.RootSpan.ParentSpanId == null || !existingParentIds.Contains(t.RootSpan.ParentSpanId))
-            .Select(t => ToTraceInfo(t.TraceIdHex, t.SpanCount, t.MinStartTimeNano, t.MaxEndTimeNano, t.HasErrors, t.ServiceName, t.RootSpan))
+            .Select(t => ToTraceInfo(t.TraceIdHex, t.SpanCount, t.MinStartTimeNano, t.MaxEndTimeNano,
+                t.DisplayStartNano, t.DisplayEndNano, t.DisplayHasErrors, t.DisplayServiceName, t.AnchorSpan))
             .ToList();
     }
 
@@ -798,6 +844,7 @@ public abstract class TraceReadRepositoryBase : DapperReadRepository, ITraceRead
         var sql = $"""
             SELECT
                 s.trace_id              AS TraceId,
+                s.span_id               AS SpanId,
                 s.start_time_unix_nano  AS StartTimeUnixNano,
                 s.end_time_unix_nano    AS EndTimeUnixNano,
                 s.status_code           AS StatusCode,
@@ -818,6 +865,7 @@ public abstract class TraceReadRepositoryBase : DapperReadRepository, ITraceRead
             return new RawSpan
             {
                 TraceId = r.TraceId,
+                SpanId = r.SpanId,
                 StartTimeUnixNano = r.StartTimeUnixNano,
                 EndTimeUnixNano = r.EndTimeUnixNano,
                 StatusCode = r.StatusCode,
@@ -849,6 +897,7 @@ public abstract class TraceReadRepositoryBase : DapperReadRepository, ITraceRead
         var spanSql = $"""
             SELECT
                 s.trace_id              AS TraceId,
+                s.span_id               AS SpanId,
                 s.start_time_unix_nano  AS StartTimeUnixNano,
                 s.end_time_unix_nano    AS EndTimeUnixNano,
                 s.status_code           AS StatusCode,
@@ -879,6 +928,7 @@ public abstract class TraceReadRepositoryBase : DapperReadRepository, ITraceRead
         return rows.Select(r => new RawSpan
         {
             TraceId = r.TraceId,
+            SpanId = r.SpanId,
             StartTimeUnixNano = r.StartTimeUnixNano,
             EndTimeUnixNano = r.EndTimeUnixNano,
             StatusCode = r.StatusCode,
@@ -906,7 +956,18 @@ public abstract class TraceReadRepositoryBase : DapperReadRepository, ITraceRead
     private static string? ServiceNameOf(string? attributesJson)
         => ExtractServiceName(DeserializeAttributes(attributesJson));
 
-    private static TraceInfo ToTraceInfo(string traceId, int spanCount, long minStartNano, long maxEndNano, bool hasErrors, string? serviceName, RawSpan rootSpan) => new()
+    /// <summary>
+    /// Maps a computed trace group to its API shape. <paramref name="anchorSpan"/>/
+    /// <paramref name="serviceName"/>/<paramref name="hasErrors"/>/<paramref name="displayStartNano"/>/
+    /// <paramref name="displayEndNano"/> reflect the trace's true root and full span set when no
+    /// service filter produced this row, or the filtered service's own anchor span (its
+    /// earliest-started span) and the aggregate of just that service's spans when one did — see
+    /// the callers' "Display*"/"Anchor*" locals. <paramref name="minStartNano"/>/
+    /// <paramref name="maxEndNano"/> always describe the whole trace, regardless of filter.
+    /// </summary>
+    private static TraceInfo ToTraceInfo(
+        string traceId, int spanCount, long minStartNano, long maxEndNano,
+        long displayStartNano, long displayEndNano, bool hasErrors, string? serviceName, RawSpan anchorSpan) => new()
     {
         TraceIdHex = traceId,
         SpanCount = spanCount,
@@ -914,9 +975,10 @@ public abstract class TraceReadRepositoryBase : DapperReadRepository, ITraceRead
         TraceEndTime = TimeConversion.UnixNanoToDateTime(maxEndNano),
         HasErrors = hasErrors,
         ServiceName = serviceName,
-        RootOperationName = rootSpan.Name,
-        RootSpanAttributes = rootSpan.SpanAttributes,
-        TraceDuration = TimeConversion.UnixNanoToDateTime(maxEndNano) - TimeConversion.UnixNanoToDateTime(minStartNano)
+        RootOperationName = anchorSpan.Name,
+        RootSpanAttributes = anchorSpan.SpanAttributes,
+        TraceDuration = TimeConversion.UnixNanoToDateTime(displayEndNano) - TimeConversion.UnixNanoToDateTime(displayStartNano),
+        DisplaySpanIdHex = anchorSpan.SpanId,
     };
 
     // =========================================================================
@@ -926,6 +988,7 @@ public abstract class TraceReadRepositoryBase : DapperReadRepository, ITraceRead
     private sealed class RawSpan
     {
         public string TraceId { get; set; } = null!;
+        public string SpanId { get; set; } = null!;
         public long StartTimeUnixNano { get; set; }
         public long EndTimeUnixNano { get; set; }
         public string StatusCode { get; set; } = null!;
@@ -949,6 +1012,7 @@ public abstract class TraceReadRepositoryBase : DapperReadRepository, ITraceRead
     private sealed class RawSpanRow
     {
         public string TraceId { get; set; } = null!;
+        public string SpanId { get; set; } = null!;
         public long StartTimeUnixNano { get; set; }
         public long EndTimeUnixNano { get; set; }
         public string StatusCode { get; set; } = null!;
@@ -961,6 +1025,7 @@ public abstract class TraceReadRepositoryBase : DapperReadRepository, ITraceRead
     private sealed class SlimSpanRow
     {
         public string TraceId { get; set; } = null!;
+        public string SpanId { get; set; } = null!;
         public long StartTimeUnixNano { get; set; }
         public long EndTimeUnixNano { get; set; }
         public string StatusCode { get; set; } = null!;

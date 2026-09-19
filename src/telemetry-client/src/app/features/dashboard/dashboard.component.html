@@ -133,7 +133,7 @@
             </ng-container>
             <tr mat-header-row *matHeaderRowDef="['service','operation','time']"></tr>
             <tr mat-row *matRowDef="let row; columns: ['service','operation','time']"
-                class="clickable-row" (click)="navigateToTrace(row.traceIdHex)"></tr>
+                class="clickable-row" (click)="navigateToTrace(row.traceIdHex, row.displaySpanIdHex)"></tr>
           </table>
         }
       </mat-card-content>
@@ -162,7 +162,7 @@
             </ng-container>
             <tr mat-header-row *matHeaderRowDef="['service','duration','operation']"></tr>
             <tr mat-row *matRowDef="let row; columns: ['service','duration','operation']"
-                class="clickable-row" (click)="navigateToTrace(row.traceIdHex)"></tr>
+                class="clickable-row" (click)="navigateToTrace(row.traceIdHex, row.displaySpanIdHex)"></tr>
           </table>
         }
       </mat-card-content>

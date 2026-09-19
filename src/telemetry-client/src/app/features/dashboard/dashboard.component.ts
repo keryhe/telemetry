@@ -315,8 +315,8 @@ export class DashboardComponent {
     });
   }
 
-  protected navigateToTrace(traceId: string): void {
-    this.router.navigate(['/traces', traceId]);
+  protected navigateToTrace(traceId: string, spanId?: string | null): void {
+    this.router.navigate(['/traces', traceId], spanId ? { queryParams: { span: spanId } } : undefined);
   }
 
   protected durationMs(trace: TraceInfo): number {

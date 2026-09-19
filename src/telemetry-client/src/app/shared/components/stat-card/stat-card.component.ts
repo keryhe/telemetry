@@ -30,7 +30,7 @@ import type { ApexOptions } from 'ng-apexcharts';
               [markers]="sparklineOptions.markers!"
               [tooltip]="sparklineOptions.tooltip!" />
           } @else if (icon) {
-            <mat-icon class="stat-icon" [ngClass]="color">{{ icon }}</mat-icon>
+            <mat-icon class="stat-icon" [ngClass]="color" [style.color]="iconColor">{{ icon }}</mat-icon>
           }
         </div>
       </mat-card-content>
@@ -64,7 +64,11 @@ import type { ApexOptions } from 'ng-apexcharts';
     @container (max-width: 200px) {
       .sparkline { display: none; }
     }
-    .error { color: var(--mat-sys-error); }
+    /* Material's --mat-sys-error dark-theme tone is deliberately desaturated for contrast on dark
+       surfaces, which reads as pale/washed out here. Matches SEVERITY_COLORS.Error
+       (log.models.ts) and the dashboard's error-series chart color instead, so "error" is the
+       same red everywhere in the app. */
+    .error { color: #f44336; }
     .warn { color: #ff9800; }
     .success { color: #4caf50; }
   `],
@@ -76,6 +80,8 @@ export class StatCardComponent {
   @Input() subtitle = '';
   @Input() icon = '';
   @Input() color: 'default' | 'error' | 'warn' | 'success' = 'default';
+  /** Overrides the icon's color with an arbitrary CSS color (e.g. to match another element's color elsewhere on the page). Takes precedence over `color`'s icon styling; falls back to it when unset. */
+  @Input() iconColor: string | null = null;
   /**
    * Optional trend line, built via `buildSparklineOptions`. Takes priority over `icon`.
    * Sizing is handled entirely in CSS: the chart is configured with a percentage width and

@@ -697,8 +697,8 @@ export class TraceListComponent {
     });
   }
 
-  protected navigate(traceId: string): void {
-    this.router.navigate(['/traces', traceId]);
+  protected navigate(traceId: string, spanId?: string | null): void {
+    this.router.navigate(['/traces', traceId], spanId ? { queryParams: { span: spanId } } : undefined);
   }
 
   // =========================================================================

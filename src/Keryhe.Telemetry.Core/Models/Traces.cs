@@ -66,12 +66,29 @@ public class TraceInfo
     public int SpanCount { get; set; }
     public DateTime TraceStartTime { get; set; }
     public DateTime TraceEndTime { get; set; }
+
+    /// <summary>
+    /// Whole-trace duration, unless a service filter produced this row — then it's that
+    /// service's own duration (the span of time between its earliest and latest span in this
+    /// trace), not the whole trace's. Same conditional applies to <see cref="ServiceName"/>,
+    /// <see cref="RootOperationName"/>, <see cref="HasErrors"/>, and <see cref="RootSpanAttributes"/>:
+    /// each reflects the filtered service's own spans when a service filter matched this trace,
+    /// and the trace's true root otherwise.
+    /// </summary>
     public TimeSpan TraceDuration { get; set; }
     public string? ServiceName { get; set; }
     public string? RootOperationName { get; set; }
     public bool HasErrors { get; set; }
     public List<string> Services { get; set; } = new();
     public Dictionary<string, object>? RootSpanAttributes { get; set; }
+
+    /// <summary>
+    /// The span id backing this row's displayed info — the trace's true root span when no
+    /// service filter is active, or the filtered service's own earliest-started span
+    /// (its entry point into this trace) otherwise. Always populated; the client uses it to
+    /// deep-link into the trace-detail page with that span expanded.
+    /// </summary>
+    public string? DisplaySpanIdHex { get; set; }
 }
 
 /// <summary>Per-operation RED metrics (Rate, Errors, Duration percentiles) for the Analytics tab.</summary>
