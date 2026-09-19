@@ -5,14 +5,14 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <GeneratePackageOnBuild>true</GeneratePackageOnBuild>
-    <Version>1.0.1</Version>
+    <Version>1.1.0</Version>
     <Authors>Keith Heard</Authors>
     <Product>Telemetry</Product>
     <PackageLicenseExpression>MIT</PackageLicenseExpression>
     <PackageProjectUrl>https://github.com/keryhe/telemetry</PackageProjectUrl>
     <PackageTags>Keryhe Telemetry PostgreSQL</PackageTags>
-    <AssemblyVersion>1.0.1.0</AssemblyVersion>
-    <FileVersion>1.0.1.0</FileVersion>
+    <AssemblyVersion>1.1.0.0</AssemblyVersion>
+    <FileVersion>1.1.0.0</FileVersion>
     <Description>PostgreSQL implementation for telemetry persistence</Description>
     <Copyright>Copyright 2026</Copyright>
     <PackageReadmeFile>README.md</PackageReadmeFile>
