@@ -1,4 +1,3 @@
-using Keryhe.Telemetry.Api;
 using Keryhe.Telemetry.Api.Services;
 using Keryhe.Telemetry.Core;
 using Microsoft.Extensions.Configuration;
@@ -15,22 +14,15 @@ public static class TelemetryApiServiceCollectionExtensions
     /// Registers the telemetry API controllers and services. The host is responsible
     /// for CORS, Swagger, HTTPS redirection, and calling <c>MapControllers()</c>.
     /// </summary>
+    /// <param name="services"></param>
     /// <param name="configuration">
-    /// Host configuration. The provider defaults to the <c>Database:Provider</c> key
-    /// and connection strings are read from <c>ConnectionStrings:Api</c>.
+    /// Host configuration. This does not register a database provider — the host must also
+    /// call the active provider's <c>Add&lt;Provider&gt;ApiServices(configuration)</c> (e.g.
+    /// <c>AddPostgreSqlApiServices</c>), which supplies the Dapper read/alert repositories
+    /// (connection string comes from <c>ConnectionStrings:Api</c>).
     /// </param>
-    /// <param name="configure">Optional overrides for <see cref="TelemetryApiOptions"/>.</param>
-    public static IServiceCollection AddKeryheTelemetryApi(
-        this IServiceCollection services,
-        IConfiguration configuration,
-        Action<TelemetryApiOptions>? configure = null)
+    public static IServiceCollection AddKeryheTelemetryApi(this IServiceCollection services, IConfiguration configuration)
     {
-        var options = new TelemetryApiOptions
-        {
-            Provider = configuration["Database:Provider"]
-        };
-        configure?.Invoke(options);
-
         // Controllers live in this class library, so the host will not discover them
         // unless this assembly is registered as an MVC application part.
         services.AddControllers()
@@ -39,19 +31,6 @@ public static class TelemetryApiServiceCollectionExtensions
         // Scoped: one ApiTenantContext per request; TenantMiddleware sets the tenant id.
         services.AddScoped<ApiTenantContext>();
         services.AddScoped<ITenantContext>(sp => sp.GetRequiredService<ApiTenantContext>());
-
-        // Read path: the active provider's Dapper read/alert repositories are selected by
-        // the resolved provider (connection string comes from ConnectionStrings:Api).
-        switch (options.Provider)
-        {
-            case "SqlServer":  services.AddSqlServerApiServices(configuration);  break;
-            case "PostgreSQL": services.AddPostgreSqlApiServices(configuration); break;
-            case "Timescale":  services.AddTimescaleApiServices(configuration);  break;
-            case "ClickHouse": services.AddClickHouseApiServices(configuration); break;
-            case "MySql":      services.AddMySqlApiServices(configuration);      break;
-            default: throw new InvalidOperationException(
-                "Unknown or missing telemetry database provider (expected SqlServer, PostgreSQL, Timescale, ClickHouse, or MySql).");
-        }
 
         return services;
     }

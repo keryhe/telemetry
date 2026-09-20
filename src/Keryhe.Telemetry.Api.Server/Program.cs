@@ -16,9 +16,20 @@ builder.Services.AddCors(options =>
 builder.Services.AddOpenApi();
 
 // ── TELEMETRY API ─────────────────────────────────────────────────────────────
-// Registers the API controllers (via application part), tenant context, and the
-// active provider's read services (Database:Provider + ConnectionStrings:Api).
+// Registers the API controllers (via application part) and tenant context.
 builder.Services.AddKeryheTelemetryApi(builder.Configuration);
+
+// The active provider's read services (Database:Provider + ConnectionStrings:Api).
+switch (builder.Configuration["Database:Provider"])
+{
+    case "SqlServer":  builder.Services.AddSqlServerApiServices(builder.Configuration);  break;
+    case "PostgreSQL": builder.Services.AddPostgreSqlApiServices(builder.Configuration); break;
+    case "Timescale":  builder.Services.AddTimescaleApiServices(builder.Configuration);  break;
+    case "ClickHouse": builder.Services.AddClickHouseApiServices(builder.Configuration); break;
+    case "MySql":      builder.Services.AddMySqlApiServices(builder.Configuration);      break;
+    default: throw new InvalidOperationException(
+        "Unknown or missing Database:Provider (expected SqlServer, PostgreSQL, Timescale, ClickHouse, or MySql).");
+}
 
 // ── ALERTING ──────────────────────────────────────────────────────────────────
 // Registers alert evaluation and the periodic background worker that drives it.

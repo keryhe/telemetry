@@ -1,0 +1,33 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <RootNamespace>Keryhe.Telemetry.Admin</RootNamespace>
+    <UserSecretsId>8f2b6f1e-9b8e-4c3d-9a7a-6d6a2e5f9c31</UserSecretsId>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!--
+      Deliberately no ProjectReference to Keryhe.Telemetry.Core or any provider project. This
+      tool is self-contained by design (see plans/admin-tui.md, section 1) and duplicates the
+      handful of types and the one algorithm it needs instead of depending on the rest of the
+      solution.
+    -->
+    <PackageReference Include="Spectre.Console" Version="0.49.1" />
+    <PackageReference Include="Dapper" Version="2.1.79" />
+    <PackageReference Include="Npgsql" Version="10.0.3" />
+    <PackageReference Include="Microsoft.Data.SqlClient" Version="7.0.2" />
+    <PackageReference Include="Microsoft.Extensions.Configuration.Json" Version="10.0.10" />
+    <PackageReference Include="Microsoft.Extensions.Configuration.UserSecrets" Version="10.0.10" />
+    <PackageReference Include="Microsoft.Extensions.Configuration.EnvironmentVariables" Version="10.0.10" />
+    <PackageReference Include="Microsoft.Extensions.Configuration.Binder" Version="10.0.10" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Include="appsettings.json" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+</Project>

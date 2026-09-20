@@ -20,6 +20,12 @@
          (rather than the former per-host BuildAngularClient/IncludeAngularClient targets) is what
          makes the UI available to `dotnet run` too, not just a publish — see Program.cs. -->
     <ProjectReference Include="..\Keryhe.Telemetry.Ui\Keryhe.Telemetry.Ui.csproj" />
+    <!-- All providers are referenced; the active one is chosen at runtime via Database:Provider. -->
+    <ProjectReference Include="..\Keryhe.Telemetry.SqlServer\Keryhe.Telemetry.SqlServer.csproj" />
+    <ProjectReference Include="..\Keryhe.Telemetry.PostgreSQL\Keryhe.Telemetry.PostgreSQL.csproj" />
+    <ProjectReference Include="..\Keryhe.Telemetry.Timescale\Keryhe.Telemetry.Timescale.csproj" />
+    <ProjectReference Include="..\Keryhe.Telemetry.ClickHouse\Keryhe.Telemetry.ClickHouse.csproj" />
+    <ProjectReference Include="..\Keryhe.Telemetry.MySql\Keryhe.Telemetry.MySql.csproj" />
   </ItemGroup>
 
 </Project>

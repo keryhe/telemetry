@@ -81,17 +81,18 @@ combine it with an existing application, or change what gets exposed.
 
 ```xml
 <ItemGroup>
-  <PackageReference Include="Keryhe.Telemetry.Api" Version="1.2.0" />
-  <PackageReference Include="Keryhe.Telemetry.Ui" Version="1.2.0" />
+  <PackageReference Include="Keryhe.Telemetry.Api" Version="1.2.1" />
+  <PackageReference Include="Keryhe.Telemetry.Ui" Version="1.2.1" />
   <!-- Plus exactly one provider package, matching Database:Provider below: -->
-  <PackageReference Include="Keryhe.Telemetry.Timescale" Version="1.2.0" />
+  <PackageReference Include="Keryhe.Telemetry.Timescale" Version="1.2.1" />
 </ItemGroup>
 ```
 
 ```csharp
 var builder = WebApplication.CreateBuilder(args);
 
-builder.Services.AddKeryheTelemetryApi(builder.Configuration); // reads Database:Provider, ConnectionStrings:Api
+builder.Services.AddKeryheTelemetryApi(builder.Configuration); // controllers, tenant context
+builder.Services.AddTimescaleApiServices(builder.Configuration); // reads ConnectionStrings:Api
 
 var app = builder.Build();
 
@@ -121,10 +122,12 @@ app.UseKeryheTelemetryUi(options =>
 });
 ```
 
-Add `Keryhe.Telemetry.Collector` (plus `AddKeryheTelemetryCollector()`/`MapKeryheTelemetryCollector()`)
-the same way if your host should also ingest OTLP, mirroring what `Keryhe.Telemetry.Server` does
-internally. Pin the UI and API packages to the same version — they ship in lockstep, and a
-mismatch fails silently (a field goes missing from a rendered page) rather than with an error.
+Add `Keryhe.Telemetry.Collector` (plus `AddKeryheTelemetryCollector()`/`MapKeryheTelemetryCollector()`
+and the matching `Add<Provider>CollectorServices(configuration)` call, e.g.
+`AddTimescaleCollectorServices`) the same way if your host should also ingest OTLP, mirroring
+what `Keryhe.Telemetry.Server` does internally. Pin the UI and API packages to the same version —
+they ship in lockstep, and a mismatch fails silently (a field goes missing from a rendered page)
+rather than with an error.
 
 ## License
 

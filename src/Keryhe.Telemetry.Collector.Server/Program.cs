@@ -13,9 +13,20 @@ public class Program
 
         // Add services to the container.
 
-        // Registers gRPC, the ingestion channel + worker, the write repositories, and the
-        // active provider's write services (Database:Provider + ConnectionStrings:Collector).
+        // Registers gRPC, the ingestion channel + worker, and the write repositories.
         builder.Services.AddKeryheTelemetryCollector(builder.Configuration);
+
+        // The active provider's write services (Database:Provider + ConnectionStrings:Collector).
+        switch (builder.Configuration["Database:Provider"])
+        {
+            case "SqlServer":  builder.Services.AddSqlServerCollectorServices(builder.Configuration);  break;
+            case "PostgreSQL": builder.Services.AddPostgreSqlCollectorServices(builder.Configuration); break;
+            case "Timescale":  builder.Services.AddTimescaleCollectorServices(builder.Configuration);  break;
+            case "ClickHouse": builder.Services.AddClickHouseCollectorServices(builder.Configuration); break;
+            case "MySql":      builder.Services.AddMySqlCollectorServices(builder.Configuration);      break;
+            default: throw new InvalidOperationException(
+                "Unknown or missing Database:Provider (expected SqlServer, PostgreSQL, Timescale, ClickHouse, or MySql).");
+        }
 
         // Add CORS for web clients if needed
         builder.Services.AddCors(o => o.AddPolicy("AllowAll", builder =>

@@ -6,22 +6,23 @@ using Microsoft.Extensions.Configuration;
 namespace Microsoft.Extensions.DependencyInjection;
 
 /// <summary>
-/// Extension methods that register the Keryhe Telemetry collector (gRPC OTLP ingestion,
-/// the ingestion channel + worker, and the active provider's write services) into a host
-/// application. Mirrors <c>AddKeryheTelemetryApi</c> on the read side.
+/// Extension methods that register the Keryhe Telemetry collector (gRPC OTLP ingestion and
+/// the provider-agnostic ingestion channel + worker) into a host application. Mirrors
+/// <c>AddKeryheTelemetryApi</c> on the read side.
 /// </summary>
 public static class TelemetryCollectorServiceCollectionExtensions
 {
     /// <summary>
     /// Registers the write path: gRPC, the ingestion channel (gated on resident record/span
-    /// count — see <see cref="TelemetryIngestionOptions"/>), the background worker that drains
-    /// it, and the provider selected by <c>Database:Provider</c> (connection string comes from
+    /// count — see <see cref="TelemetryIngestionOptions"/>), and the background worker that
+    /// drains it. This does not register a database provider — the host must also call the
+    /// active provider's <c>Add&lt;Provider&gt;CollectorServices(configuration)</c> (e.g.
+    /// <c>AddPostgreSqlCollectorServices</c>), which supplies <c>ITelemetryBulkWriter</c>,
+    /// <c>IApiKeyLookup</c>, and <c>IApiKeyTouchStore</c> (connection string comes from
     /// <c>ConnectionStrings:Collector</c>). The host still owns CORS, Kestrel configuration, and
     /// calling <c>MapKeryheTelemetryCollector()</c>.
     /// </summary>
-    public static IServiceCollection AddKeryheTelemetryCollector(
-        this IServiceCollection services,
-        IConfiguration configuration)
+    public static IServiceCollection AddKeryheTelemetryCollector(this IServiceCollection services, IConfiguration configuration)
     {
         services.AddGrpc();
         services.AddLogging();
@@ -39,7 +40,7 @@ public static class TelemetryCollectorServiceCollectionExtensions
         // provider-agnostically — every provider's ITenantResolver used to do its own SELECT *and*
         // UPDATE on every gRPC export against the one api_keys row a whole tenant's agents share.
         // Now every provider registers only the raw IApiKeyLookup / IApiKeyTouchStore this wraps
-        // (see the switch below). Bound from Telemetry:TenantResolution.
+        // (via the host's Add<Provider>CollectorServices call). Bound from Telemetry:TenantResolution.
         services.Configure<TenantResolutionOptions>(configuration.GetSection(TenantResolutionOptions.SectionName));
         services.AddMemoryCache();
         services.AddSingleton<ApiKeyTouchTracker>();
@@ -47,20 +48,9 @@ public static class TelemetryCollectorServiceCollectionExtensions
         services.AddHostedService<ApiKeyTouchWorker>();
 
         // Write path: the generic worker drains the ingestion channel and delegates each
-        // batch flush to the active provider's ITelemetryBulkWriter. The provider — and with
-        // it ITelemetryBulkWriter, IApiKeyLookup, and IApiKeyTouchStore —
-        // is selected by the Database:Provider config key.
-        switch (configuration["Database:Provider"])
-        {
-            case "SqlServer":  services.AddSqlServerCollectorServices(configuration);  break;
-            case "PostgreSQL": services.AddPostgreSqlCollectorServices(configuration); break;
-            case "Timescale":  services.AddTimescaleCollectorServices(configuration);  break;
-            case "ClickHouse": services.AddClickHouseCollectorServices(configuration); break;
-            case "MySql":      services.AddMySqlCollectorServices(configuration);      break;
-            default: throw new InvalidOperationException(
-                "Unknown or missing Database:Provider (expected SqlServer, PostgreSQL, Timescale, ClickHouse, or MySql).");
-        }
-
+        // batch flush to the active provider's ITelemetryBulkWriter. The host is responsible
+        // for registering that provider (ITelemetryBulkWriter, IApiKeyLookup,
+        // IApiKeyTouchStore) via the matching Add<Provider>CollectorServices call.
         services.AddHostedService<TelemetryIngestionWorker>();
 
         services

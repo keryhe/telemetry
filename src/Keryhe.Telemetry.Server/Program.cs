@@ -37,14 +37,42 @@ public class Program
         builder.Services.AddOpenApi();
 
         // ── TELEMETRY COLLECTOR (write path) ──────────────────────────────────────
-        // gRPC, the bounded ingestion channel, the background worker that drains it, and
-        // the active provider's write services (Database:Provider + ConnectionStrings:Collector).
+        // gRPC, the bounded ingestion channel, and the background worker that drains it.
         builder.Services.AddKeryheTelemetryCollector(builder.Configuration);
 
         // ── TELEMETRY API (read path) ─────────────────────────────────────────────
-        // API controllers (via application part), tenant context, and the active
-        // provider's read services (Database:Provider + ConnectionStrings:Api).
+        // API controllers (via application part) and tenant context.
         builder.Services.AddKeryheTelemetryApi(builder.Configuration);
+
+        // ── DATABASE PROVIDER ─────────────────────────────────────────────────────
+        // The active provider's write services (ConnectionStrings:Collector) and read
+        // services (ConnectionStrings:Api), both selected by Database:Provider.
+        switch (builder.Configuration["Database:Provider"])
+        {
+            case "SqlServer":
+                builder.Services.AddSqlServerCollectorServices(builder.Configuration);
+                builder.Services.AddSqlServerApiServices(builder.Configuration);
+                break;
+            case "PostgreSQL":
+                builder.Services.AddPostgreSqlCollectorServices(builder.Configuration);
+                builder.Services.AddPostgreSqlApiServices(builder.Configuration);
+                break;
+            case "Timescale":
+                builder.Services.AddTimescaleCollectorServices(builder.Configuration);
+                builder.Services.AddTimescaleApiServices(builder.Configuration);
+                break;
+            case "ClickHouse":
+                builder.Services.AddClickHouseCollectorServices(builder.Configuration);
+                builder.Services.AddClickHouseApiServices(builder.Configuration);
+                break;
+            case "MySql":
+                builder.Services.AddMySqlCollectorServices(builder.Configuration);
+                builder.Services.AddMySqlApiServices(builder.Configuration);
+                break;
+            default:
+                throw new InvalidOperationException(
+                    "Unknown or missing Database:Provider (expected SqlServer, PostgreSQL, Timescale, ClickHouse, or MySql).");
+        }
 
         // ── ALERTING ──────────────────────────────────────────────────────────────
         // Alert evaluation plus the periodic background worker that drives it.

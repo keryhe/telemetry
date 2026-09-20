@@ -175,14 +175,22 @@ behind two matching extension pairs:
 
 - **Write side** — `AddKeryheTelemetryCollector(configuration)` / `MapKeryheTelemetryCollector()`
   (`Keryhe.Telemetry.Collector/TelemetryCollectorExtensions.cs`): gRPC, the ingestion channel,
-  `ResourceScopeCache`, the `TelemetryIngestionWorker`, the write repositories, and the
-  **write-side** provider services; then maps the three gRPC services.
+  `ResourceScopeCache`, the `TelemetryIngestionWorker`, and the write repositories; then maps the
+  three gRPC services. It registers no database provider itself.
 - **Read side** — `AddKeryheTelemetryApi(configuration)` / `UseKeryheTelemetryApi()`
   (`Keryhe.Telemetry.Api/TelemetryApiExtensions.cs`): controllers (via an MVC application part,
-  since they live in the class library), the tenant context, and the **read-side** provider services.
+  since they live in the class library) and the tenant context. It likewise registers no
+  database provider itself.
 
-`Keryhe.Telemetry.Collector.Server` calls the first pair, `Keryhe.Telemetry.Api.Server` the second,
-and `Keryhe.Telemetry.Server` calls **both** plus `AddAlerting` and the SPA static-file middleware.
+Neither class library references any provider project — each host separately calls the active
+provider's own `Add<Provider>CollectorServices`/`Add<Provider>ApiServices` (see "Provider
+abstraction" below), which is what lets a consumer depend on only the one provider package they
+actually use instead of all five.
+
+`Keryhe.Telemetry.Collector.Server` calls the first pair (plus its own provider registration),
+`Keryhe.Telemetry.Api.Server` the second (plus its own), and `Keryhe.Telemetry.Server` calls
+**both** plus `AddAlerting`, the SPA static-file middleware, and a single provider registration
+shared by both sides.
 
 > **All-in-one constraint.** The Npgsql-backed providers (`PostgreSQL`, `Timescale`) register a
 > singleton `NpgsqlDataSource` in *both* `Add*CollectorServices` (from `ConnectionStrings:Collector`) and
