@@ -92,6 +92,7 @@ combine it with an existing application, or change what gets exposed.
 var builder = WebApplication.CreateBuilder(args);
 
 builder.Services.AddKeryheTelemetryApi(builder.Configuration); // controllers, tenant context
+builder.Services.AddKeryheTelemetryUi(builder.Configuration);  // binds the TelemetryUi section
 builder.Services.AddTimescaleApiServices(builder.Configuration); // reads ConnectionStrings:Api
 
 var app = builder.Build();
@@ -110,17 +111,26 @@ app.Run();
 
 `Keryhe.Telemetry.Ui` ships the compiled Angular bundle prebuilt — no Node, no npm, nothing to
 build — and serves it at `/`, same-origin with the API at `/api` by default. If your host mounts
-the API somewhere else, or wants its own product name in the header bar and browser tab instead of
-"Sentinel", tell the UI at startup rather than rebuilding it:
+the UI or the API somewhere else, or wants its own product name in the header bar and browser tab
+instead of "Sentinel", configure it rather than rebuilding it:
 
-```csharp
-app.UseKeryheTelemetryUi(options =>
+```jsonc
 {
-    options.ApiBasePath = "/telemetry/api";
-    options.BrandName = "Acme Watchtower";
-    options.BrandTagline = "Custom Consumer Branding";
-});
+  "TelemetryUi": {
+    "BasePath": "/telemetry",                 // serve the UI beside another app at "/"
+    "ApiBasePath": "/telemetry/api",          // only if the API moved too; "/api" otherwise
+    "BrandName": "Acme Watchtower",
+    "BrandTagline": "Custom Consumer Branding"
+  }
+}
 ```
+
+`BasePath` rewrites the bundle's `<base href>` at startup, which re-roots its assets, its
+`config.json` fetch and its client-side router together. Behind a reverse proxy the prefix must be
+*forwarded* rather than stripped, and the origin root then returns 404 — see
+[the UI package README](src/Keryhe.Telemetry.Ui/README.md#hosting-the-ui-under-a-sub-path). The
+same settings are available in code via `AddKeryheTelemetryUi(configuration, options => ...)` or
+`app.UseKeryheTelemetryUi(options => ...)`, which take precedence over the configuration section.
 
 Add `Keryhe.Telemetry.Collector` (plus `AddKeryheTelemetryCollector()`/`MapKeryheTelemetryCollector()`
 and the matching `Add<Provider>CollectorServices(configuration)` call, e.g.

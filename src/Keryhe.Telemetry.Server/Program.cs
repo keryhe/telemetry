@@ -44,6 +44,13 @@ public class Program
         // API controllers (via application part) and tenant context.
         builder.Services.AddKeryheTelemetryApi(builder.Configuration);
 
+        // ── TELEMETRY UI ──────────────────────────────────────────────────────────
+        // Binds the TelemetryUi section (BasePath, ApiBasePath, BrandName, BrandTagline)
+        // and registers the in-memory SPA shell. Required by UseKeryheTelemetryUi() below;
+        // keeping the UI's settings in configuration is what lets a deployment relocate or
+        // rebrand the prebuilt bundle without recompiling anything.
+        builder.Services.AddKeryheTelemetryUi(builder.Configuration);
+
         // ── DATABASE PROVIDER ─────────────────────────────────────────────────────
         // The active provider's write services (ConnectionStrings:Collector) and read
         // services (ConnectionStrings:Api), both selected by Database:Provider.

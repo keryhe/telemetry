@@ -19,6 +19,13 @@ builder.Services.AddOpenApi();
 // Registers the API controllers (via application part) and tenant context.
 builder.Services.AddKeryheTelemetryApi(builder.Configuration);
 
+// ── TELEMETRY UI ──────────────────────────────────────────────────────────────
+// Binds the TelemetryUi section (BasePath, ApiBasePath, BrandName, BrandTagline) and
+// registers the in-memory SPA shell. Required by UseKeryheTelemetryUi() below; keeping
+// the UI's settings in configuration is what lets a deployment relocate or rebrand the
+// prebuilt bundle without recompiling anything.
+builder.Services.AddKeryheTelemetryUi(builder.Configuration);
+
 // The active provider's read services (Database:Provider + ConnectionStrings:Api).
 switch (builder.Configuration["Database:Provider"])
 {
@@ -64,11 +71,12 @@ app.UseKeryheTelemetryUi();
 
 // Explicit, rather than relying on WebApplication's implicit UseRouting() insertion: with no
 // explicit call, that insertion lands ahead of the middleware above, so routing pre-selects an
-// endpoint for "/" (MapKeryheTelemetryUiFallback's route pattern matches any extensionless path,
-// "/" included) before UseKeryheTelemetryUi's own static-file middleware ever runs — and static
-// file middleware, on seeing an endpoint already selected, defers to it rather than serving,
-// silently discarding this method's compression negotiation for exactly the one route ("/") that
-// most needed it. Placed here so UseKeryheTelemetryUi's static files still run first and
+// endpoint before UseKeryheTelemetryUi's own static-file middleware ever runs — and static file
+// middleware, on seeing an endpoint already selected, defers to it rather than serving. The SPA
+// shell no longer depends on this (UseKeryheTelemetryUi writes it from memory, ahead of routing
+// and without consulting the selected endpoint), but every other asset it serves still does, and
+// the implicit insertion would also silently move UseCors and the tenant middleware to the wrong
+// side of routing. Placed here so UseKeryheTelemetryUi's static files still run first and
 // short-circuit whatever they can actually serve, matching Keryhe.Telemetry.Server's Program.cs,
 // which already calls this explicitly in the same position.
 app.UseRouting();

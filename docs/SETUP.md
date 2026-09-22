@@ -234,8 +234,22 @@ published host as static web assets. The resulting host serves the UI at `/` and
   fetches `GET /config.json` before it bootstraps and reads `apiUrl` from it (served by
   `UseKeryheTelemetryUi()`, defaulting to the conventional same-origin `/api` this section
   describes). This is what lets the same published bundle work for a host that mounts the API
-  somewhere else — see the README's `ApiBasePath` example. The app still assumes it is served from
-  the origin root (`<base href="/">`); sub-path UI hosting isn't supported.
+  somewhere else — see the README's `ApiBasePath` example.
+- **Where the UI itself is mounted is runtime configuration too.** Set `TelemetryUi:BasePath` to
+  serve it under a prefix instead of the origin root:
+
+  ```bash
+  dotnet run --project src/Keryhe.Telemetry.Api.Server -- --TelemetryUi:BasePath=/telemetry
+  ```
+
+  The bundle's `<base href>` is rewritten to match at startup, so its assets, its `config.json`
+  fetch and its client-side router all re-root together with no rebuild. Two constraints follow
+  from the value being baked into the served HTML rather than derived per request: behind a reverse
+  proxy the prefix must be **forwarded** (`proxy_pass http://app;`) rather than stripped
+  (`proxy_pass http://app/;`), and once it is set the origin root returns 404 — which is the point,
+  since it is what lets another app own `/`. `BasePath` moves the UI only; the API's controllers
+  stay at `api/*` on the origin root, so set `TelemetryUi:ApiBasePath` as well if your deployment
+  relocates the API too.
 
 When deploying `Keryhe.Telemetry.Api.Server` this way, the gRPC ingestion host
 (`Keryhe.Telemetry.Collector.Server`) is deployed separately.

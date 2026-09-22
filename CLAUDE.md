@@ -93,29 +93,70 @@ an empty UI rather than failing the solution build). `Keryhe.Telemetry.Api.Serve
 `Keryhe.Telemetry.Server` reference it via a plain `ProjectReference`; nothing else needs to know
 it exists.
 
-`app.UseKeryheTelemetryUi()` serves the packaged bundle at `/` (rather than the Razor class
-library default of `/_content/Keryhe.Telemetry.Ui/`) and answers `GET /config.json` with the
-host's configured `TelemetryUiOptions` — API location plus `BrandName`/`BrandTagline`, the
-consumer-facing product name and tagline shown in the header bar and, via the Angular client's
-`BrandedTitleStrategy`, in every route's browser tab title. Both default to this UI's own
-out-of-the-box branding ("Sentinel" / "OpenTelemetry Visualization"), so a host that sets nothing
-sees exactly what it always has. It must run before the tenant middleware, so UI asset requests —
-`/config.json` included — skip scoped tenant resolution, and it also negotiates `.br`/`.gz`
-variants that the SDK generates automatically at the *host's* publish (`Keryhe.Telemetry.Ui`
-itself has no compressed variants — `MapStaticAssets()` would give that negotiation for free but
-can't be re-rooted to `/` for a referenced class library's assets, so
-`TelemetryUiApplicationBuilderExtensions` reimplements just that piece). `MapKeryheTelemetryUiFallback()`
-runs *after* `MapControllers()` so Angular deep links (`/traces/:id`) survive a hard reload while
-`/api/*` and `/openapi/*` are never swallowed. **The host must call `app.UseRouting()` explicitly,
-immediately after `UseKeryheTelemetryUi()`** — left to `WebApplication`'s own implicit insertion,
-it lands ahead of that method's middleware (since a `Map*` call exists later in every such host),
-so routing pre-selects the fallback endpoint for any extensionless path — `/` included — before the
-UI's own static-file middleware runs, and `UseStaticFiles` correctly defers to an already-selected
-endpoint rather than serving. The practical symptom is silent: the fallback still serves the same
-`index.html`, just uncompressed, while the `Content-Encoding` header this method already wrote
-stays attached to that response — a real browser rejects the mismatch
-(`net::ERR_CONTENT_DECODING_FAILED`); `curl` does not, since it never validates the header against
-the bytes it receives.
+The package has the same `Add*`/`Use*` split as the API and collector sides.
+`builder.Services.AddKeryheTelemetryUi(configuration, configure?)` binds `TelemetryUiOptions` from
+the **`TelemetryUi`** configuration section (the `AddRetention`/`AddAlerting` shape) and registers
+the `TelemetryUiShell` singleton; it is **required** — `UseKeryheTelemetryUi()` throws a
+fail-fast `InvalidOperationException` naming it otherwise. That guard is deliberately on the shell
+singleton rather than on `IOptions<TelemetryUiOptions>`: the options open generic is registered by
+the host builder regardless, so guarding on it would resolve successfully and silently hand back
+defaults. Config binding is what lets a consumer relocate or rebrand a *prebuilt* bundle without
+recompiling, which is the whole premise of shipping it prebuilt.
+
+`app.UseKeryheTelemetryUi()` serves the packaged bundle at `TelemetryUiOptions.BasePath` — `/` by
+default — rather than the Razor class library default of `/_content/Keryhe.Telemetry.Ui/`, and
+answers `GET {BasePath}/config.json` with the host's configured options: API location plus
+`BrandName`/`BrandTagline`, the consumer-facing product name and tagline shown in the header bar
+and, via the Angular client's `BrandedTitleStrategy`, in every route's browser tab title. All
+default to this UI's own out-of-the-box branding ("Sentinel" / "OpenTelemetry Visualization"), so a
+host that sets nothing sees exactly what it always has. It must run before the tenant middleware,
+so UI asset requests — `config.json` included — skip scoped tenant resolution, and it also
+negotiates `.br`/`.gz` variants that the SDK generates automatically at the *host's* publish
+(`Keryhe.Telemetry.Ui` itself has no compressed variants — `MapStaticAssets()` would give that
+negotiation for free but can't be re-rooted for a referenced class library's assets, so
+`TelemetryUiApplicationBuilderExtensions` reimplements just that piece).
+
+**`BasePath` and the in-memory shell (`TelemetryUiShell`).** The built `index.html` carries
+`<base href="/">`, and *every* asset reference in it, the client's own relative `config.json` fetch
+(`load-config.ts`) and its router's `PathLocationStrategy` all resolve against that one attribute —
+so serving the file as-is pins the whole UI to the origin root. `BasePath` is therefore implemented
+by rewriting that attribute once at startup and serving the result **from memory**, never through
+`UseStaticFiles`/`MapFallbackToFile`, which would hand back the unpatched packaged file. Consequences
+worth knowing before touching this code:
+
+- `{BasePath}`, `{BasePath}/` **and `{BasePath}/index.html`** are all intercepted by the shell
+  middleware. The third is not optional — left to `UseStaticFiles` it would serve the unpatched
+  file. Handling it there also means the compression-negotiation middleware never sees `index.html`,
+  so it needs no special case for the one file whose `.br` sibling must not be served.
+- Serving from memory means the shell owns what those middlewares gave for free: `Content-Type`,
+  `Content-Length` (**the encoded length** — setting the identity length on a compressed body is
+  `ERR_CONTENT_DECODING_FAILED` by another route), `Cache-Control: no-cache`, `Vary`, a **distinct
+  strong ETag per representation** (identity/`-br`/`-gz`), and `If-None-Match` → 304. The 304 branch
+  returns before any content header is written.
+- `MapKeryheTelemetryUiFallback()` is **scoped** to `{BasePath}/{*path:nonfile}` and must be
+  `MapFallback` specifically, whose `Order = int.MaxValue` is what keeps `api/*` and the gRPC routes
+  winning. It reads the effective base path back off the shell and throws if `UseKeryheTelemetryUi`
+  has not run, so mapping the two out of order fails loudly instead of registering deep links at the
+  wrong prefix. Unlike the `MapFallbackToFile` it replaced it *does* negotiate compression, since
+  the shell is already held in all three representations.
+- `BasePath` is fixed at startup, not derived per request from `PathBase`. A reverse proxy must
+  therefore **forward** the prefix, not strip it, and a non-empty value means `GET /` returns 404.
+- `NormalizeBasePath` validates against `^(/[A-Za-z0-9._~-]+)+$` rather than only trimming: the
+  normalized value is concatenated into a route-pattern literal, where `{`/`}`/`?`/`#`/`%` would
+  produce a corrupt template.
+- A build with no Node toolchain packages no `index.html` at all (the csproj warns rather than
+  failing). `TelemetryUiShell.Content` is nullable for exactly that case and must degrade to a 404,
+  never an exception.
+
+**The host must still call `app.UseRouting()` explicitly, immediately after
+`UseKeryheTelemetryUi()`** — left to `WebApplication`'s own implicit insertion, it lands ahead of
+that method's middleware (since a `Map*` call exists later in every such host), so routing
+pre-selects an endpoint before the UI's own static-file middleware runs, and `UseStaticFiles`
+correctly defers to an already-selected endpoint rather than serving. The shell itself is no longer
+exposed to this (it is written from memory, ahead of routing, without consulting the selected
+endpoint — which is what retired the old `net::ERR_CONTENT_DECODING_FAILED` symptom on `/`), but
+every other asset still is, and the implicit insertion also silently moves `UseCors` and the tenant
+middleware to the wrong side of routing.
 
 Because static web assets flow through a plain `ProjectReference` at *build* time, not only at
 publish, `dotnet run --project src/Keryhe.Telemetry.Api.Server` now serves the UI too — unlike the
