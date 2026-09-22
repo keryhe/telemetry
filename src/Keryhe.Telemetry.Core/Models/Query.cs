@@ -98,6 +98,12 @@ public sealed class HistogramQuery
     // Log-only filters (ignored by the trace histogram).
     public int? MinSeverity { get; init; }
     public string? Search { get; init; }
+
+    // Latency-bucket grid dimensions (ignored by GetTraceHistogramAsync; used only by
+    // GetTraceOverviewAsync's LatencyBuckets — trace-latency-p50 plan, Phase 3). Configurable so
+    // the client can match the grid to its rendered chart width/height.
+    public int LatencyTimeCols { get; init; } = 48;
+    public int LatencyDurationRows { get; init; } = 20;
 }
 
 /// <summary>One bucket of the trace volume histogram.</summary>
@@ -121,12 +127,36 @@ public sealed class TraceVolumeBucket
 }
 
 /// <summary>
-/// Dashboard overview: the time-bucketed volume histogram plus per-service RED stats, both
-/// computed from a single scan of the window's traces (see
+/// One cell of the trace latency chart's time × log-duration grid (trace-latency-p50 plan, Phase
+/// 3), mirroring the client's former <c>LatencyBucket</c> in chart.utils.ts. Empty cells are
+/// omitted from the result entirely rather than sent as zero-count buckets.
+/// </summary>
+public sealed class TraceLatencyBucket
+{
+    public DateTime XStart { get; init; }
+    public DateTime XEnd { get; init; }
+    public double YStartMs { get; init; }
+    public double YEndMs { get; init; }
+    public int Count { get; init; }
+    public int ErrorCount { get; init; }
+
+    /// <summary>
+    /// Set only when <see cref="Count"/> == 1, which is the only case the bubble-click handler
+    /// needs a trace id for — a larger bucket is handled by zooming into its time span instead.
+    /// Deliberately not a full id list: that would reintroduce an unbounded payload (one id per
+    /// trace in the window) for no behavioral gain.
+    /// </summary>
+    public string? SampleTraceIdHex { get; init; }
+}
+
+/// <summary>
+/// Dashboard overview: the time-bucketed volume histogram, per-service RED stats, and the latency
+/// bucket grid, all computed from a single scan of the window's traces (see
 /// <see cref="ITraceReadRepository.GetTraceOverviewAsync"/>) — grouping the same
-/// already-materialized trace list two ways rather than querying twice. Deliberately not a
-/// change to <c>GetTraceHistogramAsync</c>'s own response shape: that endpoint has a second
-/// caller (the traces list page) that doesn't need per-service stats and shouldn't pay for them.
+/// already-materialized trace list several ways rather than querying repeatedly. Deliberately not
+/// a change to <c>GetTraceHistogramAsync</c>'s own response shape: that endpoint has a second
+/// caller (the traces list page's volume chart) that doesn't need per-service stats or the
+/// latency grid and shouldn't pay for them.
 /// </summary>
 public sealed class TraceOverview
 {
@@ -135,6 +165,15 @@ public sealed class TraceOverview
 
     /// <summary>Window-wide totals and percentiles across every trace in the range.</summary>
     public TraceWindowSummary Summary { get; init; } = new();
+
+    /// <summary>
+    /// The trace list page's latency bubble chart (trace-latency-p50 plan, Phase 3). Bounded by
+    /// the grid size (<see cref="HistogramQuery.LatencyTimeCols"/> ×
+    /// <see cref="HistogramQuery.LatencyDurationRows"/>), independent of trace volume — unlike the
+    /// former client-side approach, which binned a 1000-row capped page and so only ever covered
+    /// the most recent few minutes of any wide time range.
+    /// </summary>
+    public List<TraceLatencyBucket> LatencyBuckets { get; init; } = [];
 }
 
 /// <summary>

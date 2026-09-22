@@ -27,17 +27,35 @@ export interface TraceHistogramQuery {
   minDurationMs?: number;
   maxDurationMs?: number;
   tags?: string[];
+  /** Latency bucket grid dimensions — only read by `getTraceOverview`. */
+  latencyTimeCols?: number;
+  latencyDurationRows?: number;
+}
+
+/** One cell of the trace latency chart's time × log-duration grid (server-computed, Phase 3 of
+ *  the trace-latency-p50 plan) — replaces the client-side `binLatencyPoints`/`LatencyBucket`. */
+export interface TraceLatencyBucket {
+  xStart: Date;
+  xEnd: Date;
+  yStartMs: number;
+  yEndMs: number;
+  count: number;
+  errorCount: number;
+  /** Set only when count === 1 — the only case the bubble-click handler needs a trace id for. */
+  sampleTraceIdHex?: string;
 }
 
 /**
- * Same volume histogram as `getTraceHistogram` plus per-service RED stats, from one backend scan
- * instead of two — see plans/dashboard-refactor.md Phase 5. Kept as its own endpoint/type rather
- * than an option on `getTraceHistogram` so the traces list page (the histogram's other caller)
- * never fetches or pays for stats it doesn't read.
+ * Same volume histogram as `getTraceHistogram` plus per-service RED stats and the latency bucket
+ * grid, from one backend scan instead of several — see plans/dashboard-refactor.md Phase 5 and
+ * plans/trace-latency-p50.md Phase 3. Kept as its own endpoint/type rather than an option on
+ * `getTraceHistogram` so the traces list page's volume chart never fetches or pays for stats it
+ * doesn't read when latency buckets aren't needed either.
  */
 export interface TraceOverview {
   buckets: TimeBucket[];
   services: ServiceStats[];
+  latencyBuckets?: TraceLatencyBucket[];
 }
 
 @Injectable({ providedIn: 'root' })
@@ -90,7 +108,7 @@ export class TracesApiService {
     );
   }
 
-  /** Dashboard-only: same query shape as `getTraceHistogram`, plus per-service RED stats. */
+  /** Same query shape as `getTraceHistogram`, plus per-service RED stats and (when requested) the latency bucket grid. */
   getTraceOverview(query: TraceHistogramQuery): Observable<TraceOverview> {
     let params = new HttpParams()
       .set('start', query.start.toISOString())
@@ -101,9 +119,15 @@ export class TracesApiService {
     if (query.operation) params = params.set('operation', query.operation);
     if (query.minDurationMs != null) params = params.set('minDurationMs', query.minDurationMs);
     if (query.maxDurationMs != null) params = params.set('maxDurationMs', query.maxDurationMs);
+    if (query.latencyTimeCols != null) params = params.set('latencyTimeCols', query.latencyTimeCols);
+    if (query.latencyDurationRows != null) params = params.set('latencyDurationRows', query.latencyDurationRows);
     for (const tag of query.tags ?? []) params = params.append('tag', tag);
     return this.http.get<TraceOverview>(`${this.base}/overview`, { params }).pipe(
-      map((o) => ({ ...o, buckets: o.buckets.map((b) => ({ ...b, timestamp: new Date(b.timestamp) })) }))
+      map((o) => ({
+        ...o,
+        buckets: o.buckets.map((b) => ({ ...b, timestamp: new Date(b.timestamp) })),
+        latencyBuckets: o.latencyBuckets?.map((b) => ({ ...b, xStart: new Date(b.xStart), xEnd: new Date(b.xEnd) })),
+      }))
     );
   }
 

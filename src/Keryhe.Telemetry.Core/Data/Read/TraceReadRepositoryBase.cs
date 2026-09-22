@@ -334,7 +334,9 @@ public abstract class TraceReadRepositoryBase : DapperReadRepository, ITraceRead
             throw new ArgumentException("Start time must be before end time");
 
         // slim: buckets are built from timestamps, durations and the error flag only.
-        var traces = await ComputeTraceInfosAsync(ToTraceQuery(query), cancellationToken, slim: true);
+        // requireInboundRoot: this is a latency/RED aggregation — see the doc comment on
+        // ComputeTraceInfosAsync's parameter.
+        var traces = await ComputeTraceInfosAsync(ToTraceQuery(query), cancellationToken, slim: true, requireInboundRoot: true);
         return BuildVolumeBuckets(traces, query);
     }
 
@@ -347,13 +349,16 @@ public abstract class TraceReadRepositoryBase : DapperReadRepository, ITraceRead
         // just as cheap for its other caller (the traces list page), which doesn't need
         // per-service stats and shouldn't pay for them.
         // slim: all three groupings below read only trace-level aggregates and the service name.
-        var traces = await ComputeTraceInfosAsync(ToTraceQuery(query), cancellationToken, slim: true);
+        // requireInboundRoot: this is a latency/RED aggregation — see the doc comment on
+        // ComputeTraceInfosAsync's parameter.
+        var traces = await ComputeTraceInfosAsync(ToTraceQuery(query), cancellationToken, slim: true, requireInboundRoot: true);
         var services = BuildServiceStats(traces, query.Start, query.End);
         return new TraceOverview
         {
             Buckets = BuildVolumeBuckets(traces, query),
             Services = services,
             Summary = BuildWindowSummary(traces, services.Count),
+            LatencyBuckets = BuildLatencyBuckets(traces, query),
         };
     }
 
@@ -437,6 +442,71 @@ public abstract class TraceReadRepositoryBase : DapperReadRepository, ITraceRead
     }
 
     /// <summary>
+    /// Bins the same trace list onto a time × log-duration grid for the traces list page's latency
+    /// bubble chart (trace-latency-p50 plan, Phase 3) — ports the client-side grid math that used
+    /// to run in <c>binLatencyPoints</c> (chart.utils.ts) over a 1000-row capped page, which meant
+    /// the chart only ever covered the most recent few minutes of any wide time range. Time
+    /// columns are evenly spaced across <c>[Start, End)</c>; duration rows are log-spaced across
+    /// the observed [min, max] duration, since durations are right-skewed. Empty cells are
+    /// omitted.
+    /// </summary>
+    private static List<TraceLatencyBucket> BuildLatencyBuckets(List<TraceInfo> traces, HistogramQuery query)
+    {
+        if (traces.Count == 0) return new List<TraceLatencyBucket>();
+
+        var timeCols = Math.Clamp(query.LatencyTimeCols, 1, 200);
+        var durationRows = Math.Clamp(query.LatencyDurationRows, 1, 100);
+
+        var startTicks = query.Start.Ticks;
+        var rangeTicks = Math.Max(1, query.End.Ticks - startTicks);
+
+        var durationsMs = traces.Select(t => t.TraceDuration.TotalMilliseconds).ToList();
+        var yMin = Math.Max(1.0, durationsMs.Min());
+        var yMax = Math.Max(yMin * 10, durationsMs.Max());
+        var logMin = Math.Log(yMin);
+        var logMax = Math.Log(yMax);
+        var logStep = (logMax - logMin) / durationRows;
+
+        int ColIndexFor(long startTicksOfTrace)
+        {
+            var idx = (int)((startTicksOfTrace - startTicks) * timeCols / rangeTicks);
+            return Math.Clamp(idx, 0, timeCols - 1);
+        }
+
+        int RowIndexFor(double durationMs)
+        {
+            if (durationMs <= yMin) return 0;
+            var idx = (int)((Math.Log(durationMs) - logMin) / logStep);
+            return Math.Clamp(idx, 0, durationRows - 1);
+        }
+
+        var cells = new Dictionary<(int Col, int Row), (int Count, int ErrorCount, string FirstTraceIdHex)>();
+        foreach (var t in traces)
+        {
+            var key = (ColIndexFor(t.TraceStartTime.Ticks), RowIndexFor(t.TraceDuration.TotalMilliseconds));
+            cells[key] = cells.TryGetValue(key, out var existing)
+                ? (existing.Count + 1, existing.ErrorCount + (t.HasErrors ? 1 : 0), existing.FirstTraceIdHex)
+                : (1, t.HasErrors ? 1 : 0, t.TraceIdHex);
+        }
+
+        var result = new List<TraceLatencyBucket>(cells.Count);
+        foreach (var ((col, row), (count, errorCount, firstTraceIdHex)) in cells)
+        {
+            result.Add(new TraceLatencyBucket
+            {
+                XStart = new DateTime(startTicks + col * rangeTicks / timeCols, query.Start.Kind),
+                XEnd = new DateTime(startTicks + (col + 1) * rangeTicks / timeCols, query.Start.Kind),
+                YStartMs = Math.Exp(logMin + row * logStep),
+                YEndMs = Math.Exp(logMin + (row + 1) * logStep),
+                Count = count,
+                ErrorCount = errorCount,
+                SampleTraceIdHex = count == 1 ? firstTraceIdHex : null,
+            });
+        }
+        return result;
+    }
+
+    /// <summary>
     /// Groups the same trace list by root-span service (falling back to "(unknown)" for a trace
     /// with none, so every trace is counted exactly once — Σ per-service counts must equal the
     /// bucketed total). <see cref="TraceInfo.Services"/> (the full participant list) is
@@ -479,8 +549,20 @@ public abstract class TraceReadRepositoryBase : DapperReadRepository, ITraceRead
     /// error flag, service name); the returned <see cref="TraceInfo.RootSpanAttributes"/> will be
     /// null. Silently ignored when the query carries tag predicates, which need span attributes.
     /// </param>
+    /// <param name="requireInboundRoot">
+    /// Restrict the result to traces whose true root span is <c>SERVER</c> or <c>CONSUMER</c> —
+    /// the conventional inbound-request entry points (trace-latency-p50 plan, Phase 2). Most root
+    /// spans in a real system are not requests (internal work, client calls, or — in this
+    /// codebase's own test generator — parentless activities opened only to carry a trace id for
+    /// a log line or metric exemplar), so an unfiltered population makes "trace latency"
+    /// arithmetically correct but semantically meaningless: it reads close to zero because
+    /// non-request roots dominate and are typically instantaneous. Used by the latency/RED
+    /// aggregations (<see cref="GetTraceHistogramAsync"/>, <see cref="GetTraceOverviewAsync"/>);
+    /// deliberately left off <see cref="QueryTracesAsync"/>, an exploration surface where a user
+    /// must still be able to find a specific internal- or client-rooted trace.
+    /// </param>
     protected async Task<List<TraceInfo>> ComputeTraceInfosAsync(
-        TraceQuery query, CancellationToken ct, bool slim = false)
+        TraceQuery query, CancellationToken ct, bool slim = false, bool requireInboundRoot = false)
     {
         var startNano = TimeConversion.DateTimeToUnixNano(query.Start);
         var endNano = TimeConversion.DateTimeToUnixNano(query.End);
@@ -543,6 +625,10 @@ public abstract class TraceReadRepositoryBase : DapperReadRepository, ITraceRead
                 tag.Negate
                     ? !t.Spans.Any(s => MatchesTag(s, tag))
                     : t.Spans.Any(s => MatchesTag(s, tag))))
+            // Inbound-request filter (see the requireInboundRoot doc comment above): keyed off the
+            // trace's true root span, not any per-service anchor, so it reflects what actually
+            // started the trace regardless of a service filter applied later.
+            .Where(t => !requireInboundRoot || t.RootSpan.Kind is "SERVER" or "CONSUMER")
             .ToList();
 
         // Per-service display values: when a service filter is active, the row represents that
@@ -850,6 +936,7 @@ public abstract class TraceReadRepositoryBase : DapperReadRepository, ITraceRead
                 s.status_code           AS StatusCode,
                 s.name                  AS Name,
                 s.parent_span_id        AS ParentSpanId,
+                s.kind                  AS Kind,
                 s.attributes_json       AS SpanAttributesJson,
                 r.attributes_json       AS ResourceAttributesJson
             FROM spans s
@@ -871,6 +958,7 @@ public abstract class TraceReadRepositoryBase : DapperReadRepository, ITraceRead
                 StatusCode = r.StatusCode,
                 Name = r.Name,
                 ParentSpanId = r.ParentSpanId,
+                Kind = r.Kind,
                 ServiceName = ExtractServiceName(resourceAttributes),
                 SpanAttributes = DeserializeAttributes(r.SpanAttributesJson),
                 ResourceAttributes = resourceAttributes
@@ -903,6 +991,7 @@ public abstract class TraceReadRepositoryBase : DapperReadRepository, ITraceRead
                 s.status_code           AS StatusCode,
                 s.name                  AS Name,
                 s.parent_span_id        AS ParentSpanId,
+                s.kind                  AS Kind,
                 s.resource_id           AS ResourceId
             FROM spans s
             JOIN resources r ON s.resource_id = r.id
@@ -934,6 +1023,7 @@ public abstract class TraceReadRepositoryBase : DapperReadRepository, ITraceRead
             StatusCode = r.StatusCode,
             Name = r.Name,
             ParentSpanId = r.ParentSpanId,
+            Kind = r.Kind,
             ServiceName = serviceByResourceId.GetValueOrDefault(r.ResourceId),
         }).ToList();
     }
@@ -977,7 +1067,10 @@ public abstract class TraceReadRepositoryBase : DapperReadRepository, ITraceRead
         ServiceName = serviceName,
         RootOperationName = anchorSpan.Name,
         RootSpanAttributes = anchorSpan.SpanAttributes,
-        TraceDuration = TimeConversion.UnixNanoToDateTime(displayEndNano) - TimeConversion.UnixNanoToDateTime(displayStartNano),
+        // Computed from the raw nanosecond values, not by subtracting two already-converted
+        // DateTimes (which truncates twice) — matches GetOperationStatsAsync's precedent and
+        // fixes the trace-latency-p50 plan's Cause B (p50 pinned at exactly 0µs).
+        TraceDuration = TimeSpan.FromTicks((displayEndNano - displayStartNano) / 100),
         DisplaySpanIdHex = anchorSpan.SpanId,
     };
 
@@ -994,6 +1087,7 @@ public abstract class TraceReadRepositoryBase : DapperReadRepository, ITraceRead
         public string StatusCode { get; set; } = null!;
         public string Name { get; set; } = null!;
         public string? ParentSpanId { get; set; }
+        public string Kind { get; set; } = "UNSPECIFIED";
 
         /// <summary>
         /// Resolved once at fetch time, by both the full and slim paths, so callers never have to
@@ -1018,6 +1112,7 @@ public abstract class TraceReadRepositoryBase : DapperReadRepository, ITraceRead
         public string StatusCode { get; set; } = null!;
         public string Name { get; set; } = null!;
         public string? ParentSpanId { get; set; }
+        public string Kind { get; set; } = "UNSPECIFIED";
         public string? SpanAttributesJson { get; set; }
         public string? ResourceAttributesJson { get; set; }
     }
@@ -1031,6 +1126,7 @@ public abstract class TraceReadRepositoryBase : DapperReadRepository, ITraceRead
         public string StatusCode { get; set; } = null!;
         public string Name { get; set; } = null!;
         public string? ParentSpanId { get; set; }
+        public string Kind { get; set; } = "UNSPECIFIED";
         public long ResourceId { get; set; }
     }
 

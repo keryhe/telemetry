@@ -523,77 +523,6 @@ export function makeGrid(start: Date, end: Date, bucketCount: number): number[] 
   return Array.from({ length: bucketCount + 1 }, (_, i) => s + i * step);
 }
 
-export interface LatencyBucket {
-  xStart: number; xEnd: number; xCenter: number;   // epoch ms, time-column bounds
-  yStart: number; yEnd: number; yCenter: number;   // ms, duration-row bounds (log-spaced)
-  count: number;
-  errorCount: number;
-  errorRatio: number;                              // errorCount / count
-  traceIds: string[];
-}
-
-/**
- * Bins raw {x: startTime, y: durationMs, hasErrors, traceIdHex} points onto a fixed
- * time-column × log-duration-row grid. Time columns are evenly spaced across [start, end]
- * (via makeGrid); duration rows are log-spaced across the observed [minDuration, maxDuration]
- * since durations are right-skewed — many fast traces, a long tail of slow ones. Empty cells
- * are omitted from the result. Bucket x/y center is the grid cell midpoint, not a centroid of
- * the contained points — sufficient for tooltip/zoom purposes.
- */
-export function binLatencyPoints(
-  points: { x: number; y: number; hasErrors: boolean; traceIdHex: string }[],
-  start: Date,
-  end: Date,
-  timeCols = 48,
-  durationRows = 20,
-): LatencyBucket[] {
-  if (!points.length) return [];
-
-  const timeGrid = makeGrid(start, end, timeCols);
-  const yMin = Math.max(1, Math.min(...points.map((p) => p.y)));
-  const yMax = Math.max(yMin * 10, Math.max(...points.map((p) => p.y)));
-  const logMin = Math.log(yMin);
-  const logMax = Math.log(yMax);
-  const logStep = (logMax - logMin) / durationRows;
-
-  const colIndexFor = (x: number): number => {
-    const span = timeGrid[timeGrid.length - 1] - timeGrid[0];
-    if (span <= 0) return 0;
-    const idx = Math.floor(((x - timeGrid[0]) / span) * timeCols);
-    return Math.min(timeCols - 1, Math.max(0, idx));
-  };
-  const rowIndexFor = (y: number): number => {
-    if (y <= yMin) return 0;
-    const idx = Math.floor((Math.log(y) - logMin) / logStep);
-    return Math.min(durationRows - 1, Math.max(0, idx));
-  };
-
-  const buckets = new Map<string, LatencyBucket>();
-  for (const p of points) {
-    const col = colIndexFor(p.x);
-    const row = rowIndexFor(p.y);
-    const key = `${col}:${row}`;
-    let b = buckets.get(key);
-    if (!b) {
-      const xStart = timeGrid[col];
-      const xEnd = timeGrid[col + 1];
-      const yStart = Math.exp(logMin + row * logStep);
-      const yEnd = Math.exp(logMin + (row + 1) * logStep);
-      b = {
-        xStart, xEnd, xCenter: (xStart + xEnd) / 2,
-        yStart, yEnd, yCenter: (yStart + yEnd) / 2,
-        count: 0, errorCount: 0, errorRatio: 0, traceIds: [],
-      };
-      buckets.set(key, b);
-    }
-    b.count++;
-    if (p.hasErrors) b.errorCount++;
-    b.traceIds.push(p.traceIdHex);
-  }
-  for (const b of buckets.values()) b.errorRatio = b.errorCount / b.count;
-  return Array.from(buckets.values());
-}
-
 /**
  * Resamples a [t, v][] series onto `grid` by last-value carry-forward: each grid point takes
  * the most recent sample at or before it. Grid points preceding the first sample are null.
@@ -1070,13 +999,24 @@ function plainNumber(v: number): string {
 }
 
 export function parseDotnetTimespan(ts: string): number {
-  // Handles formats like "00:00:01.234" or "1.00:00:00"
+  // Handles "00:00:01.234" (h:m:s[.fff]) and "1.00:00:00[.fff]" (d.h:m:s[.fff], .NET's format for
+  // a TimeSpan of a day or more). The two are told apart by a '.' in the *hours* slot — the first
+  // ':'-delimited part — not the seconds slot, where a '.' is just a fractional-second separator.
+  // Previously mishandled: "1.00:00:00".split(':')[0] is "1.00", and parseFloat read that whole
+  // "day.hour" pair as 1.00 *hours*, undercounting a multi-day duration by ~24x.
   const parts = ts.split(':');
-  if (parts.length === 3) {
-    const h = parseFloat(parts[0]);
-    const m = parseFloat(parts[1]);
-    const s = parseFloat(parts[2]);
-    return (h * 3600 + m * 60 + s) * 1000;
+  if (parts.length !== 3) return 0;
+
+  let days = 0;
+  let hoursPart = parts[0];
+  const dotIdx = hoursPart.indexOf('.');
+  if (dotIdx >= 0) {
+    days = parseFloat(hoursPart.slice(0, dotIdx));
+    hoursPart = hoursPart.slice(dotIdx + 1);
   }
-  return 0;
+
+  const h = parseFloat(hoursPart);
+  const m = parseFloat(parts[1]);
+  const s = parseFloat(parts[2]);
+  return (days * 86400 + h * 3600 + m * 60 + s) * 1000;
 }

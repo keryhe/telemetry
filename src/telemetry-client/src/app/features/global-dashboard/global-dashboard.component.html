@@ -126,7 +126,7 @@
             </div>
 
             <div class="latency-row">
-              <span class="metric-label">p50 / p95</span>
+              <span class="metric-label" matTooltip="Computed over inbound request traces (server/consumer root spans) only — internal and client-rooted traces are excluded.">p50 / p95</span>
               <span class="latency-values">
                 @if (card.stats.traceCount > 0) {
                   {{ formatDuration(card.stats.p50Ms) }}

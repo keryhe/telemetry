@@ -23,7 +23,7 @@ import { NgxGraphModule } from '@swimlane/ngx-graph';
 import { NgApexchartsModule } from 'ng-apexcharts';
 import type { ApexOptions } from 'ng-apexcharts';
 
-import { TracesApiService } from '../../../core/services/api/traces-api.service';
+import { TracesApiService, TraceLatencyBucket } from '../../../core/services/api/traces-api.service';
 import { ResourcesApiService } from '../../../core/services/api/resources-api.service';
 import { TimeRangeService } from '../../../core/services/time-range.service';
 import { ThemeService } from '../../../core/services/theme.service';
@@ -31,7 +31,7 @@ import { TraceInfo, ServiceDependency, OperationStats } from '../../../core/mode
 import { StatCardComponent } from '../../../shared/components/stat-card/stat-card.component';
 import { EmptyStateComponent } from '../../../shared/components/empty-state/empty-state.component';
 import { PageHeaderComponent } from '../../../shared/components/page-header/page-header.component';
-import { TimeBucket, formatDuration, parseDotnetTimespan, timeRangeZoom, binLatencyPoints } from '../../../shared/utils/chart.utils';
+import { TimeBucket, formatDuration, parseDotnetTimespan, timeRangeZoom } from '../../../shared/utils/chart.utils';
 import { parseSearchQuery, ParsedSearchQuery, SearchTerm } from '../../../shared/utils/search-query.parser';
 import { TraceSearchHelpDialogComponent } from '../trace-search-help-dialog/trace-search-help-dialog.component';
 import { loadPageState, savePageState } from '../../../shared/utils/page-state';
@@ -450,15 +450,19 @@ export class TraceListComponent {
     const filters = this.serverFilters();
     forkJoin({
       page: this.api.searchTraces({ start, end, ...filters, limit: OVERVIEW_CAP, offset: 0 }),
-      histogram: this.api.getTraceHistogram({ start, end, ...filters }),
+      // One scan serving both charts (trace-latency-p50 plan, Phase 3): the volume histogram and
+      // the latency bucket grid. Replaces the old getTraceHistogram() + client-side
+      // binLatencyPoints(overview()) pairing, which bubbled only the 1000-row capped page — the
+      // most recent few minutes of any wide range, not the actual distribution.
+      overview: this.api.getTraceOverview({ start, end, ...filters }),
     }).subscribe({
-      next: ({ page, histogram }) => {
+      next: ({ page, overview }) => {
         this.overview.set(page.items);
         this.total.set(page.total);
         this.capped.set(page.total > page.items.length);
-        this.histogram.set(histogram);
-        this.buildChart(start, end, histogram);
-        this.buildLatencyBubbles(start, end);
+        this.histogram.set(overview.buckets);
+        this.buildChart(start, end, overview.buckets);
+        this.buildLatencyBubbles(overview.latencyBuckets ?? []);
         this.loading.set(false);
       },
       error: () => this.loading.set(false),
@@ -519,29 +523,29 @@ export class TraceListComponent {
   }
 
   /**
-   * Jaeger-style latency chart: traces binned onto a time × log-duration grid, rendered as
-   * bubbles sized by trace count and colored by error ratio (see ERROR_TIERS). Clicking a
-   * single-trace bubble opens it; clicking a multi-trace bubble zooms into its time span.
+   * Jaeger-style latency chart: server-computed buckets (trace-latency-p50 plan, Phase 3) on a
+   * time × log-duration grid, rendered as bubbles sized by trace count and colored by error ratio
+   * (see ERROR_TIERS). Clicking a single-trace bubble opens it; clicking a multi-trace bubble
+   * zooms into its time span. Unlike the former client-side `binLatencyPoints`, these buckets
+   * cover the whole requested range regardless of trace volume — they're not derived from the
+   * 1000-row-capped `overview()` page.
    */
-  private buildLatencyBubbles(start: Date, end: Date): void {
+  private buildLatencyBubbles(buckets: TraceLatencyBucket[]): void {
     const isDark = this.theme.isDark();
-    const points = this.overview().map((t) => ({
-      x: new Date(t.traceStartTime).getTime(),
-      y: parseDotnetTimespan(t.traceDuration),
-      hasErrors: t.hasErrors,
-      traceIdHex: t.traceIdHex,
-    }));
-    const buckets = binLatencyPoints(points, start, end);
+    const { start, end } = this.timeRange.range();
 
     const tierSeries: { x: number; y: number; z: number; count: number; errorCount: number;
-      errorRatio: number; xStart: number; xEnd: number; yStart: number; yEnd: number; traceIds: string[] }[][] =
+      errorRatio: number; xStart: number; xEnd: number; yStart: number; yEnd: number; sampleTraceIdHex?: string }[][] =
       ERROR_TIERS.map(() => []);
     for (const b of buckets) {
-      const tierIndex = ERROR_TIERS.findIndex((t) => b.errorRatio <= t.max);
+      const errorRatio = b.errorCount / b.count;
+      const tierIndex = ERROR_TIERS.findIndex((t) => errorRatio <= t.max);
+      const xStart = b.xStart.getTime();
+      const xEnd = b.xEnd.getTime();
       tierSeries[tierIndex < 0 ? ERROR_TIERS.length - 1 : tierIndex].push({
-        x: b.xCenter, y: b.yCenter, z: Math.sqrt(b.count),
-        count: b.count, errorCount: b.errorCount, errorRatio: b.errorRatio,
-        xStart: b.xStart, xEnd: b.xEnd, yStart: b.yStart, yEnd: b.yEnd, traceIds: b.traceIds,
+        x: (xStart + xEnd) / 2, y: (b.yStartMs + b.yEndMs) / 2, z: Math.sqrt(b.count),
+        count: b.count, errorCount: b.errorCount, errorRatio,
+        xStart, xEnd, yStart: b.yStartMs, yEnd: b.yEndMs, sampleTraceIdHex: b.sampleTraceIdHex,
       });
     }
 
@@ -587,11 +591,11 @@ export class TraceListComponent {
 
   /** Bubble-click → open a single trace, or zoom into a multi-trace bucket's time span. */
   private onBubbleClick(cfg: { seriesIndex: number; dataPointIndex: number; w: unknown }): void {
-    const w = cfg.w as { config: { series: { data: { count: number; traceIds: string[]; xStart: number; xEnd: number }[] }[] } };
+    const w = cfg.w as { config: { series: { data: { count: number; sampleTraceIdHex?: string; xStart: number; xEnd: number }[] }[] } };
     const p = w?.config?.series?.[cfg.seriesIndex]?.data?.[cfg.dataPointIndex];
     if (!p) return;
     this.zone.run(() => {
-      if (p.count === 1) this.navigate(p.traceIds[0]);
+      if (p.count === 1 && p.sampleTraceIdHex) this.navigate(p.sampleTraceIdHex);
       else this.timeRange.setCustom(new Date(p.xStart), new Date(p.xEnd));
     });
   }

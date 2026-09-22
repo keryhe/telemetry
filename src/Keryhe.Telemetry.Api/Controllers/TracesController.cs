@@ -116,10 +116,11 @@ public class TracesController : ControllerBase
         return Ok(result);
     }
 
-    // GET /api/traces/overview?start=&end=&bucketCount=&mode=all|errors|slow&service=&operation=&minDurationMs=&maxDurationMs=&tag=key:value
-    // Dashboard overview: the same volume histogram as /histogram plus per-service RED stats,
-    // from one scan instead of two. Kept as its own endpoint (not a flag on /histogram) so the
-    // traces list page's use of /histogram is unaffected and never pays for stats it doesn't read.
+    // GET /api/traces/overview?start=&end=&bucketCount=&mode=all|errors|slow&service=&operation=&minDurationMs=&maxDurationMs=&tag=key:value&latencyTimeCols=&latencyDurationRows=
+    // Dashboard overview: the same volume histogram as /histogram plus per-service RED stats and
+    // the latency bucket grid (trace-latency-p50 plan, Phase 3), from one scan instead of several.
+    // Kept as its own endpoint (not a flag on /histogram) so the traces list page's use of
+    // /histogram is unaffected and never pays for stats it doesn't read.
     [HttpGet("overview")]
     public async Task<ActionResult<TraceOverview>> GetTraceOverview(
         [FromQuery] DateTime start,
@@ -131,6 +132,8 @@ public class TracesController : ControllerBase
         [FromQuery] double? minDurationMs = null,
         [FromQuery] double? maxDurationMs = null,
         [FromQuery(Name = "tag")] string[]? tag = null,
+        [FromQuery] int latencyTimeCols = 48,
+        [FromQuery] int latencyDurationRows = 20,
         CancellationToken ct = default)
     {
         var tags = (tag ?? Array.Empty<string>())
@@ -149,7 +152,9 @@ public class TracesController : ControllerBase
             Operation = operation,
             MinDurationMs = minDurationMs,
             MaxDurationMs = maxDurationMs,
-            Tags = tags
+            Tags = tags,
+            LatencyTimeCols = latencyTimeCols,
+            LatencyDurationRows = latencyDurationRows
         }, ct);
         return Ok(result);
     }

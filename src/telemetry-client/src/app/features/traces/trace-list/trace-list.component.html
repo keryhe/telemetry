@@ -99,13 +99,16 @@
         <mat-card class="chart-card">
           <mat-card-content>
             <div class="chart-header">
-              <div class="chart-title">{{ chartView() === 'latency' ? 'Trace Latency' : 'Trace Volume' }}</div>
+              <div class="chart-title"
+                   matTooltip="Computed over inbound request traces (server/consumer root spans) only — internal and client-rooted traces are excluded.">
+                {{ chartView() === 'latency' ? 'Trace Latency (request spans)' : 'Trace Volume (request spans)' }}
+              </div>
               <mat-button-toggle-group class="chart-toggle" [value]="chartView()"
                                        (change)="setChartView($event.value)">
-                <mat-button-toggle value="volume" matTooltip="Volume over time">
+                <mat-button-toggle value="volume" matTooltip="Volume over time (inbound request traces)">
                   <mat-icon>area_chart</mat-icon>
                 </mat-button-toggle>
-                <mat-button-toggle value="latency" matTooltip="Duration vs time, bucketed by volume/errors (click to zoom or open)">
+                <mat-button-toggle value="latency" matTooltip="Duration vs time for inbound request traces, bucketed by volume/errors (click to zoom or open)">
                   <mat-icon>bubble_chart</mat-icon>
                 </mat-button-toggle>
               </mat-button-toggle-group>
