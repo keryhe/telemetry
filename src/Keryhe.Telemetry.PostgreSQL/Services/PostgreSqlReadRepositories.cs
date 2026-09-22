@@ -1,6 +1,7 @@
 using System.Data.Common;
 using Dapper;
 using Npgsql;
+using Microsoft.Extensions.Configuration;
 using Keryhe.Telemetry.Core;
 using Keryhe.Telemetry.Core.Data;
 using Keryhe.Telemetry.Core.Data.Read;
@@ -23,8 +24,8 @@ public class PostgreSqlTraceReadRepository(NpgsqlDataSource dataSource, ITenantC
     protected override string SpanIdInPredicate => "s.span_id = ANY(@ids)";
 }
 
-public class PostgreSqlMetricReadRepository(NpgsqlDataSource dataSource, ITenantContext tenantContext)
-    : MetricReadRepositoryBase(tenantContext)
+public class PostgreSqlMetricReadRepository(NpgsqlDataSource dataSource, ITenantContext tenantContext, IConfiguration configuration)
+    : MetricReadRepositoryBase(tenantContext, configuration)
 {
     protected override async Task<DbConnection> OpenConnectionAsync(CancellationToken cancellationToken)
         => await dataSource.OpenConnectionAsync(cancellationToken);

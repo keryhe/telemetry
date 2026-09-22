@@ -43,10 +43,10 @@ export function getTypeColor(type: MetricType): string {
 export interface MetricInfo {
   id: number;
   name: string;
-  description: string | null;
-  unit: string | null;
+  description?: string;
+  unit?: string;
   type: MetricType;
-  serviceName: string | null;
+  serviceName?: string;
   firstSeen: string;
   lastSeen: string;
   dataPointCount: number;
@@ -64,40 +64,39 @@ export interface MetricsSummary {
 }
 
 export interface MetricDataPoint {
-  startTimestamp: string | null;
+  startTimestamp?: string;
   timestamp: string;
-  doubleValue: number | null;
-  intValue: number | null;
-  count: number | null;
-  sum: number | null;
-  min: number | null;
-  max: number | null;
+  doubleValue?: number;
+  intValue?: number;
+  count?: number;
+  sum?: number;
+  min?: number;
+  max?: number;
   flags: number;
-  bucketCounts: number[] | null;
-  bucketBounds: number[] | null;
+  bucketCounts?: number[];
+  bucketBounds?: number[];
   // Exponential histogram fields
-  scale: number | null;
-  zeroCount: number | null;
-  positiveOffset: number | null;
-  positiveBucketCounts: number[] | null;
-  negativeOffset: number | null;
-  negativeBucketCounts: number[] | null;
+  scale?: number;
+  zeroCount?: number;
+  positiveOffset?: number;
+  positiveBucketCounts?: number[];
+  negativeOffset?: number;
+  negativeBucketCounts?: number[];
   // Summary fields
-  quantiles: number[] | null;
-  quantileValues: number[] | null;
-  attributes: Record<string, unknown> | null;
-  exemplars: ExemplarModel[] | null;
-  aggregationTemporality: AggregationTemporality | null;
-  isMonotonic: boolean | null;
+  quantiles?: number[];
+  quantileValues?: number[];
+  attributes?: Record<string, unknown>;
+  aggregationTemporality?: AggregationTemporality;
+  isMonotonic?: boolean;
 }
 
 export interface ExemplarModel {
   timeUnixNano: number;
-  valueDouble: number | null;
-  valueInt: number | null;
-  spanIdHex: string | null;
-  traceIdHex: string | null;
-  filteredAttributes: Record<string, unknown> | null;
+  valueDouble?: number;
+  valueInt?: number;
+  spanIdHex?: string;
+  traceIdHex?: string;
+  filteredAttributes?: Record<string, unknown>;
 }
 
 export interface MetricSeries {
@@ -105,6 +104,9 @@ export interface MetricSeries {
   type: MetricType;
   labels: Record<string, string>;
   points: MetricDataPoint[];
+  /** True when the server-side row cap was hit for at least one underlying metric row — the
+   *  requested range may hold more data than shown. */
+  truncated?: boolean;
 }
 
 export interface NamedMetricSeries {
@@ -119,6 +121,9 @@ export interface MultiSeriesMetricData {
   name: string;
   type: MetricType;
   series: NamedMetricSeries[];
+  /** True when the server-side row cap was hit for at least one underlying metric row — the
+   *  requested range may hold more data than shown. */
+  truncated?: boolean;
 }
 
 export interface MetricSeriesParams {
@@ -127,4 +132,27 @@ export interface MetricSeriesParams {
   end?: Date;
   metricId?: number;
   labelFilters?: Record<string, string>;
+}
+
+/** One exemplar plus the identity of the data point and series it was sampled from. Served by the
+ *  dedicated /metrics/exemplars endpoint, called only when the Exemplars tab is opened. */
+export interface MetricExemplar {
+  exemplar: ExemplarModel;
+  seriesName: string;
+  serviceName: string;
+  labels: Record<string, string>;
+  pointTimestamp: string;
+  /** Owning point's observation count — distributions only; absent for gauge/sum. */
+  pointCount?: number;
+  /** Owning point's value — gauge/sum only; absent for distributions. */
+  pointDoubleValue?: number;
+  pointIntValue?: number;
+}
+
+export interface MetricExemplarPage {
+  name: string;
+  type: MetricType;
+  exemplars: MetricExemplar[];
+  /** True when the scan hit its cap: more exemplars exist beyond those returned. */
+  hasMore: boolean;
 }

@@ -97,6 +97,28 @@ public class MetricsController : ControllerBase
         return Ok(data);
     }
 
+    // GET /api/metrics/exemplars?metricName=&start=&end=&metricId=&labelFilter=key:value&limit=500
+    [HttpGet("exemplars")]
+    public async Task<ActionResult<MetricExemplarPage>> GetMetricExemplars(
+        [FromQuery] string metricName,
+        [FromQuery] DateTime? start,
+        [FromQuery] DateTime? end,
+        [FromQuery] long? metricId,
+        [FromQuery(Name = "labelFilter")] List<string>? labelFilter,
+        [FromQuery] int limit = 500,
+        CancellationToken ct = default)
+    {
+        if (string.IsNullOrWhiteSpace(metricName))
+            return BadRequest("metricName query parameter is required.");
+
+        var filters = ParseLabelFilters(labelFilter);
+        var clampedLimit = Math.Clamp(limit, 1, 2000);
+        var page = await _metrics.GetMetricExemplarsAsync(metricName, start, end, metricId, filters, clampedLimit, ct);
+        if (page == null)
+            return NotFound();
+        return Ok(page);
+    }
+
     private static Dictionary<string, string>? ParseLabelFilters(List<string>? labelFilter)
     {
         if (labelFilter == null || labelFilter.Count == 0)

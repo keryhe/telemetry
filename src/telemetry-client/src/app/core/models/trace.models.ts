@@ -20,58 +20,58 @@ export interface TraceInfo {
   traceEndTime: string;
   /** Whole-trace duration, or the filtered service's own duration when a service filter matched this trace. */
   traceDuration: string;
-  serviceName: string | null;
-  rootOperationName: string | null;
+  serviceName?: string;
+  rootOperationName?: string;
   hasErrors: boolean;
   services: string[];
-  rootSpanAttributes: Record<string, unknown> | null;
+  rootSpanAttributes?: Record<string, unknown>;
   /** The trace's true root span, or the filtered service's entry span when a service filter matched this trace. Used to deep-link into trace-detail. */
-  displaySpanIdHex: string | null;
+  displaySpanIdHex?: string;
 }
 
 export interface SpanModel {
   traceIdHex: string;
   spanIdHex: string;
-  parentSpanIdHex: string | null;
+  parentSpanIdHex?: string;
   name: string;
   kind: SpanKind;
   startTimeUnixNano: number;
   endTimeUnixNano: number;
   statusCode: SpanStatusCode;
-  statusMessage: string | null;
-  traceState: string | null;
+  statusMessage?: string;
+  traceState?: string;
   flags: number;
   droppedAttributesCount: number;
   droppedEventsCount: number;
   droppedLinksCount: number;
-  attributes: Record<string, unknown> | null;
+  attributes?: Record<string, unknown>;
   events: SpanEventModel[];
   links: SpanLinkModel[];
-  resource: ResourceModel | null;
-  instrumentationScope: InstrumentationScopeModel | null;
+  resource?: ResourceModel;
+  instrumentationScope?: InstrumentationScopeModel;
 }
 
 export interface SpanEventModel {
   name: string;
   timeUnixNano: number;
-  attributes: Record<string, unknown> | null;
+  attributes?: Record<string, unknown>;
 }
 
 export interface SpanLinkModel {
   linkedTraceIdHex: string;
   linkedSpanIdHex: string;
   flags: number;
-  attributes: Record<string, unknown> | null;
+  attributes?: Record<string, unknown>;
 }
 
 export interface ResourceModel {
-  schemaUrl: string | null;
+  schemaUrl?: string;
   attributes: Record<string, unknown>;
 }
 
 export interface InstrumentationScopeModel {
   name: string;
-  version: string | null;
+  version?: string;
   attributes: Record<string, unknown>;
 }
 

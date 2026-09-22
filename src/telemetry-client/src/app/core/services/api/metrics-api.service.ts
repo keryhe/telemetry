@@ -3,6 +3,7 @@ import { HttpClient, HttpParams } from '@angular/common/http';
 import { Observable } from 'rxjs';
 import { APP_CONFIG } from '../../config/app-config';
 import {
+  MetricExemplarPage,
   MetricInfo,
   MetricSeries,
   MetricSeriesParams,
@@ -62,5 +63,19 @@ export class MetricsApiService {
       }
     }
     return this.http.get<MultiSeriesMetricData>(`${this.base}/series-grouped`, { params });
+  }
+
+  getExemplars(p: MetricSeriesParams & { limit?: number }): Observable<MetricExemplarPage> {
+    let params = new HttpParams().set('metricName', p.metricName);
+    if (p.start) params = params.set('start', p.start.toISOString());
+    if (p.end) params = params.set('end', p.end.toISOString());
+    if (p.metricId != null) params = params.set('metricId', p.metricId);
+    if (p.limit != null) params = params.set('limit', p.limit);
+    if (p.labelFilters) {
+      for (const [k, v] of Object.entries(p.labelFilters)) {
+        params = params.append('labelFilter', `${k}:${v}`);
+      }
+    }
+    return this.http.get<MetricExemplarPage>(`${this.base}/exemplars`, { params });
   }
 }

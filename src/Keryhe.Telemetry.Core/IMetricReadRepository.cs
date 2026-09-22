@@ -30,6 +30,15 @@ public interface IMetricReadRepository
         Dictionary<string, string>? labelFilters = null,
         CancellationToken cancellationToken = default);
 
+    /// <summary>
+    /// The newest exemplars for a metric, independent of the series reads. Returns an empty page for
+    /// SUMMARY, whose table has no exemplars_json column (OTLP declares no exemplars on Summary).
+    /// </summary>
+    Task<MetricExemplarPage?> GetMetricExemplarsAsync(string metricName,
+        DateTime? startTime = null, DateTime? endTime = null, long? metricId = null,
+        Dictionary<string, string>? labelFilters = null, int limit = 500,
+        CancellationToken cancellationToken = default);
+
     // Aggregation and analysis
     Task<Dictionary<string, double>> GetLatestMetricValuesAsync(string serviceName, CancellationToken cancellationToken = default);
     Task<Dictionary<string, int>> GetMetricCountsByTypeAsync(string? serviceName = null, CancellationToken cancellationToken = default);

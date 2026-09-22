@@ -1,6 +1,7 @@
 using System.Data.Common;
 using System.Text.Json;
 using Dapper;
+using Microsoft.Extensions.Configuration;
 using Keryhe.Telemetry.Core;
 using Keryhe.Telemetry.Core.Models;
 
@@ -14,7 +15,22 @@ namespace Keryhe.Telemetry.Core.Data.Read;
 /// </summary>
 public abstract class MetricReadRepositoryBase : DapperReadRepository, IMetricReadRepository
 {
-    protected MetricReadRepositoryBase(ITenantContext tenantContext) : base(tenantContext) { }
+    /// <summary>
+    /// Hard cap on data points read per metric row per series query (metric-detail-performance
+    /// plan §6.1). Before this, a wide time range (24h/7d) could scan and return an unbounded
+    /// number of rows — nothing server-side stopped it. Truncation is signaled honestly via
+    /// <see cref="MetricSeries.Truncated"/> / <see cref="MultiSeriesMetricData.Truncated"/> rather
+    /// than silently dropping data: the client shows a "narrow the range" banner instead of
+    /// rendering a chart that quietly covers less than the requested window.
+    /// </summary>
+    private readonly int _maxDataPointsPerQuery;
+
+    protected MetricReadRepositoryBase(ITenantContext tenantContext, IConfiguration configuration) : base(tenantContext)
+    {
+        _maxDataPointsPerQuery = int.TryParse(configuration["Metrics:MaxDataPointsPerQuery"], out var configured)
+            ? configured
+            : 50_000;
+    }
 
     private const string MetricSelect = """
         SELECT m.id AS Id, m.name AS Name, m.description AS Description, m.unit AS Unit,
@@ -156,7 +172,9 @@ public abstract class MetricReadRepositoryBase : DapperReadRepository, IMetricRe
         var metricIds = metrics.Select(m => m.Id).ToList();
 
         var series = new MetricSeries { Name = metricName, Type = primaryType };
-        series.Points = await GetDataPointsAsync(conn, primaryType, metricIds, labelFilters, startTime, endTime, cancellationToken);
+        var (points, truncated) = await GetDataPointsAsync(conn, primaryType, metricIds, labelFilters, startTime, endTime, cancellationToken);
+        series.Points = points;
+        series.Truncated = truncated;
         return series;
     }
 
@@ -185,7 +203,8 @@ public abstract class MetricReadRepositoryBase : DapperReadRepository, IMetricRe
         {
             var serviceName = ExtractServiceName(DeserializeAttributes(metric.ResourceAttributesJson)) ?? "unknown";
             var type = Enum.Parse<MetricType>(metric.Type);
-            var points = await GetDataPointsAsync(conn, type, new List<long> { metric.Id }, labelFilters, startTime, endTime, cancellationToken);
+            var (points, truncated) = await GetDataPointsAsync(conn, type, new List<long> { metric.Id }, labelFilters, startTime, endTime, cancellationToken);
+            if (truncated) result.Truncated = true;
 
             foreach (var point in points)
             {
@@ -211,6 +230,161 @@ public abstract class MetricReadRepositoryBase : DapperReadRepository, IMetricRe
 
         result.Series = groups.Values.OrderBy(s => s.SeriesName, StringComparer.Ordinal).ToList();
         return result;
+    }
+
+    /// <summary>
+    /// The newest exemplars for a metric, scanned independently of the series reads (see the
+    /// metric-detail-performance plan §4) — a realistic histogram range carries tens of thousands
+    /// of exemplars, which is what made the combined series+exemplars payload freeze the page.
+    /// Only rows that actually carry at least one exemplar are scanned
+    /// (<c>exemplars_json IS NOT NULL</c>), newest first, up to a row cap; label filtering happens
+    /// in memory afterward, matching every other read path in this repository, so a narrow filter
+    /// can under-fill the page (mitigated by widening the scan — see <paramref name="labelFilters"/>
+    /// below). This makes the result a sampling aid, not an exhaustive export.
+    /// </summary>
+    public async Task<MetricExemplarPage?> GetMetricExemplarsAsync(string metricName,
+        DateTime? startTime = null, DateTime? endTime = null, long? metricId = null,
+        Dictionary<string, string>? labelFilters = null, int limit = 500,
+        CancellationToken cancellationToken = default)
+    {
+        if (string.IsNullOrEmpty(metricName))
+            throw new ArgumentException("Metric name cannot be null or empty", nameof(metricName));
+
+        await using var conn = await OpenConnectionAsync(cancellationToken);
+
+        var sql = MetricSelect + " AND m.name = @name";
+        if (metricId.HasValue) sql += " AND m.id = @metricId";
+        var metrics = (await conn.QueryAsync<MetricRow>(new CommandDefinition(
+            sql, new { tenantId = TenantId, name = metricName, metricId }, cancellationToken: cancellationToken))).ToList();
+
+        if (metrics.Count == 0) return null;
+
+        var result = new MetricExemplarPage { Name = metricName, Type = Enum.Parse<MetricType>(metrics[0].Type) };
+
+        // SUMMARY has no exemplars_json column: OTLP declares no exemplars on the Summary point type.
+        if (result.Type == MetricType.SUMMARY)
+            return result;
+
+        // A label filter applies after the row cap, so a narrow one can under-fill the page unless
+        // the scan itself is widened. This is an approximation, documented on the client's hint text.
+        var scanLimit = labelFilters is { Count: > 0 } ? limit * 4 : limit;
+
+        var flattened = new List<MetricExemplar>();
+        var anyTableHitCap = false;
+
+        foreach (var group in metrics.GroupBy(m => Enum.Parse<MetricType>(m.Type)))
+        {
+            if (group.Key == MetricType.SUMMARY) continue; // mixed-type metric name edge case.
+
+            var serviceNameByMetricId = group.ToDictionary(m => m.Id,
+                m => ExtractServiceName(DeserializeAttributes(m.ResourceAttributesJson)) ?? "unknown");
+            var ids = group.Select(m => m.Id).ToList();
+
+            var (rows, rowsReturned) = await ScanExemplarRowsAsync(conn, group.Key, ids, startTime, endTime, scanLimit, cancellationToken);
+            if (rowsReturned == scanLimit) anyTableHitCap = true;
+
+            foreach (var row in rows)
+            {
+                if (labelFilters is { Count: > 0 } && !MatchesLabelFilters(row.Attributes, labelFilters))
+                    continue;
+
+                var serviceName = serviceNameByMetricId[row.MetricId];
+                var labels = ToLabelDictionary(row.Attributes);
+                var seriesName = BuildSeriesDisplayName(serviceName, labels);
+
+                foreach (var exemplar in row.Exemplars)
+                {
+                    flattened.Add(new MetricExemplar
+                    {
+                        Exemplar = exemplar,
+                        SeriesName = seriesName,
+                        ServiceName = serviceName,
+                        Labels = labels,
+                        PointTimestamp = row.Timestamp,
+                        PointCount = row.Count,
+                        PointDoubleValue = row.ValueDouble,
+                        PointIntValue = row.ValueInt
+                    });
+                }
+            }
+        }
+
+        flattened.Sort((a, b) => b.Exemplar.TimeUnixNano.CompareTo(a.Exemplar.TimeUnixNano));
+        result.HasMore = anyTableHitCap || flattened.Count > limit;
+        result.Exemplars = flattened.Take(limit).ToList();
+        return result;
+    }
+
+    /// <summary>Dispatches to the per-type exemplar scan; SUMMARY is filtered out by the caller.</summary>
+    private Task<(List<ExemplarScanRow> Rows, int RowsReturned)> ScanExemplarRowsAsync(DbConnection conn,
+        MetricType type, IList<long> metricIds, DateTime? startTime, DateTime? endTime, int scanLimit, CancellationToken ct) => type switch
+    {
+        MetricType.GAUGE => ScanScalarExemplarsAsync(conn, "gauge_data_points", metricIds, startTime, endTime, scanLimit, ct),
+        MetricType.SUM => ScanScalarExemplarsAsync(conn, "sum_data_points", metricIds, startTime, endTime, scanLimit, ct),
+        MetricType.HISTOGRAM => ScanCountExemplarsAsync(conn, "histogram_data_points", metricIds, startTime, endTime, scanLimit, ct),
+        MetricType.EXPONENTIAL_HISTOGRAM => ScanCountExemplarsAsync(conn, "exponential_histogram_data_points", metricIds, startTime, endTime, scanLimit, ct),
+        _ => Task.FromResult((new List<ExemplarScanRow>(), 0))
+    };
+
+    /// <summary>Exemplar scan for gauge/sum: the point's own value is a double or int.</summary>
+    private async Task<(List<ExemplarScanRow>, int)> ScanScalarExemplarsAsync(DbConnection conn, string table,
+        IList<long> metricIds, DateTime? startTime, DateTime? endTime, int scanLimit, CancellationToken ct)
+    {
+        var (timeClause, tp) = TimeRange(startTime, endTime);
+        var rows = (await conn.QueryAsync<ExemplarScalarRow>(new CommandDefinition($"""
+            SELECT dp.metric_id AS MetricId, dp.time_unix_nano AS TimeUnixNano,
+                   dp.value_double AS ValueDouble, dp.value_int AS ValueInt,
+                   dp.attributes_json AS AttributesJson, dp.exemplars_json AS ExemplarsJson
+            FROM {table} dp
+            WHERE dp.metric_id IN ({IdInList(metricIds)})
+              AND dp.exemplars_json IS NOT NULL
+              {timeClause}
+            ORDER BY dp.time_unix_nano DESC
+            {PagingClause}
+            """, Merge(new { limit = scanLimit, offset = 0 }, tp), cancellationToken: ct))).ToList();
+
+        var scanRows = rows.Select(r => new ExemplarScanRow
+        {
+            MetricId = r.MetricId,
+            Timestamp = TimeConversion.UnixNanoToDateTime(r.TimeUnixNano),
+            ValueDouble = r.ValueDouble,
+            ValueInt = r.ValueInt,
+            Count = null,
+            Attributes = DeserializeAttributes(r.AttributesJson),
+            Exemplars = DeserializeExemplars(r.ExemplarsJson) ?? new List<ExemplarModel>()
+        }).ToList();
+
+        return (scanRows, rows.Count);
+    }
+
+    /// <summary>Exemplar scan for histogram/exp-histogram: the point's own "value" is its observation count.</summary>
+    private async Task<(List<ExemplarScanRow>, int)> ScanCountExemplarsAsync(DbConnection conn, string table,
+        IList<long> metricIds, DateTime? startTime, DateTime? endTime, int scanLimit, CancellationToken ct)
+    {
+        var (timeClause, tp) = TimeRange(startTime, endTime);
+        var rows = (await conn.QueryAsync<ExemplarCountRow>(new CommandDefinition($"""
+            SELECT dp.metric_id AS MetricId, dp.time_unix_nano AS TimeUnixNano, dp.count AS Cnt,
+                   dp.attributes_json AS AttributesJson, dp.exemplars_json AS ExemplarsJson
+            FROM {table} dp
+            WHERE dp.metric_id IN ({IdInList(metricIds)})
+              AND dp.exemplars_json IS NOT NULL
+              {timeClause}
+            ORDER BY dp.time_unix_nano DESC
+            {PagingClause}
+            """, Merge(new { limit = scanLimit, offset = 0 }, tp), cancellationToken: ct))).ToList();
+
+        var scanRows = rows.Select(r => new ExemplarScanRow
+        {
+            MetricId = r.MetricId,
+            Timestamp = TimeConversion.UnixNanoToDateTime(r.TimeUnixNano),
+            ValueDouble = null,
+            ValueInt = null,
+            Count = r.Cnt,
+            Attributes = DeserializeAttributes(r.AttributesJson),
+            Exemplars = DeserializeExemplars(r.ExemplarsJson) ?? new List<ExemplarModel>()
+        }).ToList();
+
+        return (scanRows, rows.Count);
     }
 
     public async Task<List<MetricSeries>> GetMultipleMetricSeriesAsync(List<string> metricNames,
@@ -349,19 +523,16 @@ public abstract class MetricReadRepositoryBase : DapperReadRepository, IMetricRe
     // DATA POINT FETCH
     // =========================================================================
 
-    private async Task<List<MetricDataPoint>> GetDataPointsAsync(DbConnection conn, MetricType type, IList<long> metricIds,
-        Dictionary<string, string>? labelFilters, DateTime? startTime, DateTime? endTime, CancellationToken ct)
+    private Task<(List<MetricDataPoint> Points, bool Truncated)> GetDataPointsAsync(DbConnection conn, MetricType type, IList<long> metricIds,
+        Dictionary<string, string>? labelFilters, DateTime? startTime, DateTime? endTime, CancellationToken ct) => type switch
     {
-        return type switch
-        {
-            MetricType.GAUGE => await GetGaugeDataPointsAsync(conn, metricIds, labelFilters, startTime, endTime, ct),
-            MetricType.SUM => await GetSumDataPointsAsync(conn, metricIds, labelFilters, startTime, endTime, ct),
-            MetricType.HISTOGRAM => await GetHistogramDataPointsAsync(conn, metricIds, labelFilters, startTime, endTime, ct),
-            MetricType.EXPONENTIAL_HISTOGRAM => await GetExponentialHistogramDataPointsAsync(conn, metricIds, labelFilters, startTime, endTime, ct),
-            MetricType.SUMMARY => await GetSummaryDataPointsAsync(conn, metricIds, labelFilters, startTime, endTime, ct),
-            _ => new List<MetricDataPoint>()
-        };
-    }
+        MetricType.GAUGE => GetGaugeDataPointsAsync(conn, metricIds, labelFilters, startTime, endTime, ct),
+        MetricType.SUM => GetSumDataPointsAsync(conn, metricIds, labelFilters, startTime, endTime, ct),
+        MetricType.HISTOGRAM => GetHistogramDataPointsAsync(conn, metricIds, labelFilters, startTime, endTime, ct),
+        MetricType.EXPONENTIAL_HISTOGRAM => GetExponentialHistogramDataPointsAsync(conn, metricIds, labelFilters, startTime, endTime, ct),
+        MetricType.SUMMARY => GetSummaryDataPointsAsync(conn, metricIds, labelFilters, startTime, endTime, ct),
+        _ => Task.FromResult((new List<MetricDataPoint>(), false))
+    };
 
     private static (string clause, object extraParams) TimeRange(DateTime? startTime, DateTime? endTime)
     {
@@ -375,18 +546,19 @@ public abstract class MetricReadRepositoryBase : DapperReadRepository, IMetricRe
         });
     }
 
-    private async Task<List<MetricDataPoint>> GetGaugeDataPointsAsync(DbConnection conn, IList<long> metricIds,
+    private async Task<(List<MetricDataPoint>, bool)> GetGaugeDataPointsAsync(DbConnection conn, IList<long> metricIds,
         Dictionary<string, string>? labelFilters, DateTime? startTime, DateTime? endTime, CancellationToken ct)
     {
         var (timeClause, tp) = TimeRange(startTime, endTime);
-        var rows = await conn.QueryAsync<GaugeRow>(new CommandDefinition($"""
+        var rows = (await conn.QueryAsync<GaugeRow>(new CommandDefinition($"""
             SELECT dp.start_time_unix_nano AS StartTimeUnixNano, dp.time_unix_nano AS TimeUnixNano,
                    dp.value_double AS ValueDouble, dp.value_int AS ValueInt, dp.flags AS Flags,
-                   dp.attributes_json AS AttributesJson, dp.exemplars_json AS ExemplarsJson
+                   dp.attributes_json AS AttributesJson
             FROM gauge_data_points dp
             WHERE dp.metric_id IN ({IdInList(metricIds)}){timeClause}
-            ORDER BY dp.time_unix_nano
-            """, tp, cancellationToken: ct));
+            ORDER BY dp.time_unix_nano DESC
+            {PagingClause}
+            """, Merge(new { limit = _maxDataPointsPerQuery, offset = 0 }, tp), cancellationToken: ct))).ToList();
 
         var points = rows.Select(r => new MetricDataPoint
         {
@@ -395,27 +567,27 @@ public abstract class MetricReadRepositoryBase : DapperReadRepository, IMetricRe
             DoubleValue = r.ValueDouble,
             IntValue = r.ValueInt,
             Flags = r.Flags,
-            Attributes = DeserializeAttributes(r.AttributesJson),
-            Exemplars = DeserializeExemplars(r.ExemplarsJson)
-        }).ToList();
+            Attributes = DeserializeAttributes(r.AttributesJson)
+        }).OrderBy(p => p.Timestamp).ToList();
 
-        return FilterByLabelFilters(points, labelFilters);
+        return (FilterByLabelFilters(points, labelFilters), rows.Count == _maxDataPointsPerQuery);
     }
 
-    private async Task<List<MetricDataPoint>> GetSumDataPointsAsync(DbConnection conn, IList<long> metricIds,
+    private async Task<(List<MetricDataPoint>, bool)> GetSumDataPointsAsync(DbConnection conn, IList<long> metricIds,
         Dictionary<string, string>? labelFilters, DateTime? startTime, DateTime? endTime, CancellationToken ct)
     {
         var (timeClause, tp) = TimeRange(startTime, endTime);
-        var rows = await conn.QueryAsync<SumRow>(new CommandDefinition($"""
+        var rows = (await conn.QueryAsync<SumRow>(new CommandDefinition($"""
             SELECT dp.start_time_unix_nano AS StartTimeUnixNano, dp.time_unix_nano AS TimeUnixNano,
                    dp.value_double AS ValueDouble, dp.value_int AS ValueInt,
                    dp.aggregation_temporality AS AggregationTemporality, dp.is_monotonic AS IsMonotonic,
                    dp.flags AS Flags,
-                   dp.attributes_json AS AttributesJson, dp.exemplars_json AS ExemplarsJson
+                   dp.attributes_json AS AttributesJson
             FROM sum_data_points dp
             WHERE dp.metric_id IN ({IdInList(metricIds)}){timeClause}
-            ORDER BY dp.time_unix_nano
-            """, tp, cancellationToken: ct));
+            ORDER BY dp.time_unix_nano DESC
+            {PagingClause}
+            """, Merge(new { limit = _maxDataPointsPerQuery, offset = 0 }, tp), cancellationToken: ct))).ToList();
 
         var points = rows.Select(r => new MetricDataPoint
         {
@@ -426,27 +598,27 @@ public abstract class MetricReadRepositoryBase : DapperReadRepository, IMetricRe
             AggregationTemporality = Enum.Parse<AggregationTemporality>(r.AggregationTemporality),
             IsMonotonic = r.IsMonotonic,
             Flags = r.Flags,
-            Attributes = DeserializeAttributes(r.AttributesJson),
-            Exemplars = DeserializeExemplars(r.ExemplarsJson)
-        }).ToList();
+            Attributes = DeserializeAttributes(r.AttributesJson)
+        }).OrderBy(p => p.Timestamp).ToList();
 
-        return FilterByLabelFilters(points, labelFilters);
+        return (FilterByLabelFilters(points, labelFilters), rows.Count == _maxDataPointsPerQuery);
     }
 
-    private async Task<List<MetricDataPoint>> GetHistogramDataPointsAsync(DbConnection conn, IList<long> metricIds,
+    private async Task<(List<MetricDataPoint>, bool)> GetHistogramDataPointsAsync(DbConnection conn, IList<long> metricIds,
         Dictionary<string, string>? labelFilters, DateTime? startTime, DateTime? endTime, CancellationToken ct)
     {
         var (timeClause, tp) = TimeRange(startTime, endTime);
-        var rows = await conn.QueryAsync<HistogramRow>(new CommandDefinition($"""
+        var rows = (await conn.QueryAsync<HistogramRow>(new CommandDefinition($"""
             SELECT dp.start_time_unix_nano AS StartTimeUnixNano, dp.time_unix_nano AS TimeUnixNano,
                    dp.count AS Count, dp.sum_value AS SumValue, dp.min_value AS MinValue, dp.max_value AS MaxValue,
                    dp.aggregation_temporality AS AggregationTemporality, dp.flags AS Flags,
                    dp.bucket_counts AS BucketCounts, dp.explicit_bounds AS ExplicitBounds,
-                   dp.attributes_json AS AttributesJson, dp.exemplars_json AS ExemplarsJson
+                   dp.attributes_json AS AttributesJson
             FROM histogram_data_points dp
             WHERE dp.metric_id IN ({IdInList(metricIds)}){timeClause}
-            ORDER BY dp.time_unix_nano
-            """, tp, cancellationToken: ct));
+            ORDER BY dp.time_unix_nano DESC
+            {PagingClause}
+            """, Merge(new { limit = _maxDataPointsPerQuery, offset = 0 }, tp), cancellationToken: ct))).ToList();
 
         var points = rows.Select(r => new MetricDataPoint
         {
@@ -460,29 +632,29 @@ public abstract class MetricReadRepositoryBase : DapperReadRepository, IMetricRe
             Flags = r.Flags,
             BucketCounts = DeserializeArray<long>(r.BucketCounts)?.ToList() ?? new List<long>(),
             BucketBounds = DeserializeArray<double>(r.ExplicitBounds)?.ToList() ?? new List<double>(),
-            Attributes = DeserializeAttributes(r.AttributesJson),
-            Exemplars = DeserializeExemplars(r.ExemplarsJson)
-        }).ToList();
+            Attributes = DeserializeAttributes(r.AttributesJson)
+        }).OrderBy(p => p.Timestamp).ToList();
 
-        return FilterByLabelFilters(points, labelFilters);
+        return (FilterByLabelFilters(points, labelFilters), rows.Count == _maxDataPointsPerQuery);
     }
 
-    private async Task<List<MetricDataPoint>> GetExponentialHistogramDataPointsAsync(DbConnection conn, IList<long> metricIds,
+    private async Task<(List<MetricDataPoint>, bool)> GetExponentialHistogramDataPointsAsync(DbConnection conn, IList<long> metricIds,
         Dictionary<string, string>? labelFilters, DateTime? startTime, DateTime? endTime, CancellationToken ct)
     {
         var (timeClause, tp) = TimeRange(startTime, endTime);
-        var rows = await conn.QueryAsync<ExpHistogramRow>(new CommandDefinition($"""
+        var rows = (await conn.QueryAsync<ExpHistogramRow>(new CommandDefinition($"""
             SELECT dp.start_time_unix_nano AS StartTimeUnixNano, dp.time_unix_nano AS TimeUnixNano,
                    dp.count AS Count, dp.sum_value AS SumValue, dp.min_value AS MinValue, dp.max_value AS MaxValue,
                    dp.scale AS Scale, dp.zero_count AS ZeroCount,
                    dp.positive_offset AS PositiveOffset, dp.positive_bucket_counts AS PositiveBucketCounts,
                    dp.negative_offset AS NegativeOffset, dp.negative_bucket_counts AS NegativeBucketCounts,
                    dp.aggregation_temporality AS AggregationTemporality, dp.flags AS Flags,
-                   dp.attributes_json AS AttributesJson, dp.exemplars_json AS ExemplarsJson
+                   dp.attributes_json AS AttributesJson
             FROM exponential_histogram_data_points dp
             WHERE dp.metric_id IN ({IdInList(metricIds)}){timeClause}
-            ORDER BY dp.time_unix_nano
-            """, tp, cancellationToken: ct));
+            ORDER BY dp.time_unix_nano DESC
+            {PagingClause}
+            """, Merge(new { limit = _maxDataPointsPerQuery, offset = 0 }, tp), cancellationToken: ct))).ToList();
 
         var points = rows.Select(r => new MetricDataPoint
         {
@@ -500,25 +672,25 @@ public abstract class MetricReadRepositoryBase : DapperReadRepository, IMetricRe
             NegativeBucketCounts = DeserializeArray<long>(r.NegativeBucketCounts)?.ToList(),
             AggregationTemporality = Enum.Parse<AggregationTemporality>(r.AggregationTemporality),
             Flags = r.Flags,
-            Attributes = DeserializeAttributes(r.AttributesJson),
-            Exemplars = DeserializeExemplars(r.ExemplarsJson)
-        }).ToList();
+            Attributes = DeserializeAttributes(r.AttributesJson)
+        }).OrderBy(p => p.Timestamp).ToList();
 
-        return FilterByLabelFilters(points, labelFilters);
+        return (FilterByLabelFilters(points, labelFilters), rows.Count == _maxDataPointsPerQuery);
     }
 
-    private async Task<List<MetricDataPoint>> GetSummaryDataPointsAsync(DbConnection conn, IList<long> metricIds,
+    private async Task<(List<MetricDataPoint>, bool)> GetSummaryDataPointsAsync(DbConnection conn, IList<long> metricIds,
         Dictionary<string, string>? labelFilters, DateTime? startTime, DateTime? endTime, CancellationToken ct)
     {
         var (timeClause, tp) = TimeRange(startTime, endTime);
-        var rows = await conn.QueryAsync<SummaryRow>(new CommandDefinition($"""
+        var rows = (await conn.QueryAsync<SummaryRow>(new CommandDefinition($"""
             SELECT dp.start_time_unix_nano AS StartTimeUnixNano, dp.time_unix_nano AS TimeUnixNano,
                    dp.count AS Count, dp.sum_value AS SumValue, dp.flags AS Flags,
                    dp.quantile_values AS QuantileValues, dp.attributes_json AS AttributesJson
             FROM summary_data_points dp
             WHERE dp.metric_id IN ({IdInList(metricIds)}){timeClause}
-            ORDER BY dp.time_unix_nano
-            """, tp, cancellationToken: ct));
+            ORDER BY dp.time_unix_nano DESC
+            {PagingClause}
+            """, Merge(new { limit = _maxDataPointsPerQuery, offset = 0 }, tp), cancellationToken: ct))).ToList();
 
         var points = rows.Select(r =>
         {
@@ -534,9 +706,9 @@ public abstract class MetricReadRepositoryBase : DapperReadRepository, IMetricRe
                 QuantileValues = quantiles?.Select(qv => qv.Value).ToList(),
                 Attributes = DeserializeAttributes(r.AttributesJson)
             };
-        }).ToList();
+        }).OrderBy(p => p.Timestamp).ToList();
 
-        return FilterByLabelFilters(points, labelFilters);
+        return (FilterByLabelFilters(points, labelFilters), rows.Count == _maxDataPointsPerQuery);
     }
 
     // =========================================================================
@@ -756,7 +928,6 @@ public abstract class MetricReadRepositoryBase : DapperReadRepository, IMetricRe
         public long? ValueInt { get; set; }
         public int Flags { get; set; }
         public string? AttributesJson { get; set; }
-        public string? ExemplarsJson { get; set; }
     }
 
     private sealed class SumRow
@@ -769,7 +940,6 @@ public abstract class MetricReadRepositoryBase : DapperReadRepository, IMetricRe
         public bool IsMonotonic { get; set; }
         public int Flags { get; set; }
         public string? AttributesJson { get; set; }
-        public string? ExemplarsJson { get; set; }
     }
 
     private sealed class HistogramRow
@@ -785,7 +955,6 @@ public abstract class MetricReadRepositoryBase : DapperReadRepository, IMetricRe
         public string? BucketCounts { get; set; }
         public string? ExplicitBounds { get; set; }
         public string? AttributesJson { get; set; }
-        public string? ExemplarsJson { get; set; }
     }
 
     private sealed class ExpHistogramRow
@@ -805,7 +974,6 @@ public abstract class MetricReadRepositoryBase : DapperReadRepository, IMetricRe
         public string AggregationTemporality { get; set; } = null!;
         public int Flags { get; set; }
         public string? AttributesJson { get; set; }
-        public string? ExemplarsJson { get; set; }
     }
 
     private sealed class SummaryRow
@@ -817,5 +985,36 @@ public abstract class MetricReadRepositoryBase : DapperReadRepository, IMetricRe
         public int Flags { get; set; }
         public string? QuantileValues { get; set; }
         public string? AttributesJson { get; set; }
+    }
+
+    /// <summary>Type-normalized result of an exemplar-bearing row scan, before flattening its exemplars.</summary>
+    private sealed class ExemplarScanRow
+    {
+        public long MetricId { get; set; }
+        public DateTime Timestamp { get; set; }
+        public double? ValueDouble { get; set; }
+        public long? ValueInt { get; set; }
+        public long? Count { get; set; }
+        public Dictionary<string, object>? Attributes { get; set; }
+        public List<ExemplarModel> Exemplars { get; set; } = new();
+    }
+
+    private sealed class ExemplarScalarRow
+    {
+        public long MetricId { get; set; }
+        public long TimeUnixNano { get; set; }
+        public double? ValueDouble { get; set; }
+        public long? ValueInt { get; set; }
+        public string? AttributesJson { get; set; }
+        public string? ExemplarsJson { get; set; }
+    }
+
+    private sealed class ExemplarCountRow
+    {
+        public long MetricId { get; set; }
+        public long TimeUnixNano { get; set; }
+        public long Cnt { get; set; }
+        public string? AttributesJson { get; set; }
+        public string? ExemplarsJson { get; set; }
     }
 }

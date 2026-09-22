@@ -37,7 +37,7 @@ public class ClickHouseTraceReadRepository(IConfiguration configuration, ITenant
 }
 
 public class ClickHouseMetricReadRepository(IConfiguration configuration, ITenantContext tenantContext)
-    : MetricReadRepositoryBase(tenantContext)
+    : MetricReadRepositoryBase(tenantContext, configuration)
 {
     private readonly string _connectionString = configuration.GetConnectionString("Api")!;
 

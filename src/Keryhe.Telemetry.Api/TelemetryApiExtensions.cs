@@ -1,3 +1,4 @@
+using System.Text.Json.Serialization;
 using Keryhe.Telemetry.Api.Services;
 using Keryhe.Telemetry.Core;
 using Microsoft.Extensions.Configuration;
@@ -25,8 +26,14 @@ public static class TelemetryApiServiceCollectionExtensions
     {
         // Controllers live in this class library, so the host will not discover them
         // unless this assembly is registered as an MVC application part.
+        // WhenWritingNull: MetricDataPoint is effectively a union across five metric types, so most
+        // of its properties are null on any given row — omitting them was ~3.8 MB of an 18.4 MB
+        // one-hour histogram response (metric-detail-performance plan §5.2). Every JSON consumer in
+        // the Angular client already treats these fields as optional (?? / == null), so the
+        // resulting undefined-vs-null difference is safe.
         services.AddControllers()
-            .AddApplicationPart(typeof(TelemetryApiServiceCollectionExtensions).Assembly);
+            .AddApplicationPart(typeof(TelemetryApiServiceCollectionExtensions).Assembly)
+            .AddJsonOptions(o => o.JsonSerializerOptions.DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull);
 
         // Scoped: one ApiTenantContext per request; TenantMiddleware sets the tenant id.
         services.AddScoped<ApiTenantContext>();

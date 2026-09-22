@@ -9,6 +9,7 @@ import { MatCardModule } from '@angular/material/card';
 import { MatChipsModule } from '@angular/material/chips';
 import { MatFormFieldModule } from '@angular/material/form-field';
 import { MatIconModule } from '@angular/material/icon';
+import { MatPaginatorModule, PageEvent } from '@angular/material/paginator';
 import { MatProgressBarModule } from '@angular/material/progress-bar';
 import { MatSelectModule } from '@angular/material/select';
 import { MatTableModule } from '@angular/material/table';
@@ -22,8 +23,8 @@ import { ResourcesApiService } from '../../../core/services/api/resources-api.se
 import { TimeRangeService } from '../../../core/services/time-range.service';
 import { ThemeService } from '../../../core/services/theme.service';
 import {
-  AggregationTemporality, ExemplarModel, MetricDataPoint, MetricInfo, MetricSeries, MetricType,
-  MultiSeriesMetricData, NamedMetricSeries, TYPE_LABELS, getTypeColor,
+  AggregationTemporality, ExemplarModel, MetricDataPoint, MetricExemplar, MetricInfo, MetricSeries,
+  MetricType, MultiSeriesMetricData, NamedMetricSeries, TYPE_LABELS, getTypeColor,
 } from '../../../core/models/metric.models';
 import { StatCardComponent } from '../../../shared/components/stat-card/stat-card.component';
 import { EmptyStateComponent } from '../../../shared/components/empty-state/empty-state.component';
@@ -88,7 +89,7 @@ interface ExemplarRow {
     DatePipe, DecimalPipe, KeyValuePipe, SlicePipe, RouterLink,
     MatCardModule, MatButtonModule, MatButtonToggleModule, MatIconModule,
     MatTabsModule, MatTableModule, MatChipsModule, MatFormFieldModule,
-    MatSelectModule, MatProgressBarModule, MatTooltipModule, NgApexchartsModule,
+    MatSelectModule, MatProgressBarModule, MatTooltipModule, MatPaginatorModule, NgApexchartsModule,
     StatCardComponent, EmptyStateComponent, PageHeaderComponent,
   ],
   templateUrl: './metric-detail.component.html',
@@ -146,6 +147,9 @@ export class MetricDetailComponent implements OnInit {
   protected isSummary = computed(() => this.metricType() === MetricType.Summary);
   /** Distribution metrics render derived percentiles/heatmap (via buildChart), not per-series grouping. */
   protected isDistribution = computed(() => this.isHistogram() || this.isExpHistogram() || this.isSummary());
+
+  /** True when the server-side row cap (Metrics:MaxDataPointsPerQuery) truncated this range's series. */
+  protected isTruncated = computed(() => this.multiSeries()?.truncated ?? false);
 
   /**
    * A gauge whose unit gives the dial a real 0–100 / 0–1 bound (`%` or the OTLP dimensionless
@@ -337,49 +341,72 @@ export class MetricDetailComponent implements OnInit {
   });
 
   /**
-   * Every loaded series as {name, points}. Unlike points(), which narrows scalar metrics to the
-   * single largest series so the stat cards stay meaningful, this keeps all of them — an exemplar
-   * belongs to whichever series produced it, and dropping the other series hid most of them.
+   * Exemplars are fetched from their own on-demand endpoint (§4, metric-detail-performance plan),
+   * never bundled with the series — a realistic histogram's exemplars are tens of thousands of
+   * rows and were the entire cause of the page freezing. Loaded only once the Exemplars tab is
+   * opened (see the `activeTab` effect in the constructor).
    */
-  private allSeries = computed<{ name: string; points: MetricDataPoint[] }[]>(() => {
-    const single = this.series();
-    const fallback = single ? [{ name: single.name, points: single.points }] : [];
-    if (this.isDistribution()) return fallback;
-    const grouped = this.multiSeries()?.series ?? [];
-    return grouped.length ? grouped.map((g) => ({ name: g.seriesName, points: g.points })) : fallback;
+  protected exemplars = signal<ExemplarRow[]>([]);
+  protected exemplarsLoading = signal(false);
+  protected exemplarsLoaded = signal(false);
+  protected exemplarsHasMore = signal(false);
+  protected exemplarsPage = signal<PageEvent>({ pageIndex: 0, pageSize: 25, length: 0 });
+  private static readonly EXEMPLARS_TAB = 3;
+
+  /** The current paginator page, sliced client-side from the already-capped exemplars() list. */
+  protected pagedExemplars = computed<ExemplarRow[]>(() => {
+    const { pageIndex, pageSize } = this.exemplarsPage();
+    const start = pageIndex * pageSize;
+    return this.exemplars().slice(start, start + pageSize);
   });
 
-  /**
-   * Flattened exemplars, newest first, each carrying the data point it was sampled from. Exemplars
-   * without a trace id are kept: an SDK can record one whenever a measurement is taken outside a
-   * sampled span, and silently hiding those made the tab under-report its own count.
-   */
-  protected exemplars = computed<ExemplarRow[]>(() => {
-    const unit = this.metricUnit();
-    const distribution = this.isDistribution();
-    const rows: ExemplarRow[] = [];
-
-    for (const s of this.allSeries()) {
-      for (const p of s.points) {
-        for (const e of p.exemplars ?? []) {
-          const measured = e.valueDouble ?? e.valueInt;
-          rows.push({
-            exemplar: e,
-            seriesName: s.name,
-            pointTimestamp: new Date(p.timestamp),
-            pointValue: distribution
-              ? `${p.count ?? 0} obs`
-              : formatUnitValue(val(p), unit),
-            value: measured == null ? '—' : formatUnitValue(measured, unit),
-          });
-        }
-      }
-    }
-
-    return rows.sort((a, b) => b.exemplar.timeUnixNano - a.exemplar.timeUnixNano);
+  protected exemplarsTabLabel = computed(() => {
+    if (!this.exemplarsLoaded()) return 'Exemplars';
+    return this.exemplarsHasMore() ? `Exemplars (${this.exemplars().length}+)` : `Exemplars (${this.exemplars().length})`;
   });
 
   protected readonly exemplarColumns = ['time', 'value', 'series', 'point', 'traceId', 'spanId', 'attrs'];
+
+  private loadExemplars(): void {
+    const { start, end } = this.timeRange.range();
+    const name = this.metricName();
+    const svc = this.selectedService();
+    const metricId = svc ? this.instances().find((i) => i.serviceName === svc)?.id : undefined;
+    const labelFilters = Object.keys(this.selectedLabels()).length > 0 ? this.selectedLabels() : undefined;
+    const unit = this.metricUnit();
+    const distribution = this.isDistribution();
+
+    if (svc && metricId === undefined) {
+      this.exemplars.set([]);
+      this.exemplarsHasMore.set(false);
+      this.exemplarsLoaded.set(true);
+      return;
+    }
+
+    this.exemplarsLoading.set(true);
+    this.api.getExemplars({ metricName: name, start, end, metricId, labelFilters }).subscribe({
+      next: (page) => {
+        const rows: ExemplarRow[] = page.exemplars.map((e) => {
+          const measured = e.exemplar.valueDouble ?? e.exemplar.valueInt;
+          return {
+            exemplar: e.exemplar,
+            seriesName: e.seriesName,
+            pointTimestamp: new Date(e.pointTimestamp),
+            pointValue: distribution
+              ? `${e.pointCount ?? 0} obs`
+              : formatUnitValue(e.pointDoubleValue ?? e.pointIntValue ?? 0, unit),
+            value: measured == null ? '—' : formatUnitValue(measured, unit),
+          };
+        });
+        this.exemplars.set(rows);
+        this.exemplarsHasMore.set(page.hasMore);
+        this.exemplarsPage.set({ pageIndex: 0, pageSize: this.exemplarsPage().pageSize, length: rows.length });
+        this.exemplarsLoaded.set(true);
+        this.exemplarsLoading.set(false);
+      },
+      error: () => this.exemplarsLoading.set(false),
+    });
+  }
 
   /** OTLP timestamps are nanoseconds since the epoch; JS dates are milliseconds. */
   protected nanoToDate(nano: number): Date {
@@ -408,6 +435,15 @@ export class MetricDetailComponent implements OnInit {
         if (!multi) return; // nothing loaded yet
         if (this.isDistribution()) this.buildChart();
         else this.buildMultiChart(multi);
+      });
+    });
+
+    // Load exemplars lazily, only once the Exemplars tab is actually opened — including the
+    // restored-page-state case where a user's last visit ended on that tab (activeTab is persisted).
+    effect(() => {
+      const tab = this.activeTab();
+      untracked(() => {
+        if (tab === MetricDetailComponent.EXEMPLARS_TAB && !this.exemplarsLoaded()) this.loadExemplars();
       });
     });
 
@@ -456,13 +492,12 @@ export class MetricDetailComponent implements OnInit {
     forkJoin({
       instances: this.api.getByName(name),
       labels: this.api.getLabels(name),
-      series: this.api.getSeries({ metricName: name, start, end }),
     }).subscribe({
-      next: ({ instances, labels, series }) => {
+      next: ({ instances, labels }) => {
         this.instances.set(instances);
         this.labels.set(labels);
-        this.series.set(series);
-        // Every type now loads from the grouped path (honoring any restored service/label filters).
+        // Every type loads from the grouped path (honoring any restored service/label filters);
+        // reloadSeries() also populates series() (the flattened fallback used by points()).
         this.reloadSeries();
         this.loading.set(false);
       },
@@ -478,6 +513,12 @@ export class MetricDetailComponent implements OnInit {
       ? this.instances().find((i) => i.serviceName === svc)?.id
       : undefined;
     const labelFilters = Object.keys(this.selectedLabels()).length > 0 ? this.selectedLabels() : undefined;
+
+    // The time range, service or label filter changed — the loaded exemplar page no longer matches.
+    // Clear it, and if the Exemplars tab is currently open, refetch immediately.
+    this.exemplars.set([]);
+    this.exemplarsLoaded.set(false);
+    if (this.activeTab() === MetricDetailComponent.EXEMPLARS_TAB) this.loadExemplars();
 
     // A service can be selected (from the tenant-wide list) with no instance of this particular
     // metric. Rather than querying with metricId=undefined — which means "no filter" and would
@@ -504,9 +545,11 @@ export class MetricDetailComponent implements OnInit {
     }
 
     // Scalar metrics: fetch the real per-(service, label-set) series; groupMode only controls how
-    // buildMultiChart folds them (per service vs. per full label set).
+    // buildMultiChart folds them (per service vs. per full label set). Also flatten into series()
+    // so its consumers (points()'s fallback, exportCsv) stay populated without a second request.
     this.api.getGroupedSeries({ metricName: name, start, end, metricId, labelFilters }).subscribe((multi) => {
       this.multiSeries.set(multi);
+      this.series.set(this.flattenSeries(multi));
       this.buildMultiChart(multi);
     });
   }
@@ -516,7 +559,7 @@ export class MetricDetailComponent implements OnInit {
     const points = multi.series
       .flatMap((s) => s.points)
       .sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
-    return { name: multi.name, type: multi.type, labels: {}, points };
+    return { name: multi.name, type: multi.type, labels: {}, points, truncated: multi.truncated };
   }
 
   /** Wheel-zoom off + drag-select drives the shared time-range picker (datetime charts). */

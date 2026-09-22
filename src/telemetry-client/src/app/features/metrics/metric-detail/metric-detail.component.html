@@ -78,6 +78,13 @@
     <mat-tab label="Chart">
       <mat-card class="chart-card">
         <mat-card-content>
+          @if (isTruncated()) {
+            <div class="truncated-banner">
+              <mat-icon>warning</mat-icon>
+              Showing a partial view — this range has more data than can be displayed at once.
+              Narrow the time range or add a filter to see everything.
+            </div>
+          }
           @if (!isDistribution() && chartStyles().length > 1) {
             <mat-button-toggle-group class="chart-style-tiles" [value]="chartStyle()"
               (change)="onChartStyleChange($event.value)" aria-label="Chart style">
@@ -211,13 +218,17 @@
     </mat-tab>
 
     <!-- Exemplars -->
-    <mat-tab label="Exemplars ({{ exemplars().length }})">
+    <mat-tab [label]="exemplarsTabLabel()">
+     <ng-template matTabContent>
       <mat-card class="chart-card">
         <mat-card-content class="table-content">
-          @if (exemplars().length === 0) {
+          @if (exemplarsLoading()) {
+            <mat-progress-bar mode="indeterminate" />
+          }
+          @if (!exemplarsLoading() && exemplars().length === 0) {
             <app-empty-state icon="scatter_plot" message="No exemplars" />
-          } @else {
-            <table mat-table [dataSource]="exemplars()" class="full-width">
+          } @else if (exemplars().length > 0) {
+            <table mat-table [dataSource]="pagedExemplars()" class="full-width">
               <ng-container matColumnDef="time">
                 <th mat-header-cell *matHeaderCellDef>Time</th>
                 <td mat-cell *matCellDef="let r" class="mono">
@@ -268,9 +279,18 @@
               <tr mat-header-row *matHeaderRowDef="exemplarColumns"></tr>
               <tr mat-row *matRowDef="let row; columns: exemplarColumns"></tr>
             </table>
+            <mat-paginator [length]="exemplars().length" [pageSize]="25" [pageSizeOptions]="[25, 50, 100]"
+              (page)="exemplarsPage.set($event)" />
+            @if (exemplarsHasMore()) {
+              <div class="exemplars-hint">
+                Showing the {{ exemplars().length }} most recent exemplars in this range. Narrow the
+                time range or filter by service/label to see others.
+              </div>
+            }
           }
         </mat-card-content>
       </mat-card>
+     </ng-template>
     </mat-tab>
   </mat-tab-group>
 </div>

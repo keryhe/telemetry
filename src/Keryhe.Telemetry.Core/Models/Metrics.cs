@@ -133,6 +133,9 @@ public class MetricSeries
     public MetricType Type { get; set; }
     public Dictionary<string, string> Labels { get; set; } = new();
     public List<MetricDataPoint> Points { get; set; } = new();
+    /// <summary>True when the per-metric-row row cap (<c>Metrics:MaxDataPointsPerQuery</c>) was hit
+    /// for at least one underlying metric row — the requested range may hold more data than shown.</summary>
+    public bool Truncated { get; set; }
 }
 
 public class MetricDataPoint
@@ -159,6 +162,14 @@ public class MetricDataPoint
     public List<long>? BucketCounts { get; set; }
     public List<double>? BucketBounds { get; set; }
     public Dictionary<string, object>? Attributes { get; set; }
+    /// <summary>
+    /// Write-only on the read side: the write path still populates <c>exemplars_json</c> for every
+    /// data point, but the series reads (<c>MetricReadRepositoryBase.Get*DataPointsAsync</c>) no
+    /// longer select it — exemplars are served exclusively via <see cref="MetricExemplar"/> /
+    /// <c>GetMetricExemplarsAsync</c>, a dedicated on-demand endpoint (metric-detail-performance
+    /// plan §4). A realistic histogram range carries tens of thousands of exemplars; bundling them
+    /// with every series read was ~12 MB of an 18 MB one-hour response and froze the client.
+    /// </summary>
     public List<ExemplarModel>? Exemplars { get; set; }
 }
 
@@ -178,6 +189,9 @@ public class MultiSeriesMetricData
     public string Name { get; set; } = "";
     public MetricType Type { get; set; }
     public List<NamedMetricSeries> Series { get; set; } = new();
+    /// <summary>True when the per-metric-row row cap (<c>Metrics:MaxDataPointsPerQuery</c>) was hit
+    /// for at least one underlying metric row — the requested range may hold more data than shown.</summary>
+    public bool Truncated { get; set; }
 }
 
 public class NamedMetricSeries
@@ -190,4 +204,32 @@ public class NamedMetricSeries
     /// <summary>The data point attribute (label) set that defines this series' identity.</summary>
     public Dictionary<string, string> Labels { get; set; } = new();
     public List<MetricDataPoint> Points { get; set; } = new();
+}
+
+/// <summary>
+/// One exemplar plus the identity of the data point and series it was sampled from. Served by the
+/// dedicated exemplar endpoint; the series endpoints deliberately no longer carry exemplars, which
+/// were ~12 MB of an 18 MB one-hour histogram response.
+/// </summary>
+public class MetricExemplar
+{
+    public ExemplarModel Exemplar { get; set; } = null!;
+    public string SeriesName { get; set; } = "";
+    public string ServiceName { get; set; } = "";
+    public Dictionary<string, string> Labels { get; set; } = new();
+    public DateTime PointTimestamp { get; set; }
+    /// <summary>Owning point's observation count — distributions only; null for gauge/sum.</summary>
+    public long? PointCount { get; set; }
+    /// <summary>Owning point's value — gauge/sum only; null for distributions.</summary>
+    public double? PointDoubleValue { get; set; }
+    public long? PointIntValue { get; set; }
+}
+
+public class MetricExemplarPage
+{
+    public string Name { get; set; } = "";
+    public MetricType Type { get; set; }
+    public List<MetricExemplar> Exemplars { get; set; } = new();
+    /// <summary>True when the scan hit its cap: more exemplars exist beyond those returned.</summary>
+    public bool HasMore { get; set; }
 }

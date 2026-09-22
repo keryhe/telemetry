@@ -28,7 +28,7 @@ public class SqlServerTraceReadRepository(IConfiguration configuration, ITenantC
 }
 
 public class SqlServerMetricReadRepository(IConfiguration configuration, ITenantContext tenantContext)
-    : MetricReadRepositoryBase(tenantContext)
+    : MetricReadRepositoryBase(tenantContext, configuration)
 {
     private readonly string _connectionString = configuration.GetConnectionString("Api")!;
 

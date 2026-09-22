@@ -164,7 +164,7 @@ export interface LogBucket {
 }
 
 export function bucketLogs(
-  items: { timeUnixNano: number | null; severityNumber: number | null }[],
+  items: { timeUnixNano?: number; severityNumber?: number }[],
   start: Date,
   end: Date,
   bucketCount = 24

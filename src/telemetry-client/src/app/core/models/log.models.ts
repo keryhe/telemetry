@@ -1,15 +1,15 @@
 export interface LogRecord {
-  timeUnixNano: number | null;
-  observedTimeUnixNano: number | null;
-  severityNumber: number | null;
-  severityText: string | null;
-  eventName: string | null;
-  bodyValue: string | null;
-  traceIdHex: string | null;
-  spanIdHex: string | null;
+  timeUnixNano?: number;
+  observedTimeUnixNano?: number;
+  severityNumber?: number;
+  severityText?: string;
+  eventName?: string;
+  bodyValue?: string;
+  traceIdHex?: string;
+  spanIdHex?: string;
   attributes: Record<string, unknown>;
-  resource: { attributes: Record<string, unknown> } | null;
-  instrumentationScope: { name: string; version: string | null } | null;
+  resource?: { attributes: Record<string, unknown> };
+  instrumentationScope?: { name: string; version?: string };
 }
 
 export function getServiceName(log: LogRecord): string {
@@ -35,8 +35,8 @@ export const SEVERITY_COLORS: Record<string, string> = {
   Warn: '#FF9800', Error: '#F44336', Fatal: '#B71C1C',
 };
 
-export function getSeverityLabel(num: number | null): string {
-  if (num === null) return 'Unknown';
+export function getSeverityLabel(num: number | null | undefined): string {
+  if (num == null) return 'Unknown';
   if (num <= 4) return 'Trace';
   if (num <= 8) return 'Debug';
   if (num <= 12) return 'Info';
@@ -45,7 +45,7 @@ export function getSeverityLabel(num: number | null): string {
   return 'Fatal';
 }
 
-export function getSeverityColor(num: number | null): string {
+export function getSeverityColor(num: number | null | undefined): string {
   return SEVERITY_COLORS[getSeverityLabel(num)] ?? '#9e9e9e';
 }
 
@@ -55,6 +55,6 @@ const SEVERITY_BG: Record<string, string> = {
   Fatal: 'rgba(183, 28,  28,  0.12)',
 };
 
-export function getSeverityBg(num: number | null): string {
+export function getSeverityBg(num: number | null | undefined): string {
   return SEVERITY_BG[getSeverityLabel(num)] ?? '';
 }

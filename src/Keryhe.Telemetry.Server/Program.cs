@@ -1,3 +1,5 @@
+using Microsoft.AspNetCore.ResponseCompression;
+
 namespace Keryhe.Telemetry.Server;
 
 /// <summary>
@@ -35,6 +37,19 @@ public class Program
 
         // ── OPENAPI ───────────────────────────────────────────────────────────────
         builder.Services.AddOpenApi();
+
+        // ── RESPONSE COMPRESSION ──────────────────────────────────────────────────
+        // Nothing compressed API responses before this (metric-detail-performance plan §5.1); this
+        // JSON is highly repetitive and compresses roughly 10-20x. EnableForHttps is safe here:
+        // BREACH needs a secret plus attacker-controlled input reflected in the same response, and
+        // these responses carry neither (revisit if the API ever returns CSRF tokens or per-user
+        // secrets in a compressible body).
+        builder.Services.AddResponseCompression(o =>
+        {
+            o.EnableForHttps = true;
+            o.Providers.Add<BrotliCompressionProvider>();
+            o.Providers.Add<GzipCompressionProvider>();
+        });
 
         // ── TELEMETRY COLLECTOR (write path) ──────────────────────────────────────
         // gRPC, the bounded ingestion channel, and the background worker that drains it.
@@ -116,6 +131,11 @@ public class Program
         app.UseKeryheTelemetryUi();
 
         app.UseRouting();
+
+        // Only ever sees API responses and the SPA fallback — UseKeryheTelemetryUi() above
+        // negotiates .br/.gz for the packaged SPA itself and short-circuits before this middleware
+        // runs.
+        app.UseResponseCompression();
 
         // CORS before tenant middleware so OPTIONS preflight requests pass through.
         app.UseCors("Angular");

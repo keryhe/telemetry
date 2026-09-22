@@ -115,3 +115,24 @@
   font-size: 12px;
 }
 .muted { color: var(--mat-sys-on-surface-variant); }
+.exemplars-hint {
+  padding: 8px 16px;
+  color: var(--mat-sys-on-surface-variant);
+  font-size: 12px;
+}
+.truncated-banner {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 12px;
+  padding: 8px 12px;
+  border-radius: 4px;
+  background: rgba(255, 152, 0, 0.12);
+  color: var(--mat-sys-on-surface);
+  font-size: 13px;
+
+  mat-icon {
+    color: #FF9800;
+    flex-shrink: 0;
+  }
+}

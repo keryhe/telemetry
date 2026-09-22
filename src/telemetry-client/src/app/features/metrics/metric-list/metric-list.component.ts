@@ -31,8 +31,8 @@ const STATE_KEY = 'state.metrics';
 interface UniqueMetric {
   name: string;
   type: MetricType;
-  unit: string | null;
-  description: string | null;
+  unit?: string;
+  description?: string;
   instanceCount: number;
   services: string[];
   lastSeen: string;

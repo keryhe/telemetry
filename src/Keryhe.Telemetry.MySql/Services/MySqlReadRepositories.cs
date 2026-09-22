@@ -29,7 +29,7 @@ public class MySqlTraceReadRepository(IConfiguration configuration, ITenantConte
 }
 
 public class MySqlMetricReadRepository(IConfiguration configuration, ITenantContext tenantContext)
-    : MetricReadRepositoryBase(tenantContext)
+    : MetricReadRepositoryBase(tenantContext, configuration)
 {
     private readonly string _connectionString = configuration.GetConnectionString("Api")!;
 
