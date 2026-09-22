@@ -33,6 +33,7 @@ public class SqlServerTraceReadRepository(IConfiguration configuration, ITenantC
     protected override string ResourceServiceNameExpr(string resourceAlias = "r") => $"JSON_VALUE({resourceAlias}.attributes_json, '$.\"service.name\"')";
     protected override string JsonHasKeyExpr(string jsonColumn, string keyParam)
         => $"EXISTS (SELECT 1 FROM OPENJSON(ISNULL({jsonColumn}, '{{}}')) WHERE [key] = {keyParam})";
+    protected override string PagingClause => "OFFSET @offset ROWS FETCH NEXT @limit ROWS ONLY";
 }
 
 public class SqlServerMetricReadRepository(IConfiguration configuration, ITenantContext tenantContext)
@@ -46,6 +47,9 @@ public class SqlServerMetricReadRepository(IConfiguration configuration, ITenant
         await conn.OpenAsync(cancellationToken);
         return conn;
     }
+
+    // SqlServer dialect: paging uses OFFSET/FETCH, not LIMIT/OFFSET.
+    protected override string PagingClause => "OFFSET @offset ROWS FETCH NEXT @limit ROWS ONLY";
 }
 
 public class SqlServerLogReadRepository(IConfiguration configuration, ITenantContext tenantContext)
