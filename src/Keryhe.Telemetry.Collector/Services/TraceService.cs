@@ -96,6 +96,14 @@ public class TraceService : OpenTelemetry.Proto.Collector.Trace.V1.TraceService.
             // comment for what that does and does not guarantee.
             await _traceRepository.StoreTracesBatchAsync(traces, context.CancellationToken);
         }
+        catch (System.Threading.Channels.ChannelClosedException)
+        {
+            // The ingestion worker is draining for host shutdown and has closed the channel.
+            // UNAVAILABLE (not a partial-success rejection, which OTLP clients never retry)
+            // so the client resends -- behind a load balancer, to another instance.
+            _logger.LogWarning("Rejected trace export: collector is shutting down");
+            throw new RpcException(new Grpc.Core.Status(StatusCode.Unavailable, "Collector is shutting down"));
+        }
         catch (OperationCanceledException)
         {
             errorMessage = "Trace export operation was cancelled";

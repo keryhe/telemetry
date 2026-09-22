@@ -86,6 +86,14 @@ public class LogService : OpenTelemetry.Proto.Collector.Logs.V1.LogsService.Logs
             await _logRepository.StoreLogRecordsBatchAsync(logRecords, context.CancellationToken);
             storedLogCount = logRecords.Count;
         }
+        catch (System.Threading.Channels.ChannelClosedException)
+        {
+            // The ingestion worker is draining for host shutdown and has closed the channel.
+            // UNAVAILABLE (not a partial-success rejection, which OTLP clients never retry)
+            // so the client resends -- behind a load balancer, to another instance.
+            _logger.LogWarning("Rejected log export: collector is shutting down");
+            throw new RpcException(new Grpc.Core.Status(StatusCode.Unavailable, "Collector is shutting down"));
+        }
         catch (OperationCanceledException)
         {
             errorMessage = "Log export operation was cancelled";

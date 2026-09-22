@@ -90,6 +90,14 @@ public class MetricService : MetricsService.MetricsServiceBase
             totalDataPointCount = CalculateTotalDataPoints(metrics);
             storedDataPointCount = totalDataPointCount;
         }
+        catch (System.Threading.Channels.ChannelClosedException)
+        {
+            // The ingestion worker is draining for host shutdown and has closed the channel.
+            // UNAVAILABLE (not a partial-success rejection, which OTLP clients never retry)
+            // so the client resends -- behind a load balancer, to another instance.
+            _logger.LogWarning("Rejected metric export: collector is shutting down");
+            throw new RpcException(new Grpc.Core.Status(StatusCode.Unavailable, "Collector is shutting down"));
+        }
         catch (OperationCanceledException)
         {
             errorMessage = "Metric export operation was cancelled";

@@ -192,7 +192,8 @@ public sealed class MySqlBulkWriter(
                 pending.TryAdd(key, (hash, model));
         }
 
-        foreach (var (key, entry) in pending)
+        // Deterministic lock order, so two collectors upserting the same key set cannot deadlock.
+        foreach (var (key, entry) in pending.OrderBy(kv => kv.Key, StringComparer.Ordinal))
         {
             var id = await UpsertResourceAsync(conn, tx, entry.Model, entry.Hash, ct);
             // Deferred: caching now, before the transaction commits, would let a later failure in
@@ -228,7 +229,8 @@ public sealed class MySqlBulkWriter(
                 pending.TryAdd(hash, model);
         }
 
-        foreach (var (hash, model) in pending)
+        // Deterministic lock order, so two collectors upserting the same key set cannot deadlock.
+        foreach (var (hash, model) in pending.OrderBy(kv => kv.Key, StringComparer.Ordinal))
         {
             var id = await UpsertScopeAsync(conn, tx, model, hash, ct);
             // Deferred -- see ResolveResourcesAsync.

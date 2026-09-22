@@ -56,4 +56,18 @@ public sealed class TelemetryIngestionChannel
         TraceGate = new RecordCountGate(o.MaxQueuedSpans);
         MetricGate = new RecordCountGate(o.MaxQueuedMetrics);
     }
+
+    /// <summary>
+    /// Refuses further writes on all three channels -- called by
+    /// <see cref="TelemetryIngestionWorker.StopAsync"/> at host shutdown, so a late enqueue throws
+    /// <see cref="ChannelClosedException"/> (surfaced to the client as gRPC <c>UNAVAILABLE</c>)
+    /// instead of landing in a queue the stopping worker will never drain. Items already queued
+    /// remain readable.
+    /// </summary>
+    public void CompleteWriters()
+    {
+        Logs.Writer.TryComplete();
+        Traces.Writer.TryComplete();
+        Metrics.Writer.TryComplete();
+    }
 }

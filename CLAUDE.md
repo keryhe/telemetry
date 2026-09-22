@@ -320,6 +320,11 @@ regardless of outcome. A batch that still fails after retries are exhausted is d
 on `IngestionMetrics`'s `records_dropped` counter — the three gRPC `Export` methods' partial-success
 responses reflect only enqueue success, never this later, asynchronous drop; each documents that
 explicitly. This isolates gRPC latency from DB write latency and provides backpressure.
+On host shutdown the worker **drains rather than abandons** the queue (everything in it was already
+acknowledged to clients): `StopAsync` completes the channel writers, so a late export gets gRPC
+`UNAVAILABLE` (retryable, unlike a partial-success rejection), and the loops keep flushing until the
+channels are empty or the host's `ShutdownTimeout` (30s default, shared with Kestrel's request
+drain) expires — at which point whatever is left is counted on `records_dropped` and logged.
 
 **gRPC services** (`Keryhe.Telemetry.Collector/Services/`): inherit from protobuf-generated base
 classes, convert OTLP protobuf messages to Core domain models, delegate to write repositories,
@@ -366,6 +371,17 @@ process resolves them with no round trip. The cache needs no invalidation becaus
 resource, scope or metrics catalog row — `IRetentionSettingsRepository` offers retention only. If a delete
 that removes catalog rows is ever added, it must clear the cache, or every data-point insert fails
 its foreign key on each subsequent batch until the process restarts.
+
+On Postgres and Timescale, resource/scope/metric-catalog upserts run as their own
+auto-committed statements **before** the data transaction opens, rather than inside it —
+`ResourceScopeCache` is populated the moment each upsert returns, with no post-commit deferral.
+This is load-bearing on Timescale specifically: a data transaction that inserts into a time range
+with no existing chunk creates that chunk (and attaches its foreign keys) inline, which takes a
+lock on `resources`/`instrumentation_scopes` that conflicts with a concurrent flush's own upsert
+lock on those tables — resolving the upserts first means the data transaction never itself holds
+that lock. `TelemetryIngestionWorker`'s retry backoff also carries full jitter (random within
+[50%, 100%] of the exponential delay) for the same reason: a transient failure like this tends to
+hit several concurrent flushes at once, so fixed backoff would retry them all at the same moment.
 
 Because `metrics.created_at` now means "first seen" rather than approximately the data timestamp,
 metric retention prunes `TelemetryIngestionHelpers.TimePrunedMetricTables` — the five data-point

@@ -34,29 +34,37 @@ namespace Keryhe.Telemetry.PostgreSQL.Services;
 /// flush that later fails rolls back with everything else, the same as the unnest form it
 /// replaced) -- Npgsql tracks it automatically, unlike <c>SqlClient</c>.
 ///
-/// Each <c>Flush*Async</c> runs inside a single transaction, so a failure partway through
-/// leaves zero rows from that batch rather than a partially-applied flush -- previously a
-/// trace flush alone issued 3+ separate autocommitted statements. The transaction is never
-/// explicitly rolled back: <c>await using</c> disposes it without a matching
-/// <c>CommitAsync</c> whenever an exception propagates out of the block, and disposing an
-/// uncommitted <see cref="NpgsqlTransaction"/> rolls it back. Every command in these helpers
-/// is enlisted via <c>Transaction = tx</c> even though Npgsql's own docs say this is not
-/// strictly required (unlike <c>SqlClient</c>, it tracks the connection's ambient
-/// transaction automatically) -- explicit enlistment costs nothing and keeps every provider
-/// in this codebase following the same, unambiguous pattern.
+/// <b>Resource/scope/metric upserts run BEFORE the data transaction opens</b>, each as its own
+/// separately-committed statement against the same connection, rather than inside the same
+/// transaction as the bulk data insert. This used to be one transaction end to end, with
+/// <see cref="ResourceScopeCache"/> writes deferred until after commit to avoid caching an id
+/// that a later failure in the same flush would roll back. That shape deadlocked under
+/// concurrent flushes: on Timescale specifically, inserting into a time range with no existing
+/// chunk creates the chunk inside the same transaction, and attaching that chunk's foreign keys
+/// takes a lock on <c>resources</c>/<c>instrumentation_scopes</c> that conflicts with the
+/// upsert's own row lock on those tables -- two flushes, one creating a chunk while holding an
+/// upsert lock the other needs and vice versa, deadlock. Resolving the upserts first, each in
+/// its own auto-committed statement, means the data transaction that goes on to (maybe) create a
+/// chunk never itself holds a lock on the reference tables.
 ///
-/// <see cref="ResourceScopeCache"/> writes for newly-upserted resources/scopes/metrics are
-/// DEFERRED until after <c>CommitAsync</c> succeeds, collected in a per-flush
-/// <c>postCommitCacheWrites</c> list rather than written the moment each upsert returns an
-/// id. This is load-bearing, not cosmetic: caching immediately, before commit, was verified
-/// live to poison the cache on a rollback -- a resource upsert can succeed and be cached
-/// mid-transaction, then a later statement in the SAME flush fails and rolls the whole
-/// transaction back, leaving the cache pointing at a resources.id that was never actually
-/// persisted. Every subsequent flush that resolves that resource then hits the cache, skips
-/// re-inserting it, and fails its own FK constraint on the span/log/metric it tries to write
-/// -- permanently, since <see cref="ResourceScopeCache"/> entries are never evicted, until
-/// the process restarts. Deferring the write until after the commit that makes it true is
-/// what closes that gap.
+/// A consequence: an upserted resource, scope, or metric-catalog row can survive even when the
+/// data insert that needed it fails and the batch is retried. That is fine -- these are
+/// deduplicated reference rows (<c>ON CONFLICT DO UPDATE</c>), so the retry's upsert simply finds
+/// the row it already wrote via <c>RETURNING</c> instead of inserting a duplicate. Because each
+/// upsert is already committed by the time it returns an id, <see cref="ResourceScopeCache"/> is
+/// populated immediately rather than deferred -- there is no longer a same-flush rollback that
+/// could invalidate it.
+///
+/// The data transaction itself is unaffected: it still wraps only the bulk insert into
+/// <c>log_records</c>/<c>spans</c>/the data-point tables, so a failure there still leaves zero
+/// data rows for that batch. It is never explicitly rolled back: <c>await using</c> disposes it
+/// without a matching <c>CommitAsync</c> whenever an exception propagates out of the block, and
+/// disposing an uncommitted <see cref="NpgsqlTransaction"/> rolls it back. Every command
+/// enlisted in it sets <c>Transaction = tx</c> even though Npgsql's own docs say this is not
+/// strictly required (unlike <c>SqlClient</c>, it tracks the connection's ambient transaction
+/// automatically) -- explicit enlistment costs nothing and keeps every provider in this codebase
+/// following the same, unambiguous pattern. The upsert statements, running before the
+/// transaction exists, pass no <c>Transaction</c> at all and commit on their own.
 /// </summary>
 public sealed class PostgreSqlBulkWriter(
     NpgsqlDataSource dataSource,
@@ -70,15 +78,14 @@ public sealed class PostgreSqlBulkWriter(
     public async Task FlushLogsAsync(List<LogRecordModel> records, CancellationToken ct = default)
     {
         await using var conn = await dataSource.OpenConnectionAsync(ct);
+
+        // Resolved BEFORE the data transaction opens -- see the class doc comment.
+        var resourceIds = await ResolveResourcesAsync(conn, records.Select(r => r.Resource), ct);
+        var scopeIds = await ResolveScopesAsync(conn, records.Select(r => r.InstrumentationScope), ct);
+
         await using var tx = await conn.BeginTransactionAsync(ct);
-        var postCommitCacheWrites = new List<Action>();
-
-        var resourceIds = await ResolveResourcesAsync(conn, tx, records.Select(r => r.Resource), postCommitCacheWrites, ct);
-        var scopeIds = await ResolveScopesAsync(conn, tx, records.Select(r => r.InstrumentationScope), postCommitCacheWrites, ct);
-
         await BulkInsertLogsAsync(conn, tx, records, resourceIds, scopeIds, ct);
         await tx.CommitAsync(ct);
-        foreach (var write in postCommitCacheWrites) write();
         logger.LogDebug("Flushed {Count} log records", records.Count);
     }
 
@@ -91,16 +98,14 @@ public sealed class PostgreSqlBulkWriter(
         if (spans.Count == 0) return;
 
         await using var conn = await dataSource.OpenConnectionAsync(ct);
+
+        // Resolved BEFORE the data transaction opens -- see the class doc comment.
+        var resourceIds = await ResolveResourcesAsync(conn, spans.Select(s => s.Resource), ct);
+        var scopeIds = await ResolveScopesAsync(conn, spans.Select(s => s.InstrumentationScope), ct);
+
         await using var tx = await conn.BeginTransactionAsync(ct);
-        var postCommitCacheWrites = new List<Action>();
-
-        var resourceIds = await ResolveResourcesAsync(conn, tx, spans.Select(s => s.Resource), postCommitCacheWrites, ct);
-        var scopeIds = await ResolveScopesAsync(conn, tx, spans.Select(s => s.InstrumentationScope), postCommitCacheWrites, ct);
-
         await BulkInsertSpansAsync(conn, tx, spans, resourceIds, scopeIds, ct);
-
         await tx.CommitAsync(ct);
-        foreach (var write in postCommitCacheWrites) write();
         logger.LogDebug("Flushed {SpanCount} spans", spans.Count);
     }
 
@@ -111,13 +116,11 @@ public sealed class PostgreSqlBulkWriter(
     public async Task FlushMetricsAsync(List<MetricModel> metrics, CancellationToken ct = default)
     {
         await using var conn = await dataSource.OpenConnectionAsync(ct);
-        await using var tx = await conn.BeginTransactionAsync(ct);
-        var postCommitCacheWrites = new List<Action>();
 
-        var resourceIds = await ResolveResourcesAsync(conn, tx, metrics.Select(m => m.Resource), postCommitCacheWrites, ct);
-        var scopeIds = await ResolveScopesAsync(conn, tx, metrics.Select(m => m.InstrumentationScope), postCommitCacheWrites, ct);
-
-        var metricIds = await ResolveMetricIdsAsync(conn, tx, metrics, resourceIds, scopeIds, postCommitCacheWrites, ct);
+        // Resolved BEFORE the data transaction opens -- see the class doc comment.
+        var resourceIds = await ResolveResourcesAsync(conn, metrics.Select(m => m.Resource), ct);
+        var scopeIds = await ResolveScopesAsync(conn, metrics.Select(m => m.InstrumentationScope), ct);
+        var metricIds = await ResolveMetricIdsAsync(conn, metrics, resourceIds, scopeIds, ct);
 
         // Group data points by target table across the WHOLE batch, attaching each row's already
         // -resolved metric_id as it is grouped. This is what turns a metric flush into AT MOST
@@ -154,6 +157,7 @@ public sealed class PostgreSqlBulkWriter(
             }
         }
 
+        await using var tx = await conn.BeginTransactionAsync(ct);
         if (gaugeRows.Count > 0) await BulkInsertGaugeDataPointsAsync(conn, tx, gaugeRows, ct);
         if (sumRows.Count > 0) await BulkInsertSumDataPointsAsync(conn, tx, sumRows, ct);
         if (histogramRows.Count > 0) await BulkInsertHistogramDataPointsAsync(conn, tx, histogramRows, ct);
@@ -161,7 +165,6 @@ public sealed class PostgreSqlBulkWriter(
         if (summaryRows.Count > 0) await BulkInsertSummaryDataPointsAsync(conn, tx, summaryRows, ct);
 
         await tx.CommitAsync(ct);
-        foreach (var write in postCommitCacheWrites) write();
         logger.LogDebug("Flushed {Count} metrics", metrics.Count);
     }
 
@@ -171,9 +174,7 @@ public sealed class PostgreSqlBulkWriter(
 
     private async Task<Dictionary<string, long>> ResolveResourcesAsync(
         NpgsqlConnection conn,
-        NpgsqlTransaction tx,
         IEnumerable<ResourceModel?> resources,
-        List<Action> postCommitCacheWrites,
         CancellationToken ct)
     {
         // Keyed by ResourceKey, never by the bare hash: two tenants running the same service with the
@@ -196,7 +197,7 @@ public sealed class PostgreSqlBulkWriter(
         }
 
         if (pending.Count > 0)
-            await UpsertResourcesAsync(conn, tx, pending, result, cache, postCommitCacheWrites, ct);
+            await UpsertResourcesAsync(conn, pending, result, cache, ct);
 
         return result;
     }
@@ -209,10 +210,13 @@ public sealed class PostgreSqlBulkWriter(
     // conflicting rows too, one output row per input row -- same reasoning as ResolveMetricIdsAsync,
     // and the same reason `pending` must already be deduped by key before this runs: PostgreSQL
     // raises 21000 if one statement's ON CONFLICT DO UPDATE touches the same conflict target twice.
+    // Runs BEFORE the data transaction opens and commits on its own -- see the class doc
+    // comment for why, and note this means `cache` is populated immediately below rather than
+    // deferred: there is no same-flush rollback left that could invalidate it.
     private static async Task UpsertResourcesAsync(
-        NpgsqlConnection conn, NpgsqlTransaction tx,
+        NpgsqlConnection conn,
         Dictionary<string, (string Hash, ResourceModel Model)> pending,
-        Dictionary<string, long> result, ResourceScopeCache cache, List<Action> postCommitCacheWrites, CancellationToken ct)
+        Dictionary<string, long> result, ResourceScopeCache cache, CancellationToken ct)
     {
         const string sql = """
             INSERT INTO resources (attributes_json, created_at, resource_hash, schema_url, tenant_id)
@@ -222,7 +226,9 @@ public sealed class PostgreSqlBulkWriter(
             RETURNING id, tenant_id, resource_hash
             """;
 
-        var entries = pending.Values.ToList();
+        // Deterministic lock order, so two collectors upserting the same key set cannot deadlock:
+        // unnest() feeds rows to the INSERT in array order, which is the order row locks are taken.
+        var entries = pending.OrderBy(kv => kv.Key, StringComparer.Ordinal).Select(kv => kv.Value).ToList();
         var n = entries.Count;
         var attrs = new string?[n];
         var hashes = new string[n];
@@ -236,7 +242,7 @@ public sealed class PostgreSqlBulkWriter(
             tenantIds[i] = entries[i].Model.TenantId;
         }
 
-        await using var cmd = new NpgsqlCommand(sql, conn) { Transaction = tx };
+        await using var cmd = new NpgsqlCommand(sql, conn);
         cmd.Parameters.Add(new NpgsqlParameter { Value = attrs, NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Jsonb });
         cmd.Parameters.Add(new NpgsqlParameter { Value = hashes, NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Text });
         cmd.Parameters.Add(new NpgsqlParameter { Value = schemaUrls, NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Text });
@@ -250,18 +256,13 @@ public sealed class PostgreSqlBulkWriter(
             var hash = reader.GetString(2);
             var key = ResourceKey(tenantId, hash);
             result[key] = id;
-            // Deferred: caching now, before the transaction commits, would let a later failure in
-            // this SAME flush roll back the row while the cache still claims it exists -- see the
-            // class doc comment.
-            postCommitCacheWrites.Add(() => cache.SetResource(tenantId, hash, id));
+            cache.SetResource(tenantId, hash, id);
         }
     }
 
     private async Task<Dictionary<string, long>> ResolveScopesAsync(
         NpgsqlConnection conn,
-        NpgsqlTransaction tx,
         IEnumerable<InstrumentationScopeModel?> scopes,
-        List<Action> postCommitCacheWrites,
         CancellationToken ct)
     {
         var result = new Dictionary<string, long>(StringComparer.Ordinal);
@@ -280,16 +281,17 @@ public sealed class PostgreSqlBulkWriter(
         }
 
         if (pending.Count > 0)
-            await UpsertScopesAsync(conn, tx, pending, result, cache, postCommitCacheWrites, ct);
+            await UpsertScopesAsync(conn, pending, result, cache, ct);
 
         return result;
     }
 
-    // Batched cold-start scope upsert -- see UpsertResourcesAsync, same reasoning.
+    // Batched cold-start scope upsert -- see UpsertResourcesAsync, same reasoning, including
+    // running before the data transaction and caching immediately.
     private static async Task UpsertScopesAsync(
-        NpgsqlConnection conn, NpgsqlTransaction tx,
+        NpgsqlConnection conn,
         Dictionary<string, InstrumentationScopeModel> pending,
-        Dictionary<string, long> result, ResourceScopeCache cache, List<Action> postCommitCacheWrites, CancellationToken ct)
+        Dictionary<string, long> result, ResourceScopeCache cache, CancellationToken ct)
     {
         const string sql = """
             INSERT INTO instrumentation_scopes (name, version, schema_url, scope_hash, created_at, attributes_json)
@@ -299,7 +301,8 @@ public sealed class PostgreSqlBulkWriter(
             RETURNING id, scope_hash
             """;
 
-        var entries = pending.ToList();
+        // Deterministic lock order -- see UpsertResourcesAsync.
+        var entries = pending.OrderBy(kv => kv.Key, StringComparer.Ordinal).ToList();
         var n = entries.Count;
         var names = new string[n];
         var versions = new string?[n];
@@ -316,7 +319,7 @@ public sealed class PostgreSqlBulkWriter(
             attrs[i] = SerializeDeterministicJson(model.Attributes);
         }
 
-        await using var cmd = new NpgsqlCommand(sql, conn) { Transaction = tx };
+        await using var cmd = new NpgsqlCommand(sql, conn);
         cmd.Parameters.Add(new NpgsqlParameter { Value = names, NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Text });
         cmd.Parameters.Add(new NpgsqlParameter { Value = versions, NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Text });
         cmd.Parameters.Add(new NpgsqlParameter { Value = schemaUrls, NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Text });
@@ -329,8 +332,7 @@ public sealed class PostgreSqlBulkWriter(
             var id = reader.GetInt64(0);
             var hash = reader.GetString(1);
             result[hash] = id;
-            // Deferred -- see ResolveResourcesAsync.
-            postCommitCacheWrites.Add(() => cache.SetScope(hash, id));
+            cache.SetScope(hash, id);
         }
     }
 
@@ -491,13 +493,14 @@ public sealed class PostgreSqlBulkWriter(
     // at all -- which is also why description/unit refresh on a cold start rather than on
     // every export.
 
+    // Runs BEFORE the data transaction opens and commits on its own -- see the class doc
+    // comment for why, and note this means `cache` is populated immediately below rather than
+    // deferred: there is no same-flush rollback left that could invalidate it.
     private async Task<long[]> ResolveMetricIdsAsync(
         NpgsqlConnection conn,
-        NpgsqlTransaction tx,
         List<MetricModel> metrics,
         Dictionary<string, long> resourceIds,
         Dictionary<string, long> scopeIds,
-        List<Action> postCommitCacheWrites,
         CancellationToken ct)
     {
         // DO UPDATE rather than DO NOTHING so RETURNING fires for conflicting rows too, giving
@@ -569,7 +572,7 @@ public sealed class PostgreSqlBulkWriter(
                 types[i] = m.Type.ToString();
             }
 
-            await using var cmd = new NpgsqlCommand(sql, conn) { Transaction = tx };
+            await using var cmd = new NpgsqlCommand(sql, conn);
             cmd.Parameters.Add(new NpgsqlParameter { Value = resIds, NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Bigint });
             cmd.Parameters.Add(new NpgsqlParameter { Value = scoIds, NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Bigint });
             cmd.Parameters.Add(new NpgsqlParameter { Value = names, NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Text });
@@ -583,8 +586,7 @@ public sealed class PostgreSqlBulkWriter(
                 var id = reader.GetInt64(0);
                 var key = MetricKey(reader.GetInt64(1), reader.GetInt64(2), reader.GetString(3), reader.GetString(4));
                 result[key] = id;
-                // Deferred -- see ResolveResourcesAsync.
-                postCommitCacheWrites.Add(() => cache.SetMetric(key, id));
+                cache.SetMetric(key, id);
             }
         }
 

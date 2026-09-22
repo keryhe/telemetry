@@ -20,10 +20,11 @@ namespace Keryhe.Telemetry.SqlServer.Services;
 /// (a minimal <see cref="IDataReader"/> over a plain <c>List&lt;object?[]&gt;</c>) instead of
 /// building a <see cref="DataTable"/> first -- no DataRow/DataColumn change-tracking overhead for
 /// data that is only ever written once, streamed straight through. Every call site also goes
-/// through <see cref="CreateBulkCopy"/>, which sets <c>BatchSize</c>, <c>TableLock</c> (safe here
-/// because the copy already runs inside this flush's own transaction) and a
-/// <c>BulkCopyTimeout</c> above the 30s default, instead of each of the seven call sites
-/// constructing its own bare <see cref="SqlBulkCopy"/> with server defaults. <c>#spans_stage</c>
+/// through <see cref="CreateBulkCopy"/>, which sets <c>BatchSize</c> and a <c>BulkCopyTimeout</c>
+/// above the 30s default, instead of each of the seven call sites constructing its own bare
+/// <see cref="SqlBulkCopy"/> with server defaults. <c>TableLock</c> is applied to the
+/// session-private <c>#spans_stage</c> only, never to a shared table -- see
+/// <see cref="CreateBulkCopy"/> for why. <c>#spans_stage</c>
 /// additionally declares <c>PRIMARY KEY CLUSTERED (trace_id, span_id)</c> matching the MERGE's own
 /// join predicate, so the MERGE gets a pre-sorted source instead of sorting or hashing a heap (plus
 /// a plan recompile) on every flush.
@@ -200,7 +201,8 @@ public sealed class SqlServerBulkWriter(
                 pending.TryAdd(key, (hash, model));
         }
 
-        foreach (var (key, entry) in pending)
+        // Deterministic lock order, so two collectors upserting the same key set cannot deadlock.
+        foreach (var (key, entry) in pending.OrderBy(kv => kv.Key, StringComparer.Ordinal))
         {
             var id = await UpsertResourceAsync(conn, tx, entry.Model, entry.Hash, ct);
             // Deferred: caching now, before the transaction commits, would let a later failure in
@@ -236,7 +238,8 @@ public sealed class SqlServerBulkWriter(
                 pending.TryAdd(hash, model);
         }
 
-        foreach (var (hash, model) in pending)
+        // Deterministic lock order, so two collectors upserting the same key set cannot deadlock.
+        foreach (var (hash, model) in pending.OrderBy(kv => kv.Key, StringComparer.Ordinal))
         {
             var id = await UpsertScopeAsync(conn, tx, model, hash, ct);
             // Deferred -- see ResolveResourcesAsync.
@@ -425,7 +428,7 @@ public sealed class SqlServerBulkWriter(
                 SerializeListOrNull(span.Links)
             ]);
 
-        using (var bulk = CreateBulkCopy(conn, tx, "#spans_stage"))
+        using (var bulk = CreateBulkCopy(conn, tx, "#spans_stage", tableLock: true))
         {
             for (var i = 0; i < SpanStageColumns.Length; i++)
                 bulk.ColumnMappings.Add(i, SpanStageColumns[i]);
@@ -684,15 +687,23 @@ public sealed class SqlServerBulkWriter(
 
     // Every SqlBulkCopy call site shares these: BatchSize caps how many rows SQL Server commits
     // per internal batch instead of the whole call as one giant implicit batch (bounds log/lock
-    // growth on a large flush); TableLock takes a bulk-update table lock instead of row locks,
-    // which is faster for a bulk load and safe here because every copy already runs inside this
-    // flush's own transaction, so there is no cross-flush contention to protect against; and the
-    // default 30s BulkCopyTimeout is too tight for a large batch on a loaded server.
+    // growth on a large flush -- and, at 2,000 rows per batch statement, keeps each one below the
+    // 5,000-lock escalation threshold, so a large flush does not escalate its row locks into the
+    // very table lock avoided below); and the default 30s BulkCopyTimeout is too tight for a large
+    // batch on a loaded server.
+    //
+    // tableLock must stay false for every shared table (log_records, the *_data_points tables).
+    // Those have a clustered IDENTITY primary key, and TableLock on a clustered table is an
+    // exclusive table lock held until this flush's transaction commits -- serializing every flush
+    // of that table across all of this process's flush loops AND every other collector instance
+    // behind the same load balancer, and blocking API reads of it for the whole flush (the schema
+    // does not enable READ_COMMITTED_SNAPSHOT). Only #spans_stage, a temp table private to this
+    // session, takes it: there it contends with nothing and still buys a minimally-logged load.
     private const int BulkCopyBatchSize = 2_000;
     private const int BulkCopyTimeoutSeconds = 120;
 
-    private static SqlBulkCopy CreateBulkCopy(SqlConnection conn, SqlTransaction tx, string destinationTable) => new(
-        conn, SqlBulkCopyOptions.TableLock, tx)
+    private static SqlBulkCopy CreateBulkCopy(SqlConnection conn, SqlTransaction tx, string destinationTable, bool tableLock = false) => new(
+        conn, tableLock ? SqlBulkCopyOptions.TableLock : SqlBulkCopyOptions.Default, tx)
     {
         DestinationTableName = destinationTable,
         BatchSize = BulkCopyBatchSize,
