@@ -1,7 +1,6 @@
 import { BreakpointObserver } from '@angular/cdk/layout';
 import { AsyncPipe } from '@angular/common';
 import { Component, inject, viewChild } from '@angular/core';
-import { toSignal } from '@angular/core/rxjs-interop';
 import { MatButtonModule } from '@angular/material/button';
 import { MatRippleModule } from '@angular/material/core';
 import { MatIconModule } from '@angular/material/icon';
@@ -10,8 +9,8 @@ import { MatSelectModule } from '@angular/material/select';
 import { MatSidenav, MatSidenavModule } from '@angular/material/sidenav';
 import { MatToolbarModule } from '@angular/material/toolbar';
 import { MatTooltipModule } from '@angular/material/tooltip';
-import { ActivatedRoute, NavigationEnd, Router, RouterLink, RouterLinkActive, RouterOutlet } from '@angular/router';
-import { filter, map, startWith } from 'rxjs/operators';
+import { RouterLink, RouterLinkActive, RouterOutlet } from '@angular/router';
+import { map } from 'rxjs/operators';
 import { APP_CONFIG } from '../../core/config/app-config';
 import { ThemeService } from '../../core/services/theme.service';
 import { TenantService } from '../../core/services/tenant.service';
@@ -72,8 +71,6 @@ export class ShellComponent {
   private readonly themeService = inject(ThemeService);
   protected readonly tenantService = inject(TenantService);
   private readonly breakpoints = inject(BreakpointObserver);
-  private readonly router = inject(Router);
-  private readonly route = inject(ActivatedRoute);
 
   /** Header bar text — configurable per host, see AppConfig.brandName/brandTagline. */
   protected readonly brand = inject(APP_CONFIG);
@@ -82,35 +79,6 @@ export class ShellComponent {
   protected readonly isCompact$ = this.breakpoints
     .observe(COMPACT_QUERY)
     .pipe(map((r) => r.matches));
-
-  /**
-   * True on pages that opt out of the per-tenant chrome — the tenant picker, and every nav item
-   * except Settings. Those are tenant-scoped controls: the picker chooses a tenant, and each
-   * other nav item routes to a page that reads one. On the cross-tenant Global Dashboard none of
-   * that has anything to act on, so the page declares `data: { chrome: 'global' }` and the shell
-   * drops the picker and narrows the rail to Settings, keeping the toolbar (branding, time range,
-   * theme) and Settings itself, which isn't tenant-scoped.
-   *
-   * Driven by route data rather than a URL test so a second chromeless page costs one line.
-   */
-  protected readonly chromeless = toSignal(
-    this.router.events.pipe(
-      filter((e) => e instanceof NavigationEnd),
-      map(() => this.isChromeless()),
-      startWith(this.isChromeless()),
-    ),
-    { initialValue: false },
-  );
-
-  /**
-   * `route` is the shell's own (path-less) route, so its snapshot's `firstChild` is the page
-   * being rendered. Read off the snapshot rather than `route.firstChild?.snapshot`: during the
-   * component's field initialization the child ActivatedRoute exists before its snapshot does,
-   * so that form throws on the initial `startWith`.
-   */
-  private isChromeless(): boolean {
-    return this.route.snapshot.firstChild?.data?.['chrome'] === 'global';
-  }
 
   /**
    * Queried rather than referenced as `#drawer` in the template: the sidenav now lives inside an

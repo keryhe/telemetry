@@ -15,8 +15,7 @@
     <span class="spacer"></span>
 
     <div class="toolbar-controls">
-      <!-- Tenant Picker — hidden on cross-tenant pages, which have no single tenant to pick. -->
-      @if (tenantService.tenants().length > 0 && !chromeless()) {
+      @if (tenantService.tenants().length > 0) {
         <mat-form-field class="tenant-select" appearance="outline" subscriptSizing="dynamic">
           <mat-label>Tenant</mat-label>
           <mat-select
@@ -45,23 +44,21 @@
       class="sidenav">
       <nav class="nav-rail">
         @for (item of navItems; track item.route) {
-          @if (!chromeless() || item.route === '/settings') {
-            <a class="nav-item"
-               matRipple
-               [matTooltip]="item.label"
-               matTooltipPosition="right"
-               [routerLink]="item.route"
-               routerLinkActive="active-link"
-               [routerLinkActiveOptions]="{
-                 paths: item.route === '/dashboard' ? 'exact' : 'subset',
-                 queryParams: 'ignored',
-                 matrixParams: 'ignored',
-                 fragment: 'ignored'
-               }">
-              <mat-icon>{{ item.icon }}</mat-icon>
-              <span class="nav-label">{{ item.label }}</span>
-            </a>
-          }
+          <a class="nav-item"
+             matRipple
+             [matTooltip]="item.label"
+             matTooltipPosition="right"
+             [routerLink]="item.route"
+             routerLinkActive="active-link"
+             [routerLinkActiveOptions]="{
+               paths: item.route === '/dashboard' ? 'exact' : 'subset',
+               queryParams: 'ignored',
+               matrixParams: 'ignored',
+               fragment: 'ignored'
+             }">
+            <mat-icon>{{ item.icon }}</mat-icon>
+            <span class="nav-label">{{ item.label }}</span>
+          </a>
         }
       </nav>
     </mat-sidenav>
