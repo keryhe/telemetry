@@ -406,7 +406,9 @@ explicitly if you wire it up.
 **Retention** (`Keryhe.Telemetry.Api/Retention/`): the single application-level mechanism for
 telemetry retention, on every provider including Timescale (schema 2.10.0 removed Timescale's
 native `add_retention_policy` jobs for `log_records` and the five metric data-point tables —
-`spans` never had one, since it is not a hypertable). `RetentionWorker`, a `BackgroundService`
+`spans` never had one either, and still doesn't now that it *is* a hypertable: it gained hypertable
+partitioning in schema 2.11.0, but no native retention policy was added alongside it, so it has
+relied on the application-level `RetentionWorker` from the start). `RetentionWorker`, a `BackgroundService`
 structurally mirroring `AlertEvaluationWorker`, wakes on `Retention:IntervalSeconds` (default
 3600s, config only — not part of the DB row), resolves the scoped `IRetentionSettingsRepository`,
 reads the current windows via `GetSettingsAsync`, then runs `DeleteOldTracesAsync`/
@@ -448,6 +450,16 @@ via `EXPLAIN` against a live Postgres container that the trace-detail lookup, th
 query, and the trace-retention sweep (`PostgreSqlRetentionSettingsRepository`/
 `TimescaleRetentionSettingsRepository`) all still resolve to index scans, not sequential scans,
 without the dropped indexes.
+
+Schema 2.12.0 adds `idx_spans_error` back for `mode=errors` — not a reversal of `idx_status`'s
+2.8.0 removal, since it's a different shape: a partial index (`WHERE status_code = 'ERROR'`,
+`status_code = 'ERROR'` on SqlServer) covering only the rare error rows rather than a plain B-tree
+over all three status values, which is exactly the case the 2.8.0 low-cardinality reasoning doesn't
+apply to. MySQL has no filtered indexes, so its equivalent is a plain `(status_code,
+start_time_unix_nano)` composite; ClickHouse needs nothing (its `ORDER BY (trace_id, span_id)` with
+a daily partition already covers it — confirmed the partial index is chosen via `EXPLAIN` against a
+live Timescale container for the exact `ErrorTracePredicate` query shape, across compressed and
+uncompressed chunks alike).
 
 **Telemetry (12)**: `resources`, `instrumentation_scopes`, `spans`, `span_events`, `span_links`,
 `metrics`, `gauge_data_points`, `sum_data_points`, `histogram_data_points`,

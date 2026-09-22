@@ -1,6 +1,7 @@
 using System.Text.Json.Serialization;
 using Keryhe.Telemetry.Api.Services;
 using Keryhe.Telemetry.Core;
+using Keryhe.Telemetry.Core.Data.Read;
 using Microsoft.Extensions.Configuration;
 
 namespace Microsoft.Extensions.DependencyInjection;
@@ -38,6 +39,13 @@ public static class TelemetryApiServiceCollectionExtensions
         // Scoped: one ApiTenantContext per request; TenantMiddleware sets the tenant id.
         services.AddScoped<ApiTenantContext>();
         services.AddScoped<ITenantContext>(sp => sp.GetRequiredService<ApiTenantContext>());
+
+        // Short-TTL memo of the trace read repositories' span scan (list-page-scale plan, Phase
+        // 3) — see TraceQueryCache's own doc comment. A dedicated singleton, not the app's shared
+        // IMemoryCache, so its SizeLimit doesn't require every other cache sharing that instance
+        // (e.g. CachingTenantResolver's) to start setting a Size per entry.
+        services.Configure<TraceQueryCacheOptions>(configuration.GetSection(TraceQueryCacheOptions.SectionName));
+        services.AddSingleton<TraceQueryCache>();
 
         return services;
     }

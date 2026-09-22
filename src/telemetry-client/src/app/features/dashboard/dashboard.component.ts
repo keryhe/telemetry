@@ -71,8 +71,11 @@ export class DashboardComponent {
   protected autoRefresh = signal(this.saved.autoRefresh);
   protected readonly preset = computed(() => this.timeRange.range().preset);
   private refreshSub?: Subscription;
-  /** Bounded (limit: 500) sample used for the recent-errors/slowest-traces tables. */
-  protected traces = signal<TraceInfo[]>([]);
+  /** Recent-errors/slowest-traces tables — server-computed samples from the `/overview` scan
+   *  (list-page-scale plan, Phase 2), replacing a separate `limit: 500` fetch of which only 5 rows
+   *  of each were ever shown. */
+  protected recentErrors = signal<TraceInfo[]>([]);
+  protected slowTraces = signal<TraceInfo[]>([]);
   protected availableServices = signal<string[]>([]);
   protected selectedService = signal(this.saved.selectedService);
   /** True (unbounded) volume histogram — backs the chart and the trace-count/error-rate stat cards. */
@@ -108,15 +111,6 @@ export class DashboardComponent {
   /** Error + fatal only — the log signal worth surfacing next to the trace RED metrics. */
   protected logErrorCount = computed(() =>
     this.logHistogram().reduce((a, b) => a + b.error + b.fatal, 0)
-  );
-  protected recentErrors = computed(() =>
-    this.traces().filter((t) => t.hasErrors).slice(0, 5)
-  );
-  protected slowTraces = computed(() =>
-    [...this.traces()]
-      .filter((t) => parseDotnetTimespan(t.traceDuration) > 500)
-      .sort((a, b) => parseDotnetTimespan(b.traceDuration) - parseDotnetTimespan(a.traceDuration))
-      .slice(0, 5)
   );
 
   // ---------------------------------------------------------------------------------------------
@@ -219,16 +213,17 @@ export class DashboardComponent {
     const svc = this.selectedService();
 
     forkJoin({
-      traces:     this.tracesApi.getTraces({ start, end, limit: 500, service: svc || undefined }),
-      // Swaps the plain histogram for the overview (same buckets, plus per-service RED stats) —
-      // one backend scan grouped two ways, not an additional request. See Phase 5 of the plan.
+      // Buckets + per-service RED stats + recent-errors/slowest-traces samples, all from one
+      // backend scan (list-page-scale plan, Phase 2) — replaces the former separate `limit: 500`
+      // trace fetch of which only 5 rows of each table were ever shown.
       overview:   this.tracesApi.getTraceOverview({ start, end, service: svc || undefined }),
       logHist:    this.logsApi.getLogHistogram({ start, end, service: svc || undefined }),
     }).subscribe({
-      next: ({ traces, overview, logHist }) => {
-        this.traces.set(traces);
+      next: ({ overview, logHist }) => {
         this.traceHistogram.set(overview.buckets);
         this.serviceStats.set(overview.services);
+        this.recentErrors.set(overview.recentErrors);
+        this.slowTraces.set(overview.slowestTraces);
         this.logHistogram.set(logHist);
         this.buildCharts(overview.buckets);
         this.loading.set(false);

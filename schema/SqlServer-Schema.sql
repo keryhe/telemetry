@@ -139,6 +139,11 @@ CREATE INDEX idx_end_time            ON spans (end_time_unix_nano DESC);
 CREATE INDEX idx_duration            ON spans (start_time_unix_nano, end_time_unix_nano);
 CREATE INDEX idx_spans_name          ON spans (name);
 CREATE INDEX idx_spans_resource_time ON spans (resource_id, start_time_unix_nano DESC);
+-- Filtered, not the idx_status this replaces the intent of (dropped in 2.8.0 for being
+-- low-cardinality over the *whole* table): ERROR is the minority status in practice (spans are
+-- overwhelmingly UNSET/OK), so this indexes only the rare rows mode=errors actually needs and
+-- stays small and cheap to maintain despite the 2.8.0 reasoning not applying to it (schema 2.12.0).
+CREATE INDEX idx_spans_error ON spans (start_time_unix_nano DESC) WHERE status_code = 'ERROR';
 -- GIN index on attributes_json omitted: no SQL Server equivalent.
 GO
 
@@ -516,7 +521,7 @@ GO
 -- Only reached when every statement above succeeded, so a partial apply cannot
 -- leave a false version marker for the apply-schema.sh gate.
 MERGE schema_version AS target
-USING (VALUES (N'2.11.0')) AS src (version)
+USING (VALUES (N'2.12.0')) AS src (version)
 ON target.version = src.version
 WHEN MATCHED     THEN UPDATE SET applied_at = SYSDATETIME()
 WHEN NOT MATCHED THEN INSERT (version, applied_at) VALUES (src.version, SYSDATETIME());

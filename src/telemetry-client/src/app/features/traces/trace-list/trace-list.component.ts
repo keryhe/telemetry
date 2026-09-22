@@ -1,7 +1,6 @@
 import { Component, NgZone, computed, effect, inject, signal, untracked } from '@angular/core';
 import { DatePipe, DecimalPipe, SlicePipe } from '@angular/common';
 import { Router } from '@angular/router';
-import { forkJoin } from 'rxjs';
 import { MatButtonToggleModule } from '@angular/material/button-toggle';
 import { MatButtonModule } from '@angular/material/button';
 import { MatCardModule } from '@angular/material/card';
@@ -184,7 +183,10 @@ export class TraceListComponent {
 
   protected pageIndex = signal(this.readNum('page') ?? 0);
   protected pageSize = signal(this.readNum('size') ?? this.saved.pageSize);
-  protected readonly pageSizeOptions = [100, 250, 500, 1000];
+  // 1000 dropped (list-page-scale plan, Phase 8): the one-line answer to "stop rendering 1000 live
+  // rows" — virtualizing the table is the better one but real work, especially for the logs page's
+  // expandable detail rows; capping the selectable page size is the cheap fix that ships today.
+  protected readonly pageSizeOptions = [100, 250, 500];
 
   /** Real length behind the paginator: server total normally, refined length in client mode. */
   protected effectiveTotal = computed(() => this.clientMode() ? this.refined().length : this.total());
@@ -318,7 +320,7 @@ export class TraceListComponent {
 
   /** Longest duration among the rows currently shown, for scaling inline duration bars. */
   protected maxRowDurationMs = computed(() =>
-    Math.max(1, ...this.displayTraces().map((t) => parseDotnetTimespan(t.traceDuration)))
+    this.displayTraces().reduce((max, t) => Math.max(max, parseDotnetTimespan(t.traceDuration)), 1)
   );
 
   /** This trace's duration as a percentage of the slowest visible row (0–100). */
@@ -363,10 +365,16 @@ export class TraceListComponent {
       });
     });
 
-    // Dependencies (service map): reload on time-range change only.
+    // Dependencies (service map): only the Service Map tab needs this — an entire full-window
+    // self-join of `spans` otherwise ran on every time-range change regardless of which tab was
+    // open (list-page-scale plan, Phase 1). Reload on time-range change while the tab is open, and
+    // on first opening it.
     effect(() => {
+      const tab = this.selectedTab();
       this.timeRange.range();
-      untracked(() => this.loadMeta());
+      untracked(() => {
+        if (tab === 1) this.loadMeta();
+      });
     });
 
     // Operation dropdown options: reload when the selected service (or time range) changes.
@@ -448,18 +456,15 @@ export class TraceListComponent {
     this.loading.set(true);
     const { start, end } = this.timeRange.range();
     const filters = this.serverFilters();
-    forkJoin({
-      page: this.api.searchTraces({ start, end, ...filters, limit: OVERVIEW_CAP, offset: 0 }),
-      // One scan serving both charts (trace-latency-p50 plan, Phase 3): the volume histogram and
-      // the latency bucket grid. Replaces the old getTraceHistogram() + client-side
-      // binLatencyPoints(overview()) pairing, which bubbled only the 1000-row capped page — the
-      // most recent few minutes of any wide range, not the actual distribution.
-      overview: this.api.getTraceOverview({ start, end, ...filters }),
-    }).subscribe({
-      next: ({ page, overview }) => {
-        this.overview.set(page.items);
-        this.total.set(page.total);
-        this.capped.set(page.total > page.items.length);
+    // One scan serving the table rows and both charts (list-page-scale plan, Phase 2, building on
+    // trace-latency-p50 plan Phase 3's shared volume-histogram/latency-bucket scan): the former
+    // second, independent /search call over the identical filter set and window is gone — the
+    // page's rows now come from the same overview as the charts.
+    this.api.getTraceOverview({ start, end, ...filters, limit: OVERVIEW_CAP, offset: 0 }).subscribe({
+      next: (overview) => {
+        this.overview.set(overview.items);
+        this.total.set(overview.total);
+        this.capped.set(overview.total > overview.items.length);
         this.histogram.set(overview.buckets);
         this.buildChart(start, end, overview.buckets);
         this.buildLatencyBubbles(overview.latencyBuckets ?? []);

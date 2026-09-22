@@ -15,8 +15,8 @@ namespace Keryhe.Telemetry.MySql.Services;
 // SQL carry MySQL-specific overrides.
 // =============================================================================
 
-public class MySqlTraceReadRepository(IConfiguration configuration, ITenantContext tenantContext)
-    : TraceReadRepositoryBase(tenantContext)
+public class MySqlTraceReadRepository(IConfiguration configuration, ITenantContext tenantContext, TraceQueryCache traceQueryCache)
+    : TraceReadRepositoryBase(tenantContext, traceQueryCache)
 {
     private readonly string _connectionString = configuration.GetConnectionString("Api")!;
 
@@ -26,6 +26,14 @@ public class MySqlTraceReadRepository(IConfiguration configuration, ITenantConte
         await conn.OpenAsync(cancellationToken);
         return conn;
     }
+
+    // Same dialect hooks as MySqlLogReadRepository, needed here too now that the service/tag
+    // filters run in SQL (list-page-scale plan, Phase 4). JSON_KEYS + JSON_CONTAINS lists the
+    // JSON object's top-level keys and tests membership — value-type-agnostic, unlike ->> which
+    // returns NULL for an object/array value.
+    protected override string ResourceServiceNameExpr(string resourceAlias = "r") => $"{resourceAlias}.attributes_json ->> '$.\"service.name\"'";
+    protected override string JsonHasKeyExpr(string jsonColumn, string keyParam)
+        => $"JSON_CONTAINS(JSON_KEYS(COALESCE({jsonColumn}, JSON_OBJECT())), JSON_QUOTE({keyParam}))";
 }
 
 public class MySqlMetricReadRepository(IConfiguration configuration, ITenantContext tenantContext)
@@ -57,7 +65,7 @@ public class MySqlLogReadRepository(IConfiguration configuration, ITenantContext
     // the ->> operator (JSON_UNQUOTE(JSON_EXTRACT(...))), and paging uses LIMIT/OFFSET.
     // The attribute key "service.name" contains a dot, so the JSON path quotes it.
     protected override string LikeOperator => "LIKE";
-    protected override string ResourceServiceNameExpr => "r.attributes_json ->> '$.\"service.name\"'";
+    protected override string ResourceServiceNameExpr(string resourceAlias = "r") => $"{resourceAlias}.attributes_json ->> '$.\"service.name\"'";
     protected override string PagingClause => "LIMIT @limit OFFSET @offset";
     // MySQL LIKE uses backslash as the default escape character (matches the Postgres base default).
 

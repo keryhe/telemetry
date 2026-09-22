@@ -30,6 +30,13 @@ export interface TraceHistogramQuery {
   /** Latency bucket grid dimensions — only read by `getTraceOverview`. */
   latencyTimeCols?: number;
   latencyDurationRows?: number;
+  /** Items paging/sort — only read by `getTraceOverview` (list-page-scale plan, Phase 2). */
+  sort?: string;
+  dir?: 'asc' | 'desc';
+  limit?: number;
+  offset?: number;
+  /** Row cap for `recentErrors`/`slowestTraces` — only read by `getTraceOverview` (dashboard). */
+  sampleSize?: number;
 }
 
 /** One cell of the trace latency chart's time × log-duration grid (server-computed, Phase 3 of
@@ -46,16 +53,25 @@ export interface TraceLatencyBucket {
 }
 
 /**
- * Same volume histogram as `getTraceHistogram` plus per-service RED stats and the latency bucket
- * grid, from one backend scan instead of several — see plans/dashboard-refactor.md Phase 5 and
- * plans/trace-latency-p50.md Phase 3. Kept as its own endpoint/type rather than an option on
- * `getTraceHistogram` so the traces list page's volume chart never fetches or pays for stats it
- * doesn't read when latency buckets aren't needed either.
+ * Same volume histogram as `getTraceHistogram` plus per-service RED stats, the latency bucket
+ * grid, and (list-page-scale plan, Phase 2) the traces list page's table rows and the dashboard's
+ * recent-errors/slowest-traces samples — all from one backend scan instead of several. Kept as
+ * its own endpoint/type rather than an option on `getTraceHistogram` so the traces list page's
+ * volume chart never fetches or pays for stats it doesn't read when latency buckets aren't needed
+ * either.
  */
 export interface TraceOverview {
   buckets: TimeBucket[];
   services: ServiceStats[];
   latencyBuckets?: TraceLatencyBucket[];
+  /** The traces list page's table rows — see `TraceHistogramQuery.sort`/`dir`/`limit`/`offset`. */
+  items: TraceInfo[];
+  /** Total rows matching the filter, before paging — the paginator's "of N" count. */
+  total: number;
+  /** Dashboard's recent-errors table (newest first, top `sampleSize`). */
+  recentErrors: TraceInfo[];
+  /** Dashboard's slowest-traces table (duration desc, top `sampleSize`). */
+  slowestTraces: TraceInfo[];
 }
 
 @Injectable({ providedIn: 'root' })
@@ -108,7 +124,11 @@ export class TracesApiService {
     );
   }
 
-  /** Same query shape as `getTraceHistogram`, plus per-service RED stats and (when requested) the latency bucket grid. */
+  /**
+   * Same query shape as `getTraceHistogram`, plus per-service RED stats, (when requested) the
+   * latency bucket grid, and — via `sort`/`dir`/`limit`/`offset`/`sampleSize` — the traces list
+   * page's table rows and the dashboard's recent-errors/slowest-traces samples.
+   */
   getTraceOverview(query: TraceHistogramQuery): Observable<TraceOverview> {
     let params = new HttpParams()
       .set('start', query.start.toISOString())
@@ -121,6 +141,10 @@ export class TracesApiService {
     if (query.maxDurationMs != null) params = params.set('maxDurationMs', query.maxDurationMs);
     if (query.latencyTimeCols != null) params = params.set('latencyTimeCols', query.latencyTimeCols);
     if (query.latencyDurationRows != null) params = params.set('latencyDurationRows', query.latencyDurationRows);
+    if (query.sort) params = params.set('sort', query.sort).set('dir', query.dir ?? 'desc');
+    if (query.limit != null) params = params.set('limit', query.limit);
+    if (query.offset != null) params = params.set('offset', query.offset);
+    if (query.sampleSize != null) params = params.set('sampleSize', query.sampleSize);
     for (const tag of query.tags ?? []) params = params.append('tag', tag);
     return this.http.get<TraceOverview>(`${this.base}/overview`, { params }).pipe(
       map((o) => ({

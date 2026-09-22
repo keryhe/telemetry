@@ -116,6 +116,11 @@ ENGINE = ReplacingMergeTree
 PARTITION BY toYYYYMMDD(fromUnixTimestamp64Nano(start_time_unix_nano))
 ORDER BY (trace_id, span_id);
 
+-- schema 2.12.0 adds idx_spans_error (a status_code-filtered index on start_time_unix_nano) to
+-- the other four providers, for mode=errors. Not needed here: the daily partition plus this
+-- table's own ORDER BY (trace_id, span_id) already lets a status_code='ERROR' scan skip whole
+-- partitions/granules outside the query's time bounds without a dedicated index.
+
 -- span_events and span_links were dropped in 2.11.0: neither was ever read or written
 -- independently of its parent span, so both collapsed into spans.events_json/links_json.
 
@@ -417,6 +422,10 @@ VALUES (1, 90, 90, 180);
 -- =============================================================================
 -- Only inserted when every statement above succeeded, so a partial apply cannot
 -- leave a false version marker for the apply-schema.sh gate.
+-- 2.12.0 is a no-op bump for ClickHouse alone, like 2.8.0 before it: the other four providers add
+-- idx_spans_error (a status_code-filtered index) for mode=errors, but spans' ORDER BY (trace_id,
+-- span_id) with a daily partition already gives ClickHouse the equivalent skip behavior — see the
+-- comment on the spans table above.
 -- 2.11.0 drops span_events and span_links, folding both into spans.events_json/links_json --
 -- which also removes the retried-flush double-insert risk those two MergeTree tables carried,
 -- since there is nothing left to insert alongside the ReplacingMergeTree-deduped spans row.
@@ -427,4 +436,4 @@ VALUES (1, 90, 90, 180);
 -- spans' ORDER BY (trace_id, span_id) with a daily partition already gave it what the relational
 -- providers got from the four indexes they dropped (see PostgreSQL-Schema.sql), and it has no
 -- GIN-style JSONB index to carry the equivalent write cost of.
-INSERT INTO schema_version (version) VALUES ('2.11.0');
+INSERT INTO schema_version (version) VALUES ('2.12.0');

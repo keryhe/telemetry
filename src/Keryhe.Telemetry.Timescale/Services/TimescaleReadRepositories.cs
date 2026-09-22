@@ -1,6 +1,7 @@
 using Npgsql;
 using Microsoft.Extensions.Configuration;
 using Keryhe.Telemetry.Core;
+using Keryhe.Telemetry.Core.Data.Read;
 using Keryhe.Telemetry.PostgreSQL.Services;
 
 namespace Keryhe.Telemetry.Timescale.Services;
@@ -15,8 +16,8 @@ namespace Keryhe.Telemetry.Timescale.Services;
 // not part of these interfaces; when such a method is added it is overridden here only.
 // =============================================================================
 
-public sealed class TimescaleTraceReadRepository(NpgsqlDataSource dataSource, ITenantContext tenantContext)
-    : PostgreSqlTraceReadRepository(dataSource, tenantContext);
+public sealed class TimescaleTraceReadRepository(NpgsqlDataSource dataSource, ITenantContext tenantContext, TraceQueryCache traceQueryCache)
+    : PostgreSqlTraceReadRepository(dataSource, tenantContext, traceQueryCache);
 
 public sealed class TimescaleMetricReadRepository(NpgsqlDataSource dataSource, ITenantContext tenantContext, IConfiguration configuration)
     : PostgreSqlMetricReadRepository(dataSource, tenantContext, configuration);

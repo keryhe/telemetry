@@ -40,6 +40,9 @@ public class TracesController : ControllerBase
 
     // GET /api/traces/search?start=&end=&mode=all|errors|slow&service=&operation=&minDurationMs=&maxDurationMs=&tag=key:value&limit=&offset=
     // Server-side filtered + paged traces for the traces list page (returns the full filtered total).
+    // RootSpanAttributes on the returned rows is null unless a `tag` predicate is supplied (list-
+    // page-scale plan, Phase 3 — this endpoint now scans slim like /overview, which it shares a
+    // cached scan with when the filters/window match).
     [HttpGet("search")]
     public async Task<ActionResult<PagedResult<TraceInfo>>> SearchTraces(
         [FromQuery] DateTime start,
@@ -116,11 +119,13 @@ public class TracesController : ControllerBase
         return Ok(result);
     }
 
-    // GET /api/traces/overview?start=&end=&bucketCount=&mode=all|errors|slow&service=&operation=&minDurationMs=&maxDurationMs=&tag=key:value&latencyTimeCols=&latencyDurationRows=
-    // Dashboard overview: the same volume histogram as /histogram plus per-service RED stats and
-    // the latency bucket grid (trace-latency-p50 plan, Phase 3), from one scan instead of several.
-    // Kept as its own endpoint (not a flag on /histogram) so the traces list page's use of
-    // /histogram is unaffected and never pays for stats it doesn't read.
+    // GET /api/traces/overview?start=&end=&bucketCount=&mode=all|errors|slow&service=&operation=&minDurationMs=&maxDurationMs=&tag=key:value&latencyTimeCols=&latencyDurationRows=&sort=&dir=&limit=&offset=&sampleSize=
+    // Dashboard/traces-list overview: the same volume histogram as /histogram plus per-service RED
+    // stats, the latency bucket grid (trace-latency-p50 plan, Phase 3), and the traces list page's
+    // table rows/dashboard's recent-errors+slowest-traces samples (list-page-scale plan, Phase 2),
+    // all from one scan instead of several. Kept as its own endpoint (not a flag on /histogram) so
+    // the traces list page's volume-chart-only use of /histogram is unaffected and never pays for
+    // stats it doesn't read.
     [HttpGet("overview")]
     public async Task<ActionResult<TraceOverview>> GetTraceOverview(
         [FromQuery] DateTime start,
@@ -134,6 +139,11 @@ public class TracesController : ControllerBase
         [FromQuery(Name = "tag")] string[]? tag = null,
         [FromQuery] int latencyTimeCols = 48,
         [FromQuery] int latencyDurationRows = 20,
+        [FromQuery] string? sort = null,
+        [FromQuery] string dir = "desc",
+        [FromQuery] int limit = 100,
+        [FromQuery] int offset = 0,
+        [FromQuery] int sampleSize = 5,
         CancellationToken ct = default)
     {
         var tags = (tag ?? Array.Empty<string>())
@@ -154,7 +164,12 @@ public class TracesController : ControllerBase
             MaxDurationMs = maxDurationMs,
             Tags = tags,
             LatencyTimeCols = latencyTimeCols,
-            LatencyDurationRows = latencyDurationRows
+            LatencyDurationRows = latencyDurationRows,
+            Sort = sort,
+            Dir = dir,
+            Limit = limit,
+            Offset = offset,
+            SampleSize = sampleSize
         }, ct);
         return Ok(result);
     }

@@ -1,4 +1,4 @@
-import { Component, computed, effect, inject, signal, untracked, viewChild } from '@angular/core';
+import { Component, computed, effect, inject, signal, untracked } from '@angular/core';
 import { DatePipe, DecimalPipe, SlicePipe, PercentPipe } from '@angular/common';
 import { ActivatedRoute, RouterLink } from '@angular/router';
 import { forkJoin } from 'rxjs';
@@ -8,7 +8,7 @@ import { MatIconModule } from '@angular/material/icon';
 import { MatInputModule } from '@angular/material/input';
 import { MatProgressBarModule } from '@angular/material/progress-bar';
 import { MatSelectModule } from '@angular/material/select';
-import { MatTable, MatTableModule } from '@angular/material/table';
+import { MatTableModule } from '@angular/material/table';
 import { MatButtonModule } from '@angular/material/button';
 import { MatPaginatorModule, PageEvent } from '@angular/material/paginator';
 import { MatChipsModule } from '@angular/material/chips';
@@ -38,8 +38,15 @@ import { downloadCsv, downloadJson, copyPermalink, fileStamp } from '../../share
 
 const BUCKET_COUNT = 30;
 const STATE_KEY = 'state.logs';
-/** Upper bound on rows pulled for the chart/stat overview (and shallow client paging). */
-const OVERVIEW_CAP = 1000;
+/**
+ * Upper bound on rows pulled for the chart/stat overview, shallow client paging, and client-side
+ * faceting. Lowered from 1000 to 250 (list-page-scale plan, Phase 7 §10.2): faceting over a
+ * 1000-row sample of a much larger window was already a statistical approximation presented as
+ * exact counts, and 250 serves that approximation equally well at a quarter of the fetch/parse/
+ * facet-walk cost. Only the approximation's sample size changes — the counts were never exact
+ * over the full filtered population to begin with.
+ */
+const OVERVIEW_CAP = 250;
 /** Default number of attribute keys / values per key the faceting sidebar shows (raised via "show more"). */
 const FACET_KEY_LIMIT = 15;
 const FACET_VALUE_LIMIT = 8;
@@ -105,6 +112,14 @@ export class LogsComponent {
   protected capped = signal(false);
 
   protected searchText = signal<string>(this.urlState.get('q') ?? this.saved.searchText);
+  /**
+   * Debounced echo of `searchText`, read by everything that parses/filters/refetches on it.
+   * Typing a `key:value` attribute term re-runs `refined()` (and so `facetCounts()`, a
+   * 1000-row × 3-attribute-bag walk) on every keystroke of the value if driven off the raw
+   * signal — debouncing is the fix (list-page-scale plan, Phase 1). The raw signal still drives
+   * the input binding and the cheap active/excluded facet marking in `facets`.
+   */
+  private readonly debouncedSearchText = signal(this.searchText());
   protected selectedService = signal<string>(this.urlState.get('service') ?? this.saved.selectedService);
   protected selectedSeverity = signal<number>(this.readNum('severity') ?? this.saved.selectedSeverity);
   protected traceIdFilter = signal('');
@@ -134,13 +149,11 @@ export class LogsComponent {
   protected contextLoading = signal(false);
   protected contextAnchor = signal<LogRecord | null>(null);
 
-  // multiTemplateDataRows only re-evaluates its `when` predicate when the table
-  // re-renders its rows, so we must call renderRows() after toggling expansion.
-  private readonly table = viewChild(MatTable<LogRecord>);
-
   protected pageIndex = signal(this.readNum('page') ?? 0);
   protected pageSize = signal(this.readNum('size') ?? this.saved.pageSize);
-  protected readonly pageSizeOptions = [100, 250, 500, 1000];
+  // 1000 dropped (list-page-scale plan, Phase 8) — see trace-list.component.ts's identical change
+  // for why this, not virtualization, is what shipped.
+  protected readonly pageSizeOptions = [100, 250, 500];
 
   /** Distinct services in range for the dropdown — fetched independently of the paged rows. */
   protected services = signal<string[]>([]);
@@ -155,7 +168,7 @@ export class LogsComponent {
     { num: 21, label: 'Fatal' },
   ];
 
-  protected parsedQuery = computed<ParsedSearchQuery>(() => parseSearchQuery(this.searchText()));
+  protected parsedQuery = computed<ParsedSearchQuery>(() => parseSearchQuery(this.debouncedSearchText()));
   protected isTraceIdSearch = computed(() => this.parsedQuery().isTraceIdSearch);
 
   // The trace id currently driving a server-side fetch: query-param banner takes
@@ -188,11 +201,12 @@ export class LogsComponent {
 
   /**
    * Attribute facets over the currently-filtered rows: each key's full value list with counts,
-   * inferred type, per-value bar width (pct) and share, marked active/excluded per the search box.
-   * Counts reflect all other active filters (computed over the refined set). Purely client-side
-   * over the loaded overview — the key/value display limits are applied downstream, not here.
+   * inferred type, per-value bar width (pct) and share. Counts reflect all other active filters
+   * (computed over the refined set) — but not the search box's own free text, so this stays
+   * cheap to type into. Purely client-side over the loaded overview — the key/value display
+   * limits are applied downstream, not here.
    */
-  protected facets = computed<Facet[]>(() => {
+  protected facetCounts = computed<Facet[]>(() => {
     const rows = this.refined();
     const byKey = new Map<string, Map<string, number>>();
     const keyType = new Map<string, FacetValueType>();
@@ -215,9 +229,6 @@ export class LogsComponent {
       }
     }
 
-    // Mark values already pinned in the search box (include vs exclude).
-    const parts = new Set(splitTerms(this.searchText()));
-
     return [...byKey.entries()]
       .map(([key, values]) => {
         const total = [...values.values()].reduce((a, b) => a + b, 0);
@@ -227,8 +238,8 @@ export class LogsComponent {
             value, count,
             pct: maxCount > 0 ? (count / maxCount) * 100 : 0,
             share: total > 0 ? count / total : 0,
-            active: parts.has(buildAttributeTerm(key, value, false)),
-            excluded: parts.has(buildAttributeTerm(key, value, true)),
+            active: false,
+            excluded: false,
           }))
           .sort((a, b) => b.count - a.count)
           .slice(0, FACET_VALUE_HARD_CAP);
@@ -236,6 +247,24 @@ export class LogsComponent {
       })
       // Most-covering keys first; ties broken alphabetically for stable ordering.
       .sort((a, b) => b.total - a.total || a.key.localeCompare(b.key));
+  });
+
+  /**
+   * `facetCounts()` decorated with active/excluded per the search box. Split out from the
+   * counting above so a keystroke — which changes `searchText()` but not `refined()` — only
+   * re-marks the already-built structure instead of re-walking every row × attribute bag
+   * (list-page-scale plan, Phase 1).
+   */
+  protected facets = computed<Facet[]>(() => {
+    const parts = new Set(splitTerms(this.searchText()));
+    return this.facetCounts().map((f) => ({
+      ...f,
+      values: f.values.map((v) => ({
+        ...v,
+        active: parts.has(buildAttributeTerm(f.key, v.value, false)),
+        excluded: parts.has(buildAttributeTerm(f.key, v.value, true)),
+      })),
+    }));
   });
 
   /** Facets after the field-name filter — the full matching set before the display key-limit. */
@@ -279,6 +308,16 @@ export class LogsComponent {
     // Tenant-wide, signal-agnostic — fetched once, not on every overview reload.
     this.resourcesApi.getServices().subscribe({
       next: (services) => this.services.set(services),
+    });
+
+    // Debounce searchText → debouncedSearchText for the data-dependent computeds (see field doc).
+    let searchDebounceHandle: ReturnType<typeof setTimeout> | undefined;
+    effect(() => {
+      const text = this.searchText();
+      untracked(() => {
+        clearTimeout(searchDebounceHandle);
+        searchDebounceHandle = setTimeout(() => this.debouncedSearchText.set(text), 250);
+      });
     });
 
     // Overview + total: reload when the time range or any server-side filter changes.
@@ -462,16 +501,11 @@ export class LogsComponent {
     this.bodyCollapsed.set(false); // each newly-opened row starts with its JSON body expanded
     this.expandedAttrKeys.set(new Set()); // ...and with every JSON attribute collapsed
     this.copiedAttrKey.set(null);         // don't carry a stale check-mark into the new row
-    // Force the table to re-evaluate the detail row's `when` predicate.
-    this.table()?.renderRows();
   }
 
   protected isExpanded(row: LogRecord): boolean {
     return this.expandedRow() === row;
   }
-
-  // Predicate for the multi-template detail row: render it only below the expanded row.
-  protected readonly isExpandedRow = (_: number, row: LogRecord): boolean => this.isExpanded(row);
 
   protected onPage(e: PageEvent): void {
     this.pageIndex.set(e.pageIndex);

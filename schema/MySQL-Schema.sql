@@ -121,6 +121,13 @@ CREATE INDEX idx_end_time            ON spans (end_time_unix_nano DESC);
 CREATE INDEX idx_duration            ON spans (start_time_unix_nano, end_time_unix_nano);
 CREATE INDEX idx_spans_name          ON spans (name);
 CREATE INDEX idx_spans_resource_time ON spans (resource_id, start_time_unix_nano DESC);
+-- MySQL has no filtered/partial index, unlike the other four providers' idx_spans_error — the
+-- nearest equivalent is a plain composite leading on the low-cardinality column, which still lets
+-- mode=errors seek straight to the 'ERROR' slice of the index instead of scanning every row
+-- (schema 2.12.0). Not the same "too low-cardinality" case 2.8.0's idx_status was: this indexes
+-- the rare rows a status_code predicate actually selects (errors are the minority status), not an
+-- equality lookup expected to touch most of the table.
+CREATE INDEX idx_spans_error ON spans (status_code, start_time_unix_nano DESC);
 
 -- span_events and span_links were dropped in 2.11.0: neither was ever read or written
 -- independently of its parent span, so both collapsed into spans.events_json/links_json.
@@ -474,7 +481,7 @@ GROUP BY severity_text, severity_number, day_bucket;
 -- Only inserted when every statement above succeeded, so a partial apply cannot
 -- leave a false version marker for the apply-schema.sh gate.
 INSERT INTO schema_version (version, applied_at)
-VALUES ('2.11.0', CURRENT_TIMESTAMP(6))
+VALUES ('2.12.0', CURRENT_TIMESTAMP(6))
 ON DUPLICATE KEY UPDATE applied_at = CURRENT_TIMESTAMP(6);
 
 -- =============================================================================

@@ -208,6 +208,11 @@
 
     <!-- Service Map -->
     <mat-tab label="Service Map">
+      <!-- matTabContent: this tab's content (the ngx-graph/dagre component and its templates) is
+           only instantiated on first selection, not eagerly alongside the Traces tab that's
+           visible by default (list-page-scale plan, Phase 8) — §4.1 already stopped the *fetch*
+           this content depends on; this stops the *render* the plan's own text calls out. -->
+      <ng-template matTabContent>
       <mat-card class="tab-card graph-card">
         <mat-card-content>
           @if (graphNodes().length === 0) {
@@ -260,10 +265,13 @@
           }
         </mat-card-content>
       </mat-card>
+      </ng-template>
     </mat-tab>
 
     <!-- Analytics -->
     <mat-tab label="Analytics">
+      <!-- matTabContent — same reasoning as Service Map above. -->
+      <ng-template matTabContent>
       <mat-card class="tab-card">
         <mat-card-content>
           <div class="analytics-controls">
@@ -321,6 +329,7 @@
           }
         </mat-card-content>
       </mat-card>
+      </ng-template>
     </mat-tab>
   </mat-tab-group>
 </div>

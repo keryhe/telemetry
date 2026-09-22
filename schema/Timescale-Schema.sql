@@ -131,6 +131,12 @@ CREATE INDEX idx_end_time           ON spans ("end_time_unix_nano"   DESC);
 CREATE INDEX idx_duration           ON spans ("start_time_unix_nano", "end_time_unix_nano");
 CREATE INDEX idx_spans_name         ON spans ("name");
 CREATE INDEX idx_spans_resource_time ON spans ("resource_id", "start_time_unix_nano" DESC);
+-- Partial, not the idx_status this replaces the intent of (dropped in 2.8.0 for being
+-- low-cardinality over the *whole* table): ERROR is the minority status in practice (spans are
+-- overwhelmingly UNSET/OK), so this indexes only the rare rows mode=errors actually needs and
+-- stays small and cheap to maintain despite the 2.8.0 reasoning not applying to it (schema
+-- 2.12.0). Created after create_hypertable above, so TimescaleDB propagates it to every chunk.
+CREATE INDEX idx_spans_error ON spans ("start_time_unix_nano" DESC) WHERE "status_code" = 'ERROR';
 
 -- span_events and span_links were dropped in 2.11.0: neither was ever read or written
 -- independently of its parent span, so both collapsed into spans."events_json"/"links_json",
@@ -624,7 +630,7 @@ FROM log_severity_stats_daily;
 -- =============================================================================
 -- Only reached when every statement above succeeded, so a partial apply cannot
 -- leave a false version marker for the apply-schema.sh gate.
-INSERT INTO schema_version ("version") VALUES ('2.11.0')
+INSERT INTO schema_version ("version") VALUES ('2.12.0')
 ON CONFLICT ("version") DO UPDATE
 SET "applied_at" = NOW();
 

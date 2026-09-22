@@ -27,13 +27,20 @@ internal static class ClickHouseConnectionFactory
     }
 }
 
-public class ClickHouseTraceReadRepository(IConfiguration configuration, ITenantContext tenantContext)
-    : TraceReadRepositoryBase(tenantContext)
+public class ClickHouseTraceReadRepository(IConfiguration configuration, ITenantContext tenantContext, TraceQueryCache traceQueryCache)
+    : TraceReadRepositoryBase(tenantContext, traceQueryCache)
 {
     private readonly string _connectionString = configuration.GetConnectionString("Api")!;
 
     protected override Task<DbConnection> OpenConnectionAsync(CancellationToken cancellationToken)
         => ClickHouseConnectionFactory.OpenReadAsync(_connectionString, cancellationToken);
+
+    // Same dialect hooks as ClickHouseLogReadRepository, needed here too now that the service/tag
+    // filters run in SQL (list-page-scale plan, Phase 4). JSONHas tests key presence regardless
+    // of the value's type, unlike JSONExtractString which returns '' for a non-scalar value.
+    protected override string ResourceServiceNameExpr(string resourceAlias = "r") => $"JSONExtractString(coalesce({resourceAlias}.attributes_json, ''), 'service.name')";
+    protected override string JsonHasKeyExpr(string jsonColumn, string keyParam)
+        => $"JSONHas(coalesce({jsonColumn}, ''), {keyParam}) = 1";
 }
 
 public class ClickHouseMetricReadRepository(IConfiguration configuration, ITenantContext tenantContext)
@@ -56,7 +63,7 @@ public class ClickHouseLogReadRepository(IConfiguration configuration, ITenantCo
     // attributes_json is a Nullable(String) holding JSON text; extract service.name with
     // JSONExtractString (coalesce guards NULL rows). ILIKE, LIMIT/OFFSET paging, and backslash
     // LIKE-escaping all match the Postgres defaults, so those hooks are inherited unchanged.
-    protected override string ResourceServiceNameExpr => "JSONExtractString(coalesce(r.attributes_json, ''), 'service.name')";
+    protected override string ResourceServiceNameExpr(string resourceAlias = "r") => $"JSONExtractString(coalesce({resourceAlias}.attributes_json, ''), 'service.name')";
 
     // ClickHouse's `/` on Int64 operands promotes to Float64; intDiv keeps histogram
     // bucket-index math as true integer floor division.

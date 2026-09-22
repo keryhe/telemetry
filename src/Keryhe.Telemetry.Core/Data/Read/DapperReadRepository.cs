@@ -43,8 +43,27 @@ public abstract class DapperReadRepository
     /// <summary>Trailing LIMIT/OFFSET clause for a paged query; expects <c>@limit</c> and <c>@offset</c> parameters and a preceding ORDER BY.</summary>
     protected virtual string PagingClause => "LIMIT @limit OFFSET @offset";
 
-    /// <summary>SQL expression extracting <c>service.name</c> from the <c>r.attributes_json</c> resource column.</summary>
-    protected virtual string ResourceServiceNameExpr => "r.attributes_json ->> 'service.name'";
+    /// <summary>
+    /// SQL expression extracting <c>service.name</c> from a resource's <c>attributes_json</c>
+    /// column, aliased <paramref name="resourceAlias"/> (default <c>r</c>, the alias every
+    /// existing caller's own resources join uses; trace-side callers pass <c>r2</c> for their
+    /// correlated subqueries — see <c>TraceReadRepositoryBase.ServiceTracePredicate</c>).
+    /// </summary>
+    protected virtual string ResourceServiceNameExpr(string resourceAlias = "r") => $"{resourceAlias}.attributes_json ->> 'service.name'";
+
+    /// <summary>
+    /// SQL boolean expression: does the JSON column <paramref name="jsonColumn"/> contain the key
+    /// named by parameter <paramref name="keyParam"/> (e.g. <c>"@tagKey0"</c>), regardless of the
+    /// value's type? Unlike <see cref="ResourceServiceNameExpr"/>'s value-extraction expressions,
+    /// this must not return NULL for a present key whose value is a JSON object/array/null — that
+    /// would under-match. Used only as a coarse, safe-to-over-include pre-filter ahead of
+    /// <c>TraceReadRepositoryBase</c>'s own authoritative C# tag-value check (list-page-scale
+    /// plan, Phase 4) — a false positive here just means one extra trace gets fetched and then
+    /// correctly excluded in C#; a false negative would silently drop a matching trace, which is
+    /// why every override picks a JSON function that lists/tests keys, not one that extracts a
+    /// scalar value.
+    /// </summary>
+    protected virtual string JsonHasKeyExpr(string jsonColumn, string keyParam) => $"({jsonColumn} -> {keyParam}) IS NOT NULL";
 
     /// <summary>
     /// Integer floor-division SQL expression, <c>numerator / denominator</c>, used to compute

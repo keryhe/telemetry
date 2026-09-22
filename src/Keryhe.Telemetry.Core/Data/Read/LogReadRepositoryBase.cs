@@ -76,6 +76,20 @@ public abstract class LogReadRepositoryBase : DapperReadRepository, ILogReadRepo
         return rows.Select(Map).ToList();
     }
 
+    /// <summary>
+    /// Ports <see cref="TraceReadRepositoryBase.FetchRawSpansSlimAsync"/>'s approach (list-page-
+    /// scale plan, Phase 7 §10.1): this page's rows carry <c>resource_id</c>/<c>scope_id</c>
+    /// instead of the two attributes JSON blobs, and both lookup tables are resolved once per
+    /// request instead of once per row. Unlike the trace side this cannot be conditional on a
+    /// <c>slim</c> flag — the logs page genuinely renders resource and scope attributes in the
+    /// expanded row detail and the faceting sidebar — but a 1000-row page over (typically) tens of
+    /// distinct resources and a handful of scopes was still re-parsing the same handful of JSON
+    /// documents up to 1000 times each. Resources are scoped to the tenant, same reasoning as the
+    /// trace side; scopes have no tenant column at all (an instrumentation library is shared
+    /// across tenants on purpose — see the resource-hash-vs-identity note in CLAUDE.md), so that
+    /// lookup is unscoped, bounded instead by how many distinct instrumentation libraries exist at
+    /// all.
+    /// </summary>
     public async Task<PagedResult<LogRecordModel>> QueryLogRecordsAsync(LogQuery query, CancellationToken cancellationToken = default)
     {
         if (query.Start >= query.End)
@@ -91,7 +105,7 @@ public abstract class LogReadRepositoryBase : DapperReadRepository, ILogReadRepo
             "lr.time_unix_nano >= @start",
             "lr.time_unix_nano <= @end"
         };
-        if (!string.IsNullOrEmpty(query.Service)) clauses.Add($"{ResourceServiceNameExpr} = @service");
+        if (!string.IsNullOrEmpty(query.Service)) clauses.Add($"{ResourceServiceNameExpr()} = @service");
         if (query.MinSeverity.HasValue) clauses.Add("lr.severity_number >= @minSeverity");
         if (!string.IsNullOrEmpty(query.Search)) clauses.Add($"lr.body_value {LikeOperator} @search");
 
@@ -110,23 +124,16 @@ public abstract class LogReadRepositoryBase : DapperReadRepository, ILogReadRepo
                 lr.trace_id                  AS TraceId,
                 lr.span_id                   AS SpanId,
                 lr.attributes_json           AS AttributesJson,
-                r.schema_url                 AS ResourceSchemaUrl,
-                r.attributes_json            AS ResourceAttributesJson,
-                sc.name                      AS ScopeName,
-                sc.version                   AS ScopeVersion,
-                sc.schema_url                AS ScopeSchemaUrl,
-                sc.attributes_json           AS ScopeAttributesJson,
-                COUNT(*) OVER()              AS TotalCount
+                lr.resource_id               AS ResourceId,
+                lr.scope_id                  AS ScopeId
             FROM log_records lr
-            JOIN resources r               ON lr.resource_id = r.id
-            JOIN instrumentation_scopes sc ON lr.scope_id = sc.id
+            JOIN resources r ON lr.resource_id = r.id
             WHERE r.tenant_id = @tenantId AND {where}
             ORDER BY lr.time_unix_nano DESC
             {PagingClause}
             """;
 
-        await using var conn = await OpenConnectionAsync(cancellationToken);
-        var rows = (await conn.QueryAsync<LogRow>(new CommandDefinition(sql, new
+        var logParams = new
         {
             tenantId = TenantId,
             start = TimeConversion.DateTimeToUnixNano(query.Start),
@@ -134,17 +141,73 @@ public abstract class LogReadRepositoryBase : DapperReadRepository, ILogReadRepo
             service = query.Service,
             minSeverity = query.MinSeverity,
             search = string.IsNullOrEmpty(query.Search) ? null : $"%{EscapeLike(query.Search)}%",
+        };
+
+        await using var conn = await OpenConnectionAsync(cancellationToken);
+
+        // Bounded by distinct resource/scope sets (tens, typically), not by the page size — see
+        // this method's own doc comment.
+        var resourceRows = await conn.QueryAsync<ResourceRow>(new CommandDefinition(
+            "SELECT id AS Id, schema_url AS SchemaUrl, attributes_json AS AttributesJson FROM resources WHERE tenant_id = @tenantId",
+            new { tenantId = TenantId }, cancellationToken: cancellationToken));
+        var resourceById = resourceRows.ToDictionary(r => r.Id);
+
+        var scopeRows = await conn.QueryAsync<ScopeRow>(new CommandDefinition(
+            "SELECT id AS Id, name AS Name, version AS Version, schema_url AS SchemaUrl, attributes_json AS AttributesJson FROM instrumentation_scopes",
+            cancellationToken: cancellationToken));
+        var scopeById = scopeRows.ToDictionary(s => s.Id);
+
+        // list-page-scale plan, Phase 7 §10.3: COUNT(*) OVER() forces the full filtered set to be
+        // counted before LIMIT can help the page fetch below — for a paginator, "10,000+" is as
+        // useful as an exact count and far cheaper. This scans at most LogTotalCap + 1 rows
+        // regardless of how large the true filtered set is, via the same ORDER BY + PagingClause
+        // the page fetch itself uses (SqlServer's OFFSET/FETCH requires one).
+        var cappedSql = $"""
+            SELECT COUNT(*) FROM (
+                SELECT 1 AS x
+                FROM log_records lr
+                JOIN resources r ON lr.resource_id = r.id
+                WHERE r.tenant_id = @tenantId AND {where}
+                ORDER BY lr.time_unix_nano DESC
+                {PagingClause}
+            ) capped
+            """;
+        var cappedCount = await conn.ExecuteScalarAsync<int>(new CommandDefinition(cappedSql, new
+        {
+            logParams.tenantId,
+            logParams.start,
+            logParams.end,
+            logParams.service,
+            logParams.minSeverity,
+            logParams.search,
+            limit = LogTotalCap + 1,
+            offset = 0
+        }, cancellationToken: cancellationToken));
+        var capped = cappedCount > LogTotalCap;
+        var total = capped ? LogTotalCap : cappedCount;
+
+        var rows = (await conn.QueryAsync<SlimLogRow>(new CommandDefinition(sql, new
+        {
+            logParams.tenantId,
+            logParams.start,
+            logParams.end,
+            logParams.service,
+            logParams.minSeverity,
+            logParams.search,
             limit,
             offset
         }, cancellationToken: cancellationToken))).ToList();
 
-        var total = rows.Count > 0 ? (int)rows[0].TotalCount : 0;
         return new PagedResult<LogRecordModel>
         {
-            Items = rows.Select(Map).ToList(),
-            Total = total
+            Items = rows.Select(r => MapSlim(r, resourceById, scopeById)).ToList(),
+            Total = total,
+            Capped = capped
         };
     }
+
+    /// <summary>Row cap for <see cref="QueryLogRecordsAsync"/>'s <c>Total</c>.</summary>
+    private const int LogTotalCap = 10_000;
 
     /// <summary>
     /// True volume-by-severity histogram, aggregated in SQL (log_records can be far larger than
@@ -167,7 +230,7 @@ public abstract class LogReadRepositoryBase : DapperReadRepository, ILogReadRepo
             "lr.time_unix_nano >= @start",
             "lr.time_unix_nano <= @end"
         };
-        if (!string.IsNullOrEmpty(query.Service)) clauses.Add($"{ResourceServiceNameExpr} = @service");
+        if (!string.IsNullOrEmpty(query.Service)) clauses.Add($"{ResourceServiceNameExpr()} = @service");
         if (query.MinSeverity.HasValue) clauses.Add("lr.severity_number >= @minSeverity");
         if (!string.IsNullOrEmpty(query.Search)) clauses.Add($"lr.body_value {LikeOperator} @search");
         var where = string.Join(" AND ", clauses);
@@ -252,7 +315,7 @@ public abstract class LogReadRepositoryBase : DapperReadRepository, ILogReadRepo
         before = Math.Clamp(before, 0, 500);
         after = Math.Clamp(after, 0, 500);
 
-        var serviceClause = string.IsNullOrEmpty(service) ? "" : $" AND {ResourceServiceNameExpr} = @service";
+        var serviceClause = string.IsNullOrEmpty(service) ? "" : $" AND {ResourceServiceNameExpr()} = @service";
 
         await using var conn = await OpenConnectionAsync(cancellationToken);
 
@@ -318,6 +381,46 @@ public abstract class LogReadRepositoryBase : DapperReadRepository, ILogReadRepo
         TimeUnixNano = r.TimeUnixNano
     };
 
+    /// <summary>
+    /// <see cref="Map(LogRow)"/>'s counterpart for <see cref="QueryLogRecordsAsync"/>'s slim rows
+    /// — resolves <see cref="SlimLogRow.ResourceId"/>/<see cref="SlimLogRow.ScopeId"/> against the
+    /// per-request lookups instead of reading pre-joined columns. A miss (a resource/scope
+    /// deleted between the two queries — nothing in this codebase does that today, but the lookup
+    /// is a separate query, not a transaction) degrades to an empty model rather than throwing.
+    /// </summary>
+    private static LogRecordModel MapSlim(SlimLogRow r, IReadOnlyDictionary<long, ResourceRow> resourceById, IReadOnlyDictionary<long, ScopeRow> scopeById)
+    {
+        resourceById.TryGetValue(r.ResourceId, out var resource);
+        scopeById.TryGetValue(r.ScopeId, out var scope);
+        return new LogRecordModel
+        {
+            Resource = new ResourceModel
+            {
+                SchemaUrl = resource?.SchemaUrl,
+                Attributes = DeserializeAttributes(resource?.AttributesJson) ?? new Dictionary<string, object>()
+            },
+            InstrumentationScope = new InstrumentationScopeModel
+            {
+                Name = scope?.Name ?? "",
+                Version = scope?.Version,
+                SchemaUrl = scope?.SchemaUrl,
+                Attributes = DeserializeAttributes(scope?.AttributesJson) ?? new Dictionary<string, object>()
+            },
+            SeverityText = r.SeverityText,
+            EventName = r.EventName,
+            SeverityNumber = r.SeverityNumber,
+            Attributes = DeserializeAttributes(r.AttributesJson) ?? new Dictionary<string, object>(),
+            TraceIdHex = r.TraceId,
+            BodyType = r.BodyType == null ? null : Enum.Parse<AttributeType>(r.BodyType),
+            BodyValue = r.BodyValue,
+            DroppedAttributesCount = r.DroppedAttributesCount,
+            Flags = r.Flags,
+            ObservedTimeUnixNano = r.ObservedTimeUnixNano,
+            SpanIdHex = r.SpanId,
+            TimeUnixNano = r.TimeUnixNano
+        };
+    }
+
     private sealed class LogRow
     {
         public long? TimeUnixNano { get; set; }
@@ -338,8 +441,43 @@ public abstract class LogReadRepositoryBase : DapperReadRepository, ILogReadRepo
         public string? ScopeVersion { get; set; }
         public string? ScopeSchemaUrl { get; set; }
         public string? ScopeAttributesJson { get; set; }
+    }
 
-        /// <summary>Window-function total from the paged query; 0 for the non-paged reads that don't select it.</summary>
+    /// <summary>Row shape for <see cref="QueryLogRecordsAsync"/> — see its own doc comment (list-page-scale plan, Phase 7 §10.1).</summary>
+    private sealed class SlimLogRow
+    {
+        public long? TimeUnixNano { get; set; }
+        public long? ObservedTimeUnixNano { get; set; }
+        public int? SeverityNumber { get; set; }
+        public string? SeverityText { get; set; }
+        public string? EventName { get; set; }
+        public string? BodyType { get; set; }
+        public string? BodyValue { get; set; }
+        public int DroppedAttributesCount { get; set; }
+        public int Flags { get; set; }
+        public string? TraceId { get; set; }
+        public string? SpanId { get; set; }
+        public string? AttributesJson { get; set; }
+        public long ResourceId { get; set; }
+        public long ScopeId { get; set; }
+
+        /// <summary>Window-function total from the paged query.</summary>
         public long TotalCount { get; set; }
+    }
+
+    private sealed class ResourceRow
+    {
+        public long Id { get; set; }
+        public string? SchemaUrl { get; set; }
+        public string? AttributesJson { get; set; }
+    }
+
+    private sealed class ScopeRow
+    {
+        public long Id { get; set; }
+        public string Name { get; set; } = null!;
+        public string? Version { get; set; }
+        public string? SchemaUrl { get; set; }
+        public string? AttributesJson { get; set; }
     }
 }

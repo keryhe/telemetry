@@ -14,8 +14,8 @@ namespace Keryhe.Telemetry.SqlServer.Services;
 // dialect-neutral read SQL + shaping; only the alert CRUD/cooldown SQL differs.
 // =============================================================================
 
-public class SqlServerTraceReadRepository(IConfiguration configuration, ITenantContext tenantContext)
-    : TraceReadRepositoryBase(tenantContext)
+public class SqlServerTraceReadRepository(IConfiguration configuration, ITenantContext tenantContext, TraceQueryCache traceQueryCache)
+    : TraceReadRepositoryBase(tenantContext, traceQueryCache)
 {
     private readonly string _connectionString = configuration.GetConnectionString("Api")!;
 
@@ -25,6 +25,14 @@ public class SqlServerTraceReadRepository(IConfiguration configuration, ITenantC
         await conn.OpenAsync(cancellationToken);
         return conn;
     }
+
+    // Same dialect hooks as SqlServerLogReadRepository, needed here too now that the service/tag
+    // filters run in SQL (list-page-scale plan, Phase 4) — see DapperReadRepository's own doc
+    // comments for why each hook is shaped the way it is (JSON_VALUE for a known-scalar value,
+    // OPENJSON for a value-type-agnostic key existence check).
+    protected override string ResourceServiceNameExpr(string resourceAlias = "r") => $"JSON_VALUE({resourceAlias}.attributes_json, '$.\"service.name\"')";
+    protected override string JsonHasKeyExpr(string jsonColumn, string keyParam)
+        => $"EXISTS (SELECT 1 FROM OPENJSON(ISNULL({jsonColumn}, '{{}}')) WHERE [key] = {keyParam})";
 }
 
 public class SqlServerMetricReadRepository(IConfiguration configuration, ITenantContext tenantContext)
@@ -55,7 +63,7 @@ public class SqlServerLogReadRepository(IConfiguration configuration, ITenantCon
     // SqlServer dialect: LIKE is case-insensitive under the default collation, JSON is read via
     // JSON_VALUE, paging uses OFFSET/FETCH, and LIKE wildcards escape with square brackets.
     protected override string LikeOperator => "LIKE";
-    protected override string ResourceServiceNameExpr => "JSON_VALUE(r.attributes_json, '$.\"service.name\"')";
+    protected override string ResourceServiceNameExpr(string resourceAlias = "r") => $"JSON_VALUE({resourceAlias}.attributes_json, '$.\"service.name\"')";
     protected override string PagingClause => "OFFSET @offset ROWS FETCH NEXT @limit ROWS ONLY";
     protected override string EscapeLike(string value)
         => value.Replace("[", "[[]").Replace("%", "[%]").Replace("_", "[_]");

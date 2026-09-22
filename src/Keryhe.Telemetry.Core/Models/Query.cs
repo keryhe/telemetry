@@ -104,6 +104,23 @@ public sealed class HistogramQuery
     // the client can match the grid to its rendered chart width/height.
     public int LatencyTimeCols { get; init; } = 48;
     public int LatencyDurationRows { get; init; } = 20;
+
+    // Items paging/sort (ignored by GetTraceHistogramAsync; used only by GetTraceOverviewAsync's
+    // Items/Total — list-page-scale plan, Phase 2). Same semantics as the matching TraceQuery
+    // fields: the traces list page's table now comes from this same scan instead of a second,
+    // non-slim /search call.
+    /// <summary>Sort key: <c>duration</c> | <c>spans</c> | <c>time</c> | <c>service</c> | <c>operation</c>. Null = mode default.</summary>
+    public string? Sort { get; init; }
+    public string Dir { get; init; } = "desc";
+    public int Limit { get; init; } = 100;
+    public int Offset { get; init; }
+
+    /// <summary>
+    /// Row cap for the dashboard's <see cref="TraceOverview.RecentErrors"/>/
+    /// <see cref="TraceOverview.SlowestTraces"/> (list-page-scale plan, Phase 2). Clamped small
+    /// server-side — the dashboard only ever renders a handful of rows per table.
+    /// </summary>
+    public int SampleSize { get; init; } = 5;
 }
 
 /// <summary>One bucket of the trace volume histogram.</summary>
@@ -174,6 +191,35 @@ public sealed class TraceOverview
     /// the most recent few minutes of any wide time range.
     /// </summary>
     public List<TraceLatencyBucket> LatencyBuckets { get; init; } = [];
+
+    /// <summary>
+    /// The traces list page's table rows, from this same scan (list-page-scale plan, Phase 2) —
+    /// replaces what used to be a second, independent <c>/search</c> scan over the identical
+    /// filter set and window. Unlike <see cref="Buckets"/>/<see cref="Services"/>/
+    /// <see cref="Summary"/>/<see cref="LatencyBuckets"/>, drawn from the trace list's
+    /// <em>unfiltered</em> population (no inbound-root restriction) — the table is an exploration
+    /// surface where a user must still be able to find an internal- or client-rooted trace.
+    /// Paged/sorted per <see cref="HistogramQuery.Sort"/>/<see cref="HistogramQuery.Dir"/>/
+    /// <see cref="HistogramQuery.Limit"/>/<see cref="HistogramQuery.Offset"/>.
+    /// </summary>
+    public List<TraceInfo> Items { get; init; } = [];
+
+    /// <summary>Total rows matching the filter, before paging — the paginator's "of N" count.</summary>
+    public int Total { get; init; }
+
+    /// <summary>
+    /// The dashboard's recent-errors table: newest first, top <see cref="HistogramQuery.SampleSize"/>,
+    /// drawn from the same unfiltered population as <see cref="Items"/> — not <see cref="Items"/>'s
+    /// own sort order. Replaces a separate <c>limit: 500</c> fetch of which only 5 rows were ever
+    /// rendered.
+    /// </summary>
+    public List<TraceInfo> RecentErrors { get; init; } = [];
+
+    /// <summary>
+    /// The dashboard's slowest-traces table: duration descending, top
+    /// <see cref="HistogramQuery.SampleSize"/>, same population as <see cref="RecentErrors"/>.
+    /// </summary>
+    public List<TraceInfo> SlowestTraces { get; init; } = [];
 }
 
 /// <summary>
