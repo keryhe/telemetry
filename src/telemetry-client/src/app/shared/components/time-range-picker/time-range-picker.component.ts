@@ -123,7 +123,7 @@ import { TimePreset, TimeRangeService } from '../../../core/services/time-range.
       display: flex;
       flex-direction: column;
       gap: 8px;
-      min-width: 340px;
+      min-width: 380px;
     }
 
     .preset-list {
@@ -164,7 +164,7 @@ import { TimePreset, TimeRangeService } from '../../../core/services/time-range.
     }
 
     .time-input {
-      width: 80px;
+      width: 108px;
       height: 36px;
       border: 1px solid var(--mat-sys-outline);
       border-radius: 4px;
