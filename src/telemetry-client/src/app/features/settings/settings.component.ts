@@ -62,8 +62,10 @@ export class SettingsComponent implements OnInit {
     this.loading.set(true);
     this.api.getRetentionSettings().subscribe({
       next: (settings) => {
-        this.retentionForm.patchValue(settings);
+        this.retentionForm.patchValue(settings, { emitEvent: false });
         this.lastSaved = this.retentionForm.getRawValue();
+        this.dirtyFields.set(new Set());
+        this.retentionDirty.set(false);
         this.loading.set(false);
       },
       error: () => this.loading.set(false),

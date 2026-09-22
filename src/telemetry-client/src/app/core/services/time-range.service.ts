@@ -2,7 +2,7 @@ import { inject, Injectable, signal } from '@angular/core';
 import { Params } from '@angular/router';
 import { UrlStateService } from '../../shared/utils/url-state';
 
-export type TimePreset = '1h' | '6h' | '24h' | '7d' | '30d';
+export type TimePreset = '1h' | '3h' | '6h' | '12h' | '24h' | '3d' | '7d';
 
 export interface TimeRange {
   preset: TimePreset | 'custom';
@@ -12,27 +12,33 @@ export interface TimeRange {
 
 const PRESET_DURATIONS: Record<TimePreset, number> = {
   '1h':  60 * 60 * 1000,
+  '3h':  3 * 60 * 60 * 1000,
   '6h':  6 * 60 * 60 * 1000,
+  '12h': 12 * 60 * 60 * 1000,
   '24h': 24 * 60 * 60 * 1000,
+  '3d':  3 * 24 * 60 * 60 * 1000,
   '7d':  7 * 24 * 60 * 60 * 1000,
-  '30d': 30 * 24 * 60 * 60 * 1000,
 };
 
 const PRESET_LABELS: Record<TimePreset, string> = {
   '1h':  'Last 1 Hour',
+  '3h':  'Last 3 Hours',
   '6h':  'Last 6 Hours',
+  '12h': 'Last 12 Hours',
   '24h': 'Last 24 Hours',
+  '3d':  'Last 3 Days',
   '7d':  'Last 7 Days',
-  '30d': 'Last 30 Days',
 };
 
 /** Time-range-aware auto-refresh cadence, matching Blazor's GetRecommendedRefreshInterval(). */
 const REFRESH_INTERVALS: Record<TimePreset, number> = {
   '1h':  30 * 1000,
+  '3h':  45 * 1000,
   '6h':  60 * 1000,
+  '12h': 2 * 60 * 1000,
   '24h': 5 * 60 * 1000,
+  '3d':  10 * 60 * 1000,
   '7d':  15 * 60 * 1000,
-  '30d': 30 * 60 * 1000,
 };
 
 export function recommendedRefreshIntervalMs(preset: TimePreset): number {
@@ -47,7 +53,7 @@ interface StoredTimeRange {
   end: string;
 }
 
-const PRESETS: TimePreset[] = ['1h', '6h', '24h', '7d', '30d'];
+const PRESETS: TimePreset[] = ['1h', '3h', '6h', '12h', '24h', '3d', '7d'];
 
 @Injectable({ providedIn: 'root' })
 export class TimeRangeService {

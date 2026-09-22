@@ -189,10 +189,12 @@ export class TimeRangePickerComponent {
 
   protected readonly presets: { value: TimePreset; label: string }[] = [
     { value: '1h', label: 'Last 1 Hour' },
+    { value: '3h', label: 'Last 3 Hours' },
     { value: '6h', label: 'Last 6 Hours' },
+    { value: '12h', label: 'Last 12 Hours' },
     { value: '24h', label: 'Last 24 Hours' },
+    { value: '3d', label: 'Last 3 Days' },
     { value: '7d', label: 'Last 7 Days' },
-    { value: '30d', label: 'Last 30 Days' },
   ];
 
   protected readonly showPanel = signal(false);
