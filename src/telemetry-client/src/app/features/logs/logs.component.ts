@@ -1,7 +1,7 @@
 import { Component, computed, effect, inject, signal, untracked } from '@angular/core';
 import { DatePipe, DecimalPipe, SlicePipe, PercentPipe } from '@angular/common';
 import { ActivatedRoute, RouterLink } from '@angular/router';
-import { forkJoin } from 'rxjs';
+import { Subscription, forkJoin } from 'rxjs';
 import { MatCardModule } from '@angular/material/card';
 import { MatFormFieldModule } from '@angular/material/form-field';
 import { MatIconModule } from '@angular/material/icon';
@@ -39,14 +39,13 @@ import { downloadCsv, downloadJson, copyPermalink, fileStamp } from '../../share
 const BUCKET_COUNT = 30;
 const STATE_KEY = 'state.logs';
 /**
- * Upper bound on rows pulled for the chart/stat overview, shallow client paging, and client-side
- * faceting. Lowered from 1000 to 250 (list-page-scale plan, Phase 7 §10.2): faceting over a
- * 1000-row sample of a much larger window was already a statistical approximation presented as
- * exact counts, and 250 serves that approximation equally well at a quarter of the fetch/parse/
- * facet-walk cost. Only the approximation's sample size changes — the counts were never exact
- * over the full filtered population to begin with.
+ * Upper bound on rows pulled for the chart/stat overview, shallow client paging, client-side
+ * faceting and client-side (attribute) search. Lowered from 1000 to 250 in list-page-scale plan
+ * Phase 7 §10.2 to save fetch/parse/facet-walk cost; raised back to 1000 so a client-side search
+ * covers the same number of rows as the traces page, accepting that cost until attribute search
+ * moves to the server. Paging past this window fetches from the server and is not bounded by it.
  */
-const OVERVIEW_CAP = 250;
+const OVERVIEW_CAP = 1000;
 /** Default number of attribute keys / values per key the faceting sidebar shows (raised via "show more"). */
 const FACET_KEY_LIMIT = 15;
 const FACET_VALUE_LIMIT = 8;
@@ -108,6 +107,9 @@ export class LogsComponent {
   protected histogram = signal<LogBucket[]>([]);
   /** A single server-fetched page, used only when paging beyond the overview window. */
   private serverPage = signal<LogRecord[]>([]);
+  /** True while a deep server page is in flight — shown as loading, not as an empty result. */
+  protected pageLoading = signal(false);
+  private serverPageSub?: Subscription;
   protected total = signal(0);
   protected capped = signal(false);
 
@@ -282,10 +284,20 @@ export class LogsComponent {
     return this.overview().slice(start, start + this.pageSize());
   });
 
-  /** True Error+Fatal count across the full filtered range (histogram sum, not the capped overview). */
-  protected errorCount = computed(() => this.histogram().reduce((a, b) => a + b.error + b.fatal, 0));
-  /** True Warn count across the full filtered range (histogram sum, not the capped overview). */
-  protected warnCount = computed(() => this.histogram().reduce((a, b) => a + b.warn, 0));
+  /**
+   * Buckets behind the chart and the Errors/Warnings cards. Normally the server histogram (exact,
+   * full filtered range — plain-text search included, since `q` goes to the server). During an
+   * attribute search the histogram can't see the attribute terms, so bucket the searched rows
+   * (`refined()`) locally instead — the same `bucketLogs` trace mode uses — keeping the cards and
+   * chart consistent with the Total Logs card and the pager.
+   */
+  private displayBuckets = computed<LogBucket[]>(() => {
+    if (this.attributeTerms().length === 0) return this.histogram();
+    const { start, end } = this.timeRange.range();
+    return bucketLogs(this.refined(), start, end, BUCKET_COUNT);
+  });
+  protected errorCount = computed(() => this.displayBuckets().reduce((a, b) => a + b.error + b.fatal, 0));
+  protected warnCount = computed(() => this.displayBuckets().reduce((a, b) => a + b.warn, 0));
 
   protected chartOptions = signal<ApexOptions>({});
 
@@ -346,6 +358,12 @@ export class LogsComponent {
     // Adopt filter/paging params on back/forward navigation.
     this.urlState.changes().subscribe(() => this.readStateFromUrl());
 
+    // Chart follows displayBuckets: the server histogram, or the searched rows during an attribute search.
+    effect(() => {
+      const buckets = this.displayBuckets();
+      untracked(() => this.buildChart(buckets));
+    });
+
     effect(() => {
       savePageState(STATE_KEY, {
         searchText: this.searchText(),
@@ -378,11 +396,14 @@ export class LogsComponent {
     }).subscribe({
       next: ({ page, histogram }) => {
         this.overview.set(page.items);
-        this.total.set(page.total);
+        // The search endpoint's total stops at 10,000 (LogReadRepositoryBase.LogTotalCap, to keep
+        // that count cheap); the histogram is an exact GROUP BY over the same filters, so its sum
+        // is the real total — which the stat card and pager (and deep paging) need.
+        this.total.set(histogram.reduce((a, b) => a + b.trace + b.debug + b.info + b.warn + b.error + b.fatal, 0));
         this.capped.set(page.total > page.items.length);
         this.histogram.set(histogram);
-        this.buildChart(histogram);
         this.loading.set(false);
+        this.settlePage();
       },
       error: () => this.loading.set(false),
     });
@@ -390,13 +411,33 @@ export class LogsComponent {
 
   private loadServerPage(): void {
     const { start, end } = this.timeRange.range();
-    this.api.searchLogs({
+    // Drop any in-flight page so a slower, older response can't overwrite this one.
+    this.serverPageSub?.unsubscribe();
+    this.serverPage.set([]);
+    this.pageLoading.set(true);
+    this.serverPageSub = this.api.searchLogs({
       start, end,
       service: this.selectedService() || undefined,
       minSeverity: this.selectedSeverity() >= 0 ? this.selectedSeverity() : undefined,
       q: this.serverQuery() || undefined,
       limit: this.pageSize(), offset: this.pageIndex() * this.pageSize(),
-    }).subscribe({ next: (res) => this.serverPage.set(res.items) });
+    }).subscribe({
+      next: (res) => { this.serverPage.set(res.items); this.pageLoading.set(false); },
+      error: () => this.pageLoading.set(false),
+    });
+  }
+
+  /**
+   * Run once the overview has landed. The deep-page effect first runs at construction, before
+   * `overview`/`total` are known, and doesn't track them — so a page restored from the URL on
+   * reload would never be fetched. Clamp a restored page that no longer exists (a relative window
+   * that slid to fewer rows); otherwise fetch the deep page if it is one. Clamping re-triggers the
+   * deep-page effect itself, so it returns without fetching.
+   */
+  private settlePage(): void {
+    const lastPage = Math.max(0, Math.ceil(this.effectiveTotal() / this.pageSize()) - 1);
+    if (this.pageIndex() > lastPage) { this.pageIndex.set(lastPage); return; }
+    if (this.needsServerPage()) this.loadServerPage();
   }
 
   private loadByTrace(traceId: string): void {
@@ -410,7 +451,6 @@ export class LogsComponent {
         const { start, end } = this.timeRange.range();
         const buckets = bucketLogs(logs, start, end, BUCKET_COUNT);
         this.histogram.set(buckets);
-        this.buildChart(buckets);
         this.loading.set(false);
       },
       error: () => this.loading.set(false),

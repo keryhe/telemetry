@@ -1,7 +1,7 @@
-import { Component, Input } from '@angular/core';
+import { Component, Input, LOCALE_ID, inject } from '@angular/core';
 import { MatCardModule } from '@angular/material/card';
 import { MatIconModule } from '@angular/material/icon';
-import { NgClass } from '@angular/common';
+import { NgClass, formatNumber } from '@angular/common';
 import { NgApexchartsModule } from 'ng-apexcharts';
 import type { ApexOptions } from 'ng-apexcharts';
 
@@ -76,7 +76,15 @@ import type { ApexOptions } from 'ng-apexcharts';
 export class StatCardComponent {
   @Input() label = '';
   @Input() value: string | number | null = '—';
-  get displayValue(): string | number { return this.value ?? '—'; }
+  /**
+   * Numbers get locale grouping (51,698) so every card reads the same whether or not its caller
+   * piped the value; strings — already formatted by the caller (durations, rates) — pass through.
+   */
+  get displayValue(): string {
+    if (typeof this.value === 'number') return formatNumber(this.value, this.locale, '1.0-2');
+    return this.value ?? '—';
+  }
+  private readonly locale = inject(LOCALE_ID);
   @Input() subtitle = '';
   @Input() icon = '';
   @Input() color: 'default' | 'error' | 'warn' | 'success' = 'default';

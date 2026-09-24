@@ -6,9 +6,16 @@
   <!-- Stats -->
   <div class="stat-grid">
     <app-stat-card label="Traces" icon="account_tree" [value]="totalTraces() | number" />
-    <app-stat-card label="Errors" icon="error" [value]="errorCount() | number" [color]="errorCount() > 0 ? 'error' : 'default'" />
-    <app-stat-card label="Error Rate" icon="percent" [value]="errorRate()" [color]="errorCount() > 0 ? 'error' : 'default'" />
-    <app-stat-card label="Avg Duration" icon="timer" [value]="avgDuration()" />
+    <!-- Search → the searched rows; no search → request traces only (see cardStats). -->
+    <app-stat-card [label]="clientMode() ? 'Errors' : 'Request Errors'" icon="error"
+                   [value]="errorCount() | number" [color]="errorCount() > 0 ? 'error' : 'default'"
+                   [matTooltip]="clientMode() ? '' : requestTracesTooltip" />
+    <app-stat-card [label]="clientMode() ? 'Error Rate' : 'Request Error Rate'" icon="percent"
+                   [value]="errorRate()" [color]="errorCount() > 0 ? 'error' : 'default'"
+                   [matTooltip]="clientMode() ? '' : requestTracesTooltip" />
+    <app-stat-card [label]="clientMode() ? 'Avg Duration' : 'Avg Request Duration'" icon="timer"
+                   [value]="avgDuration()"
+                   [matTooltip]="clientMode() ? '' : requestTracesTooltip" />
   </div>
 
   <!-- Filters -->
@@ -104,9 +111,8 @@
         <mat-card class="chart-card">
           <mat-card-content>
             <div class="chart-header">
-              <div class="chart-title"
-                   matTooltip="Computed over inbound request traces (server/consumer root spans) only — internal and client-rooted traces are excluded.">
-                {{ chartView() === 'latency' ? 'Trace Latency (request spans)' : 'Trace Volume (request spans)' }}
+              <div class="chart-title" [matTooltip]="requestTracesTooltip">
+                {{ chartView() === 'latency' ? 'Trace Latency (request traces)' : 'Trace Volume (request traces)' }}
               </div>
               <mat-button-toggle-group class="chart-toggle" [value]="chartView()"
                                        (change)="setChartView($event.value)">
@@ -151,13 +157,16 @@
 
       <mat-card class="tab-card">
         <mat-card-content>
-          @if (displayTraces().length === 0 && !loading()) {
-            <app-empty-state icon="account_tree" message="No traces found" hint="Try adjusting the time range or filters" />
+          @if (displayTraces().length === 0 && !loading() && !pageLoading()) {
+            <app-empty-state icon="account_tree" message="No traces found"
+                             [hint]="capped() && clientMode()
+                               ? 'Searched only the most recent ' + (overview().length | number) + ' of ' + (total() | number) + ' traces. Narrow the time range to search further.'
+                               : 'Try adjusting the time range or filters'" />
           } @else {
-            @if (capped()) {
+            @if (capped() && clientMode()) {
               <div class="capped-notice">
                 <mat-icon>info</mat-icon>
-                Showing the most recent {{ overview().length }} of {{ total() | number }} matching traces. Narrow the time range or filters to see the rest.
+                Searched the most recent {{ overview().length | number }} of {{ total() | number }} traces — {{ effectiveTotal() | number }} matched. Narrow the time range to search further.
               </div>
             }
             <table mat-table [dataSource]="displayTraces()" matSort

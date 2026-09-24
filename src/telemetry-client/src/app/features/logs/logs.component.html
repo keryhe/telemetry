@@ -174,13 +174,16 @@
 
   <mat-card>
     <mat-card-content class="table-content">
-      @if (displayRows().length === 0 && !loading()) {
-        <app-empty-state icon="receipt_long" message="No logs found" hint="Adjust the time range or filters" />
+      @if (displayRows().length === 0 && !loading() && !pageLoading()) {
+        <app-empty-state icon="receipt_long" message="No logs found"
+                         [hint]="capped() && clientMode()
+                           ? 'Searched only the most recent ' + (overview().length | number) + ' of ' + (total() | number) + ' logs. Narrow the time range to search further.'
+                           : 'Adjust the time range or filters'" />
       } @else {
-        @if (capped()) {
+        @if (capped() && clientMode()) {
           <div class="capped-notice">
             <mat-icon>info</mat-icon>
-            Showing the most recent {{ overview().length }} of {{ total() | number }} matching logs. Narrow the time range or filters to see the rest.
+            Searched the most recent {{ overview().length | number }} of {{ total() | number }} logs — {{ effectiveTotal() | number }} matched. Narrow the time range to search further.
           </div>
         }
         <table mat-table [dataSource]="displayRows()" multiTemplateDataRows class="full-width log-table">

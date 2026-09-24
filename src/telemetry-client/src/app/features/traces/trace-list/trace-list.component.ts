@@ -20,6 +20,7 @@ import { MatMenuModule } from '@angular/material/menu';
 import { FormsModule } from '@angular/forms';
 import { NgxGraphModule } from '@swimlane/ngx-graph';
 import { NgApexchartsModule } from 'ng-apexcharts';
+import { Subscription } from 'rxjs';
 import type { ApexOptions } from 'ng-apexcharts';
 
 import { TracesApiService, TraceLatencyBucket } from '../../../core/services/api/traces-api.service';
@@ -58,6 +59,9 @@ type ChartView = 'volume' | 'latency';
 const STATE_KEY = 'state.traces';
 /** Upper bound on traces pulled for the chart/stat overview (and shallow client paging). */
 const OVERVIEW_CAP = 1000;
+/** Explains the "request traces" population behind the chart and the no-search stat cards. */
+const REQUEST_TRACES_TOOLTIP =
+  'Traces whose root span is an incoming request (SERVER or CONSUMER kind). Background and client-rooted traces are excluded.';
 /** Discrete error-ratio tiers for latency-bubble coloring (ApexCharts colors per series, not per point). */
 const ERROR_TIERS: { max: number; color: string; label: string }[] = [
   { max: 0, color: '#2196f3', label: 'OK' },
@@ -116,6 +120,9 @@ export class TraceListComponent {
   protected histogram = signal<TimeBucket[]>([]);
   /** A single server-fetched page, used only when paging beyond the overview window. */
   private serverPage = signal<TraceInfo[]>([]);
+  /** True while a deep server page is in flight — shown as loading, not as an empty result. */
+  protected pageLoading = signal(false);
+  private serverPageSub?: Subscription;
   protected total = signal(0);
   protected capped = signal(false);
   protected services = signal<string[]>([]);
@@ -208,19 +215,36 @@ export class TraceListComponent {
   }
 
   protected totalTraces = computed(() => this.effectiveTotal());
-  /** True error count across the full filtered range (histogram sum, not the capped overview). */
-  protected errorCount = computed(() => this.histogram().reduce((a, b) => a + b.errorCount, 0));
-  protected errorRate = computed(() =>
-    this.total() > 0 ? ((this.errorCount() / this.total()) * 100).toFixed(1) + '%' : '0%'
-  );
-  /** True average duration across the full filtered range (histogram duration/count sums). */
-  protected avgDuration = computed(() => {
+  /**
+   * The error/rate/duration cards describe one consistent population. With no search that is the
+   * histogram's — inbound request traces only (SERVER/CONSUMER roots, see the server's
+   * `IsInboundRoot`) across the full filtered range — hence the "Request …" labels and
+   * REQUEST_TRACES_TOOLTIP. During a client-side search it is the searched rows themselves
+   * (`refined()`), matching the Traces card and the pager, since the histogram ignores free text.
+   */
+  private cardStats = computed(() => {
+    if (this.clientMode()) {
+      const rows = this.refined();
+      const totalMs = rows.reduce((a, t) => a + parseDotnetTimespan(t.traceDuration), 0);
+      return { count: rows.length, errors: rows.filter((t) => t.hasErrors).length, totalMs };
+    }
     const buckets = this.histogram();
-    const count = buckets.reduce((a, b) => a + b.count, 0);
-    if (count === 0) return '—';
-    const totalMs = buckets.reduce((a, b) => a + b.sumDurationMs, 0);
-    return formatDuration(totalMs / count);
+    return {
+      count: buckets.reduce((a, b) => a + b.count, 0),
+      errors: buckets.reduce((a, b) => a + b.errorCount, 0),
+      totalMs: buckets.reduce((a, b) => a + b.sumDurationMs, 0),
+    };
   });
+  protected errorCount = computed(() => this.cardStats().errors);
+  protected errorRate = computed(() => {
+    const { count, errors } = this.cardStats();
+    return count > 0 ? ((errors / count) * 100).toFixed(1) + '%' : '0%';
+  });
+  protected avgDuration = computed(() => {
+    const { count, totalMs } = this.cardStats();
+    return count > 0 ? formatDuration(totalMs / count) : '—';
+  });
+  protected readonly requestTracesTooltip = REQUEST_TRACES_TOOLTIP;
 
   /** Per-service health (error rate + call volume), derived from the dependency edges. */
   private nodeHealth = computed(() => {
@@ -472,6 +496,7 @@ export class TraceListComponent {
         this.buildChart(start, end, overview.buckets);
         this.buildLatencyBubbles(overview.latencyBuckets ?? []);
         this.loading.set(false);
+        this.settlePage();
       },
       error: () => this.loading.set(false),
     });
@@ -479,10 +504,30 @@ export class TraceListComponent {
 
   private loadServerPage(): void {
     const { start, end } = this.timeRange.range();
-    this.api.searchTraces({
+    // Drop any in-flight page so a slower, older response can't overwrite this one.
+    this.serverPageSub?.unsubscribe();
+    this.serverPage.set([]);
+    this.pageLoading.set(true);
+    this.serverPageSub = this.api.searchTraces({
       start, end, ...this.serverFilters(),
       limit: this.pageSize(), offset: this.pageIndex() * this.pageSize(),
-    }).subscribe({ next: (res) => this.serverPage.set(res.items) });
+    }).subscribe({
+      next: (res) => { this.serverPage.set(res.items); this.pageLoading.set(false); },
+      error: () => this.pageLoading.set(false),
+    });
+  }
+
+  /**
+   * Run once the overview has landed. The deep-page effect first runs at construction, before
+   * `overview`/`total` are known, and doesn't track them — so a page restored from the URL on
+   * reload would never be fetched. Clamp a restored page that no longer exists (a relative window
+   * that slid to fewer rows); otherwise fetch the deep page if it is one. Clamping re-triggers the
+   * deep-page effect itself, so it returns without fetching.
+   */
+  private settlePage(): void {
+    const lastPage = Math.max(0, Math.ceil(this.effectiveTotal() / this.pageSize()) - 1);
+    if (this.pageIndex() > lastPage) { this.pageIndex.set(lastPage); return; }
+    if (this.needsServerPage()) this.loadServerPage();
   }
 
   /** Load the operation list for the operation dropdown (only meaningful with a service selected). */
