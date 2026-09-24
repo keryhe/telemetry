@@ -12,7 +12,7 @@ namespace Keryhe.Telemetry.SqlServer.Services;
 /// <summary>
 /// SqlServer implementation of <see cref="ITelemetryBulkWriter"/>. Owns only the
 /// dialect-specific flush logic — <see cref="SqlBulkCopy"/> for the high-volume tables,
-/// staging-table <c>MERGE ... OUTPUT</c> for spans, and <c>MERGE ... WITH (HOLDLOCK)</c>
+/// staging-table <c>INSERT ... WHERE NOT EXISTS</c> for spans, and <c>MERGE ... WITH (HOLDLOCK)</c>
 /// upserts for resource/scope dedup. The channel-draining loop and the
 /// normalization/hashing helpers live in <c>Keryhe.Telemetry.Core.Data</c>.
 ///
@@ -25,34 +25,38 @@ namespace Keryhe.Telemetry.SqlServer.Services;
 /// <see cref="SqlBulkCopy"/> with server defaults. <c>TableLock</c> is applied to the
 /// session-private <c>#spans_stage</c> only, never to a shared table -- see
 /// <see cref="CreateBulkCopy"/> for why. <c>#spans_stage</c>
-/// additionally declares <c>PRIMARY KEY CLUSTERED (trace_id, span_id)</c> matching the MERGE's own
-/// join predicate, so the MERGE gets a pre-sorted source instead of sorting or hashing a heap (plus
+/// additionally declares <c>PRIMARY KEY CLUSTERED (trace_id, span_id)</c> matching the insert's own
+/// join predicate, so the insert gets a pre-sorted source instead of sorting or hashing a heap (plus
 /// a plan recompile) on every flush.
 ///
-/// Each <c>Flush*Async</c> runs inside a single transaction, so a failure partway through
-/// leaves zero rows from that batch rather than a partially-applied flush. Unlike Npgsql,
+/// <b>Resource/scope/metric upserts run BEFORE the data transaction opens</b>, each as its own
+/// auto-committed statement on the same connection -- the same shape as
+/// <c>PostgreSqlBulkWriter</c>, for the same reason. Those upserts are <c>MERGE ... WITH
+/// (HOLDLOCK)</c>, i.e. serializable key-range locks; inside the data transaction they were held
+/// through the bulk copy until commit, and concurrent flushes (<c>FlushConcurrency</c> loops per
+/// signal, times three signals) deadlocked on each other's ranges -- worst on a cold
+/// <see cref="ResourceScopeCache"/>, when every loop misses the cache at once. Auto-committed,
+/// HOLDLOCK still closes the both-see-NOT-MATCHED insert race, but its range locks now last one
+/// statement instead of one flush.
+///
+/// A consequence: a reference row can outlive a data insert that fails and is retried. That is
+/// fine -- they are deduplicated, so the retry's MERGE simply finds the row it already wrote.
+/// And because each row is committed by the time its id is returned,
+/// <see cref="ResourceScopeCache"/> is populated immediately: there is no longer a same-flush
+/// rollback that could leave the cache pointing at an id that was never persisted.
+///
+/// The data transaction wraps only the bulk inserts (and the spans staging insert), so a failure
+/// partway through still leaves zero data rows from that batch. Unlike Npgsql,
 /// <c>SqlClient</c> requires every command -- and every <see cref="SqlBulkCopy"/> -- to be
 /// explicitly enlisted in the transaction, or it throws at execution time; every
-/// <c>SqlCommand</c> below sets <c>Transaction = tx</c>, and every <c>SqlBulkCopy</c> is
+/// data-path <c>SqlCommand</c> below sets <c>Transaction = tx</c>, and every <c>SqlBulkCopy</c> is
 /// constructed with the transaction passed in directly, including the bulk copy into
 /// <c>#spans_stage</c>, a temp table that must live in the same transaction as the
-/// <c>MERGE</c> that reads it. The transaction is never explicitly rolled back:
+/// insert that reads it. The transaction is never explicitly rolled back:
 /// <c>await using</c> disposes it without a matching <c>CommitAsync</c> whenever an
 /// exception propagates out of the block, and disposing an uncommitted
-/// <see cref="SqlTransaction"/> rolls it back.
-///
-/// <see cref="ResourceScopeCache"/> writes for newly-upserted resources/scopes/metrics are
-/// DEFERRED until after <c>CommitAsync</c> succeeds, collected in a per-flush
-/// <c>postCommitCacheWrites</c> list rather than written the moment each upsert returns an
-/// id. This is load-bearing, not cosmetic: caching immediately, before commit, was verified
-/// live (against PostgreSQL, but the failure mode is provider-agnostic) to poison the cache
-/// on a rollback -- a resource upsert can succeed and be cached mid-transaction, then a
-/// later statement in the SAME flush fails and rolls the whole transaction back, leaving the
-/// cache pointing at a resources.id that was never actually persisted. Every subsequent
-/// flush that resolves that resource then hits the cache, skips re-inserting it, and fails
-/// its own FK constraint on the span/log/metric it tries to write -- permanently, since
-/// <see cref="ResourceScopeCache"/> entries are never evicted, until the process restarts.
-/// Deferring the write until after the commit that makes it true is what closes that gap.
+/// <see cref="SqlTransaction"/> rolls it back. The upsert commands, running before the
+/// transaction exists, pass no transaction and commit on their own.
 /// </summary>
 public sealed class SqlServerBulkWriter(
     IConfiguration configuration,
@@ -69,16 +73,16 @@ public sealed class SqlServerBulkWriter(
     {
         await using var conn = new SqlConnection(_connectionString);
         await conn.OpenAsync(ct);
+
+        // Resolved BEFORE the data transaction opens -- see the class doc comment.
+        var resourceIds = await ResolveResourcesAsync(conn, records.Select(r => r.Resource), ct);
+        var scopeIds    = await ResolveScopesAsync(conn, records.Select(r => r.InstrumentationScope), ct);
+
         var tx = (SqlTransaction)await conn.BeginTransactionAsync(ct);
         await using (tx)
         {
-            var postCommitCacheWrites = new List<Action>();
-            var resourceIds = await ResolveResourcesAsync(conn, tx, records.Select(r => r.Resource), postCommitCacheWrites, ct);
-            var scopeIds    = await ResolveScopesAsync(conn, tx, records.Select(r => r.InstrumentationScope), postCommitCacheWrites, ct);
-
             await BulkInsertLogsAsync(conn, tx, records, resourceIds, scopeIds, ct);
             await tx.CommitAsync(ct);
-            foreach (var write in postCommitCacheWrites) write();
             logger.LogDebug("Flushed {Count} log records", records.Count);
         }
     }
@@ -94,17 +98,16 @@ public sealed class SqlServerBulkWriter(
         await using var conn = new SqlConnection(_connectionString);
         await conn.OpenAsync(ct);
 
+        // Resolved BEFORE the data transaction opens -- see the class doc comment.
+        var resourceIds = await ResolveResourcesAsync(conn, spans.Select(s => s.Resource), ct);
+        var scopeIds    = await ResolveScopesAsync(conn, spans.Select(s => s.InstrumentationScope), ct);
+
         var tx = (SqlTransaction)await conn.BeginTransactionAsync(ct);
         await using (tx)
         {
-            var postCommitCacheWrites = new List<Action>();
-            var resourceIds = await ResolveResourcesAsync(conn, tx, spans.Select(s => s.Resource), postCommitCacheWrites, ct);
-            var scopeIds    = await ResolveScopesAsync(conn, tx, spans.Select(s => s.InstrumentationScope), postCommitCacheWrites, ct);
-
             await BulkInsertSpansAsync(conn, tx, spans, resourceIds, scopeIds, ct);
 
             await tx.CommitAsync(ct);
-            foreach (var write in postCommitCacheWrites) write();
             logger.LogDebug("Flushed {SpanCount} spans", spans.Count);
         }
     }
@@ -117,15 +120,15 @@ public sealed class SqlServerBulkWriter(
     {
         await using var conn = new SqlConnection(_connectionString);
         await conn.OpenAsync(ct);
+
+        // Resolved BEFORE the data transaction opens -- see the class doc comment.
+        var resourceIds = await ResolveResourcesAsync(conn, metrics.Select(m => m.Resource), ct);
+        var scopeIds    = await ResolveScopesAsync(conn, metrics.Select(m => m.InstrumentationScope), ct);
+        var metricIds   = await ResolveMetricIdsAsync(conn, metrics, resourceIds, scopeIds, ct);
+
         var tx = (SqlTransaction)await conn.BeginTransactionAsync(ct);
         await using (tx)
         {
-            var postCommitCacheWrites = new List<Action>();
-            var resourceIds = await ResolveResourcesAsync(conn, tx, metrics.Select(m => m.Resource), postCommitCacheWrites, ct);
-            var scopeIds    = await ResolveScopesAsync(conn, tx, metrics.Select(m => m.InstrumentationScope), postCommitCacheWrites, ct);
-
-            var metricIds = await ResolveMetricIdsAsync(conn, tx, metrics, resourceIds, scopeIds, postCommitCacheWrites, ct);
-
             // Group data points by target table across the WHOLE batch, attaching each row's already
             // -resolved metric_id as it is grouped. This is what turns a metric flush into AT MOST
             // FIVE SqlBulkCopy calls instead of one per metric: a naive per-metric loop here defeats
@@ -167,7 +170,6 @@ public sealed class SqlServerBulkWriter(
             if (summaryRows.Count > 0) await BulkInsertSummaryDataPointsAsync(conn, tx, summaryRows, ct);
 
             await tx.CommitAsync(ct);
-            foreach (var write in postCommitCacheWrites) write();
             logger.LogDebug("Flushed {Count} metrics", metrics.Count);
         }
     }
@@ -178,9 +180,7 @@ public sealed class SqlServerBulkWriter(
 
     private async Task<Dictionary<string, long>> ResolveResourcesAsync(
         SqlConnection conn,
-        SqlTransaction tx,
         IEnumerable<ResourceModel?> resources,
-        List<Action> postCommitCacheWrites,
         CancellationToken ct)
     {
         // Keyed by ResourceKey, never by the bare hash: two tenants running the same service with the
@@ -204,13 +204,9 @@ public sealed class SqlServerBulkWriter(
         // Deterministic lock order, so two collectors upserting the same key set cannot deadlock.
         foreach (var (key, entry) in pending.OrderBy(kv => kv.Key, StringComparer.Ordinal))
         {
-            var id = await UpsertResourceAsync(conn, tx, entry.Model, entry.Hash, ct);
-            // Deferred: caching now, before the transaction commits, would let a later failure in
-            // this SAME flush roll back the row while the cache still claims it exists -- see the
-            // class doc comment.
-            var tenantId = entry.Model.TenantId;
-            var hash2 = entry.Hash;
-            postCommitCacheWrites.Add(() => cache.SetResource(tenantId, hash2, id));
+            var id = await UpsertResourceAsync(conn, entry.Model, entry.Hash, ct);
+            // Safe to cache immediately: the upsert auto-committed -- see the class doc comment.
+            cache.SetResource(entry.Model.TenantId, entry.Hash, id);
             result[key] = id;
         }
 
@@ -219,9 +215,7 @@ public sealed class SqlServerBulkWriter(
 
     private async Task<Dictionary<string, long>> ResolveScopesAsync(
         SqlConnection conn,
-        SqlTransaction tx,
         IEnumerable<InstrumentationScopeModel?> scopes,
-        List<Action> postCommitCacheWrites,
         CancellationToken ct)
     {
         var result  = new Dictionary<string, long>(StringComparer.Ordinal);
@@ -241,9 +235,8 @@ public sealed class SqlServerBulkWriter(
         // Deterministic lock order, so two collectors upserting the same key set cannot deadlock.
         foreach (var (hash, model) in pending.OrderBy(kv => kv.Key, StringComparer.Ordinal))
         {
-            var id = await UpsertScopeAsync(conn, tx, model, hash, ct);
-            // Deferred -- see ResolveResourcesAsync.
-            postCommitCacheWrites.Add(() => cache.SetScope(hash, id));
+            var id = await UpsertScopeAsync(conn, model, hash, ct);
+            cache.SetScope(hash, id);
             result[hash] = id;
         }
 
@@ -252,9 +245,10 @@ public sealed class SqlServerBulkWriter(
 
     // MERGE upserts when not matched; the trailing SELECT always returns the ID whether
     // the row was just inserted or already existed.  HOLDLOCK prevents race conditions
-    // where two concurrent MERGEs both see NOT MATCHED and both attempt an insert.
+    // where two concurrent MERGEs both see NOT MATCHED and both attempt an insert. Runs outside
+    // any transaction, so its key-range locks are released when the statement completes.
     private static async Task<long> UpsertResourceAsync(
-        SqlConnection conn, SqlTransaction tx, ResourceModel model, string hash, CancellationToken ct)
+        SqlConnection conn, ResourceModel model, string hash, CancellationToken ct)
     {
         const string sql = """
             MERGE resources WITH (HOLDLOCK) AS t
@@ -266,7 +260,7 @@ public sealed class SqlServerBulkWriter(
             SELECT id FROM resources WHERE resource_hash = @hash AND tenant_id = @tenantId;
             """;
 
-        await using var cmd = new SqlCommand(sql, conn, tx);
+        await using var cmd = new SqlCommand(sql, conn);
         cmd.Parameters.AddWithValue("@attrJson",  (object?)SerializeDeterministicJson(model.Attributes) ?? DBNull.Value);
         cmd.Parameters.AddWithValue("@hash",      hash);
         cmd.Parameters.AddWithValue("@schemaUrl", (object?)model.SchemaUrl ?? DBNull.Value);
@@ -275,7 +269,7 @@ public sealed class SqlServerBulkWriter(
     }
 
     private static async Task<long> UpsertScopeAsync(
-        SqlConnection conn, SqlTransaction tx, InstrumentationScopeModel model, string hash, CancellationToken ct)
+        SqlConnection conn, InstrumentationScopeModel model, string hash, CancellationToken ct)
     {
         const string sql = """
             MERGE instrumentation_scopes WITH (HOLDLOCK) AS t
@@ -287,7 +281,7 @@ public sealed class SqlServerBulkWriter(
             SELECT id FROM instrumentation_scopes WHERE scope_hash = @hash;
             """;
 
-        await using var cmd = new SqlCommand(sql, conn, tx);
+        await using var cmd = new SqlCommand(sql, conn);
         cmd.Parameters.AddWithValue("@name",      model.Name);
         cmd.Parameters.AddWithValue("@version",   (object?)model.Version   ?? DBNull.Value);
         cmd.Parameters.AddWithValue("@schemaUrl", (object?)model.SchemaUrl ?? DBNull.Value);
@@ -363,16 +357,16 @@ public sealed class SqlServerBulkWriter(
         Dictionary<string, long> scopeIds,
         CancellationToken ct)
     {
-        // Stage spans into a temp table, then MERGE from it so an already-stored span is left
+        // Stage spans into a temp table, then insert from it so an already-stored span is left
         // alone (matching ON CONFLICT DO NOTHING on the Postgres providers).
         // The temp table lives only for the lifetime of this connection's session, so its
-        // creation, the bulk copy into it, and the MERGE that reads it must all run inside
+        // creation, the bulk copy into it, and the insert that reads it must all run inside
         // the same transaction as everything else in this flush.
         //
-        // PRIMARY KEY CLUSTERED (trace_id, span_id) matches the MERGE's own join predicate: without
-        // it, #spans_stage is a heap and the MERGE has to sort or hash it every flush (plus a plan
+        // PRIMARY KEY CLUSTERED (trace_id, span_id) matches the insert's own join predicate: without
+        // it, #spans_stage is a heap and the insert has to sort or hash it every flush (plus a plan
         // recompile) to match it against spans.uk_trace_span. Declaring the clustered key up front
-        // gives the MERGE a pre-sorted source, at the cost of the bulk copy now inserting in key
+        // gives the insert a pre-sorted source, at the cost of the bulk copy now inserting in key
         // order rather than append order -- a fine trade for a temp table that only ever exists to
         // be joined once and then dropped.
         await using (var createCmd = new SqlCommand("""
@@ -396,7 +390,7 @@ public sealed class SqlServerBulkWriter(
                 flags                    INT           NOT NULL,
                 events_json              NVARCHAR(MAX),
                 links_json               NVARCHAR(MAX),
-                CONSTRAINT pk_spans_stage PRIMARY KEY CLUSTERED (trace_id, span_id)
+                PRIMARY KEY CLUSTERED (trace_id, span_id) WITH (IGNORE_DUP_KEY = ON)
             )
             """, conn, tx))
         {
@@ -436,27 +430,38 @@ public sealed class SqlServerBulkWriter(
             await bulk.WriteToServerAsync(stageReader, ct);
         }
 
-        const string mergeSql = """
-            MERGE spans AS target
-            USING #spans_stage AS source
-            ON target.trace_id = source.trace_id AND target.span_id = source.span_id
-            WHEN NOT MATCHED THEN
-                INSERT (trace_id, span_id, parent_span_id, resource_id, scope_id,
-                        name, kind, start_time_unix_nano, end_time_unix_nano,
-                        dropped_attributes_count, dropped_events_count, dropped_links_count,
-                        trace_state, status_code, status_message, created_at, attributes_json, flags,
-                        events_json, links_json)
-                VALUES (source.trace_id, source.span_id, source.parent_span_id,
-                        source.resource_id, source.scope_id,
-                        source.name, source.kind, source.start_time_unix_nano, source.end_time_unix_nano,
-                        source.dropped_attributes_count, source.dropped_events_count, source.dropped_links_count,
-                        source.trace_state, source.status_code, source.status_message,
-                        SYSDATETIME(), source.attributes_json, source.flags,
-                        source.events_json, source.links_json);
+        // INSERT ... WHERE NOT EXISTS with FORCESEEK on uk_trace_span, not MERGE. MERGE read the
+        // target through the clustered primary key, taking U locks on every row it scanned --
+        // including rows a concurrent flush had inserted but not yet committed, while that flush's
+        // own MERGE did the same to this one's: a cycle that load-testing showed was the dominant
+        // remaining SqlServer deadlock. Seeking uk_trace_span touches only the keys this batch is
+        // actually inserting, so two flushes of different spans never meet.
+        //
+        // The cost: two in-flight flushes carrying the SAME span (a client re-delivery landing in
+        // two drain loops, or on two collectors, before either commits) both pass NOT EXISTS, and
+        // one fails uk_trace_span. That flush rolls back and TelemetryIngestionWorker retries it,
+        // at which point NOT EXISTS skips the now-stored span -- nothing is lost.
+        const string insertSql = """
+            INSERT INTO spans (trace_id, span_id, parent_span_id, resource_id, scope_id,
+                    name, kind, start_time_unix_nano, end_time_unix_nano,
+                    dropped_attributes_count, dropped_events_count, dropped_links_count,
+                    trace_state, status_code, status_message, created_at, attributes_json, flags,
+                    events_json, links_json)
+            SELECT source.trace_id, source.span_id, source.parent_span_id,
+                   source.resource_id, source.scope_id,
+                   source.name, source.kind, source.start_time_unix_nano, source.end_time_unix_nano,
+                   source.dropped_attributes_count, source.dropped_events_count, source.dropped_links_count,
+                   source.trace_state, source.status_code, source.status_message,
+                   SYSDATETIME(), source.attributes_json, source.flags,
+                   source.events_json, source.links_json
+            FROM #spans_stage AS source
+            WHERE NOT EXISTS (
+                SELECT 1 FROM spans AS target WITH (FORCESEEK(uk_trace_span(trace_id, span_id)))
+                 WHERE target.trace_id = source.trace_id AND target.span_id = source.span_id);
             """;
 
-        await using var mergeCmd = new SqlCommand(mergeSql, conn, tx);
-        await mergeCmd.ExecuteNonQueryAsync(ct);
+        await using var insertCmd = new SqlCommand(insertSql, conn, tx);
+        await insertCmd.ExecuteNonQueryAsync(ct);
     }
 
     // =========================================================================
@@ -470,16 +475,19 @@ public sealed class SqlServerBulkWriter(
 
     private async Task<long[]> ResolveMetricIdsAsync(
         SqlConnection conn,
-        SqlTransaction tx,
         List<MetricModel> metrics,
         Dictionary<string, long> resourceIds,
         Dictionary<string, long> scopeIds,
-        List<Action> postCommitCacheWrites,
         CancellationToken ct)
     {
         // HOLDLOCK for the same reason UpsertResourceAsync needs it: without it two concurrent
         // MERGEs can both see NOT MATCHED and both try to insert. The trailing SELECT returns the
         // id whether the row was just inserted or already existed.
+        //
+        // WHEN MATCHED only fires when description/unit actually changed (EXISTS ... EXCEPT is the
+        // null-safe, pre-2022 spelling of IS DISTINCT FROM). An unconditional UPDATE took an
+        // exclusive lock on the existing row on every cache miss -- on a cold cache, every flush
+        // loop at once, against the same rows.
         const string sql = """
             MERGE metrics WITH (HOLDLOCK) AS t
             USING (SELECT @resourceId AS resource_id, @scopeId AS scope_id,
@@ -488,7 +496,7 @@ public sealed class SqlServerBulkWriter(
               AND t.scope_id    = s.scope_id
               AND t.name        = s.name
               AND t.[type]      = s.[type]
-            WHEN MATCHED THEN
+            WHEN MATCHED AND EXISTS (SELECT t.description, t.unit EXCEPT SELECT @description, @unit) THEN
                 UPDATE SET description = @description, unit = @unit
             WHEN NOT MATCHED THEN
                 INSERT (resource_id, scope_id, name, description, unit, [type], created_at)
@@ -525,7 +533,7 @@ public sealed class SqlServerBulkWriter(
 
         foreach (var (key, resId, scoId, m) in pending)
         {
-            await using var cmd = new SqlCommand(sql, conn, tx);
+            await using var cmd = new SqlCommand(sql, conn);
             cmd.Parameters.Add("@resourceId", SqlDbType.BigInt).Value = resId;
             cmd.Parameters.Add("@scopeId",    SqlDbType.BigInt).Value = scoId;
             // Lengths are declared to match the columns so the plan cache does not get an entry
@@ -537,8 +545,7 @@ public sealed class SqlServerBulkWriter(
 
             var id = (long)(await cmd.ExecuteScalarAsync(ct))!;
             result[key] = id;
-            // Deferred -- see ResolveResourcesAsync.
-            postCommitCacheWrites.Add(() => cache.SetMetric(key, id));
+            cache.SetMetric(key, id);
         }
 
         var ids = new long[n];

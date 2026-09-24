@@ -128,7 +128,10 @@ export class TraceListComponent {
   protected filterMode = signal<FilterMode>((this.urlState.get('mode') as FilterMode) ?? this.saved.filterMode);
   protected selectedService = signal<string>(this.urlState.get('service') ?? this.saved.selectedService);
   protected selectedOperation = signal<string>(this.urlState.get('op') ?? this.saved.selectedOperation);
+  /** Applied query — what filtering, the URL and saved state read. Changes only on submit. */
   protected searchText = signal<string>(this.urlState.get('q') ?? this.saved.searchText);
+  /** Draft text in the search box; applied to `searchText` by `submitSearch()`. */
+  protected searchInput = signal<string>(this.searchText());
   protected minDurationMs = signal<number>(this.readNum('minDur') ?? this.saved.minDurationMs);
   protected maxDurationMs = signal<number>(this.readNum('maxDur') ?? this.saved.maxDurationMs);
   protected analyticsService = signal('');
@@ -658,7 +661,7 @@ export class TraceListComponent {
     if (this.filterMode() !== mode) this.filterMode.set(mode);
     if (this.selectedService() !== service) this.selectedService.set(service);
     if (this.selectedOperation() !== operation) this.selectedOperation.set(operation);
-    if (this.searchText() !== q) this.searchText.set(q);
+    if (this.searchText() !== q) { this.searchText.set(q); this.searchInput.set(q); }
     if (this.minDurationMs() !== minDur) this.minDurationMs.set(minDur);
     if (this.maxDurationMs() !== maxDur) this.maxDurationMs.set(maxDur);
     if (this.sortColumn() !== sortCol) this.sortColumn.set(sortCol);
@@ -677,7 +680,12 @@ export class TraceListComponent {
     this.pageIndex.set(0);
   }
   protected onOperationChange(value: string): void { this.selectedOperation.set(value); this.pageIndex.set(0); }
-  protected onSearchChange(value: string): void { this.searchText.set(value); this.pageIndex.set(0); }
+  protected onSearchChange(value: string): void {
+    this.searchInput.set(value);
+    this.searchText.set(value);
+    this.pageIndex.set(0);
+  }
+  protected submitSearch(): void { this.onSearchChange(this.searchInput().trim()); }
   protected onMinDurationChange(value: number): void { this.minDurationMs.set(value); this.pageIndex.set(0); }
   protected onMaxDurationChange(value: number): void { this.maxDurationMs.set(value); this.pageIndex.set(0); }
   protected onAnalyticsSort(s: Sort): void {
@@ -706,8 +714,8 @@ export class TraceListComponent {
     });
   }
 
-  protected navigate(traceId: string, spanId?: string | null): void {
-    this.router.navigate(['/traces', traceId], spanId ? { queryParams: { span: spanId } } : undefined);
+  protected navigate(traceId: string): void {
+    this.router.navigate(['/traces', traceId]);
   }
 
   // =========================================================================

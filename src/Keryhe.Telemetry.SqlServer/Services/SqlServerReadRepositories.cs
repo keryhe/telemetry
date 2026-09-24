@@ -145,10 +145,12 @@ public class SqlServerRetentionSettingsRepository(IConfiguration configuration)
     }
 
     /// <summary>
-    /// Rows removed per statement by the retention sweeps. Bounded so a sweep cannot escalate to a
-    /// table lock (SQL Server escalates past ~5000 row locks) while the ingest path is still appending.
+    /// Rows removed per statement by the retention sweeps. Kept below SQL Server's lock-escalation
+    /// threshold (~5000 locks on one table/index in a single statement) so a sweep takes row locks
+    /// only, rather than escalating to an exclusive table lock that blocks -- and deadlocks with --
+    /// the ingest path still appending to the same table.
     /// </summary>
-    private const int DeleteBatchSize = 50_000;
+    private const int DeleteBatchSize = 4_000;
 
     public override Task<int> DeleteOldTracesAsync(TimeSpan retentionPeriod, CancellationToken cancellationToken = default)
         => SweepAsync(["spans"], "start_time_unix_nano", retentionPeriod, cancellationToken);
@@ -176,6 +178,10 @@ public class SqlServerRetentionSettingsRepository(IConfiguration configuration)
         var cutoffNano = CutoffNano(retentionPeriod);
 
         await using var conn = await OpenConnectionAsync(cancellationToken);
+
+        // If a sweep does deadlock with an ingestion flush, make the sweep the victim: it simply
+        // resumes on its next interval, whereas a flush victim burns one of its bounded retries.
+        await conn.ExecuteAsync(new CommandDefinition("SET DEADLOCK_PRIORITY LOW", cancellationToken: cancellationToken));
 
         var total = 0;
         foreach (var table in tables)

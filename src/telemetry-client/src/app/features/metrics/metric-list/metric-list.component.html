@@ -38,9 +38,14 @@
 
     <mat-form-field appearance="outline" subscriptSizing="dynamic" class="search-field">
       <mat-label>Search metrics</mat-label>
-      <mat-icon matPrefix>search</mat-icon>
-      <input matInput [(ngModel)]="searchText" [ngModelOptions]="{standalone: true}" />
+      <input matInput [ngModel]="searchInput()" (ngModelChange)="searchInput.set($event)"
+             (keydown.enter)="submitSearch()" [ngModelOptions]="{standalone: true}" />
     </mat-form-field>
+
+    <button mat-flat-button color="primary" class="search-button"
+            (click)="submitSearch()" matTooltip="Search" aria-label="Search">
+      <mat-icon>search</mat-icon>
+    </button>
 
     <button mat-icon-button color="primary" (click)="openSearchHelp()" matTooltip="Search syntax help">
       <mat-icon>help_outline</mat-icon>

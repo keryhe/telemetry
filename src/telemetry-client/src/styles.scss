@@ -133,3 +133,29 @@ body.theme-system .apexcharts-canvas {
   white-space: pre-line;
   text-align: left;
 }
+
+// Square, icon-only submit button beside a list page's search field. Sized to the outline
+// form field at density -2 (48px), so the two sit flush.
+.search-button.mat-mdc-button-base {
+  width: 48px;
+  height: 48px;
+  min-width: 48px;
+  padding: 0;
+  border-radius: 4px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+
+  .mat-icon {
+    // mat-flat-button spaces and shrinks icons to sit beside a text label; there is none here.
+    margin: 0;
+    font-size: 28px;
+    width: 28px;
+    height: 28px;
+  }
+
+  // The empty text-label slot still takes width and pushes the icon off-center.
+  .mdc-button__label {
+    display: none;
+  }
+}

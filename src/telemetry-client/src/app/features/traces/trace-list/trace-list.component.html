@@ -58,8 +58,8 @@
 
     <mat-form-field appearance="outline" subscriptSizing="dynamic" class="search-field">
       <mat-label>Search</mat-label>
-      <mat-icon matPrefix>search</mat-icon>
-      <input matInput [ngModel]="searchText()" (ngModelChange)="onSearchChange($event)"
+      <input matInput [ngModel]="searchInput()" (ngModelChange)="searchInput.set($event)"
+             (keydown.enter)="submitSearch()"
              [ngModelOptions]="{standalone: true}"
              placeholder='Trace ID OR "operation" OR key=value OR key:value' />
       @if (isTraceIdSearch()) {
@@ -68,6 +68,11 @@
         </mat-chip-set>
       }
     </mat-form-field>
+
+    <button mat-flat-button color="primary" class="search-button"
+            (click)="submitSearch()" matTooltip="Search" aria-label="Search">
+      <mat-icon>search</mat-icon>
+    </button>
 
     <button mat-icon-button color="primary" (click)="openSearchHelp()" matTooltip="Search syntax help">
       <mat-icon>help_outline</mat-icon>
@@ -192,7 +197,7 @@
               <tr mat-header-row *matHeaderRowDef="displayedColumns"></tr>
               <tr mat-row *matRowDef="let row; columns: displayedColumns"
                   class="clickable-row"
-                  (click)="navigate(row.traceIdHex, row.displaySpanIdHex)"></tr>
+                  (click)="navigate(row.traceIdHex)"></tr>
             </table>
 
             <mat-paginator

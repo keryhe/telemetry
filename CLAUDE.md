@@ -383,6 +383,17 @@ that lock. `TelemetryIngestionWorker`'s retry backoff also carries full jitter (
 [50%, 100%] of the exponential delay) for the same reason: a transient failure like this tends to
 hit several concurrent flushes at once, so fixed backoff would retry them all at the same moment.
 
+SqlServer follows the same shape for a related reason: its upserts are `MERGE ... WITH (HOLDLOCK)`
+(serializable key-range locks), and held inside the data transaction those ranges lasted through
+the bulk copy until commit, deadlocking concurrent flushes, worst on a cold cache. Auto-committed,
+they last one statement. Its metrics `MERGE` also updates `description`/`unit` only when they
+actually differ, rather than locking the matched row on every cache miss. The SqlServer retention
+sweep deletes in 4,000-row chunks (below the lock-escalation threshold) at `DEADLOCK_PRIORITY LOW`.
+Spans go in via `INSERT ... WHERE NOT EXISTS` with `FORCESEEK` on `uk_trace_span`, not `MERGE`: the
+`MERGE` scanned the clustered key and U-locked other flushes' uncommitted rows, which was the
+dominant remaining deadlock under load. A span re-delivered into two concurrent flushes now fails
+one of them on `uk_trace_span`; the worker's retry then skips it.
+
 Because `metrics.created_at` now means "first seen" rather than approximately the data timestamp,
 metric retention prunes `TelemetryIngestionHelpers.TimePrunedMetricTables` — the five data-point
 tables — on `time_unix_nano`, instead of cascading from `metrics`.

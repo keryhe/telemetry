@@ -67,7 +67,10 @@ export class MetricListComponent {
   protected allMetrics = signal<MetricInfo[]>([]);
   /** True (unbounded) distinct-metric-name counts per type — backs the count stat cards. */
   protected summary = signal<MetricsSummary>({ uniqueMetricCount: 0, countsByType: [] });
+  /** Applied query — what filtering and saved state read. Changes only on submit. */
   protected searchText = signal(this.saved.searchText);
+  /** Draft text in the search box; applied to `searchText` by `submitSearch()`. */
+  protected searchInput = signal(this.searchText());
   protected selectedService = signal(this.saved.selectedService);
   protected selectedType = signal<MetricType | -1>(this.saved.selectedType);
   protected showUnique = signal(this.saved.showUnique);
@@ -181,6 +184,8 @@ export class MetricListComponent {
   protected navigate(name: string): void {
     this.router.navigate(['/metrics', encodeURIComponent(name)]);
   }
+
+  protected submitSearch(): void { this.searchText.set(this.searchInput().trim()); }
 
   protected openSearchHelp(): void {
     this.dialog.open(MetricSearchHelpDialogComponent, { maxWidth: '720px', width: '90vw' });

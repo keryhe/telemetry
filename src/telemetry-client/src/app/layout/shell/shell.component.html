@@ -65,7 +65,9 @@
 
     <mat-sidenav-content>
       <main class="content">
-        <router-outlet />
+        @for (key of [outletKey()]; track key) {
+          <router-outlet />
+        }
       </main>
     </mat-sidenav-content>
   </mat-sidenav-container>

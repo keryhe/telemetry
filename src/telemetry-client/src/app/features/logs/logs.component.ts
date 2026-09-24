@@ -111,15 +111,13 @@ export class LogsComponent {
   protected total = signal(0);
   protected capped = signal(false);
 
-  protected searchText = signal<string>(this.urlState.get('q') ?? this.saved.searchText);
   /**
-   * Debounced echo of `searchText`, read by everything that parses/filters/refetches on it.
-   * Typing a `key:value` attribute term re-runs `refined()` (and so `facetCounts()`, a
-   * 1000-row × 3-attribute-bag walk) on every keystroke of the value if driven off the raw
-   * signal — debouncing is the fix (list-page-scale plan, Phase 1). The raw signal still drives
-   * the input binding and the cheap active/excluded facet marking in `facets`.
+   * Applied query — what parsing, filtering, refetching, the URL and saved state read. Changes
+   * only on submit (or a facet toggle), so typing never re-runs `refined()`/`facetCounts()`.
    */
-  private readonly debouncedSearchText = signal(this.searchText());
+  protected searchText = signal<string>(this.urlState.get('q') ?? this.saved.searchText);
+  /** Draft text in the search box; applied to `searchText` by `submitSearch()`. */
+  protected searchInput = signal<string>(this.searchText());
   protected selectedService = signal<string>(this.urlState.get('service') ?? this.saved.selectedService);
   protected selectedSeverity = signal<number>(this.readNum('severity') ?? this.saved.selectedSeverity);
   protected traceIdFilter = signal('');
@@ -168,7 +166,7 @@ export class LogsComponent {
     { num: 21, label: 'Fatal' },
   ];
 
-  protected parsedQuery = computed<ParsedSearchQuery>(() => parseSearchQuery(this.debouncedSearchText()));
+  protected parsedQuery = computed<ParsedSearchQuery>(() => parseSearchQuery(this.searchText()));
   protected isTraceIdSearch = computed(() => this.parsedQuery().isTraceIdSearch);
 
   // The trace id currently driving a server-side fetch: query-param banner takes
@@ -308,16 +306,6 @@ export class LogsComponent {
     // Tenant-wide, signal-agnostic — fetched once, not on every overview reload.
     this.resourcesApi.getServices().subscribe({
       next: (services) => this.services.set(services),
-    });
-
-    // Debounce searchText → debouncedSearchText for the data-dependent computeds (see field doc).
-    let searchDebounceHandle: ReturnType<typeof setTimeout> | undefined;
-    effect(() => {
-      const text = this.searchText();
-      untracked(() => {
-        clearTimeout(searchDebounceHandle);
-        searchDebounceHandle = setTimeout(() => this.debouncedSearchText.set(text), 250);
-      });
     });
 
     // Overview + total: reload when the time range or any server-side filter changes.
@@ -489,7 +477,7 @@ export class LogsComponent {
     const severity = this.readNum('severity') ?? -1;
     const page = this.readNum('page') ?? 0;
     const size = this.readNum('size') ?? this.saved.pageSize;
-    if (this.searchText() !== q) this.searchText.set(q);
+    if (this.searchText() !== q) { this.searchText.set(q); this.searchInput.set(q); }
     if (this.selectedService() !== service) this.selectedService.set(service);
     if (this.selectedSeverity() !== severity) this.selectedSeverity.set(severity);
     if (this.pageSize() !== size) this.pageSize.set(size);
@@ -513,7 +501,12 @@ export class LogsComponent {
   }
 
   // Filter edits reset to the first page (user changes; URL restores keep their page).
-  protected onSearchChange(value: string): void { this.searchText.set(value); this.pageIndex.set(0); }
+  protected onSearchChange(value: string): void {
+    this.searchInput.set(value);
+    this.searchText.set(value);
+    this.pageIndex.set(0);
+  }
+  protected submitSearch(): void { this.onSearchChange(this.searchInput().trim()); }
   protected onServiceChange(value: string): void { this.selectedService.set(value); this.pageIndex.set(0); }
   protected onSeverityChange(value: number): void { this.selectedSeverity.set(value); this.pageIndex.set(0); }
 
