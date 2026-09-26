@@ -557,7 +557,12 @@ public abstract class TraceReadRepositoryBase : DapperReadRepository, ITraceRead
         spanParams.Add("tenantId", TenantId);
         spanParams.Add("start", TimeConversion.DateTimeToUnixNano(query.Start));
         spanParams.Add("end", TimeConversion.DateTimeToUnixNano(query.End));
-        spanParams.Add("traceIds", pageIds);
+        // A CLR array, not pageIds (List<string>) directly: ClickHouse.Client's TypeConverter has
+        // no case for List<T> and throws before any query runs, while it binds a T[] natively as
+        // a ClickHouse Array parameter -- confirmed against a live container. SqlServer/MySql are
+        // unaffected either way (Dapper's own IN-clause expansion handles both shapes the same),
+        // and Postgres/Timescale's `= ANY(@traceIds)` override binds an array natively regardless.
+        spanParams.Add("traceIds", pageIds.ToArray());
         var spanWhere = $"s.start_time_unix_nano >= @start AND s.start_time_unix_nano <= @end AND {TraceIdInPredicate}";
         var raw = await FetchRawSpansSlimAsync(spanWhere, spanParams, ct);
 
