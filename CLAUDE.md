@@ -269,8 +269,10 @@ unchanged):
   `Int64` surrogate keys the read repos join on, always from the table's full `ORDER BY` key:
   resource ids from `(tenant_id, resource_hash)`, scope ids from `scope_hash` (scopes carry no
   tenant), span ids from `(trace_id, span_id)`, metric ids from
-  `(resource_id, scope_id, name, type)` via `ClickHouseIds.FromKey`, and events/links use a
-  monotonic in-process generator (`ClickHouseIds` / `RowId`).
+  `(resource_id, scope_id, name, type)` via `ClickHouseIds.FromKey`; log records and alert events
+  use a monotonic in-process generator (`RowId`). Span events and links are `events_json`/
+  `links_json` columns on the span row (schema 2.11.0), not separate rows, so they need no id of
+  their own.
 - **Dedup via `ReplacingMergeTree`, not `ON CONFLICT`.** resources/scopes/spans/metrics collapse on their
   `ORDER BY` key at merge time, backed by `ResourceScopeCache` + per-batch dedup. Dedup is
   *eventual* — reads may briefly see a duplicate before a merge (`OPTIMIZE ... FINAL` forces it).
@@ -502,9 +504,10 @@ a daily partition already covers it — confirmed the partial index is chosen vi
 live Timescale container for the exact `ErrorTracePredicate` query shape, across compressed and
 uncompressed chunks alike).
 
-**Telemetry (12)**: `resources`, `instrumentation_scopes`, `spans`, `span_events`, `span_links`,
-`metrics`, `gauge_data_points`, `sum_data_points`, `histogram_data_points`,
-`exponential_histogram_data_points`, `summary_data_points`, `log_records`
+**Telemetry (10)**: `resources`, `instrumentation_scopes`, `spans` (events and links folded into
+its `events_json`/`links_json` columns, schema 2.11.0, on all five providers — there are no
+separate `span_events`/`span_links` tables), `metrics`, `gauge_data_points`, `sum_data_points`,
+`histogram_data_points`, `exponential_histogram_data_points`, `summary_data_points`, `log_records`
 
 **Multi-tenant/auth (2)**: `tenants`, `api_keys`
 
