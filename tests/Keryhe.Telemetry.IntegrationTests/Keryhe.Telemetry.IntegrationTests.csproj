@@ -1,0 +1,47 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <IsPackable>false</IsPackable>
+    <IsTestProject>true</IsTestProject>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="18.10.1" />
+    <PackageReference Include="xunit" Version="2.9.3" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="4.0.0">
+      <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+      <PrivateAssets>all</PrivateAssets>
+    </PackageReference>
+    <PackageReference Include="Testcontainers" Version="4.15.0" />
+    <PackageReference Include="Testcontainers.PostgreSql" Version="4.15.0" />
+    <PackageReference Include="Testcontainers.MsSql" Version="4.15.0" />
+    <PackageReference Include="Testcontainers.MySql" Version="4.15.0" />
+    <PackageReference Include="Npgsql" Version="10.0.3" />
+    <PackageReference Include="Microsoft.Data.SqlClient" Version="7.0.2" />
+    <PackageReference Include="MySqlConnector" Version="2.6.1" />
+    <PackageReference Include="ClickHouse.Client" Version="7.14.0" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="../../src/Keryhe.Telemetry.Core/Keryhe.Telemetry.Core.csproj" />
+    <ProjectReference Include="../../src/Keryhe.Telemetry.Collector/Keryhe.Telemetry.Collector.csproj" />
+    <ProjectReference Include="../../src/Keryhe.Telemetry.Api/Keryhe.Telemetry.Api.csproj" />
+    <ProjectReference Include="../../src/Keryhe.Telemetry.PostgreSQL/Keryhe.Telemetry.PostgreSQL.csproj" />
+    <ProjectReference Include="../../src/Keryhe.Telemetry.Timescale/Keryhe.Telemetry.Timescale.csproj" />
+    <ProjectReference Include="../../src/Keryhe.Telemetry.SqlServer/Keryhe.Telemetry.SqlServer.csproj" />
+    <ProjectReference Include="../../src/Keryhe.Telemetry.MySql/Keryhe.Telemetry.MySql.csproj" />
+    <ProjectReference Include="../../src/Keryhe.Telemetry.ClickHouse/Keryhe.Telemetry.ClickHouse.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Content Include="../../schema/PostgreSQL-Schema.sql" Link="Schema/PostgreSQL-Schema.sql" CopyToOutputDirectory="PreserveNewest" />
+    <Content Include="../../schema/Timescale-Schema.sql" Link="Schema/Timescale-Schema.sql" CopyToOutputDirectory="PreserveNewest" />
+    <Content Include="../../schema/SqlServer-Schema.sql" Link="Schema/SqlServer-Schema.sql" CopyToOutputDirectory="PreserveNewest" />
+    <Content Include="../../schema/MySQL-Schema.sql" Link="Schema/MySQL-Schema.sql" CopyToOutputDirectory="PreserveNewest" />
+    <Content Include="../../schema/ClickHouse-Schema.sql" Link="Schema/ClickHouse-Schema.sql" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+</Project>

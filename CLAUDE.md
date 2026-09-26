@@ -51,8 +51,22 @@ table/column set: `schema/PostgreSQL-Schema.sql` (plain Postgres), `schema/Times
 (columnar MergeTree family; see the ClickHouse notes below). A schema change edits all five plus
 `TARGET_VERSION` in `apply-schema.sh`, in one commit.
 
-There are no .NET test projects in the solution. The Angular project has `npm test`
-(Karma/Jasmine) but no meaningful tests are set up.
+`tests/Keryhe.Telemetry.IntegrationTests` (xUnit) runs every provider's real
+`Add<Provider>CollectorServices`/`Add<Provider>ApiServices` registrations against real
+Testcontainers-managed databases, applying the actual `schema/*.sql` scripts and seeding through
+`ITelemetryBulkWriter` (not `Keryhe.Telemetry.TestDataGenerator`, whose OTLP/gRPC-based data is
+random and time-dependent — see `plans/list-pages-server-side.md`'s Phase 0 section). Requires
+Docker:
+
+```bash
+# All five providers (one xUnit collection fixture per provider, containers started once per run)
+dotnet test tests/Keryhe.Telemetry.IntegrationTests
+
+# One provider only (Provider trait: PostgreSQL | Timescale | SqlServer | MySql | ClickHouse)
+dotnet test tests/Keryhe.Telemetry.IntegrationTests --filter Provider=SqlServer
+```
+
+The Angular project has `npm test` (Karma/Jasmine) but no meaningful tests are set up.
 
 ### Default ports
 
