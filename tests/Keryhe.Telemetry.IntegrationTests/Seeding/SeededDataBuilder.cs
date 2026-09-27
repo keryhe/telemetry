@@ -109,17 +109,22 @@ public static class SeededDataBuilder
         return Convert.ToHexString(bytes).ToLowerInvariant();
     }
 
-    /// <summary>~200 three-span traces (root + two children) across three services, several with an error status.</summary>
-    public static List<SpanModel> BasicTraceWindow(long tenantId, DateTime start, int traceCount = 200)
+    /// <summary>
+    /// ~200 three-span traces (root + two children) across three services, several with an error
+    /// status. <paramref name="seedOffset"/> shifts the deterministic trace/span id sequence so a
+    /// second call (e.g. a "late-arriving" batch inserted after some baseline traces) produces a
+    /// disjoint set of trace ids rather than colliding with the first.
+    /// </summary>
+    public static List<SpanModel> BasicTraceWindow(long tenantId, DateTime start, int traceCount = 200, int seedOffset = 0)
     {
         var services = new[] { "checkout-api", "payments-worker", "inventory-api" };
         var scope = Scope();
         var spans = new List<SpanModel>(traceCount * 3);
         for (var t = 0; t < traceCount; t++)
         {
-            var traceId = HexId(32, t * 3 + 1);
-            var rootId = HexId(16, t * 3 + 2);
-            var childId = HexId(16, t * 3 + 3);
+            var traceId = HexId(32, seedOffset + t * 3 + 1);
+            var rootId = HexId(16, seedOffset + t * 3 + 2);
+            var childId = HexId(16, seedOffset + t * 3 + 3);
             var service = services[t % services.Length];
             var isError = t % 17 == 0;
             var traceStart = start.AddSeconds(t);

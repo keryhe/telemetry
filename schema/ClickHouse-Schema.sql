@@ -124,6 +124,12 @@ ORDER BY (trace_id, span_id);
 -- span_events and span_links were dropped in 2.11.0: neither was ever read or written
 -- independently of its parent span, so both collapsed into spans.events_json/links_json.
 
+-- idx_spans_root_time (schema 2.13.1, list-pages-server-side plan Phase 3) has no ClickHouse
+-- equivalent either, for the same reason as idx_spans_error: the daily partition plus this
+-- table's own ORDER BY (trace_id, span_id) already lets a parent_span_id IS NULL scan skip
+-- whole partitions/granules outside the query's time bounds. Revisit with a projection if
+-- EXPLAIN ever shows otherwise.
+
 -- =============================================================================
 -- METRICS
 -- =============================================================================
@@ -407,7 +413,143 @@ CREATE TABLE IF NOT EXISTS log_rollup_hour
 ENGINE = ReplacingMergeTree(rolled_at)
 ORDER BY (bucket_unix_nano, resource_id);
 
-INSERT INTO rollup_state (signal_name, granularity) VALUES ('logs', 'minute'), ('logs', 'hour');
+-- Traces whose root span never arrived (schema 2.13.1, decision 41): one row per trace,
+-- holding the anchor span (its earliest span, whose own parent does not exist anywhere) that
+-- the rollup worker detected per finished minute. ReplacingMergeTree(detected_at) keyed on
+-- trace_id so a minute re-rolled by two racing API instances collapses to the newest row; the
+-- rollup worker also issues an explicit lightweight DELETE for a trace whose root subsequently
+-- arrives (same lightweight-DELETE precedent as the retention sweeps' `DELETE FROM spans`).
+CREATE TABLE IF NOT EXISTS orphan_roots
+(
+    trace_id             String,
+    span_id              String,
+    resource_id          Int64,
+    start_time_unix_nano Int64,
+    end_time_unix_nano   Int64,
+    detected_at          DateTime64(9) DEFAULT now64(9)
+)
+ENGINE = ReplacingMergeTree(detected_at)
+ORDER BY trace_id;
+
+-- Per-minute trace summary (schema 2.13.1, decisions 37-38, 41): one row per minute, per
+-- anchor span's resource, operation name (folded to '__other__' past the 200-distinct-name
+-- cardinality guard) and inbound flag (anchor kind SERVER/CONSUMER). Counts traces whose
+-- ANCHOR (null-parent root, or its orphan_roots span) starts in that minute; error flag and
+-- duration are aggregated over the trace's full span set. lb_00..lb_39 are the fixed
+-- latency-bucket counts (LatencyBucketSql) as plain columns so SQL can sum them across rows.
+CREATE TABLE IF NOT EXISTS trace_rollup_minute
+(
+    bucket_unix_nano Int64,
+    resource_id      Int64,
+    root_name        String,
+    inbound          UInt8,
+    trace_count      Int32 DEFAULT 0,
+    error_count      Int32 DEFAULT 0,
+    duration_sum_ms  Float64 DEFAULT 0,
+    duration_max_ms  Float64 DEFAULT 0,
+    lb_00 Int32 DEFAULT 0,
+    lb_01 Int32 DEFAULT 0,
+    lb_02 Int32 DEFAULT 0,
+    lb_03 Int32 DEFAULT 0,
+    lb_04 Int32 DEFAULT 0,
+    lb_05 Int32 DEFAULT 0,
+    lb_06 Int32 DEFAULT 0,
+    lb_07 Int32 DEFAULT 0,
+    lb_08 Int32 DEFAULT 0,
+    lb_09 Int32 DEFAULT 0,
+    lb_10 Int32 DEFAULT 0,
+    lb_11 Int32 DEFAULT 0,
+    lb_12 Int32 DEFAULT 0,
+    lb_13 Int32 DEFAULT 0,
+    lb_14 Int32 DEFAULT 0,
+    lb_15 Int32 DEFAULT 0,
+    lb_16 Int32 DEFAULT 0,
+    lb_17 Int32 DEFAULT 0,
+    lb_18 Int32 DEFAULT 0,
+    lb_19 Int32 DEFAULT 0,
+    lb_20 Int32 DEFAULT 0,
+    lb_21 Int32 DEFAULT 0,
+    lb_22 Int32 DEFAULT 0,
+    lb_23 Int32 DEFAULT 0,
+    lb_24 Int32 DEFAULT 0,
+    lb_25 Int32 DEFAULT 0,
+    lb_26 Int32 DEFAULT 0,
+    lb_27 Int32 DEFAULT 0,
+    lb_28 Int32 DEFAULT 0,
+    lb_29 Int32 DEFAULT 0,
+    lb_30 Int32 DEFAULT 0,
+    lb_31 Int32 DEFAULT 0,
+    lb_32 Int32 DEFAULT 0,
+    lb_33 Int32 DEFAULT 0,
+    lb_34 Int32 DEFAULT 0,
+    lb_35 Int32 DEFAULT 0,
+    lb_36 Int32 DEFAULT 0,
+    lb_37 Int32 DEFAULT 0,
+    lb_38 Int32 DEFAULT 0,
+    lb_39 Int32 DEFAULT 0,
+    rolled_at        DateTime64(9) DEFAULT now64(9)
+)
+ENGINE = ReplacingMergeTree(rolled_at)
+PARTITION BY toYYYYMMDD(fromUnixTimestamp64Nano(bucket_unix_nano))
+ORDER BY (bucket_unix_nano, resource_id, root_name, inbound);
+
+-- Same shape, one row per hour.
+CREATE TABLE IF NOT EXISTS trace_rollup_hour
+(
+    bucket_unix_nano Int64,
+    resource_id      Int64,
+    root_name        String,
+    inbound          UInt8,
+    trace_count      Int32 DEFAULT 0,
+    error_count      Int32 DEFAULT 0,
+    duration_sum_ms  Float64 DEFAULT 0,
+    duration_max_ms  Float64 DEFAULT 0,
+    lb_00 Int32 DEFAULT 0,
+    lb_01 Int32 DEFAULT 0,
+    lb_02 Int32 DEFAULT 0,
+    lb_03 Int32 DEFAULT 0,
+    lb_04 Int32 DEFAULT 0,
+    lb_05 Int32 DEFAULT 0,
+    lb_06 Int32 DEFAULT 0,
+    lb_07 Int32 DEFAULT 0,
+    lb_08 Int32 DEFAULT 0,
+    lb_09 Int32 DEFAULT 0,
+    lb_10 Int32 DEFAULT 0,
+    lb_11 Int32 DEFAULT 0,
+    lb_12 Int32 DEFAULT 0,
+    lb_13 Int32 DEFAULT 0,
+    lb_14 Int32 DEFAULT 0,
+    lb_15 Int32 DEFAULT 0,
+    lb_16 Int32 DEFAULT 0,
+    lb_17 Int32 DEFAULT 0,
+    lb_18 Int32 DEFAULT 0,
+    lb_19 Int32 DEFAULT 0,
+    lb_20 Int32 DEFAULT 0,
+    lb_21 Int32 DEFAULT 0,
+    lb_22 Int32 DEFAULT 0,
+    lb_23 Int32 DEFAULT 0,
+    lb_24 Int32 DEFAULT 0,
+    lb_25 Int32 DEFAULT 0,
+    lb_26 Int32 DEFAULT 0,
+    lb_27 Int32 DEFAULT 0,
+    lb_28 Int32 DEFAULT 0,
+    lb_29 Int32 DEFAULT 0,
+    lb_30 Int32 DEFAULT 0,
+    lb_31 Int32 DEFAULT 0,
+    lb_32 Int32 DEFAULT 0,
+    lb_33 Int32 DEFAULT 0,
+    lb_34 Int32 DEFAULT 0,
+    lb_35 Int32 DEFAULT 0,
+    lb_36 Int32 DEFAULT 0,
+    lb_37 Int32 DEFAULT 0,
+    lb_38 Int32 DEFAULT 0,
+    lb_39 Int32 DEFAULT 0,
+    rolled_at        DateTime64(9) DEFAULT now64(9)
+)
+ENGINE = ReplacingMergeTree(rolled_at)
+ORDER BY (bucket_unix_nano, resource_id, root_name, inbound);
+
+INSERT INTO rollup_state (signal_name, granularity) VALUES ('logs', 'minute'), ('logs', 'hour'), ('traces', 'minute'), ('traces', 'hour');
 
 -- =============================================================================
 -- UTILITY
@@ -495,6 +637,10 @@ VALUES (1, 90, 90, 180);
 -- =============================================================================
 -- Only inserted when every statement above succeeded, so a partial apply cannot
 -- leave a false version marker for the apply-schema.sh gate.
+-- 2.13.1 adds orphan_roots/trace_rollup_minute/trace_rollup_hour (decisions 37-38, 41) and no
+-- idx_spans_root_time equivalent -- see the comment on the spans table above for why. spans
+-- already carried created_at (unlike the other four providers, which gained it only when they
+-- needed it) so nothing changes there.
 -- 2.13.0 adds rollup_state/log_rollup_minute/log_rollup_hour (decisions 37-38) and needs no
 -- change to log_records' own ORDER BY -- see the comment on that table above for why the new
 -- keyset tiebreak index the other four providers add is unnecessary here.
@@ -512,4 +658,4 @@ VALUES (1, 90, 90, 180);
 -- spans' ORDER BY (trace_id, span_id) with a daily partition already gave it what the relational
 -- providers got from the four indexes they dropped (see PostgreSQL-Schema.sql), and it has no
 -- GIN-style JSONB index to carry the equivalent write cost of.
-INSERT INTO schema_version (version) VALUES ('2.13.0');
+INSERT INTO schema_version (version) VALUES ('2.13.1');

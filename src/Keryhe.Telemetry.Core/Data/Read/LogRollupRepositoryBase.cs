@@ -142,4 +142,163 @@ public abstract class LogRollupRepositoryBase : IRollupRepository
         await conn.ExecuteAsync(new CommandDefinition(insertSql, args, transaction: tx, cancellationToken: ct));
         await tx.CommitAsync(ct);
     }
+
+    // =========================================================================
+    // TRACE ROLLUPS (list-pages-server-side plan, Phase 3, decisions 37-38, 41)
+    // =========================================================================
+
+    /// <summary>
+    /// Orphan detection (decision 41): for traces with a span starting in the range and no
+    /// null-parent span anywhere in the trace, finds the earliest span (ties broken by the lowest
+    /// span_id, an arbitrary but deterministic pick) and keeps it only when that span's own parent
+    /// does not exist as any span_id. Delete-then-insert in one transaction, same shape as the log
+    /// recompute, so a re-roll both adds newly-detected orphans and removes rows whose real root
+    /// has since arrived.
+    /// </summary>
+    public virtual async Task RollOrphanRootsAsync(long fromInclusive, long toExclusive, CancellationToken ct = default)
+    {
+        const string deleteSql = "DELETE FROM orphan_roots WHERE start_time_unix_nano >= @from AND start_time_unix_nano < @to";
+        const string insertSql = """
+            INSERT INTO orphan_roots (trace_id, span_id, resource_id, start_time_unix_nano, end_time_unix_nano)
+            SELECT e2.trace_id, e2.span_id, e2.resource_id, e2.start_time_unix_nano, e2.end_time_unix_nano
+            FROM (
+                SELECT ea.trace_id, ea.span_id
+                FROM (
+                    SELECT e.trace_id, MIN(e.span_id) AS span_id
+                    FROM spans e
+                    JOIN (
+                        SELECT s.trace_id,
+                               MIN(s.start_time_unix_nano) AS min_start,
+                               SUM(CASE WHEN s.parent_span_id IS NULL THEN 1 ELSE 0 END) AS null_parent_count
+                        FROM spans s
+                        WHERE s.trace_id IN (
+                            SELECT DISTINCT s2.trace_id FROM spans s2
+                            WHERE s2.start_time_unix_nano >= @from AND s2.start_time_unix_nano < @to
+                        )
+                        GROUP BY s.trace_id
+                    ) c ON c.trace_id = e.trace_id AND c.min_start = e.start_time_unix_nano
+                    WHERE c.null_parent_count = 0
+                    GROUP BY e.trace_id
+                ) ea
+            ) earliest
+            JOIN spans e2 ON e2.trace_id = earliest.trace_id AND e2.span_id = earliest.span_id
+            WHERE NOT EXISTS (SELECT 1 FROM spans p WHERE p.span_id = e2.parent_span_id)
+            """;
+
+        await using var conn = await OpenRecomputeConnectionAsync(ct);
+        await using var tx = await BeginRecomputeTransactionAsync(conn, ct);
+        var args = new { from = fromInclusive, to = toExclusive };
+        await conn.ExecuteAsync(new CommandDefinition(deleteSql, args, transaction: tx, cancellationToken: ct));
+        await conn.ExecuteAsync(new CommandDefinition(insertSql, args, transaction: tx, cancellationToken: ct));
+        await tx.CommitAsync(ct);
+    }
+
+    /// <summary>
+    /// Trace summary recompute (decisions 37-38, 41). Anchors are null-parent roots plus
+    /// <c>orphan_roots</c> (with the late-root <c>NOT EXISTS</c> re-check, so a trace whose real
+    /// root arrived after <see cref="RollOrphanRootsAsync"/>'s last pass for this range is never
+    /// double-counted); each anchor trace's error flag and whole-trace duration are aggregated
+    /// over its full span set via <c>spans.trace_id</c> (the <c>uk_trace_span</c> prefix). Root
+    /// names are folded to <c>'__other__'</c> past the 200-distinct-name-per-(bucket,resource)
+    /// cardinality guard, ranked by trace count via <c>ROW_NUMBER()</c>.
+    /// </summary>
+    public virtual async Task RollTraceMinutesAsync(long fromInclusive, long toExclusive, CancellationToken ct = default)
+    {
+        var bucketExpr = $"({IntDivExpr("a.anchor_start", NanosPerMinute.ToString())} * {NanosPerMinute})";
+        var lbColumns = string.Join(", ", LatencyBucketSql.ColumnNames());
+        var lbSelect = LatencyBucketSql.SumCaseColumns("f.duration_nano");
+
+        const string deleteSql = "DELETE FROM trace_rollup_minute WHERE bucket_unix_nano >= @from AND bucket_unix_nano < @to";
+
+        // Nested derived tables rather than a WITH clause: PostgreSQL/SqlServer accept WITH before
+        // INSERT, but MySQL attaches WITH only to the query expression that follows it (it must
+        // come after "INSERT INTO tbl (cols)", not before INSERT) -- rather than special-case that
+        // placement per provider, the anchors/trace_level computation is written twice (once for
+        // the per-trace aggregate, once for the name-popularity ranking) as plain subqueries,
+        // which every provider parses the same way.
+        var anchorsSql = $"""
+            (
+                SELECT s.trace_id AS trace_id, s.resource_id AS resource_id, s.name AS root_name,
+                       s.kind AS anchor_kind, s.start_time_unix_nano AS anchor_start
+                FROM spans s
+                WHERE s.parent_span_id IS NULL AND s.start_time_unix_nano >= @from AND s.start_time_unix_nano < @to
+                UNION ALL
+                SELECT o.trace_id, o.resource_id, sp.name, sp.kind, o.start_time_unix_nano
+                FROM orphan_roots o
+                JOIN spans sp ON sp.trace_id = o.trace_id AND sp.span_id = o.span_id
+                WHERE o.start_time_unix_nano >= @from AND o.start_time_unix_nano < @to
+                  AND NOT EXISTS (SELECT 1 FROM spans np WHERE np.trace_id = o.trace_id AND np.parent_span_id IS NULL)
+            )
+            """;
+
+        var insertSql = $"""
+            INSERT INTO trace_rollup_minute (bucket_unix_nano, resource_id, root_name, inbound, trace_count, error_count, duration_sum_ms, duration_max_ms, {lbColumns})
+            SELECT f.bucket, f.resource_id, f.root_name, f.inbound,
+                   COUNT(*), SUM(f.has_error),
+                   SUM(f.duration_nano) / 1000000.0, MAX(f.duration_nano) / 1000000.0,
+                   {lbSelect}
+            FROM (
+                SELECT tl.bucket AS bucket, tl.resource_id AS resource_id,
+                       CASE WHEN rn.rn <= 200 THEN tl.root_name ELSE '__other__' END AS root_name,
+                       tl.inbound AS inbound, tl.has_error AS has_error, tl.duration_nano AS duration_nano
+                FROM (
+                    SELECT a.trace_id AS trace_id, a.resource_id AS resource_id, a.root_name AS root_name,
+                           CASE WHEN a.anchor_kind IN ('SERVER', 'CONSUMER') THEN 1 ELSE 0 END AS inbound,
+                           {bucketExpr} AS bucket,
+                           MAX(CASE WHEN fs.status_code = 'ERROR' THEN 1 ELSE 0 END) AS has_error,
+                           (MAX(fs.end_time_unix_nano) - MIN(fs.start_time_unix_nano)) AS duration_nano
+                    FROM {anchorsSql} a
+                    JOIN spans fs ON fs.trace_id = a.trace_id
+                    GROUP BY a.trace_id, a.resource_id, a.root_name, a.anchor_kind, a.anchor_start
+                ) tl
+                JOIN (
+                    SELECT bucket, resource_id, root_name,
+                           ROW_NUMBER() OVER (PARTITION BY bucket, resource_id ORDER BY cnt DESC, root_name) AS rn
+                    FROM (
+                        SELECT bucket, resource_id, root_name, COUNT(*) AS cnt
+                        FROM (
+                            SELECT a.trace_id AS trace_id, a.resource_id AS resource_id, a.root_name AS root_name,
+                                   {bucketExpr} AS bucket
+                            FROM {anchorsSql} a
+                        ) t2
+                        GROUP BY bucket, resource_id, root_name
+                    ) nc
+                ) rn ON rn.bucket = tl.bucket AND rn.resource_id = tl.resource_id AND rn.root_name = tl.root_name
+            ) f
+            GROUP BY f.bucket, f.resource_id, f.root_name, f.inbound
+            """;
+
+        await using var conn = await OpenRecomputeConnectionAsync(ct);
+        await using var tx = await BeginRecomputeTransactionAsync(conn, ct);
+        var args = new { from = fromInclusive, to = toExclusive };
+        await conn.ExecuteAsync(new CommandDefinition(deleteSql, args, transaction: tx, cancellationToken: ct));
+        await conn.ExecuteAsync(new CommandDefinition(insertSql, args, transaction: tx, cancellationToken: ct));
+        await tx.CommitAsync(ct);
+    }
+
+    public virtual async Task RollTraceHoursAsync(long fromInclusive, long toExclusive, CancellationToken ct = default)
+    {
+        var bucketExpr = $"({IntDivExpr("trm.bucket_unix_nano", NanosPerHour.ToString())} * {NanosPerHour})";
+        var lbColumns = string.Join(", ", LatencyBucketSql.ColumnNames());
+        var lbSums = string.Join(",\n                   ", LatencyBucketSql.ColumnNames().Select(c => $"SUM(trm.{c})"));
+
+        var deleteSql = "DELETE FROM trace_rollup_hour WHERE bucket_unix_nano >= @from AND bucket_unix_nano < @to";
+        var insertSql = $"""
+            INSERT INTO trace_rollup_hour (bucket_unix_nano, resource_id, root_name, inbound, trace_count, error_count, duration_sum_ms, duration_max_ms, {lbColumns})
+            SELECT {bucketExpr}, trm.resource_id, trm.root_name, trm.inbound,
+                   SUM(trm.trace_count), SUM(trm.error_count),
+                   SUM(trm.duration_sum_ms), MAX(trm.duration_max_ms),
+                   {lbSums}
+            FROM trace_rollup_minute trm
+            WHERE trm.bucket_unix_nano >= @from AND trm.bucket_unix_nano < @to
+            GROUP BY {bucketExpr}, trm.resource_id, trm.root_name, trm.inbound
+            """;
+
+        await using var conn = await OpenRecomputeConnectionAsync(ct);
+        await using var tx = await BeginRecomputeTransactionAsync(conn, ct);
+        var args = new { from = fromInclusive, to = toExclusive };
+        await conn.ExecuteAsync(new CommandDefinition(deleteSql, args, transaction: tx, cancellationToken: ct));
+        await conn.ExecuteAsync(new CommandDefinition(insertSql, args, transaction: tx, cancellationToken: ct));
+        await tx.CommitAsync(ct);
+    }
 }

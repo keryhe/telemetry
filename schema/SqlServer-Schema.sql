@@ -156,6 +156,13 @@ CREATE INDEX idx_spans_error ON spans (start_time_unix_nano DESC) WHERE status_c
 -- GIN index on attributes_json omitted: no SQL Server equivalent.
 GO
 
+-- Trace page/summary anchor on roots (schema 2.13.1, list-pages-server-side plan Phase 3):
+-- every root-anchored query used to read all spans through idx_duration and filter out
+-- non-roots. INCLUDE(end_time_unix_nano) so mode=slow's duration check runs inside the index.
+CREATE INDEX idx_spans_root_time ON spans (start_time_unix_nano DESC) INCLUDE (end_time_unix_nano)
+    WHERE parent_span_id IS NULL;
+GO
+
 -- span_events and span_links were dropped in 2.11.0: neither was ever read or written
 -- independently of its parent span, so both collapsed into spans.events_json/links_json.
 
@@ -409,8 +416,139 @@ CREATE TABLE log_rollup_hour (
 CREATE INDEX idx_log_rollup_hour_bucket ON log_rollup_hour (bucket_unix_nano);
 GO
 
--- Seed the two rows this phase needs (logs/minute, logs/hour); phase 3 adds traces/*.
-INSERT INTO rollup_state ([signal_name], granularity) VALUES (N'logs', N'minute'), (N'logs', N'hour');
+-- Traces whose root span never arrived (schema 2.13.1, decision 41): one row per trace,
+-- holding the anchor span (its earliest span, whose own parent does not exist anywhere) that
+-- the rollup worker detected per finished minute. No foreign keys: the worker's writes must
+-- never lock resources. Indexed to merge with idx_spans_root_time in the same order.
+CREATE TABLE orphan_roots (
+    trace_id             CHAR(32)     NOT NULL,
+    span_id              CHAR(16)     NOT NULL,
+    resource_id          BIGINT       NOT NULL,
+    start_time_unix_nano BIGINT       NOT NULL,
+    end_time_unix_nano   BIGINT       NOT NULL,
+    detected_at          DATETIME2    NOT NULL DEFAULT SYSDATETIME(),
+    CONSTRAINT pk_orphan_roots PRIMARY KEY (trace_id)
+);
+CREATE INDEX idx_orphan_roots_start ON orphan_roots (start_time_unix_nano DESC, trace_id);
+GO
+
+-- Per-minute trace summary (schema 2.13.1, decisions 37-38, 41): one row per minute, per
+-- anchor span's resource, operation name (folded to '__other__' past the 200-distinct-name
+-- cardinality guard) and inbound flag (anchor kind SERVER/CONSUMER). Counts traces whose
+-- ANCHOR (null-parent root, or its orphan_roots span) starts in that minute; error flag and
+-- duration are aggregated over the trace's full span set. lb_00..lb_39 are the fixed
+-- latency-bucket counts (LatencyBucketSql) as plain columns so SQL can sum them across rows.
+CREATE TABLE trace_rollup_minute (
+    bucket_unix_nano BIGINT        NOT NULL,
+    resource_id      BIGINT        NOT NULL,
+    root_name        NVARCHAR(255) NOT NULL,
+    inbound          TINYINT       NOT NULL,
+    trace_count      INT           NOT NULL DEFAULT 0,
+    error_count      INT           NOT NULL DEFAULT 0,
+    duration_sum_ms  FLOAT         NOT NULL DEFAULT 0,
+    duration_max_ms  FLOAT         NOT NULL DEFAULT 0,
+    lb_00 INT NOT NULL DEFAULT 0,
+    lb_01 INT NOT NULL DEFAULT 0,
+    lb_02 INT NOT NULL DEFAULT 0,
+    lb_03 INT NOT NULL DEFAULT 0,
+    lb_04 INT NOT NULL DEFAULT 0,
+    lb_05 INT NOT NULL DEFAULT 0,
+    lb_06 INT NOT NULL DEFAULT 0,
+    lb_07 INT NOT NULL DEFAULT 0,
+    lb_08 INT NOT NULL DEFAULT 0,
+    lb_09 INT NOT NULL DEFAULT 0,
+    lb_10 INT NOT NULL DEFAULT 0,
+    lb_11 INT NOT NULL DEFAULT 0,
+    lb_12 INT NOT NULL DEFAULT 0,
+    lb_13 INT NOT NULL DEFAULT 0,
+    lb_14 INT NOT NULL DEFAULT 0,
+    lb_15 INT NOT NULL DEFAULT 0,
+    lb_16 INT NOT NULL DEFAULT 0,
+    lb_17 INT NOT NULL DEFAULT 0,
+    lb_18 INT NOT NULL DEFAULT 0,
+    lb_19 INT NOT NULL DEFAULT 0,
+    lb_20 INT NOT NULL DEFAULT 0,
+    lb_21 INT NOT NULL DEFAULT 0,
+    lb_22 INT NOT NULL DEFAULT 0,
+    lb_23 INT NOT NULL DEFAULT 0,
+    lb_24 INT NOT NULL DEFAULT 0,
+    lb_25 INT NOT NULL DEFAULT 0,
+    lb_26 INT NOT NULL DEFAULT 0,
+    lb_27 INT NOT NULL DEFAULT 0,
+    lb_28 INT NOT NULL DEFAULT 0,
+    lb_29 INT NOT NULL DEFAULT 0,
+    lb_30 INT NOT NULL DEFAULT 0,
+    lb_31 INT NOT NULL DEFAULT 0,
+    lb_32 INT NOT NULL DEFAULT 0,
+    lb_33 INT NOT NULL DEFAULT 0,
+    lb_34 INT NOT NULL DEFAULT 0,
+    lb_35 INT NOT NULL DEFAULT 0,
+    lb_36 INT NOT NULL DEFAULT 0,
+    lb_37 INT NOT NULL DEFAULT 0,
+    lb_38 INT NOT NULL DEFAULT 0,
+    lb_39 INT NOT NULL DEFAULT 0,
+    CONSTRAINT pk_trace_rollup_minute PRIMARY KEY (bucket_unix_nano, resource_id, root_name, inbound)
+);
+CREATE INDEX idx_trace_rollup_minute_bucket ON trace_rollup_minute (bucket_unix_nano);
+GO
+
+-- Same shape, one row per hour.
+CREATE TABLE trace_rollup_hour (
+    bucket_unix_nano BIGINT        NOT NULL,
+    resource_id      BIGINT        NOT NULL,
+    root_name        NVARCHAR(255) NOT NULL,
+    inbound          TINYINT       NOT NULL,
+    trace_count      INT           NOT NULL DEFAULT 0,
+    error_count      INT           NOT NULL DEFAULT 0,
+    duration_sum_ms  FLOAT         NOT NULL DEFAULT 0,
+    duration_max_ms  FLOAT         NOT NULL DEFAULT 0,
+    lb_00 INT NOT NULL DEFAULT 0,
+    lb_01 INT NOT NULL DEFAULT 0,
+    lb_02 INT NOT NULL DEFAULT 0,
+    lb_03 INT NOT NULL DEFAULT 0,
+    lb_04 INT NOT NULL DEFAULT 0,
+    lb_05 INT NOT NULL DEFAULT 0,
+    lb_06 INT NOT NULL DEFAULT 0,
+    lb_07 INT NOT NULL DEFAULT 0,
+    lb_08 INT NOT NULL DEFAULT 0,
+    lb_09 INT NOT NULL DEFAULT 0,
+    lb_10 INT NOT NULL DEFAULT 0,
+    lb_11 INT NOT NULL DEFAULT 0,
+    lb_12 INT NOT NULL DEFAULT 0,
+    lb_13 INT NOT NULL DEFAULT 0,
+    lb_14 INT NOT NULL DEFAULT 0,
+    lb_15 INT NOT NULL DEFAULT 0,
+    lb_16 INT NOT NULL DEFAULT 0,
+    lb_17 INT NOT NULL DEFAULT 0,
+    lb_18 INT NOT NULL DEFAULT 0,
+    lb_19 INT NOT NULL DEFAULT 0,
+    lb_20 INT NOT NULL DEFAULT 0,
+    lb_21 INT NOT NULL DEFAULT 0,
+    lb_22 INT NOT NULL DEFAULT 0,
+    lb_23 INT NOT NULL DEFAULT 0,
+    lb_24 INT NOT NULL DEFAULT 0,
+    lb_25 INT NOT NULL DEFAULT 0,
+    lb_26 INT NOT NULL DEFAULT 0,
+    lb_27 INT NOT NULL DEFAULT 0,
+    lb_28 INT NOT NULL DEFAULT 0,
+    lb_29 INT NOT NULL DEFAULT 0,
+    lb_30 INT NOT NULL DEFAULT 0,
+    lb_31 INT NOT NULL DEFAULT 0,
+    lb_32 INT NOT NULL DEFAULT 0,
+    lb_33 INT NOT NULL DEFAULT 0,
+    lb_34 INT NOT NULL DEFAULT 0,
+    lb_35 INT NOT NULL DEFAULT 0,
+    lb_36 INT NOT NULL DEFAULT 0,
+    lb_37 INT NOT NULL DEFAULT 0,
+    lb_38 INT NOT NULL DEFAULT 0,
+    lb_39 INT NOT NULL DEFAULT 0,
+    CONSTRAINT pk_trace_rollup_hour PRIMARY KEY (bucket_unix_nano, resource_id, root_name, inbound)
+);
+CREATE INDEX idx_trace_rollup_hour_bucket ON trace_rollup_hour (bucket_unix_nano);
+GO
+
+-- Seed the four rows this phase needs (logs/traces x minute/hour).
+INSERT INTO rollup_state ([signal_name], granularity) VALUES (N'logs', N'minute'), (N'logs', N'hour'), (N'traces', N'minute'), (N'traces', N'hour');
 GO
 
 -- =============================================================================
@@ -590,7 +728,7 @@ GO
 -- Only reached when every statement above succeeded, so a partial apply cannot
 -- leave a false version marker for the apply-schema.sh gate.
 MERGE schema_version AS target
-USING (VALUES (N'2.13.0')) AS src (version)
+USING (VALUES (N'2.13.1')) AS src (version)
 ON target.version = src.version
 WHEN MATCHED     THEN UPDATE SET applied_at = SYSDATETIME()
 WHEN NOT MATCHED THEN INSERT (version, applied_at) VALUES (src.version, SYSDATETIME());

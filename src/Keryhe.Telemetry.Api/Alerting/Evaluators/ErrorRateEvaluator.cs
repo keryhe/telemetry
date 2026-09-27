@@ -33,19 +33,24 @@ public class ErrorRateEvaluator : IAlertEvaluator
         }
 
         var windowStart = now.AddMinutes(-condition.WindowMinutes);
-        const int limit = 5000;
 
-        List<TraceInfo> traces;
-        if (!string.IsNullOrEmpty(rule.ServiceName))
-            traces = await _traces.GetTracesByServiceAsync(rule.ServiceName, windowStart, now, limit, ct);
-        else
-            traces = await _traces.GetTracesByTimeRangeAsync(windowStart, now, limit, ct);
+        // Reads the summary tables when the window is unfiltered-by-search/duration (decision 32)
+        // instead of a capped GetTracesBy*Async list -- requestCount/errorCount cover every
+        // inbound-request trace in the window, not a sample.
+        var summary = await _traces.GetTraceSummaryAsync(new TraceSummaryQuery
+        {
+            Start = windowStart,
+            End = now,
+            Service = rule.ServiceName,
+            BucketCount = 1
+        }, ct);
 
-        if (traces.Count == 0)
+        var total = summary.Summary.Count;
+        if (total == 0)
             return AlertResult.NotFiring();
 
-        var errorCount = traces.Count(t => t.HasErrors);
-        var errorRate = (double)errorCount / traces.Count * 100.0;
+        var errorCount = summary.Summary.ErrorCount;
+        var errorRate = (double)errorCount / total * 100.0;
 
         if (errorRate <= condition.ThresholdPercent)
             return AlertResult.NotFiring();
@@ -53,6 +58,6 @@ public class ErrorRateEvaluator : IAlertEvaluator
         var serviceLabel = rule.ServiceName ?? "all services";
         return AlertResult.Firing(
             $"Error rate {errorRate:F1}% exceeded threshold {condition.ThresholdPercent:F1}% " +
-            $"({errorCount}/{traces.Count} traces with errors in last {condition.WindowMinutes} min for {serviceLabel}).");
+            $"({errorCount}/{total} traces with errors in last {condition.WindowMinutes} min for {serviceLabel}).");
     }
 }

@@ -213,19 +213,21 @@ export class DashboardComponent {
     const svc = this.selectedService();
 
     forkJoin({
-      // Buckets + per-service RED stats + recent-errors/slowest-traces samples, all from one
-      // backend scan (list-page-scale plan, Phase 2) — replaces the former separate `limit: 500`
-      // trace fetch of which only 5 rows of each table were ever shown.
-      overview:   this.tracesApi.getTraceOverview({ start, end, service: svc || undefined }),
-      logSummary: this.logsApi.getLogSummary({ start, end, service: svc || undefined }),
+      // Buckets + per-service RED stats, plus the two samples endpoints for the recent-errors/
+      // slowest-traces widgets (list-pages-server-side plan, Phase 3 Target API) — replaces the
+      // retired /overview's combined Items/RecentErrors/SlowestTraces with `summary` + `samples`.
+      summary:      this.tracesApi.getTraceSummary({ start, end, service: svc || undefined }),
+      recentErrors: this.tracesApi.getTraceSamples(start, end, 'errors', 5),
+      slowest:      this.tracesApi.getTraceSamples(start, end, 'slowest', 5),
+      logSummary:   this.logsApi.getLogSummary({ start, end, service: svc || undefined }),
     }).subscribe({
-      next: ({ overview, logSummary }) => {
-        this.traceHistogram.set(overview.buckets);
-        this.serviceStats.set(overview.services);
-        this.recentErrors.set(overview.recentErrors);
-        this.slowTraces.set(overview.slowestTraces);
+      next: ({ summary, recentErrors, slowest, logSummary }) => {
+        this.traceHistogram.set(summary.buckets);
+        this.serviceStats.set(summary.services);
+        this.recentErrors.set(recentErrors);
+        this.slowTraces.set(slowest);
         this.logHistogram.set(logSummary.buckets);
-        this.buildCharts(overview.buckets);
+        this.buildCharts(summary.buckets);
         this.loading.set(false);
       },
       error: () => this.loading.set(false),

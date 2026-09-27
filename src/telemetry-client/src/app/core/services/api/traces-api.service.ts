@@ -3,44 +3,36 @@ import { HttpClient, HttpParams } from '@angular/common/http';
 import { Observable } from 'rxjs';
 import { map } from 'rxjs/operators';
 import { APP_CONFIG } from '../../config/app-config';
-import { OperationStats, ServiceDependency, ServiceStats, SpanModel, TraceFilter, TraceInfo } from '../../models/trace.models';
-import { PagedResult } from '../../models/paged.models';
+import { OperationStats, ServiceDependency, ServiceStats, SpanModel, TraceInfo } from '../../models/trace.models';
 import { TimeBucket } from '../../../shared/utils/chart.utils';
 
-export interface TraceSearchQuery extends TraceFilter {
-  offset: number;
-  sort?: string;
-  dir?: 'asc' | 'desc';
-  operation?: string;
-  maxDurationMs?: number;
-  /** All-span tag predicates, each pre-encoded as `key:value` (contains) or `key=value` (exact). */
-  tags?: string[];
-}
-
-export interface TraceHistogramQuery {
+/** Filter shape shared by summary/page (list-pages-server-side plan, Phase 3 Target API). */
+export interface TraceListFilter {
   start: Date;
   end: Date;
-  bucketCount?: number;
-  mode?: string;
+  // Opaque and never parsed into a Date (same contract as LogFilter.asOf — see that type's own
+  // doc comment: the server's asOf carries sub-millisecond precision a JS Date can't hold).
+  asOf?: string;
+  mode?: 'all' | 'errors' | 'slow';
   service?: string;
   operation?: string;
   minDurationMs?: number;
   maxDurationMs?: number;
-  tags?: string[];
-  /** Latency bucket grid dimensions — only read by `getTraceOverview`. */
-  latencyTimeCols?: number;
-  latencyDurationRows?: number;
-  /** Items paging/sort — only read by `getTraceOverview` (list-page-scale plan, Phase 2). */
-  sort?: string;
-  dir?: 'asc' | 'desc';
-  limit?: number;
-  offset?: number;
-  /** Row cap for `recentErrors`/`slowestTraces` — only read by `getTraceOverview` (dashboard). */
-  sampleSize?: number;
+  q?: string;
 }
 
-/** One cell of the trace latency chart's time × log-duration grid (server-computed, Phase 3 of
- *  the trace-latency-p50 plan) — replaces the client-side `binLatencyPoints`/`LatencyBucket`. */
+export interface TraceSummaryQuery extends TraceListFilter {
+  bucketCount?: number;
+  latencyDurationRows?: number;
+}
+
+export interface TracePageQuery extends TraceListFilter {
+  size: number;
+  cursor?: string;
+  nav?: 'first' | 'next' | 'prev' | 'last';
+}
+
+/** One cell of the trace latency chart's time × log-duration grid. */
 export interface TraceLatencyBucket {
   xStart: Date;
   xEnd: Date;
@@ -52,26 +44,47 @@ export interface TraceLatencyBucket {
   sampleTraceIdHex?: string;
 }
 
-/**
- * Same volume histogram as `getTraceHistogram` plus per-service RED stats, the latency bucket
- * grid, and (list-page-scale plan, Phase 2) the traces list page's table rows and the dashboard's
- * recent-errors/slowest-traces samples — all from one backend scan instead of several. Kept as
- * its own endpoint/type rather than an option on `getTraceHistogram` so the traces list page's
- * volume chart never fetches or pays for stats it doesn't read when latency buckets aren't needed
- * either.
- */
-export interface TraceOverview {
-  buckets: TimeBucket[];
+export interface TraceWindowSummary {
+  count: number;
+  errorCount: number;
+  p50Ms: number;
+  p95Ms: number;
+  p99Ms: number;
+  serviceCount: number;
+  lastTraceStartTime: Date | null;
+}
+
+interface TraceSummaryDto {
+  source: 'rollup' | 'raw';
+  buckets: (TimeBucket & { timestamp: string })[];
+  summary: Omit<TraceWindowSummary, 'lastTraceStartTime'> & { lastTraceStartTime: string | null };
   services: ServiceStats[];
-  latencyBuckets?: TraceLatencyBucket[];
-  /** The traces list page's table rows — see `TraceHistogramQuery.sort`/`dir`/`limit`/`offset`. */
+  latencyBuckets: (Omit<TraceLatencyBucket, 'xStart' | 'xEnd'> & { xStart: string; xEnd: string })[];
+  listTotal: number;
+  requestCount: number;
+  totalIsLowerBound: boolean;
+  newSinceAsOf: number;
+  asOf: string;
+}
+
+export interface TraceSummaryResult {
+  source: 'rollup' | 'raw';
+  buckets: TimeBucket[];
+  summary: TraceWindowSummary;
+  services: ServiceStats[];
+  latencyBuckets: TraceLatencyBucket[];
+  listTotal: number;
+  requestCount: number;
+  totalIsLowerBound: boolean;
+  newSinceAsOf: number;
+  asOf: string;
+}
+
+export interface TracePageResult {
   items: TraceInfo[];
-  /** Total rows matching the filter, before paging — the paginator's "of N" count. */
-  total: number;
-  /** Dashboard's recent-errors table (newest first, top `sampleSize`). */
-  recentErrors: TraceInfo[];
-  /** Dashboard's slowest-traces table (duration desc, top `sampleSize`). */
-  slowestTraces: TraceInfo[];
+  nextCursor: string | null;
+  prevCursor: string | null;
+  asOf: string;
 }
 
 @Injectable({ providedIn: 'root' })
@@ -79,80 +92,42 @@ export class TracesApiService {
   private readonly http = inject(HttpClient);
   private readonly base = `${inject(APP_CONFIG).apiUrl}/traces`;
 
-  getTraces(filter: TraceFilter): Observable<TraceInfo[]> {
-    let params = new HttpParams()
-      .set('start', filter.start.toISOString())
-      .set('end', filter.end.toISOString())
-      .set('limit', filter.limit ?? 200)
-      .set('mode', filter.mode ?? 'all');
-    if (filter.service) params = params.set('service', filter.service);
-    if (filter.minDurationMs != null) params = params.set('minDurationMs', filter.minDurationMs);
-    return this.http.get<TraceInfo[]>(this.base, { params });
-  }
-
-  /** Server-side filtered + paged traces for the traces list page (returns the full filtered total). */
-  searchTraces(query: TraceSearchQuery): Observable<PagedResult<TraceInfo>> {
-    let params = new HttpParams()
-      .set('start', query.start.toISOString())
-      .set('end', query.end.toISOString())
-      .set('limit', query.limit ?? 100)
-      .set('offset', query.offset)
-      .set('mode', query.mode ?? 'all');
-    if (query.service) params = params.set('service', query.service);
-    if (query.minDurationMs != null) params = params.set('minDurationMs', query.minDurationMs);
-    if (query.maxDurationMs != null) params = params.set('maxDurationMs', query.maxDurationMs);
-    if (query.operation) params = params.set('operation', query.operation);
-    if (query.sort) params = params.set('sort', query.sort).set('dir', query.dir ?? 'desc');
-    for (const tag of query.tags ?? []) params = params.append('tag', tag);
-    return this.http.get<PagedResult<TraceInfo>>(`${this.base}/search`, { params });
-  }
-
-  /** True volume histogram (unaffected by any row-count cap) for the traces chart. */
-  getTraceHistogram(query: TraceHistogramQuery): Observable<TimeBucket[]> {
-    let params = new HttpParams()
-      .set('start', query.start.toISOString())
-      .set('end', query.end.toISOString())
-      .set('bucketCount', query.bucketCount ?? 24)
-      .set('mode', query.mode ?? 'all');
-    if (query.service) params = params.set('service', query.service);
-    if (query.operation) params = params.set('operation', query.operation);
-    if (query.minDurationMs != null) params = params.set('minDurationMs', query.minDurationMs);
-    if (query.maxDurationMs != null) params = params.set('maxDurationMs', query.maxDurationMs);
-    for (const tag of query.tags ?? []) params = params.append('tag', tag);
-    return this.http.get<TimeBucket[]>(`${this.base}/histogram`, { params }).pipe(
-      map((buckets) => buckets.map((b) => ({ ...b, timestamp: new Date(b.timestamp) })))
-    );
-  }
-
-  /**
-   * Same query shape as `getTraceHistogram`, plus per-service RED stats, (when requested) the
-   * latency bucket grid, and — via `sort`/`dir`/`limit`/`offset`/`sampleSize` — the traces list
-   * page's table rows and the dashboard's recent-errors/slowest-traces samples.
-   */
-  getTraceOverview(query: TraceHistogramQuery): Observable<TraceOverview> {
-    let params = new HttpParams()
-      .set('start', query.start.toISOString())
-      .set('end', query.end.toISOString())
-      .set('bucketCount', query.bucketCount ?? 24)
-      .set('mode', query.mode ?? 'all');
-    if (query.service) params = params.set('service', query.service);
-    if (query.operation) params = params.set('operation', query.operation);
-    if (query.minDurationMs != null) params = params.set('minDurationMs', query.minDurationMs);
-    if (query.maxDurationMs != null) params = params.set('maxDurationMs', query.maxDurationMs);
-    if (query.latencyTimeCols != null) params = params.set('latencyTimeCols', query.latencyTimeCols);
-    if (query.latencyDurationRows != null) params = params.set('latencyDurationRows', query.latencyDurationRows);
-    if (query.sort) params = params.set('sort', query.sort).set('dir', query.dir ?? 'desc');
-    if (query.limit != null) params = params.set('limit', query.limit);
-    if (query.offset != null) params = params.set('offset', query.offset);
-    if (query.sampleSize != null) params = params.set('sampleSize', query.sampleSize);
-    for (const tag of query.tags ?? []) params = params.append('tag', tag);
-    return this.http.get<TraceOverview>(`${this.base}/overview`, { params }).pipe(
-      map((o) => ({
-        ...o,
-        buckets: o.buckets.map((b) => ({ ...b, timestamp: new Date(b.timestamp) })),
-        latencyBuckets: o.latencyBuckets?.map((b) => ({ ...b, xStart: new Date(b.xStart), xEnd: new Date(b.xEnd) })),
+  /** Chart/stat-card summary — volume/error/duration buckets, per-service RED stats, the latency heatmap, and listTotal/requestCount (decision 13). */
+  getTraceSummary(query: TraceSummaryQuery): Observable<TraceSummaryResult> {
+    let params = this.filterParams(query)
+      .set('bucketCount', query.bucketCount ?? 60)
+      .set('latencyDurationRows', query.latencyDurationRows ?? 20);
+    return this.http.get<TraceSummaryDto>(`${this.base}/summary`, { params }).pipe(
+      map((dto) => ({
+        source: dto.source,
+        buckets: dto.buckets.map((b) => ({ ...b, timestamp: new Date(b.timestamp) })),
+        summary: { ...dto.summary, lastTraceStartTime: dto.summary.lastTraceStartTime ? new Date(dto.summary.lastTraceStartTime) : null },
+        services: dto.services,
+        latencyBuckets: dto.latencyBuckets.map((b) => ({ ...b, xStart: new Date(b.xStart), xEnd: new Date(b.xEnd) })),
+        listTotal: dto.listTotal,
+        requestCount: dto.requestCount,
+        totalIsLowerBound: dto.totalIsLowerBound,
+        newSinceAsOf: dto.newSinceAsOf,
+        asOf: dto.asOf,
       }))
     );
+  }
+
+  /** Keyset-paged trace rows (decision 1), anchored on roots plus orphan traces (decision 41), pinned on `asOf` (decision 3). */
+  getTracePage(query: TracePageQuery): Observable<TracePageResult> {
+    let params = this.filterParams(query).set('size', query.size).set('nav', query.nav ?? 'first');
+    if (query.cursor) params = params.set('cursor', query.cursor);
+    return this.http.get<TracePageResult>(`${this.base}/page`, { params });
+  }
+
+  /** Dashboard's Recent Errors / Slowest Traces widgets. */
+  getTraceSamples(start: Date, end: Date, kind: 'errors' | 'slowest', limit = 5): Observable<TraceInfo[]> {
+    const params = new HttpParams()
+      .set('start', start.toISOString())
+      .set('end', end.toISOString())
+      .set('kind', kind)
+      .set('limit', limit);
+    return this.http.get<TraceInfo[]>(`${this.base}/samples`, { params });
   }
 
   getSpans(traceId: string): Observable<SpanModel[]> {
@@ -187,5 +162,19 @@ export class TracesApiService {
       .set('start', start.toISOString())
       .set('end', end.toISOString());
     return this.http.get<OperationStats[]>(`${this.base}/operations/stats`, { params });
+  }
+
+  private filterParams(query: TraceListFilter): HttpParams {
+    let params = new HttpParams()
+      .set('start', query.start.toISOString())
+      .set('end', query.end.toISOString())
+      .set('mode', query.mode ?? 'all');
+    if (query.asOf) params = params.set('asOf', query.asOf);
+    if (query.service) params = params.set('service', query.service);
+    if (query.operation) params = params.set('operation', query.operation);
+    if (query.minDurationMs != null) params = params.set('minDurationMs', query.minDurationMs);
+    if (query.maxDurationMs != null) params = params.set('maxDurationMs', query.maxDurationMs);
+    if (query.q) params = params.set('q', query.q);
+    return params;
   }
 }

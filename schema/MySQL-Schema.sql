@@ -105,6 +105,10 @@ CREATE TABLE spans (
     attributes_json          JSON,
     events_json              JSON,
     links_json               JSON,
+    -- Stored generated column for the root-span index (schema 2.13.1, list-pages-server-side
+    -- plan Phase 3): MySQL has no filtered/partial index, so root-anchored queries instead
+    -- seek on this boolean-shaped column.
+    is_root                  BOOLEAN GENERATED ALWAYS AS (parent_span_id IS NULL) STORED,
     CONSTRAINT fk_spans_resources FOREIGN KEY (resource_id) REFERENCES resources (id),
     CONSTRAINT fk_spans_scopes    FOREIGN KEY (scope_id)    REFERENCES instrumentation_scopes (id),
     CONSTRAINT uk_trace_span      UNIQUE (trace_id, span_id)
@@ -128,6 +132,11 @@ CREATE INDEX idx_spans_resource_time ON spans (resource_id, start_time_unix_nano
 -- the rare rows a status_code predicate actually selects (errors are the minority status), not an
 -- equality lookup expected to touch most of the table.
 CREATE INDEX idx_spans_error ON spans (status_code, start_time_unix_nano DESC);
+
+-- Trace page/summary anchor on roots (schema 2.13.1, decision Phase 3 root-span index): MySQL
+-- has no filtered index, so this indexes the generated is_root column instead -- root-anchored
+-- queries seek is_root = 1 rather than scanning idx_duration and filtering non-roots in C#.
+CREATE INDEX idx_spans_root_time ON spans (is_root, start_time_unix_nano DESC, end_time_unix_nano);
 
 -- span_events and span_links were dropped in 2.11.0: neither was ever read or written
 -- independently of its parent span, so both collapsed into spans.events_json/links_json.
@@ -369,7 +378,135 @@ CREATE TABLE log_rollup_hour (
 CREATE INDEX idx_log_rollup_hour_bucket ON log_rollup_hour (bucket_unix_nano);
 
 -- Seed the two rows this phase needs (logs/minute, logs/hour); phase 3 adds traces/*.
-INSERT INTO rollup_state (signal_name, granularity) VALUES ('logs', 'minute'), ('logs', 'hour')
+-- Traces whose root span never arrived (schema 2.13.1, decision 41): one row per trace,
+-- holding the anchor span (its earliest span, whose own parent does not exist anywhere) that
+-- the rollup worker detected per finished minute. No foreign keys: the worker's writes must
+-- never lock resources. Indexed to merge with idx_spans_root_time in the same order.
+CREATE TABLE orphan_roots (
+    trace_id             CHAR(32)     NOT NULL PRIMARY KEY,
+    span_id              CHAR(16)     NOT NULL,
+    resource_id          BIGINT       NOT NULL,
+    start_time_unix_nano BIGINT       NOT NULL,
+    end_time_unix_nano   BIGINT       NOT NULL,
+    detected_at          DATETIME(6)  NOT NULL DEFAULT CURRENT_TIMESTAMP(6)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+CREATE INDEX idx_orphan_roots_start ON orphan_roots (start_time_unix_nano DESC, trace_id);
+
+-- Per-minute trace summary (schema 2.13.1, decisions 37-38, 41): one row per minute, per
+-- anchor span's resource, operation name (folded to '__other__' past the 200-distinct-name
+-- cardinality guard) and inbound flag (anchor kind SERVER/CONSUMER). Counts traces whose
+-- ANCHOR (null-parent root, or its orphan_roots span) starts in that minute; error flag and
+-- duration are aggregated over the trace's full span set. lb_00..lb_39 are the fixed
+-- latency-bucket counts (LatencyBucketSql) as plain columns so SQL can sum them across rows.
+CREATE TABLE trace_rollup_minute (
+    bucket_unix_nano BIGINT       NOT NULL,
+    resource_id      BIGINT       NOT NULL,
+    root_name        VARCHAR(255) NOT NULL,
+    inbound          TINYINT      NOT NULL,
+    trace_count      INT          NOT NULL DEFAULT 0,
+    error_count      INT          NOT NULL DEFAULT 0,
+    duration_sum_ms  DOUBLE       NOT NULL DEFAULT 0,
+    duration_max_ms  DOUBLE       NOT NULL DEFAULT 0,
+    lb_00 INT NOT NULL DEFAULT 0,
+    lb_01 INT NOT NULL DEFAULT 0,
+    lb_02 INT NOT NULL DEFAULT 0,
+    lb_03 INT NOT NULL DEFAULT 0,
+    lb_04 INT NOT NULL DEFAULT 0,
+    lb_05 INT NOT NULL DEFAULT 0,
+    lb_06 INT NOT NULL DEFAULT 0,
+    lb_07 INT NOT NULL DEFAULT 0,
+    lb_08 INT NOT NULL DEFAULT 0,
+    lb_09 INT NOT NULL DEFAULT 0,
+    lb_10 INT NOT NULL DEFAULT 0,
+    lb_11 INT NOT NULL DEFAULT 0,
+    lb_12 INT NOT NULL DEFAULT 0,
+    lb_13 INT NOT NULL DEFAULT 0,
+    lb_14 INT NOT NULL DEFAULT 0,
+    lb_15 INT NOT NULL DEFAULT 0,
+    lb_16 INT NOT NULL DEFAULT 0,
+    lb_17 INT NOT NULL DEFAULT 0,
+    lb_18 INT NOT NULL DEFAULT 0,
+    lb_19 INT NOT NULL DEFAULT 0,
+    lb_20 INT NOT NULL DEFAULT 0,
+    lb_21 INT NOT NULL DEFAULT 0,
+    lb_22 INT NOT NULL DEFAULT 0,
+    lb_23 INT NOT NULL DEFAULT 0,
+    lb_24 INT NOT NULL DEFAULT 0,
+    lb_25 INT NOT NULL DEFAULT 0,
+    lb_26 INT NOT NULL DEFAULT 0,
+    lb_27 INT NOT NULL DEFAULT 0,
+    lb_28 INT NOT NULL DEFAULT 0,
+    lb_29 INT NOT NULL DEFAULT 0,
+    lb_30 INT NOT NULL DEFAULT 0,
+    lb_31 INT NOT NULL DEFAULT 0,
+    lb_32 INT NOT NULL DEFAULT 0,
+    lb_33 INT NOT NULL DEFAULT 0,
+    lb_34 INT NOT NULL DEFAULT 0,
+    lb_35 INT NOT NULL DEFAULT 0,
+    lb_36 INT NOT NULL DEFAULT 0,
+    lb_37 INT NOT NULL DEFAULT 0,
+    lb_38 INT NOT NULL DEFAULT 0,
+    lb_39 INT NOT NULL DEFAULT 0,
+    PRIMARY KEY (bucket_unix_nano, resource_id, root_name, inbound)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+CREATE INDEX idx_trace_rollup_minute_bucket ON trace_rollup_minute (bucket_unix_nano);
+
+-- Same shape, one row per hour.
+CREATE TABLE trace_rollup_hour (
+    bucket_unix_nano BIGINT       NOT NULL,
+    resource_id      BIGINT       NOT NULL,
+    root_name        VARCHAR(255) NOT NULL,
+    inbound          TINYINT      NOT NULL,
+    trace_count      INT          NOT NULL DEFAULT 0,
+    error_count      INT          NOT NULL DEFAULT 0,
+    duration_sum_ms  DOUBLE       NOT NULL DEFAULT 0,
+    duration_max_ms  DOUBLE       NOT NULL DEFAULT 0,
+    lb_00 INT NOT NULL DEFAULT 0,
+    lb_01 INT NOT NULL DEFAULT 0,
+    lb_02 INT NOT NULL DEFAULT 0,
+    lb_03 INT NOT NULL DEFAULT 0,
+    lb_04 INT NOT NULL DEFAULT 0,
+    lb_05 INT NOT NULL DEFAULT 0,
+    lb_06 INT NOT NULL DEFAULT 0,
+    lb_07 INT NOT NULL DEFAULT 0,
+    lb_08 INT NOT NULL DEFAULT 0,
+    lb_09 INT NOT NULL DEFAULT 0,
+    lb_10 INT NOT NULL DEFAULT 0,
+    lb_11 INT NOT NULL DEFAULT 0,
+    lb_12 INT NOT NULL DEFAULT 0,
+    lb_13 INT NOT NULL DEFAULT 0,
+    lb_14 INT NOT NULL DEFAULT 0,
+    lb_15 INT NOT NULL DEFAULT 0,
+    lb_16 INT NOT NULL DEFAULT 0,
+    lb_17 INT NOT NULL DEFAULT 0,
+    lb_18 INT NOT NULL DEFAULT 0,
+    lb_19 INT NOT NULL DEFAULT 0,
+    lb_20 INT NOT NULL DEFAULT 0,
+    lb_21 INT NOT NULL DEFAULT 0,
+    lb_22 INT NOT NULL DEFAULT 0,
+    lb_23 INT NOT NULL DEFAULT 0,
+    lb_24 INT NOT NULL DEFAULT 0,
+    lb_25 INT NOT NULL DEFAULT 0,
+    lb_26 INT NOT NULL DEFAULT 0,
+    lb_27 INT NOT NULL DEFAULT 0,
+    lb_28 INT NOT NULL DEFAULT 0,
+    lb_29 INT NOT NULL DEFAULT 0,
+    lb_30 INT NOT NULL DEFAULT 0,
+    lb_31 INT NOT NULL DEFAULT 0,
+    lb_32 INT NOT NULL DEFAULT 0,
+    lb_33 INT NOT NULL DEFAULT 0,
+    lb_34 INT NOT NULL DEFAULT 0,
+    lb_35 INT NOT NULL DEFAULT 0,
+    lb_36 INT NOT NULL DEFAULT 0,
+    lb_37 INT NOT NULL DEFAULT 0,
+    lb_38 INT NOT NULL DEFAULT 0,
+    lb_39 INT NOT NULL DEFAULT 0,
+    PRIMARY KEY (bucket_unix_nano, resource_id, root_name, inbound)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+CREATE INDEX idx_trace_rollup_hour_bucket ON trace_rollup_hour (bucket_unix_nano);
+
+-- Seed the four rows this phase needs (logs/traces x minute/hour).
+INSERT INTO rollup_state (signal_name, granularity) VALUES ('logs', 'minute'), ('logs', 'hour'), ('traces', 'minute'), ('traces', 'hour')
 ON DUPLICATE KEY UPDATE signal_name = signal_name;
 
 -- =============================================================================
@@ -538,7 +675,7 @@ GROUP BY severity_text, severity_number, day_bucket;
 -- Only inserted when every statement above succeeded, so a partial apply cannot
 -- leave a false version marker for the apply-schema.sh gate.
 INSERT INTO schema_version (version, applied_at)
-VALUES ('2.13.0', CURRENT_TIMESTAMP(6))
+VALUES ('2.13.1', CURRENT_TIMESTAMP(6))
 ON DUPLICATE KEY UPDATE applied_at = CURRENT_TIMESTAMP(6);
 
 -- =============================================================================

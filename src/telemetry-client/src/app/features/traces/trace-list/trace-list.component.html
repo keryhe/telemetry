@@ -5,17 +5,16 @@
 <app-page-header>
   <!-- Stats -->
   <div class="stat-grid">
-    <app-stat-card label="Traces" icon="account_tree" [value]="totalTraces() | number" />
-    <!-- Search → the searched rows; no search → request traces only (see cardStats). -->
-    <app-stat-card [label]="clientMode() ? 'Errors' : 'Request Errors'" icon="error"
+    <app-stat-card label="Traces" icon="account_tree" [value]="effectiveTotal() | number" />
+    <app-stat-card label="Request Errors" icon="error"
                    [value]="errorCount() | number" [color]="errorCount() > 0 ? 'error' : 'default'"
-                   [matTooltip]="clientMode() ? '' : requestTracesTooltip" />
-    <app-stat-card [label]="clientMode() ? 'Error Rate' : 'Request Error Rate'" icon="percent"
+                   [matTooltip]="requestTracesTooltip" />
+    <app-stat-card label="Request Error Rate" icon="percent"
                    [value]="errorRate()" [color]="errorCount() > 0 ? 'error' : 'default'"
-                   [matTooltip]="clientMode() ? '' : requestTracesTooltip" />
-    <app-stat-card [label]="clientMode() ? 'Avg Duration' : 'Avg Request Duration'" icon="timer"
+                   [matTooltip]="requestTracesTooltip" />
+    <app-stat-card label="p50 Request Duration" icon="timer"
                    [value]="avgDuration()"
-                   [matTooltip]="clientMode() ? '' : requestTracesTooltip" />
+                   [matTooltip]="requestTracesTooltip" />
   </div>
 
   <!-- Filters -->
@@ -81,11 +80,17 @@
       <mat-icon>search</mat-icon>
     </button>
 
+    @if (rawSearchWindowMessage(); as msg) {
+      <span class="search-limit-message">
+        <mat-icon>info</mat-icon>{{ msg }}
+      </span>
+    }
+
     <button mat-icon-button color="primary" (click)="openSearchHelp()" matTooltip="Search syntax help">
       <mat-icon>help_outline</mat-icon>
     </button>
 
-    <button mat-icon-button [matMenuTriggerFor]="exportMenu" matTooltip="Export filtered traces"
+    <button mat-icon-button [matMenuTriggerFor]="exportMenu" matTooltip="Export current page's traces"
             [disabled]="effectiveTotal() === 0">
       <mat-icon>download</mat-icon>
     </button>
@@ -157,31 +162,32 @@
 
       <mat-card class="tab-card">
         <mat-card-content>
-          @if (displayTraces().length === 0 && !loading() && !pageLoading()) {
-            <app-empty-state icon="account_tree" message="No traces found"
-                             [hint]="capped() && clientMode()
-                               ? 'Searched only the most recent ' + (overview().length | number) + ' of ' + (total() | number) + ' traces. Narrow the time range to search further.'
-                               : 'Try adjusting the time range or filters'" />
+          @if (newSinceCount() > 0) {
+            <div class="new-since-banner" (click)="resetAsOf()">
+              <mat-icon>refresh</mat-icon>
+              {{ newSinceCount() | number }} new trace{{ newSinceCount() === 1 ? '' : 's' }} since this view loaded — click to refresh
+            </div>
+          }
+          @if (displayRows().length === 0 && !loading() && !pageLoading()) {
+            <app-empty-state icon="account_tree" message="No traces found" hint="Try adjusting the time range or filters" />
           } @else {
-            @if (capped() && clientMode()) {
+            @if (totalIsLowerBound()) {
               <div class="capped-notice">
                 <mat-icon>info</mat-icon>
-                Searched the most recent {{ overview().length | number }} of {{ total() | number }} traces — {{ effectiveTotal() | number }} matched. Narrow the time range to search further.
+                Showing at least {{ effectiveTotal() | number }} traces — the exact total timed out. Narrow the time range for an exact count.
               </div>
             }
-            <table mat-table [dataSource]="displayTraces()" matSort
-                   [matSortActive]="sortColumn()" [matSortDirection]="sortDir()"
-                   (matSortChange)="onSort($event)" class="full-width">
+            <table mat-table [dataSource]="displayRows()" class="full-width">
               <ng-container matColumnDef="service">
-                <th mat-header-cell *matHeaderCellDef mat-sort-header>Service</th>
+                <th mat-header-cell *matHeaderCellDef>Service</th>
                 <td mat-cell *matCellDef="let t" class="mono">{{ t.serviceName }}</td>
               </ng-container>
               <ng-container matColumnDef="operation">
-                <th mat-header-cell *matHeaderCellDef mat-sort-header>Operation</th>
+                <th mat-header-cell *matHeaderCellDef>Operation</th>
                 <td mat-cell *matCellDef="let t" class="mono">{{ t.rootOperationName }}</td>
               </ng-container>
               <ng-container matColumnDef="spans">
-                <th mat-header-cell *matHeaderCellDef mat-sort-header>Spans</th>
+                <th mat-header-cell *matHeaderCellDef>Spans</th>
                 <td mat-cell *matCellDef="let t" class="mono">{{ t.spanCount }}</td>
               </ng-container>
               <ng-container matColumnDef="status">
@@ -193,14 +199,14 @@
                 </td>
               </ng-container>
               <ng-container matColumnDef="duration">
-                <th mat-header-cell *matHeaderCellDef mat-sort-header>Duration</th>
+                <th mat-header-cell *matHeaderCellDef>Duration</th>
                 <td mat-cell *matCellDef="let t" class="duration-cell">
                   <span class="dur-bar-fill" [style.width.%]="durationBarPct(t)"></span>
                   <span class="mono dur-text">{{ formatDuration(parseDuration(t.traceDuration)) }}</span>
                 </td>
               </ng-container>
               <ng-container matColumnDef="time">
-                <th mat-header-cell *matHeaderCellDef mat-sort-header>Start Time</th>
+                <th mat-header-cell *matHeaderCellDef>Start Time</th>
                 <td mat-cell *matCellDef="let t" class="mono">{{ t.traceStartTime | date:'MM/dd/yyyy, h:mm:ss a' }}</td>
               </ng-container>
               <tr mat-header-row *matHeaderRowDef="displayedColumns"></tr>
@@ -214,6 +220,7 @@
               [pageSize]="pageSize()"
               [pageIndex]="pageIndex()"
               [pageSizeOptions]="pageSizeOptions"
+              [showFirstLastButtons]="true"
               (page)="onPage($event)" />
           }
         </mat-card-content>

@@ -12,25 +12,21 @@ public interface ITraceReadRepository
     Task<List<SpanModel>> GetTraceByIdAsync(string traceIdHex, CancellationToken cancellationToken = default);
     Task<SpanModel?> GetSpanByIdAsync(string traceIdHex, string spanIdHex, CancellationToken cancellationToken = default);
     Task<List<SpanModel>> GetSpansByParentAsync(string traceIdHex, string parentSpanIdHex, CancellationToken cancellationToken = default);
-    Task<List<TraceInfo>> GetTracesByTimeRangeAsync(DateTime startTime, DateTime endTime, int limit = 100, CancellationToken cancellationToken = default);
-    Task<List<TraceInfo>> GetTracesByServiceAsync(string serviceName, DateTime? startTime = null, DateTime? endTime = null, int limit = 100, CancellationToken cancellationToken = default);
-    Task<List<TraceInfo>> GetErrorTracesAsync(DateTime? startTime = null, DateTime? endTime = null, int limit = 100, CancellationToken cancellationToken = default);
-    Task<List<TraceInfo>> GetSlowTracesAsync(TimeSpan minDuration, DateTime? startTime = null, DateTime? endTime = null, int limit = 100, CancellationToken cancellationToken = default);
-
-    /// <summary>Server-side filtered + paged trace query; returns a page of traces plus the full filtered total.</summary>
-    Task<PagedResult<TraceInfo>> QueryTracesAsync(TraceQuery query, CancellationToken cancellationToken = default);
-
-    /// <summary>True volume histogram (fixed bucket count over the full filtered range) for the traces list/dashboard chart, unaffected by any row-count cap.</summary>
-    Task<List<TraceVolumeBucket>> GetTraceHistogramAsync(HistogramQuery query, CancellationToken cancellationToken = default);
 
     /// <summary>
-    /// Dashboard overview: the same time-bucketed volume histogram as <see cref="GetTraceHistogramAsync"/>
-    /// plus per-service RED stats, computed from one scan instead of two. Grouped by each trace's
-    /// root-span service (<see cref="Models.TraceInfo.ServiceName"/>) — the correct semantic for
-    /// "traces originating in service X"; a multi-service trace's full participant list would
-    /// double-count it if used instead.
+    /// Chart/stat-card summary for the traces list page (list-pages-server-side plan, Phase 3):
+    /// volume/error/duration-percentile buckets, per-service RED stats, the latency heatmap and
+    /// <c>listTotal</c>/<c>requestCount</c> (decision 13). Reads the trace rollup tables when
+    /// eligible (decision 37), the anchor-bounded raw path otherwise. <c>listTotal</c> always
+    /// comes from the raw path.
     /// </summary>
-    Task<TraceOverview> GetTraceOverviewAsync(HistogramQuery query, CancellationToken cancellationToken = default);
+    Task<TraceSummaryResult> GetTraceSummaryAsync(TraceSummaryQuery query, CancellationToken cancellationToken = default);
+
+    /// <summary>Keyset-paged trace rows for the traces list page (decision 1), anchored on roots plus <c>orphan_roots</c> (decision 41), pinned on <see cref="TraceQuery.AsOf"/> (decision 3).</summary>
+    Task<TracePageResult> GetTracePageAsync(TraceQuery query, CancellationToken cancellationToken = default);
+
+    /// <summary>The dashboard's Recent Errors/Slowest Traces widgets — newest errors or the slowest anchors, over the unfiltered population.</summary>
+    Task<List<TraceInfo>> GetTraceSamplesAsync(TraceSamplesQuery query, CancellationToken cancellationToken = default);
 
     // Analysis operations
     Task<List<ServiceDependency>> GetServiceDependenciesAsync(DateTime? startTime = null, DateTime? endTime = null, CancellationToken cancellationToken = default);

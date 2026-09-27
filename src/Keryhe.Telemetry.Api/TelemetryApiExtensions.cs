@@ -40,12 +40,11 @@ public static class TelemetryApiServiceCollectionExtensions
         services.AddScoped<ApiTenantContext>();
         services.AddScoped<ITenantContext>(sp => sp.GetRequiredService<ApiTenantContext>());
 
-        // Short-TTL memo of the trace read repositories' span scan (list-page-scale plan, Phase
-        // 3) — see TraceQueryCache's own doc comment. A dedicated singleton, not the app's shared
-        // IMemoryCache, so its SizeLimit doesn't require every other cache sharing that instance
-        // (e.g. CachingTenantResolver's) to start setting a Size per entry.
-        services.Configure<TraceQueryCacheOptions>(configuration.GetSection(TraceQueryCacheOptions.SectionName));
-        services.AddSingleton<TraceQueryCache>();
+        // TraceQueryCache (the list-page-scale plan's short-TTL memo of the trace read
+        // repositories' span scan) was retired in the list-pages-server-side plan's Phase 3: the
+        // traces list page's summary/page/samples endpoints are SQL-aggregated (rollup tables plus
+        // an anchor-bounded raw path) rather than an in-memory full-window scan, so there is no
+        // longer a per-request scan worth memoizing.
 
         // Query timeout / raw-search-window override settings (list-pages-server-side plan, Phase
         // 1) — bound here so phases 2/3's summary endpoints and ProviderCapabilities.FromConfiguration

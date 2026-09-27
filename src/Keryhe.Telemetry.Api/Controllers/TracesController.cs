@@ -1,4 +1,5 @@
 using Keryhe.Telemetry.Core;
+using Keryhe.Telemetry.Core.Data.Read;
 using Keryhe.Telemetry.Core.Models;
 using Microsoft.AspNetCore.Mvc;
 
@@ -9,169 +10,136 @@ namespace Keryhe.Telemetry.Api.Controllers;
 public class TracesController : ControllerBase
 {
     private readonly ITraceReadRepository _traces;
+    private readonly ProviderCapabilities _capabilities;
 
-    public TracesController(ITraceReadRepository traces)
+    public TracesController(ITraceReadRepository traces, ProviderCapabilities capabilities)
     {
         _traces = traces;
+        _capabilities = capabilities;
     }
 
-    // GET /api/traces?start=&end=&limit=&mode=all|errors|slow&service=&minDurationMs=
-    [HttpGet]
-    public async Task<ActionResult<List<TraceInfo>>> GetTraces(
+    // GET /api/traces/summary?start=&end=&asOf=&mode=&service=&operation=&minDurationMs=&maxDurationMs=&q=&bucketCount=&latencyDurationRows=
+    [HttpGet("summary")]
+    public async Task<ActionResult<TraceSummaryResult>> GetSummary(
         [FromQuery] DateTime start,
         [FromQuery] DateTime end,
-        [FromQuery] int limit = 100,
-        [FromQuery] string mode = "all",
-        [FromQuery] string? service = null,
-        [FromQuery] double? minDurationMs = null,
-        CancellationToken ct = default)
-    {
-        List<TraceInfo> result = mode switch
-        {
-            "errors" => await _traces.GetErrorTracesAsync(start, end, limit, ct),
-            "slow"   => await _traces.GetSlowTracesAsync(
-                            TimeSpan.FromMilliseconds(minDurationMs ?? 500), start, end, limit, ct),
-            _        => string.IsNullOrEmpty(service)
-                            ? await _traces.GetTracesByTimeRangeAsync(start, end, limit, ct)
-                            : await _traces.GetTracesByServiceAsync(service, start, end, limit, ct)
-        };
-        return Ok(result);
-    }
-
-    // GET /api/traces/search?start=&end=&mode=all|errors|slow&service=&operation=&minDurationMs=&maxDurationMs=&tag=key:value&limit=&offset=
-    // Server-side filtered + paged traces for the traces list page (returns the full filtered total).
-    // RootSpanAttributes on the returned rows is null unless a `tag` predicate is supplied (list-
-    // page-scale plan, Phase 3 — this endpoint now scans slim like /overview, which it shares a
-    // cached scan with when the filters/window match).
-    [HttpGet("search")]
-    public async Task<ActionResult<PagedResult<TraceInfo>>> SearchTraces(
-        [FromQuery] DateTime start,
-        [FromQuery] DateTime end,
+        [FromQuery] DateTime? asOf = null,
         [FromQuery] string mode = "all",
         [FromQuery] string? service = null,
         [FromQuery] string? operation = null,
         [FromQuery] double? minDurationMs = null,
         [FromQuery] double? maxDurationMs = null,
-        [FromQuery(Name = "tag")] string[]? tag = null,
-        [FromQuery] string? sort = null,
-        [FromQuery] string dir = "desc",
-        [FromQuery] int limit = 100,
-        [FromQuery] int offset = 0,
-        CancellationToken ct = default)
-    {
-        var tags = (tag ?? Array.Empty<string>())
-            .Select(TagFilter.Parse)
-            .Where(t => t != null)
-            .Select(t => t!)
-            .ToList();
-
-        var result = await _traces.QueryTracesAsync(new TraceQuery
-        {
-            Start = start,
-            End = end,
-            Mode = mode,
-            Service = service,
-            Operation = operation,
-            MinDurationMs = minDurationMs,
-            MaxDurationMs = maxDurationMs,
-            Tags = tags,
-            Sort = sort,
-            Dir = dir,
-            Limit = limit,
-            Offset = offset
-        }, ct);
-        return Ok(result);
-    }
-
-    // GET /api/traces/histogram?start=&end=&bucketCount=&mode=all|errors|slow&service=&operation=&minDurationMs=&maxDurationMs=&tag=key:value
-    // True volume histogram for the traces list/dashboard chart — unaffected by any row-count cap.
-    [HttpGet("histogram")]
-    public async Task<ActionResult<List<TraceVolumeBucket>>> GetTraceHistogram(
-        [FromQuery] DateTime start,
-        [FromQuery] DateTime end,
-        [FromQuery] int bucketCount = 24,
-        [FromQuery] string mode = "all",
-        [FromQuery] string? service = null,
-        [FromQuery] string? operation = null,
-        [FromQuery] double? minDurationMs = null,
-        [FromQuery] double? maxDurationMs = null,
-        [FromQuery(Name = "tag")] string[]? tag = null,
-        CancellationToken ct = default)
-    {
-        var tags = (tag ?? Array.Empty<string>())
-            .Select(TagFilter.Parse)
-            .Where(t => t != null)
-            .Select(t => t!)
-            .ToList();
-
-        var result = await _traces.GetTraceHistogramAsync(new HistogramQuery
-        {
-            Start = start,
-            End = end,
-            BucketCount = bucketCount,
-            Mode = mode,
-            Service = service,
-            Operation = operation,
-            MinDurationMs = minDurationMs,
-            MaxDurationMs = maxDurationMs,
-            Tags = tags
-        }, ct);
-        return Ok(result);
-    }
-
-    // GET /api/traces/overview?start=&end=&bucketCount=&mode=all|errors|slow&service=&operation=&minDurationMs=&maxDurationMs=&tag=key:value&latencyTimeCols=&latencyDurationRows=&sort=&dir=&limit=&offset=&sampleSize=
-    // Dashboard/traces-list overview: the same volume histogram as /histogram plus per-service RED
-    // stats, the latency bucket grid (trace-latency-p50 plan, Phase 3), and the traces list page's
-    // table rows/dashboard's recent-errors+slowest-traces samples (list-page-scale plan, Phase 2),
-    // all from one scan instead of several. Kept as its own endpoint (not a flag on /histogram) so
-    // the traces list page's volume-chart-only use of /histogram is unaffected and never pays for
-    // stats it doesn't read.
-    [HttpGet("overview")]
-    public async Task<ActionResult<TraceOverview>> GetTraceOverview(
-        [FromQuery] DateTime start,
-        [FromQuery] DateTime end,
-        [FromQuery] int bucketCount = 24,
-        [FromQuery] string mode = "all",
-        [FromQuery] string? service = null,
-        [FromQuery] string? operation = null,
-        [FromQuery] double? minDurationMs = null,
-        [FromQuery] double? maxDurationMs = null,
-        [FromQuery(Name = "tag")] string[]? tag = null,
-        [FromQuery] int latencyTimeCols = 48,
+        [FromQuery] string? q = null,
+        [FromQuery] int bucketCount = 60,
         [FromQuery] int latencyDurationRows = 20,
-        [FromQuery] string? sort = null,
-        [FromQuery] string dir = "desc",
-        [FromQuery] int limit = 100,
-        [FromQuery] int offset = 0,
-        [FromQuery] int sampleSize = 5,
         CancellationToken ct = default)
     {
-        var tags = (tag ?? Array.Empty<string>())
-            .Select(TagFilter.Parse)
-            .Where(t => t != null)
-            .Select(t => t!)
-            .ToList();
+        if (start >= end)
+            return BadRequest("Start time must be before end time.");
 
-        var result = await _traces.GetTraceOverviewAsync(new HistogramQuery
+        var guard = CheckRawSearchWindow(q, mode, start, end);
+        if (!guard.Allowed)
+            return BadRequest(guard.Message);
+
+        var result = await _traces.GetTraceSummaryAsync(new TraceSummaryQuery
         {
             Start = start,
             End = end,
-            BucketCount = bucketCount,
+            AsOf = asOf,
             Mode = mode,
             Service = service,
             Operation = operation,
             MinDurationMs = minDurationMs,
             MaxDurationMs = maxDurationMs,
-            Tags = tags,
-            LatencyTimeCols = latencyTimeCols,
-            LatencyDurationRows = latencyDurationRows,
-            Sort = sort,
-            Dir = dir,
-            Limit = limit,
-            Offset = offset,
-            SampleSize = sampleSize
+            Search = q,
+            BucketCount = bucketCount,
+            LatencyDurationRows = latencyDurationRows
         }, ct);
         return Ok(result);
+    }
+
+    // GET /api/traces/page?start=&end=&asOf=&mode=&service=&operation=&minDurationMs=&maxDurationMs=&q=&size=&cursor=&nav=
+    [HttpGet("page")]
+    public async Task<ActionResult<TracePageResult>> GetPage(
+        [FromQuery] DateTime start,
+        [FromQuery] DateTime end,
+        [FromQuery] DateTime? asOf = null,
+        [FromQuery] string mode = "all",
+        [FromQuery] string? service = null,
+        [FromQuery] string? operation = null,
+        [FromQuery] double? minDurationMs = null,
+        [FromQuery] double? maxDurationMs = null,
+        [FromQuery] string? q = null,
+        [FromQuery] int size = 100,
+        [FromQuery] string? cursor = null,
+        [FromQuery] string nav = "first",
+        CancellationToken ct = default)
+    {
+        if (start >= end)
+            return BadRequest("Start time must be before end time.");
+
+        var guard = CheckRawSearchWindow(q, mode, start, end);
+        if (!guard.Allowed)
+            return BadRequest(guard.Message);
+
+        try
+        {
+            var result = await _traces.GetTracePageAsync(new TraceQuery
+            {
+                Start = start,
+                End = end,
+                Mode = mode,
+                Service = service,
+                Operation = operation,
+                MinDurationMs = minDurationMs,
+                MaxDurationMs = maxDurationMs,
+                Search = q,
+                Size = size,
+                Cursor = cursor,
+                Nav = nav,
+                AsOf = asOf
+            }, ct);
+            return Ok(result);
+        }
+        catch (ArgumentException ex)
+        {
+            return BadRequest(ex.Message);
+        }
+    }
+
+    // GET /api/traces/samples?start=&end=&kind=errors|slowest&limit=
+    [HttpGet("samples")]
+    public async Task<ActionResult<List<TraceInfo>>> GetSamples(
+        [FromQuery] DateTime start,
+        [FromQuery] DateTime end,
+        [FromQuery] string kind = "errors",
+        [FromQuery] int limit = 5,
+        CancellationToken ct = default)
+    {
+        if (start >= end)
+            return BadRequest("Start time must be before end time.");
+
+        var result = await _traces.GetTraceSamplesAsync(new TraceSamplesQuery
+        {
+            Start = start,
+            End = end,
+            Kind = kind,
+            Limit = limit
+        }, ct);
+        return Ok(result);
+    }
+
+    /// <summary>
+    /// Decision 39's standard-tier raw-search-window guard. A trace-id-shaped <c>q</c> and
+    /// <c>mode=errors</c> (served by <c>idx_spans_error</c>) are exempt; <c>mode=slow</c>'s
+    /// duration filter and any other non-empty <c>q</c> count as a raw search filter.
+    /// </summary>
+    private RawSearchWindowGuard.Result CheckRawSearchWindow(string? q, string mode, DateTime start, DateTime end)
+    {
+        var parsed = SearchQueryParser.Parse(q);
+        var hasRawSearchFilter = parsed.Terms.Count > 0 || mode == "slow";
+        var isExempt = parsed.IsTraceIdSearch || mode == "errors";
+        return RawSearchWindowGuard.Check(_capabilities, hasRawSearchFilter, isExempt, end - start);
     }
 
     // GET /api/traces/{traceId}/spans

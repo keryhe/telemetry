@@ -69,7 +69,7 @@ public sealed class TimescaleFixture : ProviderFixture
             TRUNCATE TABLE log_records, spans, metrics,
                 gauge_data_points, sum_data_points, histogram_data_points,
                 exponential_histogram_data_points, summary_data_points,
-                log_rollup_minute, log_rollup_hour
+                log_rollup_minute, log_rollup_hour, orphan_roots, trace_rollup_minute, trace_rollup_hour
             RESTART IDENTITY CASCADE
             """, conn);
         await cmd.ExecuteNonQueryAsync();

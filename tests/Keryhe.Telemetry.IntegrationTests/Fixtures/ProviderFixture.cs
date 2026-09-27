@@ -20,9 +20,9 @@ namespace Keryhe.Telemetry.IntegrationTests.Fixtures;
 /// <c>AddKeryheTelemetryApi</c>: those also wire gRPC, MVC controllers and the background
 /// ingestion worker, none of which this harness needs since it writes through
 /// <see cref="ITelemetryBulkWriter"/> directly. It does still register the handful of
-/// provider-agnostic singletons the bulk writers and trace read repository depend on directly
-/// (<see cref="ResourceScopeCache"/>, <see cref="TraceQueryCache"/>, logging) — see each
-/// provider's own <c>*BulkWriter</c>/<c>*TraceReadRepository</c> constructor.
+/// provider-agnostic singletons the bulk writers depend on directly
+/// (<see cref="ResourceScopeCache"/>, logging) — see each provider's own
+/// <c>*BulkWriter</c> constructor.
 /// </summary>
 public abstract class ProviderFixture : IAsyncLifetime
 {
@@ -72,12 +72,11 @@ public abstract class ProviderFixture : IAsyncLifetime
         services.AddLogging();
         services.AddSingleton<IConfiguration>(configuration);
 
-        // Depended on directly by every provider's *BulkWriter and *TraceReadRepository — normally
-        // registered by AddKeryheTelemetryCollector/AddKeryheTelemetryApi, which this harness
-        // deliberately does not call (see class doc comment).
+        // Depended on directly by every provider's *BulkWriter — normally registered by
+        // AddKeryheTelemetryCollector/AddKeryheTelemetryApi, which this harness deliberately does
+        // not call (see class doc comment). TraceQueryCache was retired in Phase 3 (the traces list
+        // page no longer scans the whole window in memory), so it no longer needs registering here.
         services.AddSingleton<ResourceScopeCache>();
-        services.Configure<TraceQueryCacheOptions>(configuration.GetSection(TraceQueryCacheOptions.SectionName));
-        services.AddSingleton<TraceQueryCache>();
 
         // Mirrors AddKeryheTelemetryApi's own registration (list-pages-server-side plan, Phase 1)
         // so the integration harness sees these options too, even though this harness doesn't call

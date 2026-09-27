@@ -65,7 +65,7 @@ public class GlobalController : ControllerBase
         var lastSeen = (await _tenants.GetTenantActivityAsync(DateTime.UtcNow - ActivityLookback, ct))
             .ToDictionary(a => a.TenantId, a => a.LastSeenUtc);
 
-        var query = new HistogramQuery { Start = start, End = end, BucketCount = bucketCount };
+        var query = new TraceSummaryQuery { Start = start, End = end, BucketCount = bucketCount };
 
         // One bucket, because the card wants window totals rather than a log time series.
         // Unfiltered (time only), so GetLogSummaryAsync reads the rollup tables when coverage
@@ -89,7 +89,7 @@ public class GlobalController : ControllerBase
             try
             {
                 _tenantContext.SetTenantId(tenant.Id);
-                var overview = await _traces.GetTraceOverviewAsync(query, ct);
+                var overview = await _traces.GetTraceSummaryAsync(query, ct);
                 var logSummary = await _logs.GetLogSummaryAsync(logQuery, ct);
                 results.Add(ToDto(tenant, overview, logSummary, lastSeenUtc));
             }
@@ -114,7 +114,7 @@ public class GlobalController : ControllerBase
     }
 
     private static GlobalTenantStatsDto ToDto(
-        TenantInfo tenant, TraceOverview overview, LogSummaryResult logSummary, DateTime? lastSeenUtc)
+        TenantInfo tenant, TraceSummaryResult overview, LogSummaryResult logSummary, DateTime? lastSeenUtc)
     {
         var summary = overview.Summary;
 

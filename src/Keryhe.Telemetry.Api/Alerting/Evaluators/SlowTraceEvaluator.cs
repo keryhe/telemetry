@@ -33,20 +33,28 @@ public class SlowTraceEvaluator : IAlertEvaluator
         }
 
         var windowStart = now.AddMinutes(-condition.WindowMinutes);
-        var minDuration = TimeSpan.FromMilliseconds(condition.MinDurationMs);
 
-        var slowTraces = await _traces.GetSlowTracesAsync(minDuration, windowStart, now, limit: 100, ct);
+        // Counts anchors (roots plus orphan_roots) whose OWN duration is >= threshold (decision 4:
+        // mode=slow filters on the anchor span's duration, not whole-trace) -- always the raw path,
+        // through the covering idx_spans_root_time, instead of reading a capped 100-row list
+        // (decision 32).
+        var summary = await _traces.GetTraceSummaryAsync(new TraceSummaryQuery
+        {
+            Start = windowStart,
+            End = now,
+            Mode = "slow",
+            MinDurationMs = condition.MinDurationMs,
+            Service = rule.ServiceName,
+            BucketCount = 1
+        }, ct);
 
-        if (!string.IsNullOrEmpty(rule.ServiceName))
-            slowTraces = slowTraces.Where(t => t.ServiceName == rule.ServiceName).ToList();
-
-        if (slowTraces.Count == 0)
+        var count = summary.Summary.Count;
+        if (count == 0)
             return AlertResult.NotFiring();
 
-        var maxDurationMs = slowTraces.Max(t => t.TraceDuration.TotalMilliseconds);
         var serviceLabel = rule.ServiceName ?? "all services";
         return AlertResult.Firing(
-            $"{slowTraces.Count} trace(s) exceeded {condition.MinDurationMs}ms in last {condition.WindowMinutes} min for {serviceLabel}. " +
-            $"Slowest: {maxDurationMs:F0}ms.");
+            $"{count} trace(s) exceeded {condition.MinDurationMs}ms in last {condition.WindowMinutes} min for {serviceLabel}. " +
+            $"p99: {summary.Summary.P99Ms:F0}ms.");
     }
 }

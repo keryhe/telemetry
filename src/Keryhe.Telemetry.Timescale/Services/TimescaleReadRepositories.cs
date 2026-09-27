@@ -16,8 +16,8 @@ namespace Keryhe.Telemetry.Timescale.Services;
 // not part of these interfaces; when such a method is added it is overridden here only.
 // =============================================================================
 
-public sealed class TimescaleTraceReadRepository(NpgsqlDataSource dataSource, ITenantContext tenantContext, TraceQueryCache traceQueryCache)
-    : PostgreSqlTraceReadRepository(dataSource, tenantContext, traceQueryCache);
+public sealed class TimescaleTraceReadRepository(NpgsqlDataSource dataSource, ITenantContext tenantContext)
+    : PostgreSqlTraceReadRepository(dataSource, tenantContext);
 
 public sealed class TimescaleMetricReadRepository(NpgsqlDataSource dataSource, ITenantContext tenantContext, IConfiguration configuration)
     : PostgreSqlMetricReadRepository(dataSource, tenantContext, configuration);

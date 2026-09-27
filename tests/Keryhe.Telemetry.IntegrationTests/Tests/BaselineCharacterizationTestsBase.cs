@@ -89,8 +89,16 @@ public abstract class BaselineCharacterizationTestsBase : IAsyncLifetime
         Assert.Equal(expectedErrors, summary.Buckets.Sum(b => b.Error));
     }
 
+    /// <summary>
+    /// Replaces the retired <c>GetTraceOverviewAsync</c> baseline (list-pages-server-side plan,
+    /// Phase 3: "these tests are replaced, not deleted"). No rollup coverage exists in this test
+    /// (the fixture never runs RollupWorker), so this exercises <c>GetTraceSummaryAsync</c>'s raw
+    /// path — the rollup-vs-raw parity check lives in the Phase 3 trace rollup tests.
+    /// <c>BasicTraceWindow</c>'s roots are all <c>SERVER</c> kind, so the inbound-anchor
+    /// restriction (decision 13) doesn't change the expected counts here.
+    /// </summary>
     [Fact]
-    public virtual async Task TraceOverview_Totals_ErrorCounts_And_Percentiles_MatchSeededWindow()
+    public virtual async Task TraceSummary_Totals_ErrorCounts_And_Percentiles_MatchSeededWindow()
     {
         var spans = SeededDataBuilder.BasicTraceWindow(_fixture.TenantId, WindowStart, traceCount: 200);
         using (var writeScope = Scope())
@@ -99,7 +107,7 @@ public abstract class BaselineCharacterizationTestsBase : IAsyncLifetime
         using var readScope = Scope();
         var repo = readScope.ServiceProvider.GetRequiredService<ITraceReadRepository>();
 
-        var overview = await repo.GetTraceOverviewAsync(new HistogramQuery
+        var summary = await repo.GetTraceSummaryAsync(new TraceSummaryQuery
         {
             Start = WindowStart.AddMinutes(-1),
             End = WindowStart.AddHours(1),
@@ -110,11 +118,19 @@ public abstract class BaselineCharacterizationTestsBase : IAsyncLifetime
         var expectedRootCount = spans.Count(s => s.ParentSpanIdHex == null);
         var expectedErrorCount = spans.Count(s => s.ParentSpanIdHex == null && s.StatusCode == SpanStatusCode.ERROR);
 
-        Assert.Equal(expectedRootCount, overview.Summary.Count);
-        Assert.Equal(expectedErrorCount, overview.Summary.ErrorCount);
-        Assert.True(overview.Summary.P50Ms > 0);
-        Assert.True(overview.Summary.P95Ms >= overview.Summary.P50Ms);
-        Assert.True(overview.Summary.P99Ms >= overview.Summary.P95Ms);
+        Assert.Equal("raw", summary.Source);
+        Assert.Equal(expectedRootCount, summary.Summary.Count);
+        Assert.Equal(expectedErrorCount, summary.Summary.ErrorCount);
+        // ListTotal is NOT asserted here: it is pinned on asOf <= created_at (decision 3), and
+        // PostgreSQL/Timescale resolve asOf as "now minus 5 seconds" to cover the transaction-start
+        // race (see DapperReadRepository.ResolveAsOfAsync) -- rows flushed moments ago in this fast
+        // test can still have created_at > asOf, undercounting ListTotal exactly like the "new since"
+        // pin race. That race is exercised deliberately (with the matching delay) by
+        // TracePhase3TestsBase's Pin_ExcludesLateArrivals test; this characterization test only
+        // pins down the unpinned Summary aggregate.
+        Assert.True(summary.Summary.P50Ms > 0);
+        Assert.True(summary.Summary.P95Ms >= summary.Summary.P50Ms);
+        Assert.True(summary.Summary.P99Ms >= summary.Summary.P95Ms);
     }
 
     [Fact]

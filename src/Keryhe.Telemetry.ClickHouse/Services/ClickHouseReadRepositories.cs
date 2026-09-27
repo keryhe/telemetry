@@ -51,8 +51,8 @@ internal static class ClickHouseJsonAttributeHooks
     }
 }
 
-public class ClickHouseTraceReadRepository(IConfiguration configuration, ITenantContext tenantContext, TraceQueryCache traceQueryCache)
-    : TraceReadRepositoryBase(tenantContext, traceQueryCache)
+public class ClickHouseTraceReadRepository(IConfiguration configuration, ITenantContext tenantContext)
+    : TraceReadRepositoryBase(tenantContext)
 {
     private readonly string _connectionString = configuration.GetConnectionString("Api")!;
 
@@ -69,12 +69,51 @@ public class ClickHouseTraceReadRepository(IConfiguration configuration, ITenant
     protected override string AttributePredicate(string column, string keyParam, string valueParam, bool negated)
         => ClickHouseJsonAttributeHooks.Predicate(column, keyParam, valueParam, negated);
 
+    // Decision 3/Phase 3 pin helper: ClickHouse's created_at default is evaluated at statement
+    // execution, so no 5-second back-off is needed here -- see ClickHouseLogReadRepository's
+    // identical override.
+    protected override string DatabaseClockNowExpr => "now64(9)";
+
     // ClickHouse can't reliably correlate a subquery to the outer row, so "any span in this trace
     // matches" is expressed as an uncorrelated membership test instead of EXISTS (decision 9,
     // list-pages-server-side plan Phase 1). The subquery's own spans alias is still needed so
     // innerPredicate/innerTimeClause (built against that alias by the caller) resolve.
     protected override string SpanLevelMatchPredicate(string traceIdColumn, string innerTimeClause, string innerPredicate, string spanAlias = "s2")
         => $"{traceIdColumn} IN (SELECT {spanAlias}.trace_id FROM spans {spanAlias} WHERE 1=1{innerTimeClause} AND {innerPredicate})";
+
+    // Same uncorrelated shape, joined to the matching span's own resource for a resource-attribute
+    // search term (list-pages-server-side plan, Phase 3).
+    protected override string SpanLevelMatchPredicateWithResource(string traceIdColumn, string innerTimeClause, string innerPredicate)
+        => $"{traceIdColumn} IN (SELECT s2.trace_id FROM spans s2 JOIN resources rs2 ON rs2.id = s2.resource_id WHERE 1=1{innerTimeClause} AND {innerPredicate})";
+
+    protected override string TraceIdInPredicate(string alias) => $"{alias}.trace_id IN @traceIds";
+    protected override string ResourceIdInPredicate => "id IN @resourceIds";
+
+    // Decision 34: spans is a ReplacingMergeTree, so a page's anchor rows are deduped with
+    // LIMIT 1 BY trace_id, span_id; orphan_roots is read through FINAL. Decision 9's uncorrelated
+    // NOT EXISTS equivalent for the late-root re-check.
+    protected override string AnchorsSql => """
+        (
+            SELECT trace_id, id AS anchor_span_pk, span_id AS anchor_span_id, resource_id, name AS root_name, kind AS anchor_kind,
+                   start_time_unix_nano AS anchor_start, end_time_unix_nano AS anchor_end, created_at AS anchor_created_at
+            FROM (
+                SELECT trace_id, id, span_id, resource_id, name, kind, parent_span_id, start_time_unix_nano, end_time_unix_nano, created_at
+                FROM spans
+                LIMIT 1 BY trace_id, span_id
+            )
+            WHERE parent_span_id IS NULL
+            UNION ALL
+            SELECT o.trace_id, sp.id, sp.span_id, o.resource_id, sp.name, sp.kind, o.start_time_unix_nano, o.end_time_unix_nano, o.detected_at
+            FROM (SELECT * FROM orphan_roots FINAL) o
+            JOIN (
+                SELECT trace_id, span_id, id, name, kind FROM spans LIMIT 1 BY trace_id, span_id
+            ) sp ON sp.trace_id = o.trace_id AND sp.span_id = o.span_id
+            WHERE o.trace_id NOT IN (
+                SELECT trace_id FROM (SELECT trace_id, parent_span_id FROM spans LIMIT 1 BY trace_id, span_id)
+                WHERE parent_span_id IS NULL
+            )
+        )
+        """;
 }
 
 public class ClickHouseMetricReadRepository(IConfiguration configuration, ITenantContext tenantContext)
@@ -513,6 +552,178 @@ public class ClickHouseLogRollupRepository(IConfiguration configuration) : IRoll
             FROM log_rollup_minute AS lrm FINAL
             WHERE lrm.bucket_unix_nano >= @from AND lrm.bucket_unix_nano < @to
             GROUP BY intDiv(lrm.bucket_unix_nano, {nanosPerHour}) * {nanosPerHour}, lrm.resource_id
+            """;
+        await using var conn = await OpenConnectionAsync(ct);
+        await conn.ExecuteAsync(new CommandDefinition(sql, new { from = fromInclusive, to = toExclusive }, cancellationToken: ct));
+    }
+
+    // =========================================================================
+    // TRACE ROLLUPS (list-pages-server-side plan, Phase 3, decisions 37-38, 41)
+    // =========================================================================
+
+    /// <summary>
+    /// Orphan detection, ClickHouse dialect: an uncorrelated <c>NOT IN</c> in place of the
+    /// relational providers' correlated <c>NOT EXISTS</c> (ClickHouse can't reliably correlate a
+    /// subquery to the outer row — decision 9's same reasoning), and spans deduped with
+    /// <c>LIMIT 1 BY trace_id, span_id</c> (decision 34) since <c>spans</c> is a
+    /// <c>ReplacingMergeTree</c> that may still hold un-merged duplicates. A lightweight
+    /// <c>DELETE FROM</c> (the same mutation this codebase's retention sweeps already use against
+    /// <c>spans</c>) replaces the range before re-inserting, mirroring the relational providers'
+    /// delete-then-insert shape even though <c>orphan_roots</c> is itself a
+    /// <c>ReplacingMergeTree</c> — a plain re-insert with a fresh <c>detected_at</c> would leave a
+    /// trace whose real root has since arrived sitting in the table forever.
+    /// </summary>
+    public async Task RollOrphanRootsAsync(long fromInclusive, long toExclusive, CancellationToken ct = default)
+    {
+        await using var conn = await OpenConnectionAsync(ct);
+
+        await conn.ExecuteAsync(new CommandDefinition(
+            "DELETE FROM orphan_roots WHERE start_time_unix_nano >= @from AND start_time_unix_nano < @to",
+            new { from = fromInclusive, to = toExclusive }, cancellationToken: ct));
+
+        const string insertSql = """
+            INSERT INTO orphan_roots (trace_id, span_id, resource_id, start_time_unix_nano, end_time_unix_nano)
+            SELECT e2.trace_id, e2.span_id, e2.resource_id, e2.start_time_unix_nano, e2.end_time_unix_nano
+            FROM (
+                SELECT ea.trace_id, ea.span_id
+                FROM (
+                    SELECT e.trace_id AS trace_id, MIN(e.span_id) AS span_id
+                    FROM (
+                        SELECT trace_id, span_id, start_time_unix_nano
+                        FROM spans
+                        LIMIT 1 BY trace_id, span_id
+                    ) e
+                    JOIN (
+                        SELECT trace_id,
+                               MIN(start_time_unix_nano) AS min_start,
+                               SUM(CASE WHEN parent_span_id IS NULL THEN 1 ELSE 0 END) AS null_parent_count
+                        FROM (
+                            SELECT trace_id, parent_span_id, start_time_unix_nano
+                            FROM spans
+                            LIMIT 1 BY trace_id, span_id
+                        )
+                        WHERE trace_id IN (
+                            SELECT DISTINCT trace_id FROM spans
+                            WHERE start_time_unix_nano >= @from AND start_time_unix_nano < @to
+                        )
+                        GROUP BY trace_id
+                    ) c ON c.trace_id = e.trace_id AND c.min_start = e.start_time_unix_nano
+                    WHERE c.null_parent_count = 0
+                    GROUP BY e.trace_id
+                ) ea
+            ) earliest
+            JOIN (
+                SELECT trace_id, span_id, parent_span_id, resource_id, start_time_unix_nano, end_time_unix_nano
+                FROM spans
+                LIMIT 1 BY trace_id, span_id
+            ) e2 ON e2.trace_id = earliest.trace_id AND e2.span_id = earliest.span_id
+            WHERE e2.parent_span_id NOT IN (SELECT span_id FROM spans)
+               OR e2.parent_span_id IS NULL
+            """;
+        await conn.ExecuteAsync(new CommandDefinition(insertSql, new { from = fromInclusive, to = toExclusive }, cancellationToken: ct));
+    }
+
+    /// <summary>
+    /// Trace summary recompute, ClickHouse dialect — same anchors-plus-full-trace-aggregation
+    /// shape as <see cref="LogRollupRepositoryBase.RollTraceMinutesAsync"/>, using nested
+    /// subqueries instead of a <c>WITH</c> clause (sidesteps any doubt about ClickHouse's
+    /// <c>WITH ... INSERT</c> clause placement) and deduping every <c>spans</c> read with
+    /// <c>LIMIT 1 BY trace_id, span_id</c> (decision 34).
+    /// </summary>
+    public async Task RollTraceMinutesAsync(long fromInclusive, long toExclusive, CancellationToken ct = default)
+    {
+        const long nanosPerMinute = 60_000_000_000L;
+        var lbColumns = string.Join(", ", LatencyBucketSql.ColumnNames());
+        var lbSelect = LatencyBucketSql.SumCaseColumns("f.duration_nano");
+
+        var anchorsSql = $"""
+            (
+                SELECT trace_id, resource_id, name AS root_name, kind AS anchor_kind, start_time_unix_nano AS anchor_start
+                FROM (
+                    SELECT trace_id, resource_id, name, kind, parent_span_id, start_time_unix_nano
+                    FROM spans
+                    LIMIT 1 BY trace_id, span_id
+                )
+                WHERE parent_span_id IS NULL AND start_time_unix_nano >= @from AND start_time_unix_nano < @to
+                UNION ALL
+                SELECT o.trace_id, o.resource_id, sp.name, sp.kind, o.start_time_unix_nano
+                FROM orphan_roots AS o FINAL
+                JOIN (
+                    SELECT trace_id, span_id, name, kind FROM spans LIMIT 1 BY trace_id, span_id
+                ) sp ON sp.trace_id = o.trace_id AND sp.span_id = o.span_id
+                WHERE o.start_time_unix_nano >= @from AND o.start_time_unix_nano < @to
+                  AND o.trace_id NOT IN (
+                      SELECT trace_id FROM (
+                          SELECT trace_id, parent_span_id FROM spans LIMIT 1 BY trace_id, span_id
+                      )
+                      WHERE parent_span_id IS NULL
+                  )
+            )
+            """;
+
+        var sql = $"""
+            INSERT INTO trace_rollup_minute (bucket_unix_nano, resource_id, root_name, inbound, trace_count, error_count, duration_sum_ms, duration_max_ms, {lbColumns})
+            SELECT f.bucket, f.resource_id, f.root_name, f.inbound,
+                   COUNT(*), SUM(f.has_error),
+                   SUM(f.duration_nano) / 1000000.0, MAX(f.duration_nano) / 1000000.0,
+                   {lbSelect}
+            FROM (
+                SELECT tl.bucket AS bucket, tl.resource_id AS resource_id,
+                       if(rn.rn <= 200, tl.root_name, '__other__') AS root_name,
+                       tl.inbound AS inbound, tl.has_error AS has_error, tl.duration_nano AS duration_nano
+                FROM (
+                    SELECT a.trace_id AS trace_id, a.resource_id AS resource_id, a.root_name AS root_name,
+                           if(a.anchor_kind IN ('SERVER', 'CONSUMER'), 1, 0) AS inbound,
+                           (intDiv(a.anchor_start, {nanosPerMinute}) * {nanosPerMinute}) AS bucket,
+                           MAX(if(fs.status_code = 'ERROR', 1, 0)) AS has_error,
+                           (MAX(fs.end_time_unix_nano) - MIN(fs.start_time_unix_nano)) AS duration_nano
+                    FROM {anchorsSql} a
+                    JOIN (
+                        SELECT trace_id, status_code, start_time_unix_nano, end_time_unix_nano
+                        FROM spans
+                        LIMIT 1 BY trace_id, span_id
+                    ) fs ON fs.trace_id = a.trace_id
+                    GROUP BY a.trace_id, a.resource_id, a.root_name, a.anchor_kind, a.anchor_start
+                ) tl
+                JOIN (
+                    SELECT bucket, resource_id, root_name,
+                           row_number() OVER (PARTITION BY bucket, resource_id ORDER BY cnt DESC, root_name) AS rn
+                    FROM (
+                        SELECT bucket, resource_id, root_name, COUNT(*) AS cnt
+                        FROM (
+                            SELECT a.trace_id AS trace_id, a.resource_id AS resource_id, a.root_name AS root_name,
+                                   (intDiv(a.anchor_start, {nanosPerMinute}) * {nanosPerMinute}) AS bucket
+                            FROM {anchorsSql} a
+                        ) t2
+                        GROUP BY bucket, resource_id, root_name
+                    ) nc
+                ) rn ON rn.bucket = tl.bucket AND rn.resource_id = tl.resource_id AND rn.root_name = tl.root_name
+            ) f
+            GROUP BY f.bucket, f.resource_id, f.root_name, f.inbound
+            """;
+
+        await using var conn = await OpenConnectionAsync(ct);
+        await conn.ExecuteAsync(new CommandDefinition(
+            "DELETE FROM trace_rollup_minute WHERE bucket_unix_nano >= @from AND bucket_unix_nano < @to",
+            new { from = fromInclusive, to = toExclusive }, cancellationToken: ct));
+        await conn.ExecuteAsync(new CommandDefinition(sql, new { from = fromInclusive, to = toExclusive }, cancellationToken: ct));
+    }
+
+    public async Task RollTraceHoursAsync(long fromInclusive, long toExclusive, CancellationToken ct = default)
+    {
+        const long nanosPerHour = 3_600_000_000_000L;
+        var lbColumns = string.Join(", ", LatencyBucketSql.ColumnNames());
+        var lbSums = string.Join(", ", LatencyBucketSql.ColumnNames().Select(c => $"SUM(trm.{c})"));
+
+        var sql = $"""
+            INSERT INTO trace_rollup_hour (bucket_unix_nano, resource_id, root_name, inbound, trace_count, error_count, duration_sum_ms, duration_max_ms, {lbColumns})
+            SELECT intDiv(trm.bucket_unix_nano, {nanosPerHour}) * {nanosPerHour}, trm.resource_id, trm.root_name, trm.inbound,
+                   SUM(trm.trace_count), SUM(trm.error_count),
+                   SUM(trm.duration_sum_ms), MAX(trm.duration_max_ms),
+                   {lbSums}
+            FROM trace_rollup_minute AS trm FINAL
+            WHERE trm.bucket_unix_nano >= @from AND trm.bucket_unix_nano < @to
+            GROUP BY intDiv(trm.bucket_unix_nano, {nanosPerHour}) * {nanosPerHour}, trm.resource_id, trm.root_name, trm.inbound
             """;
         await using var conn = await OpenConnectionAsync(ct);
         await conn.ExecuteAsync(new CommandDefinition(sql, new { from = fromInclusive, to = toExclusive }, cancellationToken: ct));

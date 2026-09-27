@@ -38,4 +38,27 @@ public interface IRollupRepository
 
     /// <summary>Deletes then recomputes <c>log_rollup_hour</c> rows for <c>[fromInclusive, toExclusive)</c> from <c>log_rollup_minute</c>.</summary>
     Task RollLogHoursAsync(long fromInclusive, long toExclusive, CancellationToken ct = default);
+
+    /// <summary>
+    /// Trace half of the rollup worker (list-pages-server-side plan, Phase 3, decision 41). For
+    /// every trace with a span starting in <c>[fromInclusive, toExclusive)</c> that has no
+    /// null-parent span anywhere in the trace, finds its earliest span and, when that span's own
+    /// parent does not exist as any span_id, replaces the minute's <c>orphan_roots</c> rows with
+    /// it. Re-running the same range (the 15-minute re-roll) both adds newly-detected orphans and
+    /// removes rows whose real root has since arrived.
+    /// </summary>
+    Task RollOrphanRootsAsync(long fromInclusive, long toExclusive, CancellationToken ct = default);
+
+    /// <summary>
+    /// Deletes then recomputes <c>trace_rollup_minute</c> rows for
+    /// <c>[fromInclusive, toExclusive)</c>: anchors (null-parent roots plus <c>orphan_roots</c>,
+    /// the latter with the late-root <c>NOT EXISTS</c> re-check) starting in the range, aggregated
+    /// over each anchor trace's full span set (error flag, whole-trace duration, latency bucket).
+    /// Must run after <see cref="RollOrphanRootsAsync"/> for the same range on the same cycle, so
+    /// a trace detected as an orphan in this pass is already anchored when this recompute runs.
+    /// </summary>
+    Task RollTraceMinutesAsync(long fromInclusive, long toExclusive, CancellationToken ct = default);
+
+    /// <summary>Deletes then recomputes <c>trace_rollup_hour</c> rows for <c>[fromInclusive, toExclusive)</c> from <c>trace_rollup_minute</c>.</summary>
+    Task RollTraceHoursAsync(long fromInclusive, long toExclusive, CancellationToken ct = default);
 }

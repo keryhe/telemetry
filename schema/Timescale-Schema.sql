@@ -138,6 +138,13 @@ CREATE INDEX idx_spans_resource_time ON spans ("resource_id", "start_time_unix_n
 -- 2.12.0). Created after create_hypertable above, so TimescaleDB propagates it to every chunk.
 CREATE INDEX idx_spans_error ON spans ("start_time_unix_nano" DESC) WHERE "status_code" = 'ERROR';
 
+-- Trace page/summary anchor on roots (schema 2.13.1, list-pages-server-side plan Phase 3):
+-- every root-anchored query used to read all spans through idx_duration and filter out
+-- non-roots. This covers end_time_unix_nano too, so mode=slow's duration check runs inside
+-- the index without fetching each row.
+CREATE INDEX idx_spans_root_time ON spans ("start_time_unix_nano" DESC) INCLUDE ("end_time_unix_nano")
+    WHERE "parent_span_id" IS NULL;
+
 -- span_events and span_links were dropped in 2.11.0: neither was ever read or written
 -- independently of its parent span, so both collapsed into spans."events_json"/"links_json",
 -- which in turn removed the FK that kept spans from being a hypertable.
@@ -411,8 +418,135 @@ CREATE TABLE log_rollup_hour (
 );
 CREATE INDEX idx_log_rollup_hour_bucket ON log_rollup_hour ("bucket_unix_nano");
 
--- Seed the two rows this phase needs (logs/minute, logs/hour); phase 3 adds traces/*.
-INSERT INTO rollup_state ("signal_name", "granularity") VALUES ('logs', 'minute'), ('logs', 'hour')
+-- Traces whose root span never arrived (schema 2.13.1, decision 41): one row per trace,
+-- holding the anchor span (its earliest span, whose own parent does not exist anywhere) that
+-- the rollup worker detected per finished minute. No foreign keys: the worker's writes must
+-- never lock resources. Indexed to merge with idx_spans_root_time in the same order.
+CREATE TABLE orphan_roots (
+    "trace_id"             CHAR(32)     NOT NULL PRIMARY KEY,
+    "span_id"              CHAR(16)     NOT NULL,
+    "resource_id"          BIGINT       NOT NULL,
+    "start_time_unix_nano" BIGINT       NOT NULL,
+    "end_time_unix_nano"   BIGINT       NOT NULL,
+    "detected_at"          TIMESTAMPTZ  NOT NULL DEFAULT NOW()
+);
+CREATE INDEX idx_orphan_roots_start ON orphan_roots ("start_time_unix_nano" DESC, "trace_id");
+
+-- Per-minute trace summary (schema 2.13.1, decisions 37-38, 41): one row per minute, per
+-- anchor span's resource, operation name (folded to '__other__' past the 200-distinct-name
+-- cardinality guard) and inbound flag (anchor kind SERVER/CONSUMER). Counts traces whose
+-- ANCHOR (null-parent root, or its orphan_roots span) starts in that minute; error flag and
+-- duration are aggregated over the trace's full span set. lb_00..lb_39 are the fixed
+-- latency-bucket counts (LatencyBucketSql) as plain columns so SQL can sum them across rows.
+CREATE TABLE trace_rollup_minute (
+    "bucket_unix_nano" BIGINT        NOT NULL,
+    "resource_id"      BIGINT        NOT NULL,
+    "root_name"        VARCHAR(255)  NOT NULL,
+    "inbound"          SMALLINT      NOT NULL,
+    "trace_count"      INTEGER       NOT NULL DEFAULT 0,
+    "error_count"      INTEGER       NOT NULL DEFAULT 0,
+    "duration_sum_ms"  DOUBLE PRECISION NOT NULL DEFAULT 0,
+    "duration_max_ms"  DOUBLE PRECISION NOT NULL DEFAULT 0,
+    "lb_00" INTEGER NOT NULL DEFAULT 0,
+    "lb_01" INTEGER NOT NULL DEFAULT 0,
+    "lb_02" INTEGER NOT NULL DEFAULT 0,
+    "lb_03" INTEGER NOT NULL DEFAULT 0,
+    "lb_04" INTEGER NOT NULL DEFAULT 0,
+    "lb_05" INTEGER NOT NULL DEFAULT 0,
+    "lb_06" INTEGER NOT NULL DEFAULT 0,
+    "lb_07" INTEGER NOT NULL DEFAULT 0,
+    "lb_08" INTEGER NOT NULL DEFAULT 0,
+    "lb_09" INTEGER NOT NULL DEFAULT 0,
+    "lb_10" INTEGER NOT NULL DEFAULT 0,
+    "lb_11" INTEGER NOT NULL DEFAULT 0,
+    "lb_12" INTEGER NOT NULL DEFAULT 0,
+    "lb_13" INTEGER NOT NULL DEFAULT 0,
+    "lb_14" INTEGER NOT NULL DEFAULT 0,
+    "lb_15" INTEGER NOT NULL DEFAULT 0,
+    "lb_16" INTEGER NOT NULL DEFAULT 0,
+    "lb_17" INTEGER NOT NULL DEFAULT 0,
+    "lb_18" INTEGER NOT NULL DEFAULT 0,
+    "lb_19" INTEGER NOT NULL DEFAULT 0,
+    "lb_20" INTEGER NOT NULL DEFAULT 0,
+    "lb_21" INTEGER NOT NULL DEFAULT 0,
+    "lb_22" INTEGER NOT NULL DEFAULT 0,
+    "lb_23" INTEGER NOT NULL DEFAULT 0,
+    "lb_24" INTEGER NOT NULL DEFAULT 0,
+    "lb_25" INTEGER NOT NULL DEFAULT 0,
+    "lb_26" INTEGER NOT NULL DEFAULT 0,
+    "lb_27" INTEGER NOT NULL DEFAULT 0,
+    "lb_28" INTEGER NOT NULL DEFAULT 0,
+    "lb_29" INTEGER NOT NULL DEFAULT 0,
+    "lb_30" INTEGER NOT NULL DEFAULT 0,
+    "lb_31" INTEGER NOT NULL DEFAULT 0,
+    "lb_32" INTEGER NOT NULL DEFAULT 0,
+    "lb_33" INTEGER NOT NULL DEFAULT 0,
+    "lb_34" INTEGER NOT NULL DEFAULT 0,
+    "lb_35" INTEGER NOT NULL DEFAULT 0,
+    "lb_36" INTEGER NOT NULL DEFAULT 0,
+    "lb_37" INTEGER NOT NULL DEFAULT 0,
+    "lb_38" INTEGER NOT NULL DEFAULT 0,
+    "lb_39" INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY ("bucket_unix_nano", "resource_id", "root_name", "inbound")
+);
+CREATE INDEX idx_trace_rollup_minute_bucket ON trace_rollup_minute ("bucket_unix_nano");
+
+-- Same shape, one row per hour.
+CREATE TABLE trace_rollup_hour (
+    "bucket_unix_nano" BIGINT        NOT NULL,
+    "resource_id"      BIGINT        NOT NULL,
+    "root_name"        VARCHAR(255)  NOT NULL,
+    "inbound"          SMALLINT      NOT NULL,
+    "trace_count"      INTEGER       NOT NULL DEFAULT 0,
+    "error_count"      INTEGER       NOT NULL DEFAULT 0,
+    "duration_sum_ms"  DOUBLE PRECISION NOT NULL DEFAULT 0,
+    "duration_max_ms"  DOUBLE PRECISION NOT NULL DEFAULT 0,
+    "lb_00" INTEGER NOT NULL DEFAULT 0,
+    "lb_01" INTEGER NOT NULL DEFAULT 0,
+    "lb_02" INTEGER NOT NULL DEFAULT 0,
+    "lb_03" INTEGER NOT NULL DEFAULT 0,
+    "lb_04" INTEGER NOT NULL DEFAULT 0,
+    "lb_05" INTEGER NOT NULL DEFAULT 0,
+    "lb_06" INTEGER NOT NULL DEFAULT 0,
+    "lb_07" INTEGER NOT NULL DEFAULT 0,
+    "lb_08" INTEGER NOT NULL DEFAULT 0,
+    "lb_09" INTEGER NOT NULL DEFAULT 0,
+    "lb_10" INTEGER NOT NULL DEFAULT 0,
+    "lb_11" INTEGER NOT NULL DEFAULT 0,
+    "lb_12" INTEGER NOT NULL DEFAULT 0,
+    "lb_13" INTEGER NOT NULL DEFAULT 0,
+    "lb_14" INTEGER NOT NULL DEFAULT 0,
+    "lb_15" INTEGER NOT NULL DEFAULT 0,
+    "lb_16" INTEGER NOT NULL DEFAULT 0,
+    "lb_17" INTEGER NOT NULL DEFAULT 0,
+    "lb_18" INTEGER NOT NULL DEFAULT 0,
+    "lb_19" INTEGER NOT NULL DEFAULT 0,
+    "lb_20" INTEGER NOT NULL DEFAULT 0,
+    "lb_21" INTEGER NOT NULL DEFAULT 0,
+    "lb_22" INTEGER NOT NULL DEFAULT 0,
+    "lb_23" INTEGER NOT NULL DEFAULT 0,
+    "lb_24" INTEGER NOT NULL DEFAULT 0,
+    "lb_25" INTEGER NOT NULL DEFAULT 0,
+    "lb_26" INTEGER NOT NULL DEFAULT 0,
+    "lb_27" INTEGER NOT NULL DEFAULT 0,
+    "lb_28" INTEGER NOT NULL DEFAULT 0,
+    "lb_29" INTEGER NOT NULL DEFAULT 0,
+    "lb_30" INTEGER NOT NULL DEFAULT 0,
+    "lb_31" INTEGER NOT NULL DEFAULT 0,
+    "lb_32" INTEGER NOT NULL DEFAULT 0,
+    "lb_33" INTEGER NOT NULL DEFAULT 0,
+    "lb_34" INTEGER NOT NULL DEFAULT 0,
+    "lb_35" INTEGER NOT NULL DEFAULT 0,
+    "lb_36" INTEGER NOT NULL DEFAULT 0,
+    "lb_37" INTEGER NOT NULL DEFAULT 0,
+    "lb_38" INTEGER NOT NULL DEFAULT 0,
+    "lb_39" INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY ("bucket_unix_nano", "resource_id", "root_name", "inbound")
+);
+CREATE INDEX idx_trace_rollup_hour_bucket ON trace_rollup_hour ("bucket_unix_nano");
+
+-- Seed the four rows this phase needs (logs/traces x minute/hour).
+INSERT INTO rollup_state ("signal_name", "granularity") VALUES ('logs', 'minute'), ('logs', 'hour'), ('traces', 'minute'), ('traces', 'hour')
 ON CONFLICT ("signal_name", "granularity") DO NOTHING;
 
 -- =============================================================================
@@ -690,7 +824,7 @@ FROM log_severity_stats_daily;
 -- =============================================================================
 -- Only reached when every statement above succeeded, so a partial apply cannot
 -- leave a false version marker for the apply-schema.sh gate.
-INSERT INTO schema_version ("version") VALUES ('2.13.0')
+INSERT INTO schema_version ("version") VALUES ('2.13.1')
 ON CONFLICT ("version") DO UPDATE
 SET "applied_at" = NOW();
 

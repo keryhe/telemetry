@@ -33,8 +33,8 @@ internal static class MySqlJsonAttributeHooks
     }
 }
 
-public class MySqlTraceReadRepository(IConfiguration configuration, ITenantContext tenantContext, TraceQueryCache traceQueryCache)
-    : TraceReadRepositoryBase(tenantContext, traceQueryCache)
+public class MySqlTraceReadRepository(IConfiguration configuration, ITenantContext tenantContext)
+    : TraceReadRepositoryBase(tenantContext)
 {
     private readonly string _connectionString = configuration.GetConnectionString("Api")!;
 
@@ -55,6 +55,20 @@ public class MySqlTraceReadRepository(IConfiguration configuration, ITenantConte
     protected override object AttributeKeyParamValue(string key) => MySqlJsonAttributeHooks.KeyParamValue(key);
     protected override string AttributePredicate(string column, string keyParam, string valueParam, bool negated)
         => MySqlJsonAttributeHooks.Predicate(column, keyParam, valueParam, negated);
+    protected override string PagingClause => "LIMIT @limit OFFSET @offset";
+
+    // MySQL dialect: LIKE is case-insensitive under the default _ci collation -- see
+    // MySqlLogReadRepository's identical override.
+    protected override string LikeOperator => "LIKE";
+
+    // Decision 3/Phase 3 pin helper: MySQL's created_at default is evaluated at statement
+    // execution, so no 5-second back-off is needed here -- see MySqlLogReadRepository's identical
+    // override.
+    protected override string DatabaseClockNowExpr => "CURRENT_TIMESTAMP(6)";
+
+    // MySQL's `/` always yields a DECIMAL result even for integer operands; DIV keeps bucket-index
+    // math as true integer floor division -- see MySqlLogReadRepository's identical override.
+    protected override string BucketIndexExpr(string numerator, string denominator) => $"({numerator} DIV {denominator})";
 }
 
 public class MySqlMetricReadRepository(IConfiguration configuration, ITenantContext tenantContext)

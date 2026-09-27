@@ -1,5 +1,5 @@
-import { Component, NgZone, computed, effect, inject, signal, untracked } from '@angular/core';
-import { DatePipe, DecimalPipe, SlicePipe } from '@angular/common';
+import { Component, NgZone, computed, effect, inject, signal, untracked, OnDestroy } from '@angular/core';
+import { DatePipe, DecimalPipe } from '@angular/common';
 import { Router } from '@angular/router';
 import { MatButtonToggleModule } from '@angular/material/button-toggle';
 import { MatButtonModule } from '@angular/material/button';
@@ -23,16 +23,17 @@ import { NgApexchartsModule } from 'ng-apexcharts';
 import { Subscription } from 'rxjs';
 import type { ApexOptions } from 'ng-apexcharts';
 
-import { TracesApiService, TraceLatencyBucket } from '../../../core/services/api/traces-api.service';
+import { TracesApiService, TraceLatencyBucket, TraceSummaryResult, TracePageResult } from '../../../core/services/api/traces-api.service';
 import { ResourcesApiService } from '../../../core/services/api/resources-api.service';
 import { TimeRangeService } from '../../../core/services/time-range.service';
 import { ThemeService } from '../../../core/services/theme.service';
+import { CapabilitiesService } from '../../../core/services/capabilities.service';
 import { TraceInfo, ServiceDependency, OperationStats } from '../../../core/models/trace.models';
 import { StatCardComponent } from '../../../shared/components/stat-card/stat-card.component';
 import { EmptyStateComponent } from '../../../shared/components/empty-state/empty-state.component';
 import { PageHeaderComponent } from '../../../shared/components/page-header/page-header.component';
-import { TimeBucket, formatDuration, parseDotnetTimespan, timeRangeZoom } from '../../../shared/utils/chart.utils';
-import { parseSearchQuery, ParsedSearchQuery, SearchTerm } from '../../../shared/utils/search-query.parser';
+import { formatDuration, parseDotnetTimespan, timeRangeZoom } from '../../../shared/utils/chart.utils';
+import { parseSearchQuery, ParsedSearchQuery } from '../../../shared/utils/search-query.parser';
 import { TraceSearchHelpDialogComponent } from '../trace-search-help-dialog/trace-search-help-dialog.component';
 import { loadPageState, savePageState } from '../../../shared/utils/page-state';
 import { UrlStateService } from '../../../shared/utils/url-state';
@@ -56,12 +57,13 @@ type FilterMode = 'all' | 'errors' | 'slow';
 type SortDir = '' | 'asc' | 'desc';
 type ChartView = 'volume' | 'latency';
 
+const BUCKET_COUNT = 60;
 const STATE_KEY = 'state.traces';
-/** Upper bound on traces pulled for the chart/stat overview (and shallow client paging). */
-const OVERVIEW_CAP = 1000;
-/** Explains the "request traces" population behind the chart and the no-search stat cards. */
+/** How often the "new since" banner's summary re-poll runs, while the tab is visible (same cadence as logs). */
+const NEW_SINCE_POLL_MS = 30_000;
+/** Explains the "request traces" population behind the chart and stat cards (decision 13). */
 const REQUEST_TRACES_TOOLTIP =
-  'Traces whose root span is an incoming request (SERVER or CONSUMER kind). Background and client-rooted traces are excluded.';
+  'Traces whose anchor span is an incoming request (SERVER or CONSUMER kind). Background and client-rooted traces are excluded.';
 /** Discrete error-ratio tiers for latency-bubble coloring (ApexCharts colors per series, not per point). */
 const ERROR_TIERS: { max: number; color: string; label: string }[] = [
   { max: 0, color: '#2196f3', label: 'OK' },
@@ -69,12 +71,6 @@ const ERROR_TIERS: { max: number; color: string; label: string }[] = [
   { max: 0.75, color: '#fb8c00', label: 'Mixed' },
   { max: 1, color: '#e53935', label: 'High errors' },
 ];
-/**
- * Delimiter joining tag predicates into the reload cache key. ASCII US, matching `PATH_SEP` in
- * trace-detail — a printable separator could occur inside an attribute value and let two distinct
- * tag sets collide into one key, suppressing a reload the filter change needs.
- */
-const TAG_KEY_SEP = '\u001F';
 
 @Component({
   selector: 'app-trace-list',
@@ -90,7 +86,7 @@ const TAG_KEY_SEP = '\u001F';
   templateUrl: './trace-list.component.html',
   styleUrl: './trace-list.component.scss',
 })
-export class TraceListComponent {
+export class TraceListComponent implements OnDestroy {
   private readonly api = inject(TracesApiService);
   private readonly resourcesApi = inject(ResourcesApiService);
   private readonly timeRange = inject(TimeRangeService);
@@ -99,6 +95,7 @@ export class TraceListComponent {
   private readonly dialog = inject(MatDialog);
   private readonly urlState = inject(UrlStateService);
   private readonly zone = inject(NgZone);
+  private readonly capabilitiesService = inject(CapabilitiesService);
 
   private readonly saved = loadPageState(STATE_KEY, {
     filterMode: 'all' as FilterMode,
@@ -108,23 +105,19 @@ export class TraceListComponent {
     minDurationMs: 500,
     maxDurationMs: 0,
     pageSize: 100,
-    sortColumn: '',
-    sortDir: '' as SortDir,
     chartView: 'volume' as ChartView,
   });
 
-  protected loading = signal(true);
-  /** Bounded overview used for the scatter chart and shallow/client paging. */
-  protected overview = signal<TraceInfo[]>([]);
-  /** True (unbounded) volume histogram — backs the bar chart and the error/duration stat cards. */
-  protected histogram = signal<TimeBucket[]>([]);
-  /** A single server-fetched page, used only when paging beyond the overview window. */
-  private serverPage = signal<TraceInfo[]>([]);
-  /** True while a deep server page is in flight — shown as loading, not as an empty result. */
-  protected pageLoading = signal(false);
-  private serverPageSub?: Subscription;
-  protected total = signal(0);
-  protected capped = signal(false);
+  protected summaryLoading = signal(true);
+  protected pageLoading = signal(true);
+  protected summary = signal<TraceSummaryResult | null>(null);
+  protected page = signal<TracePageResult | null>(null);
+  private pageSub?: Subscription;
+  private summarySub?: Subscription;
+  private newSincePollHandle?: ReturnType<typeof setInterval>;
+
+  protected capabilities = this.capabilitiesService.capabilities;
+
   protected services = signal<string[]>([]);
   protected dependencies = signal<ServiceDependency[]>([]);
   /** Operations for the selected service, populating the operation dropdown. */
@@ -144,8 +137,6 @@ export class TraceListComponent {
   protected analyticsService = signal('');
   protected analyticsSort = signal<{ col: string; dir: SortDir }>({ col: 'count', dir: 'desc' });
 
-  protected sortColumn = signal<string>(this.urlState.get('sort') ?? this.saved.sortColumn);
-  protected sortDir = signal<SortDir>((this.urlState.get('dir') as SortDir) ?? this.saved.sortDir);
   protected chartView = signal<ChartView>((this.urlState.get('chart') as ChartView) ?? this.saved.chartView);
 
   /** Selected tab index (Traces / Service Map / Analytics); driven by service-map node clicks. */
@@ -154,95 +145,54 @@ export class TraceListComponent {
   /** Transient "Link copied!" affordance for the copy-permalink button. */
   protected linkCopied = signal(false);
 
-  private firstOverview = true;
+  /** Tracked client-side (decision 1: keyset paging has no server-side page number). Reset on any filter change. */
+  protected pageIndex = signal(0);
+  protected pageSize = signal(this.readNum('size') ?? this.saved.pageSize);
+  protected readonly pageSizeOptions = [100, 250, 500];
 
   protected parsedQuery = computed<ParsedSearchQuery>(() => parseSearchQuery(this.searchText()));
   protected isTraceIdSearch = computed(() => this.parsedQuery().isTraceIdSearch);
 
-  /** Attribute (`key:value`) terms → server-side all-span tag search; free text stays client-side. */
-  private attributeTerms = computed(() => this.parsedQuery().terms.filter((t) => t.isAttributeFilter));
-  private freeTextTerms = computed(() => this.parsedQuery().terms.filter((t) => !t.isAttributeFilter));
+  /** The whole raw search text goes to the server now (decision 10: parsed server-side). */
+  private serverQuery = computed(() => this.searchText().trim());
+
+  protected displayRows = computed<TraceInfo[]>(() => this.page()?.items ?? []);
+  protected loading = computed(() => this.summaryLoading());
+
+  protected effectiveTotal = computed(() => this.summary()?.listTotal ?? 0);
+  protected totalIsLowerBound = computed(() => this.summary()?.totalIsLowerBound ?? false);
+
+  /** "N new since …" banner. */
+  protected newSinceCount = computed(() => this.summary()?.newSinceAsOf ?? 0);
 
   /**
-   * Tag predicates sent to the server, encoded as `key=value` (exact) / `key:value` (contains),
-   * `-`-prefixed when the term is negated (server excludes traces where any span matches).
+   * Standard-tier search window limit, explained inline next to the search box (decision 39):
+   * shown when a raw search filter or `mode=slow` is present and the window exceeds the limit.
    */
-  protected serverTags = computed<string[]>(() =>
-    this.attributeTerms().map(
-      (t) => `${t.negate ? '-' : ''}${t.key}${t.isExactMatch ? '=' : ':'}${t.value ?? ''}`
-    )
-  );
-  /** Stable string key so free-text keystrokes don't re-trigger the tag-driven overview reload. */
-  private serverTagsKey = computed(() => this.serverTags().join(TAG_KEY_SEP));
-
-  /** True when the result must be paged/refined client-side (trace-id or free-text search). */
-  protected clientMode = computed(() => this.isTraceIdSearch() || this.freeTextTerms().length > 0);
-
-  /** Client-side refinement — trace-id + free-text only; tag terms are applied server-side. */
-  private refined = computed(() => {
-    const query = this.parsedQuery();
-    const traces = this.overview();
-    if (query.isTraceIdSearch) {
-      const id = query.traceId!.toLowerCase();
-      return traces.filter((t) => t.traceIdHex.toLowerCase() === id);
-    }
-    const freeText = this.freeTextTerms();
-    if (freeText.length > 0) return this.applyParsedSearch(traces, freeText);
-    return traces;
+  protected rawSearchWindowMessage = computed<string | null>(() => {
+    const caps = this.capabilities();
+    if (caps.rawSearchWindowHours == null) return null;
+    const hasFilter = this.parsedQuery().terms.length > 0 || this.filterMode() === 'slow';
+    if (!hasFilter) return null;
+    const { start, end } = this.timeRange.range();
+    const hours = (end.getTime() - start.getTime()) / 3_600_000;
+    if (hours <= caps.rawSearchWindowHours) return null;
+    return `Search is limited to a ${caps.rawSearchWindowHours}-hour window on ${caps.tier} tier. Narrow the time range or remove the search/slow filter.`;
   });
 
-  protected pageIndex = signal(this.readNum('page') ?? 0);
-  protected pageSize = signal(this.readNum('size') ?? this.saved.pageSize);
-  // 1000 dropped (list-page-scale plan, Phase 8): the one-line answer to "stop rendering 1000 live
-  // rows" — virtualizing the table is the better one but real work, especially for the logs page's
-  // expandable detail rows; capping the selectable page size is the cheap fix that ships today.
-  protected readonly pageSizeOptions = [100, 250, 500];
-
-  /** Real length behind the paginator: server total normally, refined length in client mode. */
-  protected effectiveTotal = computed(() => this.clientMode() ? this.refined().length : this.total());
-
-  /** Rows for the current page — a client slice of the overview, or the fetched server page. */
-  protected displayTraces = computed(() => {
-    const start = this.pageIndex() * this.pageSize();
-    if (this.clientMode()) return this.refined().slice(start, start + this.pageSize());
-    if (this.needsServerPage()) return this.serverPage();
-    return this.overview().slice(start, start + this.pageSize());
-  });
-
-  protected onPage(e: PageEvent): void {
-    this.pageIndex.set(e.pageIndex);
-    this.pageSize.set(e.pageSize);
-  }
-
-  protected totalTraces = computed(() => this.effectiveTotal());
-  /**
-   * The error/rate/duration cards describe one consistent population. With no search that is the
-   * histogram's — inbound request traces only (SERVER/CONSUMER roots, see the server's
-   * `IsInboundRoot`) across the full filtered range — hence the "Request …" labels and
-   * REQUEST_TRACES_TOOLTIP. During a client-side search it is the searched rows themselves
-   * (`refined()`), matching the Traces card and the pager, since the histogram ignores free text.
-   */
-  private cardStats = computed(() => {
-    if (this.clientMode()) {
-      const rows = this.refined();
-      const totalMs = rows.reduce((a, t) => a + parseDotnetTimespan(t.traceDuration), 0);
-      return { count: rows.length, errors: rows.filter((t) => t.hasErrors).length, totalMs };
-    }
-    const buckets = this.histogram();
-    return {
-      count: buckets.reduce((a, b) => a + b.count, 0),
-      errors: buckets.reduce((a, b) => a + b.errorCount, 0),
-      totalMs: buckets.reduce((a, b) => a + b.sumDurationMs, 0),
-    };
-  });
-  protected errorCount = computed(() => this.cardStats().errors);
+  protected errorCount = computed(() => this.summary()?.summary.errorCount ?? 0);
   protected errorRate = computed(() => {
-    const { count, errors } = this.cardStats();
-    return count > 0 ? ((errors / count) * 100).toFixed(1) + '%' : '0%';
+    const s = this.summary()?.summary;
+    if (!s || s.count === 0) return '0%';
+    return ((s.errorCount / s.count) * 100).toFixed(1) + '%';
   });
   protected avgDuration = computed(() => {
-    const { count, totalMs } = this.cardStats();
-    return count > 0 ? formatDuration(totalMs / count) : '—';
+    const s = this.summary()?.summary;
+    if (!s || s.count === 0) return '—';
+    // p50 is the closest thing the summary carries to a single "typical" duration; the former
+    // avg-from-buckets figure isn't available since the summary no longer ships a raw duration
+    // sum at the window level outside the per-bucket buckets.
+    return formatDuration(s.p50Ms);
   });
   protected readonly requestTracesTooltip = REQUEST_TRACES_TOOLTIP;
 
@@ -255,8 +205,6 @@ export class TraceListComponent {
       ...deps.map((d) => d.childService),
     ]);
     for (const svc of services) {
-      // Prefer incoming calls (svc as callee) — they reflect errors serving this
-      // service; fall back to outgoing calls for source-only services.
       let edges = deps.filter((d) => d.childService === svc);
       if (edges.length === 0) edges = deps.filter((d) => d.parentService === svc);
       const callCount = edges.reduce((a, d) => a + d.callCount, 0);
@@ -285,18 +233,16 @@ export class TraceListComponent {
       id: `link-${i}`,
       source: d.parentService,
       target: d.childService,
-      // Label encodes avg duration; tooltip-style detail is in the legend.
       label: formatDuration(d.avgDurationMs),
       callCount: d.callCount,
       errorRate: d.errorRate,
       avgDurationMs: d.avgDurationMs,
       color: this.edgeColor(d.errorRate),
-      // Thickness encodes call volume (1.5–6px).
       width: 1.5 + (d.callCount / maxCalls) * 4.5,
     }));
   });
 
-  /** RED-metrics rows for the Analytics tab, sorted by the clicked column (default: calls desc). */
+  /** RED-metrics rows for the Analytics tab, sorted by the clicked column (default: calls desc). Small, already-aggregated set — client-side sort stays (decision 4 is about the paged trace list, not this). */
   protected operationRows = computed<OperationStats[]>(() => {
     const rows = [...this.operationStats()];
     const { col, dir } = this.analyticsSort();
@@ -333,12 +279,11 @@ export class TraceListComponent {
   protected readonly parseDuration = parseDotnetTimespan;
 
   private edgeColor(errorRate: number): string {
-    if (errorRate >= 0.2) return '#f44336';   // high errors
-    if (errorRate >= 0.05) return '#ff9800';  // some errors
-    return 'var(--mat-sys-outline)';          // healthy
+    if (errorRate >= 0.2) return '#f44336';
+    if (errorRate >= 0.05) return '#ff9800';
+    return 'var(--mat-sys-outline)';
   }
 
-  /** Solid health color for a service node border (green/orange/red by error rate). */
   private nodeColor(errorRate: number): string {
     if (errorRate >= 0.2) return '#f44336';
     if (errorRate >= 0.05) return '#ff9800';
@@ -347,10 +292,9 @@ export class TraceListComponent {
 
   /** Longest duration among the rows currently shown, for scaling inline duration bars. */
   protected maxRowDurationMs = computed(() =>
-    this.displayTraces().reduce((max, t) => Math.max(max, parseDotnetTimespan(t.traceDuration)), 1)
+    this.displayRows().reduce((max, t) => Math.max(max, parseDotnetTimespan(t.traceDuration)), 1)
   );
 
-  /** This trace's duration as a percentage of the slowest visible row (0–100). */
   protected durationBarPct(t: TraceInfo): number {
     return Math.min(100, (parseDotnetTimespan(t.traceDuration) / this.maxRowDurationMs()) * 100);
   }
@@ -374,7 +318,8 @@ export class TraceListComponent {
       next: (services) => this.services.set(services),
     });
 
-    // Overview + total: reload when the time range or any server-side filter/sort changes.
+    // Reload summary + page (in parallel) whenever the time range or any server-side filter
+    // changes. asOf resets so a fresh one is captured for the new query (decision 3's handshake).
     effect(() => {
       this.timeRange.range();
       this.filterMode();
@@ -382,20 +327,14 @@ export class TraceListComponent {
       this.selectedOperation();
       this.minDurationMs();
       this.maxDurationMs();
-      this.serverTagsKey();
-      this.sortColumn();
-      this.sortDir();
+      this.serverQuery();
       untracked(() => {
-        if (!this.firstOverview) this.pageIndex.set(0);
-        this.firstOverview = false;
-        this.loadOverview();
+        this.pageIndex.set(0);
+        this.reloadAll();
       });
     });
 
-    // Dependencies (service map): only the Service Map tab needs this — an entire full-window
-    // self-join of `spans` otherwise ran on every time-range change regardless of which tab was
-    // open (list-page-scale plan, Phase 1). Reload on time-range change while the tab is open, and
-    // on first opening it.
+    // Dependencies (service map): only the Service Map tab needs this.
     effect(() => {
       const tab = this.selectedTab();
       this.timeRange.range();
@@ -411,16 +350,9 @@ export class TraceListComponent {
       untracked(() => this.loadOperations());
     });
 
-    // Deep server page: fetch only when paging past the overview window in pure server mode.
-    effect(() => {
-      this.pageIndex(); this.pageSize();
-      this.timeRange.range(); this.filterMode(); this.selectedService(); this.selectedOperation();
-      this.minDurationMs(); this.maxDurationMs(); this.serverTagsKey();
-      this.sortColumn(); this.sortDir();
-      untracked(() => { if (this.needsServerPage()) this.loadServerPage(); });
-    });
-
-    // Mirror filter/paging/sort/view state into the URL (shareable/deep-linkable).
+    // Mirror filter/paging/view state into the URL (shareable/deep-linkable). No sort/dir
+    // (decision 4) and no `page` (decision 1: keyset paging has no page number); `cursor` isn't
+    // persisted across navigation either.
     effect(() => {
       this.urlState.patch({
         mode: this.filterMode() !== 'all' ? this.filterMode() : null,
@@ -429,10 +361,7 @@ export class TraceListComponent {
         q: this.searchText() || null,
         minDur: this.filterMode() === 'slow' ? this.minDurationMs() : null,
         maxDur: this.filterMode() === 'slow' && this.maxDurationMs() > 0 ? this.maxDurationMs() : null,
-        sort: this.sortColumn() && this.sortDir() ? this.sortColumn() : null,
-        dir: this.sortColumn() && this.sortDir() ? this.sortDir() : null,
         chart: this.chartView() !== 'volume' ? this.chartView() : null,
-        page: this.pageIndex() > 0 ? this.pageIndex() : null,
         size: this.pageSize() !== 100 ? this.pageSize() : null,
       });
     });
@@ -449,85 +378,71 @@ export class TraceListComponent {
         minDurationMs: this.minDurationMs(),
         maxDurationMs: this.maxDurationMs(),
         pageSize: this.pageSize(),
-        sortColumn: this.sortColumn(),
-        sortDir: this.sortDir(),
         chartView: this.chartView(),
       });
     });
+
+    // Chart follows the summary's buckets/latency heatmap.
+    effect(() => {
+      const s = this.summary();
+      const { start, end } = this.timeRange.range();
+      untracked(() => {
+        this.buildChart(start, end, s?.buckets ?? []);
+        this.buildLatencyBubbles(s?.latencyBuckets ?? []);
+      });
+    });
+
+    // "New since" banner: re-poll the summary every 30s while the tab is visible.
+    this.newSincePollHandle = setInterval(() => {
+      if (document.visibilityState === 'visible') this.pollSummary();
+    }, NEW_SINCE_POLL_MS);
   }
 
-  /** Whether the current page falls outside the loaded overview and must be fetched from the server. */
-  private needsServerPage(): boolean {
-    if (this.clientMode()) return false;
-    const start = this.pageIndex() * this.pageSize();
-    return this.overview().length < this.total() && start + this.pageSize() > this.overview().length;
+  ngOnDestroy(): void {
+    if (this.newSincePollHandle) clearInterval(this.newSincePollHandle);
+    this.pageSub?.unsubscribe();
+    this.summarySub?.unsubscribe();
   }
 
-  /** Shared server-side filter shape for the overview and deep-page fetches. */
-  private serverFilters() {
+  private currentFilter() {
+    const { start, end } = this.timeRange.range();
     const slow = this.filterMode() === 'slow';
-    const tags = this.serverTags();
     return {
+      start, end,
       mode: this.filterMode(),
       service: this.selectedService() || undefined,
       operation: this.selectedOperation() || undefined,
       minDurationMs: slow ? this.minDurationMs() : undefined,
       maxDurationMs: slow && this.maxDurationMs() > 0 ? this.maxDurationMs() : undefined,
-      tags: tags.length ? tags : undefined,
-      sort: this.sortColumn() || undefined,
-      dir: this.sortDir() || undefined,
+      q: this.serverQuery() || undefined,
     };
   }
 
-  private loadOverview(): void {
-    this.loading.set(true);
-    const { start, end } = this.timeRange.range();
-    const filters = this.serverFilters();
-    // One scan serving the table rows and both charts (list-page-scale plan, Phase 2, building on
-    // trace-latency-p50 plan Phase 3's shared volume-histogram/latency-bucket scan): the former
-    // second, independent /search call over the identical filter set and window is gone — the
-    // page's rows now come from the same overview as the charts.
-    this.api.getTraceOverview({ start, end, ...filters, limit: OVERVIEW_CAP, offset: 0 }).subscribe({
-      next: (overview) => {
-        this.overview.set(overview.items);
-        this.total.set(overview.total);
-        this.capped.set(overview.total > overview.items.length);
-        this.histogram.set(overview.buckets);
-        this.buildChart(start, end, overview.buckets);
-        this.buildLatencyBubbles(overview.latencyBuckets ?? []);
-        this.loading.set(false);
-        this.settlePage();
-      },
-      error: () => this.loading.set(false),
-    });
-  }
-
-  private loadServerPage(): void {
-    const { start, end } = this.timeRange.range();
-    // Drop any in-flight page so a slower, older response can't overwrite this one.
-    this.serverPageSub?.unsubscribe();
-    this.serverPage.set([]);
+  /** Fires `summary` and `page` in parallel for the first page of a (new) query. */
+  private reloadAll(): void {
+    this.summaryLoading.set(true);
     this.pageLoading.set(true);
-    this.serverPageSub = this.api.searchTraces({
-      start, end, ...this.serverFilters(),
-      limit: this.pageSize(), offset: this.pageIndex() * this.pageSize(),
-    }).subscribe({
-      next: (res) => { this.serverPage.set(res.items); this.pageLoading.set(false); },
+    this.page.set(null);
+
+    this.summarySub?.unsubscribe();
+    this.summarySub = this.api.getTraceSummary({ ...this.currentFilter(), bucketCount: BUCKET_COUNT }).subscribe({
+      next: (result) => { this.summary.set(result); this.summaryLoading.set(false); },
+      error: () => this.summaryLoading.set(false),
+    });
+
+    this.pageSub?.unsubscribe();
+    this.pageSub = this.api.getTracePage({ ...this.currentFilter(), size: this.pageSize(), nav: 'first' }).subscribe({
+      next: (result) => { this.page.set(result); this.pageLoading.set(false); },
       error: () => this.pageLoading.set(false),
     });
   }
 
-  /**
-   * Run once the overview has landed. The deep-page effect first runs at construction, before
-   * `overview`/`total` are known, and doesn't track them — so a page restored from the URL on
-   * reload would never be fetched. Clamp a restored page that no longer exists (a relative window
-   * that slid to fewer rows); otherwise fetch the deep page if it is one. Clamping re-triggers the
-   * deep-page effect itself, so it returns without fetching.
-   */
-  private settlePage(): void {
-    const lastPage = Math.max(0, Math.ceil(this.effectiveTotal() / this.pageSize()) - 1);
-    if (this.pageIndex() > lastPage) { this.pageIndex.set(lastPage); return; }
-    if (this.needsServerPage()) this.loadServerPage();
+  /** Re-polls only the summary, pinned on the query's existing `asOf`, for the "new since" banner. */
+  private pollSummary(): void {
+    const asOf = this.summary()?.asOf ?? this.page()?.asOf;
+    this.api.getTraceSummary({ ...this.currentFilter(), asOf, bucketCount: BUCKET_COUNT }).subscribe({
+      next: (result) => this.summary.set(result),
+    });
   }
 
   /** Load the operation list for the operation dropdown (only meaningful with a service selected). */
@@ -551,7 +466,7 @@ export class TraceListComponent {
     });
   }
 
-  private buildChart(start: Date, end: Date, buckets: TimeBucket[]): void {
+  private buildChart(start: Date, end: Date, buckets: TraceSummaryResult['buckets']): void {
     const isDark = this.theme.isDark();
     const timestamps = buckets.map((b) => b.timestamp.getTime());
 
@@ -576,12 +491,9 @@ export class TraceListComponent {
   }
 
   /**
-   * Jaeger-style latency chart: server-computed buckets (trace-latency-p50 plan, Phase 3) on a
-   * time × log-duration grid, rendered as bubbles sized by trace count and colored by error ratio
-   * (see ERROR_TIERS). Clicking a single-trace bubble opens it; clicking a multi-trace bubble
-   * zooms into its time span. Unlike the former client-side `binLatencyPoints`, these buckets
-   * cover the whole requested range regardless of trace volume — they're not derived from the
-   * 1000-row-capped `overview()` page.
+   * Jaeger-style latency chart: server-computed buckets on a time x log-duration grid, rendered
+   * as bubbles sized by trace count and colored by error ratio (see ERROR_TIERS). Clicking a
+   * single-trace bubble opens it; clicking a multi-trace bubble zooms into its time span.
    */
   private buildLatencyBubbles(buckets: TraceLatencyBucket[]): void {
     const isDark = this.theme.isDark();
@@ -609,8 +521,6 @@ export class TraceListComponent {
         zoom: { ...zoom.zoom, type: 'x' },
         events: {
           ...zoom.events,
-          // markerClick is the bubble marker event; dataPointSelection covers ApexCharts
-          // versions where only the latter fires.
           markerClick: (_e, _ctx, cfg: { seriesIndex: number; dataPointIndex: number; w: unknown }) =>
             this.onBubbleClick(cfg),
           dataPointSelection: (_e, _ctx, cfg: { seriesIndex: number; dataPointIndex: number; w: unknown }) =>
@@ -653,36 +563,6 @@ export class TraceListComponent {
     });
   }
 
-  private applyParsedSearch(traces: TraceInfo[], terms: SearchTerm[]): TraceInfo[] {
-    let result = traces;
-    for (const term of terms) {
-      const negate = term.negate ?? false;
-      if (term.isAttributeFilter) {
-        const key = term.key!;
-        const value = (term.value ?? '').toLowerCase();
-        const exact = term.isExactMatch;
-        result = result.filter((t) => {
-          const attrs = t.rootSpanAttributes;
-          let match = false;
-          if (attrs && Object.prototype.hasOwnProperty.call(attrs, key)) {
-            const v = String(attrs[key] ?? '').toLowerCase();
-            match = exact ? v === value : v.includes(value);
-          }
-          return match !== negate;
-        });
-      } else {
-        const text = (term.freeText ?? '').toLowerCase();
-        result = result.filter((t) => {
-          const match =
-            (t.rootOperationName?.toLowerCase().includes(text) ?? false) ||
-            (t.serviceName?.toLowerCase().includes(text) ?? false);
-          return match !== negate;
-        });
-      }
-    }
-    return result;
-  }
-
   private readNum(key: string): number | null {
     const raw = this.urlState.get(key);
     if (raw == null) return null;
@@ -690,7 +570,7 @@ export class TraceListComponent {
     return Number.isFinite(n) ? n : null;
   }
 
-  /** Pull filter/paging state from the URL (back/forward). Idempotent: only differing values are set. */
+  /** Pull filter state from the URL (back/forward). Idempotent: only differing values are set. */
   private readStateFromUrl(): void {
     const mode = (this.urlState.get('mode') as FilterMode) ?? 'all';
     const service = this.urlState.get('service') ?? '';
@@ -698,10 +578,7 @@ export class TraceListComponent {
     const q = this.urlState.get('q') ?? '';
     const minDur = this.readNum('minDur') ?? this.saved.minDurationMs;
     const maxDur = this.readNum('maxDur') ?? this.saved.maxDurationMs;
-    const sortCol = this.urlState.get('sort') ?? '';
-    const sortDir = (this.urlState.get('dir') as SortDir) ?? '';
     const chart = (this.urlState.get('chart') as ChartView) ?? 'volume';
-    const page = this.readNum('page') ?? 0;
     const size = this.readNum('size') ?? this.saved.pageSize;
     if (this.filterMode() !== mode) this.filterMode.set(mode);
     if (this.selectedService() !== service) this.selectedService.set(service);
@@ -709,16 +586,12 @@ export class TraceListComponent {
     if (this.searchText() !== q) { this.searchText.set(q); this.searchInput.set(q); }
     if (this.minDurationMs() !== minDur) this.minDurationMs.set(minDur);
     if (this.maxDurationMs() !== maxDur) this.maxDurationMs.set(maxDur);
-    if (this.sortColumn() !== sortCol) this.sortColumn.set(sortCol);
-    if (this.sortDir() !== sortDir) this.sortDir.set(sortDir);
     if (this.chartView() !== chart) this.chartView.set(chart);
     if (this.pageSize() !== size) this.pageSize.set(size);
-    if (this.pageIndex() !== page) this.pageIndex.set(page);
   }
 
-  // Filter edits reset to the first page (user changes; URL restores keep their page).
+  // Filter edits reset to the first page.
   protected onModeChange(mode: FilterMode): void { this.filterMode.set(mode); this.pageIndex.set(0); }
-  // Switching service invalidates the operation choice (operations are per-service).
   protected onServiceChange(value: string): void {
     this.selectedService.set(value);
     this.selectedOperation.set('');
@@ -735,13 +608,6 @@ export class TraceListComponent {
   protected onMaxDurationChange(value: number): void { this.maxDurationMs.set(value); this.pageIndex.set(0); }
   protected onAnalyticsSort(s: Sort): void {
     this.analyticsSort.set({ col: s.active, dir: (s.direction || 'desc') as SortDir });
-  }
-
-  /** MatSort header click → server-side sort. Empty direction reverts to the mode default order. */
-  protected onSort(s: Sort): void {
-    this.sortColumn.set(s.direction ? s.active : '');
-    this.sortDir.set(s.direction as SortDir);
-    this.pageIndex.set(0);
   }
 
   protected setChartView(view: ChartView): void { this.chartView.set(view); }
@@ -763,16 +629,72 @@ export class TraceListComponent {
     this.router.navigate(['/traces', traceId]);
   }
 
+  /**
+   * Maps MatPaginator's page event onto a keyset `nav` (decision 1: no arbitrary page jump).
+   * `showFirstLastButtons` only ever moves the index by ±1 or straight to the first/last computed
+   * page, so the direction is unambiguous from the index delta.
+   */
+  protected onPage(e: PageEvent): void {
+    if (e.pageSize !== this.pageSize()) {
+      this.pageSize.set(e.pageSize);
+      this.pageIndex.set(0);
+      this.fetchPage('first');
+      return;
+    }
+
+    const lastIndex = Math.max(0, Math.ceil(this.effectiveTotal() / this.pageSize()) - 1);
+    let nav: 'first' | 'next' | 'prev' | 'last';
+    if (e.pageIndex === 0) nav = 'first';
+    else if (!this.totalIsLowerBound() && e.pageIndex >= lastIndex) nav = 'last';
+    else if (e.pageIndex > (e.previousPageIndex ?? 0)) nav = 'next';
+    else nav = 'prev';
+
+    this.pageIndex.set(e.pageIndex);
+    this.fetchPage(nav);
+  }
+
+  private fetchPage(nav: 'first' | 'next' | 'prev' | 'last'): void {
+    const current = this.page();
+    const cursor = nav === 'next' ? current?.nextCursor ?? undefined
+      : nav === 'prev' ? current?.prevCursor ?? undefined
+      : undefined;
+
+    this.pageLoading.set(true);
+    this.pageSub?.unsubscribe();
+    this.pageSub = this.api.getTracePage({
+      ...this.currentFilter(),
+      // Must be the page's own resolved asOf, not summary's — see LogsComponent.fetchPage's
+      // identical note (Target API's asOf opaqueness/parallel-request rule).
+      asOf: current?.asOf ?? this.summary()?.asOf,
+      size: this.pageSize(),
+      cursor,
+      nav,
+    }).subscribe({
+      next: (result) => { this.page.set(result); this.pageLoading.set(false); },
+      error: () => this.pageLoading.set(false),
+    });
+  }
+
+  /** Clicking the "new since" banner resets `asOf` to now and returns to the first page. */
+  protected resetAsOf(): void {
+    this.summary.set(this.summary() ? { ...this.summary()!, asOf: new Date().toISOString(), newSinceAsOf: 0 } : null);
+    this.pageIndex.set(0);
+    this.reloadAll();
+  }
+
   // =========================================================================
   // EXPORT / PERMALINK
   // =========================================================================
 
-  /** The full current filtered result set (all loaded traces matching the active filters). */
+  /**
+   * The current page's rows — a full-result export needs the streamed endpoint Phase 7 adds;
+   * until then this exports what's on screen, and the export menu is labelled accordingly.
+   */
   private exportRows(): TraceInfo[] {
-    return this.refined();
+    return this.displayRows();
   }
 
-  /** Download the current filtered traces as CSV (one row per trace). */
+  /** Download the current page's traces as CSV (one row per trace). */
   protected exportCsv(): void {
     const rows = this.exportRows();
     if (!rows.length) return;
@@ -789,7 +711,7 @@ export class TraceListComponent {
     downloadCsv(`traces_${fileStamp()}.csv`, headers, data);
   }
 
-  /** Download the current filtered traces as raw JSON. */
+  /** Download the current page's traces as raw JSON. */
   protected exportJson(): void {
     const rows = this.exportRows();
     if (!rows.length) return;

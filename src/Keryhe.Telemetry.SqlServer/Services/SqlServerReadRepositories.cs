@@ -83,8 +83,8 @@ internal static class SqlServerReadConnection
     }
 }
 
-public class SqlServerTraceReadRepository(IConfiguration configuration, ITenantContext tenantContext, TraceQueryCache traceQueryCache)
-    : TraceReadRepositoryBase(tenantContext, traceQueryCache)
+public class SqlServerTraceReadRepository(IConfiguration configuration, ITenantContext tenantContext)
+    : TraceReadRepositoryBase(tenantContext)
 {
     private readonly string _connectionString = configuration.GetConnectionString("Api")!;
 
@@ -108,6 +108,17 @@ public class SqlServerTraceReadRepository(IConfiguration configuration, ITenantC
     protected override object AttributeKeyParamValue(string key) => SqlServerJsonAttributeHooks.KeyParamValue(key);
     protected override string AttributePredicate(string column, string keyParam, string valueParam, bool negated)
         => SqlServerJsonAttributeHooks.Predicate(column, keyParam, valueParam, negated);
+
+    // SqlServer dialect: LIKE is case-insensitive under the default collation, and LIKE wildcards
+    // escape with square brackets -- see SqlServerLogReadRepository's identical overrides.
+    protected override string LikeOperator => "LIKE";
+    protected override string EscapeLike(string value)
+        => value.Replace("[", "[[]").Replace("%", "[%]").Replace("_", "[_]");
+
+    // Decision 3/Phase 3 pin helper: SqlServer's created_at default is evaluated at statement
+    // execution (not transaction start like Postgres/Timescale) -- see SqlServerLogReadRepository's
+    // identical override.
+    protected override string DatabaseClockNowExpr => "SYSDATETIME()";
 }
 
 public class SqlServerMetricReadRepository(IConfiguration configuration, ITenantContext tenantContext)

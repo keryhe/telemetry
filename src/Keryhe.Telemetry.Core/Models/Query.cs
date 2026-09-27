@@ -1,29 +1,5 @@
 namespace Keryhe.Telemetry.Core.Models;
 
-// =============================================================================
-// PAGED READ QUERIES + RESULT ENVELOPE
-//
-// Server-side pagination/filtering for the logs and traces list pages. The read
-// repositories translate these into SQL predicates + LIMIT/OFFSET (logs) or an
-// ordered-then-paged projection (traces) and report the full filtered total so the
-// UI can render a real "showing X of Y" paginator instead of pulling whole result
-// sets into the browser.
-// =============================================================================
-
-/// <summary>A single page of results plus the total number of rows that matched the filter.</summary>
-public sealed class PagedResult<T>
-{
-    public IReadOnlyList<T> Items { get; init; } = Array.Empty<T>();
-
-    /// <summary>Total rows matching the filter across all pages (before <c>Offset</c>/<c>Limit</c>).</summary>
-    public int Total { get; init; }
-
-    /// <summary>True when the server stopped short of scanning the full result set (best-effort total).</summary>
-    public bool Capped { get; init; }
-
-    public static PagedResult<T> Empty { get; } = new();
-}
-
 /// <summary>
 /// Server-side filter for the logs list page's <c>summary</c>/<c>page</c>/<c>facets</c> endpoints
 /// (list-pages-server-side plan, Phase 2). Replaces the offset-paged <c>LogQuery</c>: <c>Search</c>
@@ -144,7 +120,14 @@ public sealed class LogFacetsResult
     public List<LogFacet> Facets { get; init; } = [];
 }
 
-/// <summary>Server-side filter + paging for the traces list page.</summary>
+/// <summary>
+/// Server-side filter + keyset paging for the traces list page (list-pages-server-side plan,
+/// Phase 3). Replaces the offset-paged <c>TraceQuery</c> of the list-page-scale plan: <c>Search</c>
+/// carries the raw <c>q</c> text (a <c>tag=key:value</c> token is absorbed into it as a
+/// <c>key:value</c> term — Target API), parsed server-side, and paging is keyset
+/// (<see cref="Cursor"/>/<see cref="Nav"/>) pinned on <see cref="AsOf"/> (decision 3) rather than
+/// offset-based. There is no <c>Sort</c>/<c>Dir</c> (decision 4): every mode pages newest-anchor-first.
+/// </summary>
 public sealed class TraceQuery
 {
     public DateTime Start { get; init; }
@@ -159,69 +142,90 @@ public sealed class TraceQuery
     /// <summary>Only traces containing a span with this operation (span name), when set.</summary>
     public string? Operation { get; init; }
 
-    /// <summary>Minimum trace duration in milliseconds (only meaningful for <c>slow</c> mode).</summary>
+    /// <summary>Minimum trace duration in milliseconds, applied to the anchor span's own duration (decision 4). Only meaningful for <c>slow</c> mode.</summary>
     public double? MinDurationMs { get; init; }
 
-    /// <summary>Maximum trace duration in milliseconds (only meaningful for <c>slow</c> mode).</summary>
+    /// <summary>Maximum trace duration in milliseconds, applied to the anchor span's own duration. Only meaningful for <c>slow</c> mode.</summary>
     public double? MaxDurationMs { get; init; }
 
-    /// <summary>All-span tag predicates: a trace matches only if <em>some</em> span satisfies each.</summary>
-    public IReadOnlyList<TagFilter> Tags { get; init; } = Array.Empty<TagFilter>();
+    /// <summary>Raw search text (decision 10): free text, <c>key:value</c>/<c>key=value</c>, negation, trace id — parsed server-side, matched against any span in the trace (decision 9).</summary>
+    public string? Search { get; init; }
 
-    /// <summary>Sort key: <c>duration</c> | <c>spans</c> | <c>time</c> | <c>service</c> | <c>operation</c>. Null = mode default.</summary>
-    public string? Sort { get; init; }
+    /// <summary>Page size, clamped 1-500 by the repository.</summary>
+    public int Size { get; init; } = 100;
 
-    /// <summary><c>asc</c> | <c>desc</c> (default <c>desc</c>).</summary>
-    public string Dir { get; init; } = "desc";
+    /// <summary>Opaque keyset cursor from a previous page, or null for the first page.</summary>
+    public string? Cursor { get; init; }
 
-    public int Limit { get; init; } = 100;
-    public int Offset { get; init; }
+    /// <summary><c>first</c> | <c>next</c> | <c>prev</c> | <c>last</c> (decision 1).</summary>
+    public string Nav { get; init; } = "first";
+
+    /// <summary>The ingestion-time pin (decision 3) — see <see cref="LogQuery.AsOf"/>'s doc comment for the exact same contract.</summary>
+    public DateTime? AsOf { get; init; }
 }
 
-/// <summary>Server-side filter for the traces/logs volume histogram (no paging — evenly-spaced buckets over the whole filtered range).</summary>
-public sealed class HistogramQuery
+/// <summary>Filter for <c>GET /api/traces/summary</c> (list-pages-server-side plan, Phase 3, Target API).</summary>
+public sealed class TraceSummaryQuery
 {
     public DateTime Start { get; init; }
     public DateTime End { get; init; }
 
-    /// <summary>Number of evenly-spaced buckets to divide <c>[Start,End)</c> into.</summary>
-    public int BucketCount { get; init; } = 24;
-
-    // Trace-only filters (ignored by the log histogram).
     /// <summary><c>all</c> | <c>errors</c> | <c>slow</c>.</summary>
     public string Mode { get; init; } = "all";
     public string? Service { get; init; }
     public string? Operation { get; init; }
     public double? MinDurationMs { get; init; }
     public double? MaxDurationMs { get; init; }
-    public IReadOnlyList<TagFilter> Tags { get; init; } = Array.Empty<TagFilter>();
-
-    // Log-only filters (ignored by the trace histogram).
-    public int? MinSeverity { get; init; }
     public string? Search { get; init; }
+    public DateTime? AsOf { get; init; }
 
-    // Latency-bucket grid dimensions (ignored by GetTraceHistogramAsync; used only by
-    // GetTraceOverviewAsync's LatencyBuckets — trace-latency-p50 plan, Phase 3). Configurable so
-    // the client can match the grid to its rendered chart width/height.
-    public int LatencyTimeCols { get; init; } = 48;
+    /// <summary>Target bucket count for the raw-path fallback; the rollup path aligns to whole minutes/hours instead (Target API's "Summary source" note).</summary>
+    public int BucketCount { get; init; } = 60;
+
+    /// <summary>Latency heatmap row count (time columns come from <see cref="BucketCount"/>).</summary>
     public int LatencyDurationRows { get; init; } = 20;
+}
 
-    // Items paging/sort (ignored by GetTraceHistogramAsync; used only by GetTraceOverviewAsync's
-    // Items/Total — list-page-scale plan, Phase 2). Same semantics as the matching TraceQuery
-    // fields: the traces list page's table now comes from this same scan instead of a second,
-    // non-slim /search call.
-    /// <summary>Sort key: <c>duration</c> | <c>spans</c> | <c>time</c> | <c>service</c> | <c>operation</c>. Null = mode default.</summary>
-    public string? Sort { get; init; }
-    public string Dir { get; init; } = "desc";
-    public int Limit { get; init; } = 100;
-    public int Offset { get; init; }
+/// <summary><c>GET /api/traces/summary</c>'s response (Target API).</summary>
+public sealed class TraceSummaryResult
+{
+    /// <summary><c>"rollup"</c> or <c>"raw"</c> (Target API's "Summary source" note).</summary>
+    public string Source { get; init; } = "raw";
+    public List<TraceVolumeBucket> Buckets { get; init; } = [];
 
-    /// <summary>
-    /// Row cap for the dashboard's <see cref="TraceOverview.RecentErrors"/>/
-    /// <see cref="TraceOverview.SlowestTraces"/> (list-page-scale plan, Phase 2). Clamped small
-    /// server-side — the dashboard only ever renders a handful of rows per table.
-    /// </summary>
-    public int SampleSize { get; init; } = 5;
+    /// <summary>Window-wide totals/percentiles over inbound-request roots (decision 13), including <see cref="TraceWindowSummary.LastTraceStartTime"/>.</summary>
+    public TraceWindowSummary Summary { get; init; } = new();
+    public List<ServiceStats> Services { get; init; } = [];
+    public List<TraceLatencyBucket> LatencyBuckets { get; init; } = [];
+
+    /// <summary>The paginator's population: every trace (roots plus <see cref="Models.TraceWindowSummary"/>'s orphan anchors), always computed on the raw path (decision 13/Target API).</summary>
+    public long ListTotal { get; init; }
+
+    /// <summary>The cards' population: inbound-request anchors only (decision 13).</summary>
+    public long RequestCount { get; init; }
+    public bool TotalIsLowerBound { get; init; }
+    public long NewSinceAsOf { get; init; }
+    public DateTime AsOf { get; init; }
+}
+
+/// <summary><c>GET /api/traces/page</c>'s response (Target API): <c>{ items[], nextCursor, prevCursor }</c>.</summary>
+public sealed class TracePageResult
+{
+    public List<TraceInfo> Items { get; init; } = [];
+    public string? NextCursor { get; init; }
+    public string? PrevCursor { get; init; }
+    public DateTime AsOf { get; init; }
+}
+
+/// <summary>Filter for <c>GET /api/traces/samples</c> (Target API): the dashboard's Recent Errors/Slowest Traces widgets.</summary>
+public sealed class TraceSamplesQuery
+{
+    public DateTime Start { get; init; }
+    public DateTime End { get; init; }
+
+    /// <summary><c>errors</c> | <c>slowest</c>.</summary>
+    public string Kind { get; init; } = "errors";
+    public int Limit { get; init; } = 5;
 }
 
 /// <summary>One bucket of the trace volume histogram.</summary>
@@ -265,62 +269,6 @@ public sealed class TraceLatencyBucket
     /// trace in the window) for no behavioral gain.
     /// </summary>
     public string? SampleTraceIdHex { get; init; }
-}
-
-/// <summary>
-/// Dashboard overview: the time-bucketed volume histogram, per-service RED stats, and the latency
-/// bucket grid, all computed from a single scan of the window's traces (see
-/// <see cref="ITraceReadRepository.GetTraceOverviewAsync"/>) — grouping the same
-/// already-materialized trace list several ways rather than querying repeatedly. Deliberately not
-/// a change to <c>GetTraceHistogramAsync</c>'s own response shape: that endpoint has a second
-/// caller (the traces list page's volume chart) that doesn't need per-service stats or the
-/// latency grid and shouldn't pay for them.
-/// </summary>
-public sealed class TraceOverview
-{
-    public List<TraceVolumeBucket> Buckets { get; init; } = [];
-    public List<ServiceStats> Services { get; init; } = [];
-
-    /// <summary>Window-wide totals and percentiles across every trace in the range.</summary>
-    public TraceWindowSummary Summary { get; init; } = new();
-
-    /// <summary>
-    /// The trace list page's latency bubble chart (trace-latency-p50 plan, Phase 3). Bounded by
-    /// the grid size (<see cref="HistogramQuery.LatencyTimeCols"/> ×
-    /// <see cref="HistogramQuery.LatencyDurationRows"/>), independent of trace volume — unlike the
-    /// former client-side approach, which binned a 1000-row capped page and so only ever covered
-    /// the most recent few minutes of any wide time range.
-    /// </summary>
-    public List<TraceLatencyBucket> LatencyBuckets { get; init; } = [];
-
-    /// <summary>
-    /// The traces list page's table rows, from this same scan (list-page-scale plan, Phase 2) —
-    /// replaces what used to be a second, independent <c>/search</c> scan over the identical
-    /// filter set and window. Unlike <see cref="Buckets"/>/<see cref="Services"/>/
-    /// <see cref="Summary"/>/<see cref="LatencyBuckets"/>, drawn from the trace list's
-    /// <em>unfiltered</em> population (no inbound-root restriction) — the table is an exploration
-    /// surface where a user must still be able to find an internal- or client-rooted trace.
-    /// Paged/sorted per <see cref="HistogramQuery.Sort"/>/<see cref="HistogramQuery.Dir"/>/
-    /// <see cref="HistogramQuery.Limit"/>/<see cref="HistogramQuery.Offset"/>.
-    /// </summary>
-    public List<TraceInfo> Items { get; init; } = [];
-
-    /// <summary>Total rows matching the filter, before paging — the paginator's "of N" count.</summary>
-    public int Total { get; init; }
-
-    /// <summary>
-    /// The dashboard's recent-errors table: newest first, top <see cref="HistogramQuery.SampleSize"/>,
-    /// drawn from the same unfiltered population as <see cref="Items"/> — not <see cref="Items"/>'s
-    /// own sort order. Replaces a separate <c>limit: 500</c> fetch of which only 5 rows were ever
-    /// rendered.
-    /// </summary>
-    public List<TraceInfo> RecentErrors { get; init; } = [];
-
-    /// <summary>
-    /// The dashboard's slowest-traces table: duration descending, top
-    /// <see cref="HistogramQuery.SampleSize"/>, same population as <see cref="RecentErrors"/>.
-    /// </summary>
-    public List<TraceInfo> SlowestTraces { get; init; } = [];
 }
 
 /// <summary>
@@ -368,41 +316,3 @@ public sealed class LogVolumeBucket
     public int Fatal { get; init; }
 }
 
-/// <summary>A single span-tag predicate for all-span trace search (<c>key:value</c> contains / <c>key=value</c> exact).</summary>
-public sealed class TagFilter
-{
-    public string Key { get; init; } = null!;
-    public string Value { get; init; } = "";
-    public bool Exact { get; init; }
-
-    /// <summary>
-    /// True for a <c>-</c>-prefixed token: exclude traces where <em>any</em> span satisfies the
-    /// predicate (rather than the near-vacuous "some span does not satisfy it").
-    /// </summary>
-    public bool Negate { get; init; }
-
-    /// <summary>
-    /// Parses one wire token: <c>key=value</c> (exact) or <c>key:value</c> (contains), each
-    /// optionally <c>-</c>-prefixed to negate. Null if malformed.
-    /// </summary>
-    public static TagFilter? Parse(string token)
-    {
-        if (string.IsNullOrWhiteSpace(token)) return null;
-        // A leading `-` excludes matches, mirroring the client search-box syntax.
-        var negate = token.StartsWith('-');
-        if (negate) token = token[1..];
-        var eq = token.IndexOf('=');
-        var colon = token.IndexOf(':');
-        // Whichever delimiter appears first wins (values may legitimately contain the other char).
-        var exact = eq >= 0 && (colon < 0 || eq < colon);
-        var at = exact ? eq : colon;
-        if (at <= 0) return null;
-        return new TagFilter
-        {
-            Key = token[..at].Trim(),
-            Value = token[(at + 1)..].Trim().Trim('"', '\''),
-            Exact = exact,
-            Negate = negate
-        };
-    }
-}

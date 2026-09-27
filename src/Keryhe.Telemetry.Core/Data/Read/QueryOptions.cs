@@ -5,7 +5,7 @@ namespace Keryhe.Telemetry.Core.Data.Read;
 /// <summary>
 /// Query-time bounds for the read path. Bound from the <c>Telemetry:Query</c> configuration
 /// section (list-pages-server-side plan, Phase 1) — same convention as
-/// <see cref="TelemetryIngestionOptions"/>/<see cref="TraceQueryCacheOptions"/>.
+/// <see cref="TelemetryIngestionOptions"/>.
 /// </summary>
 public sealed class QueryOptions
 {

@@ -13,16 +13,16 @@ namespace Keryhe.Telemetry.PostgreSQL.Services;
 // Connection comes from the host-configured NpgsqlDataSource (read connection string).
 // =============================================================================
 
-public class PostgreSqlTraceReadRepository(NpgsqlDataSource dataSource, ITenantContext tenantContext, TraceQueryCache traceQueryCache)
-    : TraceReadRepositoryBase(tenantContext, traceQueryCache)
+public class PostgreSqlTraceReadRepository(NpgsqlDataSource dataSource, ITenantContext tenantContext)
+    : TraceReadRepositoryBase(tenantContext)
 {
     protected override async Task<DbConnection> OpenConnectionAsync(CancellationToken cancellationToken)
         => await dataSource.OpenConnectionAsync(cancellationToken);
 
     // Npgsql binds a list parameter as a native array, so use = ANY(@ids) rather than
     // the base's IN @ids (which Dapper only expands for non-array providers like SqlServer).
-    protected override string SpanIdInPredicate => "s.span_id = ANY(@ids)";
-    protected override string TraceIdInPredicate => "s.trace_id = ANY(@traceIds)";
+    protected override string TraceIdInPredicate(string alias) => $"{alias}.trace_id = ANY(@traceIds)";
+    protected override string ResourceIdInPredicate => "id = ANY(@resourceIds)";
 }
 
 public class PostgreSqlMetricReadRepository(NpgsqlDataSource dataSource, ITenantContext tenantContext, IConfiguration configuration)
