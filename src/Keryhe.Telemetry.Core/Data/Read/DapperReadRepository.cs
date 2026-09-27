@@ -33,6 +33,41 @@ public abstract class DapperReadRepository
     /// <summary>Opens a provider-specific database connection for the read path.</summary>
     protected abstract Task<DbConnection> OpenConnectionAsync(CancellationToken cancellationToken);
 
+    /// <summary>
+    /// Database-clock expression for the <c>asOf</c> pin (list-pages-server-side plan, Phase 1
+    /// decision 3/Phase 2): read once per summary/page request when the caller supplies no
+    /// <c>asOf</c> of its own, then echoed back opaquely and never converted. PostgreSQL/Timescale
+    /// subtract 5 seconds to cover the transaction-start race documented on
+    /// <see cref="ResolveAsOfAsync"/>; SqlServer/MySql/ClickHouse have no equivalent race (their
+    /// <c>created_at</c> defaults are evaluated at statement execution, not transaction start) so
+    /// their overrides use the bare clock function.
+    /// </summary>
+    protected virtual string DatabaseClockNowExpr => "NOW() - INTERVAL '5 seconds'";
+
+    /// <summary>
+    /// Resolves the <c>asOf</c> pin: the caller's own value when supplied (a later page of the
+    /// same query, or the "new since" banner reset), otherwise the database's own clock via
+    /// <see cref="DatabaseClockNowExpr"/> — never the API host's clock, which can drift from the
+    /// database's and, on SqlServer/MySql, may not even share its time zone.
+    /// </summary>
+    protected async Task<DateTime> ResolveAsOfAsync(DbConnection conn, DateTime? requestedAsOf, CancellationToken cancellationToken)
+    {
+        if (requestedAsOf.HasValue)
+            return requestedAsOf.Value;
+
+        return await conn.ExecuteScalarAsync<DateTime>(new CommandDefinition(
+            $"SELECT {DatabaseClockNowExpr}", cancellationToken: cancellationToken));
+    }
+
+    /// <summary>
+    /// Wraps an idempotent read (summary/page/facets) so a provider can retry it once on a
+    /// transient error — SqlServer's read repositories override this to retry error 1205 (snapshot
+    /// update conflict / deadlock victim) with a short jittered delay (decision 35). Every other
+    /// provider's reads don't take locks that produce an equivalent transient failure, so the base
+    /// implementation just runs the operation once.
+    /// </summary>
+    protected virtual Task<T> ExecuteWithRetryAsync<T>(Func<Task<T>> operation) => operation();
+
     // =========================================================================
     // SQL DIALECT HOOKS (defaults are PostgreSQL/Timescale; SqlServer overrides)
     // =========================================================================
@@ -42,6 +77,15 @@ public abstract class DapperReadRepository
 
     /// <summary>Trailing LIMIT/OFFSET clause for a paged query; expects <c>@limit</c> and <c>@offset</c> parameters and a preceding ORDER BY.</summary>
     protected virtual string PagingClause => "LIMIT @limit OFFSET @offset";
+
+    /// <summary>
+    /// Modifier inserted right after a table alias in a rollup-table read
+    /// (<c>FROM {table} AS alias{RollupFinalHint}</c> — FINAL goes after the alias, not before it).
+    /// Empty everywhere except ClickHouse, which overrides it to <c>" FINAL"</c>: the rollup tables
+    /// are <c>ReplacingMergeTree</c>, and a minute rolled twice (decisions 37-38) collapses to its
+    /// newest row only at merge time or under <c>FINAL</c> — cheap here since these tables are small.
+    /// </summary>
+    protected virtual string RollupFinalHint => "";
 
     /// <summary>
     /// SQL expression extracting <c>service.name</c> from a resource's <c>attributes_json</c>

@@ -1,4 +1,5 @@
 using Keryhe.Telemetry.Core;
+using Keryhe.Telemetry.Core.Data.Read;
 using Keryhe.Telemetry.Core.Models;
 using Microsoft.AspNetCore.Mvc;
 
@@ -9,10 +10,12 @@ namespace Keryhe.Telemetry.Api.Controllers;
 public class LogsController : ControllerBase
 {
     private readonly ILogReadRepository _logs;
+    private readonly ProviderCapabilities _capabilities;
 
-    public LogsController(ILogReadRepository logs)
+    public LogsController(ILogReadRepository logs, ProviderCapabilities capabilities)
     {
         _logs = logs;
+        _capabilities = capabilities;
     }
 
     // GET /api/logs?start=&end=
@@ -26,54 +29,124 @@ public class LogsController : ControllerBase
         return Ok(logs);
     }
 
-    // GET /api/logs/search?start=&end=&service=&minSeverity=&q=&limit=&offset=
-    // Server-side filtered + paged logs for the logs list page.
-    [HttpGet("search")]
-    public async Task<ActionResult<PagedResult<LogRecordModel>>> SearchLogs(
+    // GET /api/logs/summary?start=&end=&asOf=&service=&minSeverity=&q=&bucketCount=
+    [HttpGet("summary")]
+    public async Task<ActionResult<LogSummaryResult>> GetSummary(
         [FromQuery] DateTime start,
         [FromQuery] DateTime end,
+        [FromQuery] DateTime? asOf = null,
         [FromQuery] string? service = null,
         [FromQuery] int? minSeverity = null,
         [FromQuery] string? q = null,
-        [FromQuery] int limit = 100,
-        [FromQuery] int offset = 0,
+        [FromQuery] int bucketCount = 60,
         CancellationToken ct = default)
     {
-        var result = await _logs.QueryLogRecordsAsync(new LogQuery
+        if (start >= end)
+            return BadRequest("Start time must be before end time.");
+
+        var guard = CheckRawSearchWindow(q, start, end);
+        if (!guard.Allowed)
+            return BadRequest(guard.Message);
+
+        var result = await _logs.GetLogSummaryAsync(new LogSummaryQuery
         {
             Start = start,
             End = end,
             Service = service,
             MinSeverity = minSeverity,
             Search = q,
-            Limit = limit,
-            Offset = offset
+            AsOf = asOf,
+            BucketCount = bucketCount
         }, ct);
         return Ok(result);
     }
 
-    // GET /api/logs/histogram?start=&end=&bucketCount=&service=&minSeverity=&q=
-    // True volume-by-severity histogram for the logs list/dashboard chart — unaffected by any row-count cap.
-    [HttpGet("histogram")]
-    public async Task<ActionResult<List<LogVolumeBucket>>> GetLogHistogram(
+    // GET /api/logs/page?start=&end=&asOf=&service=&minSeverity=&q=&size=&cursor=&nav=
+    [HttpGet("page")]
+    public async Task<ActionResult<LogPageResult>> GetPage(
         [FromQuery] DateTime start,
         [FromQuery] DateTime end,
-        [FromQuery] int bucketCount = 24,
+        [FromQuery] DateTime? asOf = null,
         [FromQuery] string? service = null,
         [FromQuery] int? minSeverity = null,
         [FromQuery] string? q = null,
+        [FromQuery] int size = 100,
+        [FromQuery] string? cursor = null,
+        [FromQuery] string nav = "first",
         CancellationToken ct = default)
     {
-        var result = await _logs.GetLogHistogramAsync(new HistogramQuery
+        if (start >= end)
+            return BadRequest("Start time must be before end time.");
+
+        var guard = CheckRawSearchWindow(q, start, end);
+        if (!guard.Allowed)
+            return BadRequest(guard.Message);
+
+        try
+        {
+            var result = await _logs.GetLogPageAsync(new LogQuery
+            {
+                Start = start,
+                End = end,
+                Service = service,
+                MinSeverity = minSeverity,
+                Search = q,
+                Size = size,
+                Cursor = cursor,
+                Nav = nav,
+                AsOf = asOf
+            }, ct);
+            return Ok(result);
+        }
+        catch (ArgumentException ex)
+        {
+            return BadRequest(ex.Message);
+        }
+    }
+
+    // GET /api/logs/facets?start=&end=&service=&minSeverity=&q=&keys=&valueLimit=
+    [HttpGet("facets")]
+    public async Task<ActionResult<LogFacetsResult>> GetFacets(
+        [FromQuery] DateTime start,
+        [FromQuery] DateTime end,
+        [FromQuery] string? service = null,
+        [FromQuery] int? minSeverity = null,
+        [FromQuery] string? q = null,
+        [FromQuery] string? keys = null,
+        [FromQuery] int valueLimit = 10,
+        CancellationToken ct = default)
+    {
+        if (start >= end)
+            return BadRequest("Start time must be before end time.");
+
+        var guard = CheckRawSearchWindow(q, start, end);
+        if (!guard.Allowed)
+            return BadRequest(guard.Message);
+
+        var result = await _logs.GetLogFacetsAsync(new LogFacetsQuery
         {
             Start = start,
             End = end,
-            BucketCount = bucketCount,
             Service = service,
             MinSeverity = minSeverity,
-            Search = q
+            Search = q,
+            Keys = string.IsNullOrWhiteSpace(keys) ? null : keys.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries),
+            ValueLimit = valueLimit
         }, ct);
         return Ok(result);
+    }
+
+    /// <summary>
+    /// Decision 39's standard-tier raw-search-window guard. A trace-id-shaped <c>q</c> is exempt
+    /// (indexed lookup); any other non-empty <c>q</c> counts as a raw search filter. <c>mode=slow</c>
+    /// has no logs equivalent, so that exemption/trigger doesn't apply here.
+    /// </summary>
+    private RawSearchWindowGuard.Result CheckRawSearchWindow(string? q, DateTime start, DateTime end)
+    {
+        var parsed = SearchQueryParser.Parse(q);
+        var hasRawSearchFilter = parsed.Terms.Count > 0;
+        var isExempt = parsed.IsTraceIdSearch;
+        return RawSearchWindowGuard.Check(_capabilities, hasRawSearchFilter, isExempt, end - start);
     }
 
     // GET /api/logs/by-trace/{traceId}

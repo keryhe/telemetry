@@ -284,6 +284,17 @@ CREATE TABLE IF NOT EXISTS log_records
 ENGINE = MergeTree
 PARTITION BY toYYYYMMDD(fromUnixTimestamp64Nano(time_unix_nano))
 ORDER BY (time_unix_nano, resource_id);
+-- Schema 2.13.0 (decision on the keyset tiebreak index, list-pages-server-side plan phase 2):
+-- the other four providers add an explicit (time_unix_nano DESC, id DESC) index for
+-- GetLogPageAsync's keyset paging. No equivalent is added here: this table's own ORDER BY
+-- already begins with time_unix_nano, so `ORDER BY time_unix_nano DESC, id DESC LIMIT n`
+-- reads the MergeTree's sorted parts back-to-front (ClickHouse's read-in-order optimization
+-- applies to a prefix of the sorting key in either direction) and only needs an in-memory
+-- sort for ties within the same time_unix_nano -- and `id` here is
+-- Keryhe.Telemetry.ClickHouse's monotonic per-process RowId generator, not a value ingestion
+-- can duplicate across a batch, so same-nanosecond ties are effectively never contested. No
+-- secondary index/projection was added; revisit with `EXPLAIN` if a live workload shows
+-- otherwise.
 
 -- =============================================================================
 -- ALERTING
@@ -335,6 +346,68 @@ CREATE TABLE IF NOT EXISTS retention_settings
 )
 ENGINE = ReplacingMergeTree
 ORDER BY id;
+
+-- =============================================================================
+-- ROLLUPS (schema 2.13.0, list-pages-server-side plan decisions 37-38)
+-- =============================================================================
+
+-- One row per signal + granularity. ClickHouse leases are best-effort (no atomic
+-- read-check-update like the relational providers' UPDATE ... WHERE lease_expires_at < now --
+-- see the alert-rule CRUD "control-plane is best-effort" notes for the same pattern), so two
+-- API instances can briefly both believe they hold the lease; ReplacingMergeTree on the
+-- summary tables below is what makes a double-rolled minute harmless.
+CREATE TABLE IF NOT EXISTS rollup_state
+(
+    signal_name                   String,
+    granularity              String,
+    coverage_start_unix_nano Nullable(Int64),
+    rolled_until_unix_nano   Int64 DEFAULT 0,
+    repassed_until_unix_nano Int64 DEFAULT 0,
+    lease_owner              Nullable(String),
+    lease_expires_at         DateTime64(9) DEFAULT toDateTime64(0, 9)
+)
+ENGINE = ReplacingMergeTree
+ORDER BY (signal_name, granularity);
+
+-- Per-minute log summary, recomputed from raw log_records by RollupWorker -- never
+-- incremented during ingestion (decision 38). Severity groups match
+-- LogReadRepositoryBase.GetLogHistogramAsync's six-group CASE exactly.
+-- ReplacingMergeTree(rolled_at): a minute rolled twice (by two API instances, since the lease
+-- above is best-effort) collapses to the newest row at merge time; reads use FINAL, cheap on
+-- tables this small.
+CREATE TABLE IF NOT EXISTS log_rollup_minute
+(
+    bucket_unix_nano Int64,
+    resource_id      Int64,
+    trace_count      Int32 DEFAULT 0,
+    debug_count      Int32 DEFAULT 0,
+    info_count       Int32 DEFAULT 0,
+    warn_count       Int32 DEFAULT 0,
+    error_count      Int32 DEFAULT 0,
+    fatal_count      Int32 DEFAULT 0,
+    rolled_at        DateTime64(9) DEFAULT now64(9)
+)
+ENGINE = ReplacingMergeTree(rolled_at)
+PARTITION BY toYYYYMMDD(fromUnixTimestamp64Nano(bucket_unix_nano))
+ORDER BY (bucket_unix_nano, resource_id);
+
+-- Same shape, one row per hour.
+CREATE TABLE IF NOT EXISTS log_rollup_hour
+(
+    bucket_unix_nano Int64,
+    resource_id      Int64,
+    trace_count      Int32 DEFAULT 0,
+    debug_count      Int32 DEFAULT 0,
+    info_count       Int32 DEFAULT 0,
+    warn_count       Int32 DEFAULT 0,
+    error_count      Int32 DEFAULT 0,
+    fatal_count      Int32 DEFAULT 0,
+    rolled_at        DateTime64(9) DEFAULT now64(9)
+)
+ENGINE = ReplacingMergeTree(rolled_at)
+ORDER BY (bucket_unix_nano, resource_id);
+
+INSERT INTO rollup_state (signal_name, granularity) VALUES ('logs', 'minute'), ('logs', 'hour');
 
 -- =============================================================================
 -- UTILITY
@@ -422,6 +495,9 @@ VALUES (1, 90, 90, 180);
 -- =============================================================================
 -- Only inserted when every statement above succeeded, so a partial apply cannot
 -- leave a false version marker for the apply-schema.sh gate.
+-- 2.13.0 adds rollup_state/log_rollup_minute/log_rollup_hour (decisions 37-38) and needs no
+-- change to log_records' own ORDER BY -- see the comment on that table above for why the new
+-- keyset tiebreak index the other four providers add is unnecessary here.
 -- 2.12.0 is a no-op bump for ClickHouse alone, like 2.8.0 before it: the other four providers add
 -- idx_spans_error (a status_code-filtered index) for mode=errors, but spans' ORDER BY (trace_id,
 -- span_id) with a daily partition already gives ClickHouse the equivalent skip behavior — see the
@@ -436,4 +512,4 @@ VALUES (1, 90, 90, 180);
 -- spans' ORDER BY (trace_id, span_id) with a daily partition already gave it what the relational
 -- providers got from the four indexes they dropped (see PostgreSQL-Schema.sql), and it has no
 -- GIN-style JSONB index to carry the equivalent write cost of.
-INSERT INTO schema_version (version) VALUES ('2.12.0');
+INSERT INTO schema_version (version) VALUES ('2.13.0');

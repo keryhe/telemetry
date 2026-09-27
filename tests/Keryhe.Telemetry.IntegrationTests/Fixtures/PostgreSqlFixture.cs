@@ -72,9 +72,18 @@ public sealed class PostgreSqlFixture : ProviderFixture
             """
             TRUNCATE TABLE log_records, spans, metrics,
                 gauge_data_points, sum_data_points, histogram_data_points,
-                exponential_histogram_data_points, summary_data_points
+                exponential_histogram_data_points, summary_data_points,
+                log_rollup_minute, log_rollup_hour
             RESTART IDENTITY CASCADE
             """, conn);
         await cmd.ExecuteNonQueryAsync();
+
+        // Rollup coverage is process-run state (list-pages-server-side plan, Phase 2) -- reset it
+        // between test classes the same way retention/catalog rows are left alone but signal data
+        // is cleared, so a RollupWorker test in one class never leaks coverage into the next.
+        await using var resetRollupState = new NpgsqlCommand(
+            "UPDATE rollup_state SET coverage_start_unix_nano = NULL, rolled_until_unix_nano = 0, repassed_until_unix_nano = 0, lease_owner = NULL, lease_expires_at = 'epoch'",
+            conn);
+        await resetRollupState.ExecuteNonQueryAsync();
     }
 }

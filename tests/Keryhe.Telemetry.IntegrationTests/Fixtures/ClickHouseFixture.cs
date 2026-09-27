@@ -95,7 +95,8 @@ public sealed class ClickHouseFixture : ProviderFixture
         string[] tables =
         [
             "log_records", "spans", "metrics", "gauge_data_points", "sum_data_points",
-            "histogram_data_points", "exponential_histogram_data_points", "summary_data_points"
+            "histogram_data_points", "exponential_histogram_data_points", "summary_data_points",
+            "log_rollup_minute", "log_rollup_hour"
         ];
         foreach (var table in tables)
         {
@@ -103,5 +104,10 @@ public sealed class ClickHouseFixture : ProviderFixture
             cmd.CommandText = $"TRUNCATE TABLE {table}";
             await cmd.ExecuteNonQueryAsync();
         }
+
+        var resetRollupState = conn.CreateCommand();
+        resetRollupState.CommandText =
+            "ALTER TABLE rollup_state UPDATE coverage_start_unix_nano = NULL, rolled_until_unix_nano = 0, repassed_until_unix_nano = 0, lease_owner = NULL, lease_expires_at = toDateTime64(0, 9) WHERE 1 = 1";
+        await resetRollupState.ExecuteNonQueryAsync();
     }
 }

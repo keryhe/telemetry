@@ -1,7 +1,7 @@
-import { Component, computed, effect, inject, signal, untracked } from '@angular/core';
+import { Component, computed, effect, inject, signal, untracked, OnDestroy } from '@angular/core';
 import { DatePipe, DecimalPipe, SlicePipe, PercentPipe } from '@angular/common';
 import { ActivatedRoute, RouterLink } from '@angular/router';
-import { Subscription, forkJoin } from 'rxjs';
+import { Subscription } from 'rxjs';
 import { MatCardModule } from '@angular/material/card';
 import { MatFormFieldModule } from '@angular/material/form-field';
 import { MatIconModule } from '@angular/material/icon';
@@ -19,16 +19,17 @@ import { NgApexchartsModule } from 'ng-apexcharts';
 import type { ApexOptions } from 'ng-apexcharts';
 import { FormsModule } from '@angular/forms';
 
-import { LogsApiService } from '../../core/services/api/logs-api.service';
+import { LogsApiService, LogSummaryResult, LogPageResult, LogFacetsResult } from '../../core/services/api/logs-api.service';
 import { ResourcesApiService } from '../../core/services/api/resources-api.service';
 import { TimeRangeService } from '../../core/services/time-range.service';
 import { ThemeService } from '../../core/services/theme.service';
+import { CapabilitiesService } from '../../core/services/capabilities.service';
 import { LogRecord, getSeverityLabel, getSeverityColor, getSeverityBg, getServiceName, getTimestamp } from '../../core/models/log.models';
 import { StatCardComponent } from '../../shared/components/stat-card/stat-card.component';
 import { EmptyStateComponent } from '../../shared/components/empty-state/empty-state.component';
 import { PageHeaderComponent } from '../../shared/components/page-header/page-header.component';
-import { LogBucket, bucketLogs, buildLogSeriesOptions, timeRangeZoom } from '../../shared/utils/chart.utils';
-import { parseSearchQuery, ParsedSearchQuery, SearchTerm, buildAttributeTerm } from '../../shared/utils/search-query.parser';
+import { buildLogSeriesOptions, timeRangeZoom } from '../../shared/utils/chart.utils';
+import { parseSearchQuery, ParsedSearchQuery } from '../../shared/utils/search-query.parser';
 import { LogSearchHelpDialogComponent } from './log-search-help-dialog/log-search-help-dialog.component';
 import { FacetValueType, Facet } from './facet.models';
 import { FacetValuesDialogComponent, FacetValuesDialogData } from './facet-values-dialog/facet-values-dialog.component';
@@ -36,24 +37,16 @@ import { loadPageState, savePageState } from '../../shared/utils/page-state';
 import { UrlStateService } from '../../shared/utils/url-state';
 import { downloadCsv, downloadJson, copyPermalink, fileStamp } from '../../shared/utils/export.utils';
 
-const BUCKET_COUNT = 30;
+const BUCKET_COUNT = 60;
 const STATE_KEY = 'state.logs';
-/**
- * Upper bound on rows pulled for the chart/stat overview, shallow client paging, client-side
- * faceting and client-side (attribute) search. Lowered from 1000 to 250 in list-page-scale plan
- * Phase 7 §10.2 to save fetch/parse/facet-walk cost; raised back to 1000 so a client-side search
- * covers the same number of rows as the traces page, accepting that cost until attribute search
- * moves to the server. Paging past this window fetches from the server and is not bounded by it.
- */
-const OVERVIEW_CAP = 1000;
+/** How often the "new since" banner's summary re-poll runs, while the tab is visible (decision: "poll every 30s"). */
+const NEW_SINCE_POLL_MS = 30_000;
 /** Default number of attribute keys / values per key the faceting sidebar shows (raised via "show more"). */
 const FACET_KEY_LIMIT = 15;
 const FACET_VALUE_LIMIT = 8;
 /** How many fields / values each "show more" click reveals. */
 const FACET_KEY_STEP = 15;
 const FACET_VALUE_STEP = 10;
-/** Upper bound on values retained per key (protects the "show all" dialog against pathological cardinality). */
-const FACET_VALUE_HARD_CAP = 500;
 
 function escapeHtml(s: string): string {
   return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
@@ -67,6 +60,21 @@ function escapeRegExp(s: string): string {
 function splitTerms(query: string): string[] {
   const t = query.trim();
   return t ? t.split(' AND ').map((s) => s.trim()).filter(Boolean) : [];
+}
+
+function buildAttributeTerm(key: string, value: string, exclude: boolean): string {
+  const needsQuotes = /[\s:="]/.test(value);
+  const quoted = needsQuotes ? `"${value.replace(/"/g, '\\"')}"` : value;
+  return `${exclude ? '-' : ''}${key}:${quoted}`;
+}
+
+/** Heuristic type inference over a server facet's already-stringified values, for the type glyph. */
+function inferFacetType(values: { value: string }[]): FacetValueType {
+  if (values.length === 0) return 'string';
+  const allBool = values.every((v) => v.value === 'true' || v.value === 'false');
+  if (allBool) return 'boolean';
+  const allNumeric = values.every((v) => v.value !== '' && !isNaN(Number(v.value)));
+  return allNumeric ? 'number' : 'string';
 }
 
 @Component({
@@ -83,7 +91,7 @@ function splitTerms(query: string): string[] {
   templateUrl: './logs.component.html',
   styleUrl: './logs.component.scss',
 })
-export class LogsComponent {
+export class LogsComponent implements OnDestroy {
   private readonly api = inject(LogsApiService);
   private readonly resourcesApi = inject(ResourcesApiService);
   private readonly timeRange = inject(TimeRangeService);
@@ -91,6 +99,7 @@ export class LogsComponent {
   private readonly route = inject(ActivatedRoute);
   private readonly dialog = inject(MatDialog);
   private readonly urlState = inject(UrlStateService);
+  private readonly capabilitiesService = inject(CapabilitiesService);
 
   private readonly saved = loadPageState(STATE_KEY, {
     searchText: '',
@@ -100,22 +109,25 @@ export class LogsComponent {
     facetsCollapsed: true,
   });
 
-  protected loading = signal(true);
-  /** Bounded, most-recent slice used for shallow/client paging and faceting. */
-  protected overview = signal<LogRecord[]>([]);
-  /** True (unbounded) volume-by-severity histogram — backs the chart and the error/warn stat cards. */
-  protected histogram = signal<LogBucket[]>([]);
-  /** A single server-fetched page, used only when paging beyond the overview window. */
-  private serverPage = signal<LogRecord[]>([]);
-  /** True while a deep server page is in flight — shown as loading, not as an empty result. */
-  protected pageLoading = signal(false);
-  private serverPageSub?: Subscription;
-  protected total = signal(0);
-  protected capped = signal(false);
+  protected summaryLoading = signal(true);
+  protected pageLoading = signal(true);
+  protected summary = signal<LogSummaryResult | null>(null);
+  protected page = signal<LogPageResult | null>(null);
+  protected facetsResult = signal<LogFacetsResult | null>(null);
+  private pageSub?: Subscription;
+  private summarySub?: Subscription;
+  private facetsSub?: Subscription;
+  private newSincePollHandle?: ReturnType<typeof setInterval>;
+
+  /** Trace-id-filter mode (query-param jump from a trace link) bypasses summary/page/facets entirely. */
+  protected traceLogs = signal<LogRecord[]>([]);
+  protected traceLogsLoading = signal(false);
+
+  protected capabilities = this.capabilitiesService.capabilities;
 
   /**
    * Applied query — what parsing, filtering, refetching, the URL and saved state read. Changes
-   * only on submit (or a facet toggle), so typing never re-runs `refined()`/`facetCounts()`.
+   * only on submit (or a facet toggle), so typing never re-runs anything server-side.
    */
   protected searchText = signal<string>(this.urlState.get('q') ?? this.saved.searchText);
   /** Draft text in the search box; applied to `searchText` by `submitSearch()`. */
@@ -149,17 +161,13 @@ export class LogsComponent {
   protected contextLoading = signal(false);
   protected contextAnchor = signal<LogRecord | null>(null);
 
-  protected pageIndex = signal(this.readNum('page') ?? 0);
+  /** Tracked client-side (decision 1: keyset paging has no server-side page number). Reset on any filter change. */
+  protected pageIndex = signal(0);
   protected pageSize = signal(this.readNum('size') ?? this.saved.pageSize);
-  // 1000 dropped (list-page-scale plan, Phase 8) — see trace-list.component.ts's identical change
-  // for why this, not virtualization, is what shipped.
   protected readonly pageSizeOptions = [100, 250, 500];
 
   /** Distinct services in range for the dropdown — fetched independently of the paged rows. */
   protected services = signal<string[]>([]);
-
-  /** Suppress the reset-to-page-0 on the very first load so a shared ?page=N is honored. */
-  private firstOverview = true;
 
   protected severityOptions = [
     { num: 9, label: 'Info' },
@@ -171,93 +179,80 @@ export class LogsComponent {
   protected parsedQuery = computed<ParsedSearchQuery>(() => parseSearchQuery(this.searchText()));
   protected isTraceIdSearch = computed(() => this.parsedQuery().isTraceIdSearch);
 
-  // The trace id currently driving a server-side fetch: query-param banner takes
-  // precedence, otherwise a trace-id typed into the search box.
-  protected activeTraceId = computed<string | null>(() => {
-    if (this.traceIdFilter()) return this.traceIdFilter();
-    const q = this.parsedQuery();
-    return q.isTraceIdSearch ? q.traceId! : null;
-  });
+  /** The whole raw search text goes to the server now (decision 10: parsed server-side). */
+  private serverQuery = computed(() => this.searchText().trim());
 
-  /** Free-text portion of the query offloaded to the server (attribute terms stay client-side). */
-  private serverQuery = computed(() =>
-    this.parsedQuery().terms.filter((t) => !t.isAttributeFilter).map((t) => t.freeText ?? '').join(' ').trim()
+  /** True while the query-param trace-id jump is active (a distinct navigation, not the search box's own trace-id detection). */
+  protected traceFilterActive = computed(() => this.traceIdFilter().length > 0);
+
+  /** Rows for the current page: the trace-filter's full unbounded set, or the current server page. */
+  protected displayRows = computed<LogRecord[]>(() =>
+    this.traceFilterActive() ? this.traceLogs() : (this.page()?.items ?? [])
   );
-  /** Attribute filters (`key:value`) the API can't express yet — refined client-side over the overview. */
-  private attributeTerms = computed(() => this.parsedQuery().terms.filter((t) => t.isAttributeFilter));
-  /** True when we must page/filter the overview client-side rather than trusting server offsets. */
-  protected clientMode = computed(() => this.activeTraceId() != null || this.attributeTerms().length > 0);
 
-  /** Client-side refinement (trace mode + attribute terms) applied over the overview set. */
-  private refined = computed(() => {
-    let result = this.overview();
-    const terms = this.attributeTerms();
-    if (terms.length > 0) result = this.applyParsedSearch(result, terms);
-    return result;
+  protected loading = computed(() => this.traceFilterActive() ? this.traceLogsLoading() : this.summaryLoading());
+
+  protected effectiveTotal = computed(() => this.traceFilterActive() ? this.traceLogs().length : (this.summary()?.total ?? 0));
+  protected totalIsLowerBound = computed(() => !this.traceFilterActive() && (this.summary()?.totalIsLowerBound ?? false));
+
+  protected errorCount = computed(() => {
+    if (this.traceFilterActive()) return 0;
+    const s = this.summary();
+    return s ? s.buckets.reduce((a, b) => a + b.error + b.fatal, 0) : 0;
+  });
+  protected warnCount = computed(() => {
+    if (this.traceFilterActive()) return 0;
+    const s = this.summary();
+    return s ? s.buckets.reduce((a, b) => a + b.warn, 0) : 0;
   });
 
-  /** Real length behind the paginator: server total normally, refined length in client mode. */
-  protected effectiveTotal = computed(() => this.clientMode() ? this.refined().length : this.total());
+  /** "N new since …" banner — hidden while trace-filtered or before the first summary lands. */
+  protected newSinceCount = computed(() => this.traceFilterActive() ? 0 : (this.summary()?.newSinceAsOf ?? 0));
 
   /**
-   * Attribute facets over the currently-filtered rows: each key's full value list with counts,
-   * inferred type, per-value bar width (pct) and share. Counts reflect all other active filters
-   * (computed over the refined set) — but not the search box's own free text, so this stays
-   * cheap to type into. Purely client-side over the loaded overview — the key/value display
-   * limits are applied downstream, not here.
+   * Standard-tier search window limit, explained inline next to the search box (decision 39):
+   * shown only when a raw search filter is present and the window exceeds the limit. Fetched via
+   * CapabilitiesService, not derived from a failed request, so it shows up front rather than
+   * after a 400.
    */
-  protected facetCounts = computed<Facet[]>(() => {
-    const rows = this.refined();
-    const byKey = new Map<string, Map<string, number>>();
-    const keyType = new Map<string, FacetValueType>();
-    for (const l of rows) {
-      const scopeAttrs = (l.instrumentationScope as { attributes?: Record<string, unknown> } | null)?.attributes;
-      for (const bag of [l.attributes, l.resource?.attributes, scopeAttrs]) {
-        if (!bag) continue;
-        for (const [k, raw] of Object.entries(bag)) {
-          if (raw == null || raw === '' || k === 'Timestamp') continue;
-          // First-seen non-null type wins (mixed-type keys are rare); default to 'string'.
-          if (!keyType.has(k)) {
-            const t = typeof raw;
-            keyType.set(k, t === 'number' || t === 'boolean' ? t : 'string');
-          }
-          const value = String(raw);
-          let values = byKey.get(k);
-          if (!values) { values = new Map(); byKey.set(k, values); }
-          values.set(value, (values.get(value) ?? 0) + 1);
-        }
-      }
-    }
-
-    return [...byKey.entries()]
-      .map(([key, values]) => {
-        const total = [...values.values()].reduce((a, b) => a + b, 0);
-        const maxCount = Math.max(...values.values());
-        const all = [...values.entries()]
-          .map(([value, count]) => ({
-            value, count,
-            pct: maxCount > 0 ? (count / maxCount) * 100 : 0,
-            share: total > 0 ? count / total : 0,
-            active: false,
-            excluded: false,
-          }))
-          .sort((a, b) => b.count - a.count)
-          .slice(0, FACET_VALUE_HARD_CAP);
-        return { key, type: keyType.get(key) ?? 'string', values: all, distinct: values.size, total };
-      })
-      // Most-covering keys first; ties broken alphabetically for stable ordering.
-      .sort((a, b) => b.total - a.total || a.key.localeCompare(b.key));
+  protected rawSearchWindowMessage = computed<string | null>(() => {
+    const caps = this.capabilities();
+    if (caps.rawSearchWindowHours == null) return null;
+    if (this.parsedQuery().terms.length === 0) return null;
+    const { start, end } = this.timeRange.range();
+    const hours = (end.getTime() - start.getTime()) / 3_600_000;
+    if (hours <= caps.rawSearchWindowHours) return null;
+    return `Search is limited to a ${caps.rawSearchWindowHours}-hour window on ${caps.tier} tier. Narrow the time range or remove the search.`;
   });
 
-  /**
-   * `facetCounts()` decorated with active/excluded per the search box. Split out from the
-   * counting above so a keystroke — which changes `searchText()` but not `refined()` — only
-   * re-marks the already-built structure instead of re-walking every row × attribute bag
-   * (list-page-scale plan, Phase 1).
-   */
+  /** Facets adapted from the server's already-counted sample into the sidebar's `Facet` shape. */
+  private facetsBase = computed<Facet[]>(() => {
+    const result = this.facetsResult();
+    if (!result) return [];
+    return result.facets.map((f) => {
+      const total = f.values.reduce((a, v) => a + v.count, 0);
+      const maxCount = Math.max(1, ...f.values.map((v) => v.count));
+      return {
+        key: f.key,
+        type: inferFacetType(f.values),
+        distinct: f.values.length,
+        total,
+        values: f.values.map((v) => ({
+          value: v.value,
+          count: v.count,
+          pct: (v.count / maxCount) * 100,
+          share: total > 0 ? v.count / total : 0,
+          active: false,
+          excluded: false,
+        })),
+      };
+    });
+  });
+
+  /** `facetsBase()` decorated with active/excluded per the search box. */
   protected facets = computed<Facet[]>(() => {
     const parts = new Set(splitTerms(this.searchText()));
-    return this.facetCounts().map((f) => ({
+    return this.facetsBase().map((f) => ({
       ...f,
       values: f.values.map((v) => ({
         ...v,
@@ -276,28 +271,8 @@ export class LogsComponent {
   /** Facets actually rendered in the sidebar: filtered, then capped to the current key-limit. */
   protected visibleFacets = computed<Facet[]>(() => this.filteredFacets().slice(0, this.facetKeyLimit()));
 
-  /** Rows for the current page — a client slice of the overview, or the fetched server page. */
-  protected displayRows = computed(() => {
-    const start = this.pageIndex() * this.pageSize();
-    if (this.clientMode()) return this.refined().slice(start, start + this.pageSize());
-    if (this.needsServerPage()) return this.serverPage();
-    return this.overview().slice(start, start + this.pageSize());
-  });
-
-  /**
-   * Buckets behind the chart and the Errors/Warnings cards. Normally the server histogram (exact,
-   * full filtered range — plain-text search included, since `q` goes to the server). During an
-   * attribute search the histogram can't see the attribute terms, so bucket the searched rows
-   * (`refined()`) locally instead — the same `bucketLogs` trace mode uses — keeping the cards and
-   * chart consistent with the Total Logs card and the pager.
-   */
-  private displayBuckets = computed<LogBucket[]>(() => {
-    if (this.attributeTerms().length === 0) return this.histogram();
-    const { start, end } = this.timeRange.range();
-    return bucketLogs(this.refined(), start, end, BUCKET_COUNT);
-  });
-  protected errorCount = computed(() => this.displayBuckets().reduce((a, b) => a + b.error + b.fatal, 0));
-  protected warnCount = computed(() => this.displayBuckets().reduce((a, b) => a + b.warn, 0));
+  /** "latest N matches" sample-size label for the facets sidebar footer. */
+  protected facetSampleSize = computed(() => this.facetsResult()?.sampleSize ?? 0);
 
   protected chartOptions = signal<ApexOptions>({});
 
@@ -315,53 +290,61 @@ export class LogsComponent {
     const traceId = this.route.snapshot.queryParamMap.get('traceId');
     if (traceId) this.traceIdFilter.set(traceId);
 
-    // Tenant-wide, signal-agnostic — fetched once, not on every overview reload.
+    // Tenant-wide, signal-agnostic — fetched once, not on every reload.
     this.resourcesApi.getServices().subscribe({
       next: (services) => this.services.set(services),
     });
 
-    // Overview + total: reload when the time range or any server-side filter changes.
+    // Reload summary + page (in parallel) whenever the time range or any server-side filter
+    // changes, or the trace-id-filter query param toggles. asOf resets so a fresh one is
+    // captured for the new query (decision 3's handshake).
     effect(() => {
-      const activeTrace = this.activeTraceId();
+      const trace = this.traceFilterActive();
       this.selectedService();
       this.selectedSeverity();
       this.serverQuery();
-      if (!activeTrace) this.timeRange.range();
+      if (!trace) this.timeRange.range();
 
       untracked(() => {
-        if (!this.firstOverview) this.pageIndex.set(0);
-        this.firstOverview = false;
-        if (activeTrace) this.loadByTrace(activeTrace);
-        else this.loadOverview();
+        this.pageIndex.set(0);
+        if (trace) this.loadByTraceFilter(this.traceIdFilter());
+        else this.reloadAll();
       });
     });
 
-    // Deep server page: fetch only when paging past the overview window in pure server mode.
+    // Facets: fetched only while the sidebar is expanded, re-fetched on filter change.
     effect(() => {
-      this.pageIndex(); this.pageSize();
-      this.selectedService(); this.selectedSeverity(); this.serverQuery();
-      if (!this.activeTraceId()) this.timeRange.range();
-      untracked(() => { if (this.needsServerPage()) this.loadServerPage(); });
+      const collapsed = this.facetsCollapsed();
+      const trace = this.traceFilterActive();
+      this.selectedService();
+      this.selectedSeverity();
+      this.serverQuery();
+      if (!trace) this.timeRange.range();
+
+      untracked(() => {
+        if (!collapsed && !trace) this.loadFacets();
+        else this.facetsResult.set(null);
+      });
     });
 
-    // Mirror filter/paging state into the URL (shareable/deep-linkable).
+    // Mirror filter state into the URL (shareable/deep-linkable). No `page`/`offset` (decision:
+    // keyset paging has no such parameter); the cursor itself isn't persisted across navigation.
     effect(() => {
       this.urlState.patch({
         q: this.searchText() || null,
         service: this.selectedService() || null,
         severity: this.selectedSeverity() >= 0 ? this.selectedSeverity() : null,
-        page: this.pageIndex() > 0 ? this.pageIndex() : null,
         size: this.pageSize() !== 100 ? this.pageSize() : null,
       });
     });
 
-    // Adopt filter/paging params on back/forward navigation.
+    // Adopt filter params on back/forward navigation.
     this.urlState.changes().subscribe(() => this.readStateFromUrl());
 
-    // Chart follows displayBuckets: the server histogram, or the searched rows during an attribute search.
+    // Chart follows the summary's buckets.
     effect(() => {
-      const buckets = this.displayBuckets();
-      untracked(() => this.buildChart(buckets));
+      const s = this.summary();
+      untracked(() => this.buildChart(s?.buckets ?? []));
     });
 
     effect(() => {
@@ -373,123 +356,78 @@ export class LogsComponent {
         facetsCollapsed: this.facetsCollapsed(),
       });
     });
+
+    // "New since" banner: re-poll the summary every 30s while the tab is visible.
+    this.newSincePollHandle = setInterval(() => {
+      if (document.visibilityState === 'visible' && !this.traceFilterActive()) this.pollSummary();
+    }, NEW_SINCE_POLL_MS);
   }
 
-  /** Whether the current page falls outside the loaded overview and must be fetched from the server. */
-  private needsServerPage(): boolean {
-    if (this.clientMode()) return false;
-    const start = this.pageIndex() * this.pageSize();
-    return this.overview().length < this.total() && start + this.pageSize() > this.overview().length;
+  ngOnDestroy(): void {
+    if (this.newSincePollHandle) clearInterval(this.newSincePollHandle);
+    this.pageSub?.unsubscribe();
+    this.summarySub?.unsubscribe();
+    this.facetsSub?.unsubscribe();
   }
 
-  private loadOverview(): void {
-    this.loading.set(true);
+  private currentFilter() {
     const { start, end } = this.timeRange.range();
-    const filters = {
-      service: this.selectedService() || undefined,
-      minSeverity: this.selectedSeverity() >= 0 ? this.selectedSeverity() : undefined,
-      q: this.serverQuery() || undefined,
-    };
-    forkJoin({
-      page: this.api.searchLogs({ start, end, ...filters, limit: OVERVIEW_CAP, offset: 0 }),
-      histogram: this.api.getLogHistogram({ start, end, bucketCount: BUCKET_COUNT, ...filters }),
-    }).subscribe({
-      next: ({ page, histogram }) => {
-        this.overview.set(page.items);
-        // The search endpoint's total stops at 10,000 (LogReadRepositoryBase.LogTotalCap, to keep
-        // that count cheap); the histogram is an exact GROUP BY over the same filters, so its sum
-        // is the real total — which the stat card and pager (and deep paging) need.
-        this.total.set(histogram.reduce((a, b) => a + b.trace + b.debug + b.info + b.warn + b.error + b.fatal, 0));
-        this.capped.set(page.total > page.items.length);
-        this.histogram.set(histogram);
-        this.loading.set(false);
-        this.settlePage();
-      },
-      error: () => this.loading.set(false),
-    });
-  }
-
-  private loadServerPage(): void {
-    const { start, end } = this.timeRange.range();
-    // Drop any in-flight page so a slower, older response can't overwrite this one.
-    this.serverPageSub?.unsubscribe();
-    this.serverPage.set([]);
-    this.pageLoading.set(true);
-    this.serverPageSub = this.api.searchLogs({
+    return {
       start, end,
       service: this.selectedService() || undefined,
       minSeverity: this.selectedSeverity() >= 0 ? this.selectedSeverity() : undefined,
       q: this.serverQuery() || undefined,
-      limit: this.pageSize(), offset: this.pageIndex() * this.pageSize(),
-    }).subscribe({
-      next: (res) => { this.serverPage.set(res.items); this.pageLoading.set(false); },
+    };
+  }
+
+  /** Fires `summary` and `page` in parallel for the first page of a (new) query. */
+  private reloadAll(): void {
+    this.summaryLoading.set(true);
+    this.pageLoading.set(true);
+    this.page.set(null);
+
+    this.summarySub?.unsubscribe();
+    this.summarySub = this.api.getLogSummary({ ...this.currentFilter(), bucketCount: BUCKET_COUNT }).subscribe({
+      next: (result) => { this.summary.set(result); this.summaryLoading.set(false); },
+      error: () => this.summaryLoading.set(false),
+    });
+
+    this.pageSub?.unsubscribe();
+    this.pageSub = this.api.getLogPage({ ...this.currentFilter(), size: this.pageSize(), nav: 'first' }).subscribe({
+      next: (result) => { this.page.set(result); this.pageLoading.set(false); },
       error: () => this.pageLoading.set(false),
     });
   }
 
-  /**
-   * Run once the overview has landed. The deep-page effect first runs at construction, before
-   * `overview`/`total` are known, and doesn't track them — so a page restored from the URL on
-   * reload would never be fetched. Clamp a restored page that no longer exists (a relative window
-   * that slid to fewer rows); otherwise fetch the deep page if it is one. Clamping re-triggers the
-   * deep-page effect itself, so it returns without fetching.
-   */
-  private settlePage(): void {
-    const lastPage = Math.max(0, Math.ceil(this.effectiveTotal() / this.pageSize()) - 1);
-    if (this.pageIndex() > lastPage) { this.pageIndex.set(lastPage); return; }
-    if (this.needsServerPage()) this.loadServerPage();
-  }
-
-  private loadByTrace(traceId: string): void {
-    this.loading.set(true);
-    this.api.getLogsByTrace(traceId).subscribe({
-      next: (logs) => {
-        this.overview.set(logs);
-        this.total.set(logs.length);
-        this.capped.set(false);
-        // Small, deterministic per-trace set — bucket locally rather than round-tripping.
-        const { start, end } = this.timeRange.range();
-        const buckets = bucketLogs(logs, start, end, BUCKET_COUNT);
-        this.histogram.set(buckets);
-        this.loading.set(false);
-      },
-      error: () => this.loading.set(false),
+  /** Re-polls only the summary, pinned on the query's existing `asOf`, for the "new since" banner. */
+  private pollSummary(): void {
+    const asOf = this.summary()?.asOf ?? this.page()?.asOf;
+    this.api.getLogSummary({ ...this.currentFilter(), asOf, bucketCount: BUCKET_COUNT }).subscribe({
+      next: (result) => this.summary.set(result),
     });
   }
 
-  private applyParsedSearch(logs: LogRecord[], terms: SearchTerm[]): LogRecord[] {
-    let result = logs;
-    for (const term of terms) {
-      const negate = term.negate ?? false;
-      if (term.isAttributeFilter) {
-        const key = term.key!;
-        const value = (term.value ?? '').toLowerCase();
-        const exact = term.isExactMatch;
-        result = result.filter((l) => this.matchesAttribute(l, key, value, exact) !== negate);
-      } else {
-        const text = (term.freeText ?? '').toLowerCase();
-        result = result.filter((l) => ((l.bodyValue?.toLowerCase().includes(text)) ?? false) !== negate);
-      }
-    }
-    return result;
+  private loadFacets(): void {
+    this.facetsSub?.unsubscribe();
+    this.facetsSub = this.api.getLogFacets(this.currentFilter()).subscribe({
+      next: (result) => this.facetsResult.set(result),
+    });
   }
 
-  private matchesAttribute(log: LogRecord, key: string, value: string, exact: boolean): boolean {
-    const scopeAttrs = (log.instrumentationScope as { attributes?: Record<string, unknown> } | null)?.attributes;
-    for (const bag of [log.attributes, log.resource?.attributes, scopeAttrs]) {
-      if (bag && Object.prototype.hasOwnProperty.call(bag, key)) {
-        const v = String(bag[key] ?? '').toLowerCase();
-        if (exact ? v === value : v.includes(value)) return true;
-      }
-    }
-    return false;
+  private loadByTraceFilter(traceId: string): void {
+    this.traceLogsLoading.set(true);
+    this.api.getLogsByTrace(traceId).subscribe({
+      next: (logs) => {
+        this.traceLogs.set(logs);
+        this.traceLogsLoading.set(false);
+      },
+      error: () => this.traceLogsLoading.set(false),
+    });
   }
 
-  private buildChart(buckets: LogBucket[]): void {
+  private buildChart(buckets: LogSummaryResult['buckets']): void {
     const { start, end } = this.timeRange.range();
     const isDark = this.theme.isDark();
-    // Use the shared base as-is (datetime axis, legend, visible grid) so this
-    // matches the Dashboard log chart, then layer on drag-to-select zoom.
     const base = buildLogSeriesOptions(buckets, isDark, 180);
 
     this.chartOptions.set({
@@ -510,18 +448,16 @@ export class LogsComponent {
     return Number.isFinite(n) ? n : null;
   }
 
-  /** Pull filter/paging state from the URL (back/forward). Idempotent: only differing values are set. */
+  /** Pull filter state from the URL (back/forward). Idempotent: only differing values are set. */
   private readStateFromUrl(): void {
     const q = this.urlState.get('q') ?? '';
     const service = this.urlState.get('service') ?? '';
     const severity = this.readNum('severity') ?? -1;
-    const page = this.readNum('page') ?? 0;
     const size = this.readNum('size') ?? this.saved.pageSize;
     if (this.searchText() !== q) { this.searchText.set(q); this.searchInput.set(q); }
     if (this.selectedService() !== service) this.selectedService.set(service);
     if (this.selectedSeverity() !== severity) this.selectedSeverity.set(severity);
     if (this.pageSize() !== size) this.pageSize.set(size);
-    if (this.pageIndex() !== page) this.pageIndex.set(page);
   }
 
   protected toggleRow(row: LogRecord): void {
@@ -535,20 +471,63 @@ export class LogsComponent {
     return this.expandedRow() === row;
   }
 
+  /**
+   * Maps MatPaginator's page event onto a keyset `nav` (decision 1: no arbitrary page jump).
+   * `showFirstLastButtons` only ever moves the index by ±1 or straight to the first/last computed
+   * page, so the direction is unambiguous from the index delta.
+   */
   protected onPage(e: PageEvent): void {
+    if (e.pageSize !== this.pageSize()) {
+      this.pageSize.set(e.pageSize);
+      this.pageIndex.set(0);
+      this.fetchPage('first');
+      return;
+    }
+
+    const lastIndex = Math.max(0, Math.ceil(this.effectiveTotal() / this.pageSize()) - 1);
+    let nav: 'first' | 'next' | 'prev' | 'last';
+    if (e.pageIndex === 0) nav = 'first';
+    else if (!this.totalIsLowerBound() && e.pageIndex >= lastIndex) nav = 'last';
+    else if (e.pageIndex > (e.previousPageIndex ?? 0)) nav = 'next';
+    else nav = 'prev';
+
     this.pageIndex.set(e.pageIndex);
-    this.pageSize.set(e.pageSize);
+    this.fetchPage(nav);
   }
 
-  // Filter edits reset to the first page (user changes; URL restores keep their page).
+  private fetchPage(nav: 'first' | 'next' | 'prev' | 'last'): void {
+    const current = this.page();
+    const cursor = nav === 'next' ? current?.nextCursor ?? undefined
+      : nav === 'prev' ? current?.prevCursor ?? undefined
+      : undefined;
+
+    this.pageLoading.set(true);
+    this.pageSub?.unsubscribe();
+    this.pageSub = this.api.getLogPage({
+      ...this.currentFilter(),
+      // Must be the page's own resolved asOf, not summary's: the cursor being sent was minted
+      // against the page response's asOf, and the server rejects a cursor whose filter hash
+      // (which covers asOf) doesn't match the request's — summary and page resolve asOf
+      // independently when reloadAll() fires them in parallel with neither specifying one, so
+      // preferring summary's here would reject every next/prev/last click with a stale-cursor 400.
+      asOf: current?.asOf ?? this.summary()?.asOf,
+      size: this.pageSize(),
+      cursor,
+      nav,
+    }).subscribe({
+      next: (result) => { this.page.set(result); this.pageLoading.set(false); },
+      error: () => this.pageLoading.set(false),
+    });
+  }
+
+  // Filter edits reset to the first page.
   protected onSearchChange(value: string): void {
     this.searchInput.set(value);
     this.searchText.set(value);
-    this.pageIndex.set(0);
   }
   protected submitSearch(): void { this.onSearchChange(this.searchInput().trim()); }
-  protected onServiceChange(value: string): void { this.selectedService.set(value); this.pageIndex.set(0); }
-  protected onSeverityChange(value: number): void { this.selectedSeverity.set(value); this.pageIndex.set(0); }
+  protected onServiceChange(value: string): void { this.selectedService.set(value); }
+  protected onSeverityChange(value: number): void { this.selectedSeverity.set(value); }
 
   protected openSearchHelp(): void {
     this.dialog.open(LogSearchHelpDialogComponent, { maxWidth: '720px', width: '90vw' });
@@ -558,16 +537,31 @@ export class LogsComponent {
     this.traceIdFilter.set('');
   }
 
+  /**
+   * Clicking the "new since" banner resets `asOf` to now and returns to the first page. The
+   * placeholder value here is overwritten within the same tick by reloadAll()'s own summary
+   * response (currentFilter() carries no asOf, so the server resolves a fresh one) — it only
+   * needs to zero the banner count optimistically, not be a real, usable asOf itself.
+   */
+  protected resetAsOf(): void {
+    this.summary.set(this.summary() ? { ...this.summary()!, asOf: new Date().toISOString(), newSinceAsOf: 0 } : null);
+    this.pageIndex.set(0);
+    this.reloadAll();
+  }
+
   // =========================================================================
   // EXPORT / PERMALINK
   // =========================================================================
 
-  /** The full current filtered result set (all loaded rows matching the active filters). */
+  /**
+   * The current page's rows — a full-result export needs the streamed endpoint Phase 7 adds;
+   * until then this exports what's on screen, and the export menu is labelled accordingly.
+   */
   private exportRows(): LogRecord[] {
-    return this.refined();
+    return this.displayRows();
   }
 
-  /** Download the current filtered logs as CSV (one row per log; attributes JSON-encoded). */
+  /** Download the current page's logs as CSV (one row per log; attributes JSON-encoded). */
   protected exportCsv(): void {
     const rows = this.exportRows();
     if (!rows.length) return;
@@ -584,7 +578,7 @@ export class LogsComponent {
     downloadCsv(`logs_${fileStamp()}.csv`, headers, data);
   }
 
-  /** Download the current filtered logs as raw JSON. */
+  /** Download the current page's logs as raw JSON. */
   protected exportJson(): void {
     const rows = this.exportRows();
     if (!rows.length) return;

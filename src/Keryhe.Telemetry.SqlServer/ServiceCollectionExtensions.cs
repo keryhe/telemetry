@@ -34,6 +34,7 @@ public static class SqlServerServiceCollectionExtensions
         services.AddScoped<IAlertRuleRepository, SqlServerAlertRuleRepository>();
         services.AddScoped<ITenantCatalogRepository, SqlServerTenantCatalogRepository>();
         services.AddScoped<IRetentionSettingsRepository, SqlServerRetentionSettingsRepository>();
+        services.AddScoped<IRollupRepository, SqlServerLogRollupRepository>();
         services.AddSingleton(ProviderCapabilities.FromConfiguration(ProviderTier.Standard, configuration));
         return services;
     }

@@ -67,10 +67,10 @@ public class GlobalController : ControllerBase
 
         var query = new HistogramQuery { Start = start, End = end, BucketCount = bucketCount };
 
-        // One bucket, because the card wants window totals rather than a log time series. The log
-        // histogram is a SQL GROUP BY aggregate (unlike the trace path, which materializes spans),
-        // so this adds far less per tenant than the overview call it sits beside.
-        var logQuery = new HistogramQuery { Start = start, End = end, BucketCount = 1 };
+        // One bucket, because the card wants window totals rather than a log time series.
+        // Unfiltered (time only), so GetLogSummaryAsync reads the rollup tables when coverage
+        // allows — a few small queries per tenant instead of GetLogHistogramAsync's raw GROUP BY.
+        var logQuery = new LogSummaryQuery { Start = start, End = end, BucketCount = 1 };
 
         var results = new List<GlobalTenantStatsDto>(tenants.Count);
 
@@ -90,8 +90,8 @@ public class GlobalController : ControllerBase
             {
                 _tenantContext.SetTenantId(tenant.Id);
                 var overview = await _traces.GetTraceOverviewAsync(query, ct);
-                var logs = await _logs.GetLogHistogramAsync(logQuery, ct);
-                results.Add(ToDto(tenant, overview, logs, lastSeenUtc));
+                var logSummary = await _logs.GetLogSummaryAsync(logQuery, ct);
+                results.Add(ToDto(tenant, overview, logSummary, lastSeenUtc));
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
@@ -114,14 +114,16 @@ public class GlobalController : ControllerBase
     }
 
     private static GlobalTenantStatsDto ToDto(
-        TenantInfo tenant, TraceOverview overview, List<LogVolumeBucket> logs, DateTime? lastSeenUtc)
+        TenantInfo tenant, TraceOverview overview, LogSummaryResult logSummary, DateTime? lastSeenUtc)
     {
         var summary = overview.Summary;
 
-        // Summed rather than read off a single bucket: GetLogHistogramAsync returns one row per
-        // *non-empty* bucket, so a window with no logs yields an empty list, not a zeroed row.
-        var logCount = logs.Sum(b => b.Trace + b.Debug + b.Info + b.Warn + b.Error + b.Fatal);
-        var logErrorCount = logs.Sum(b => b.Error + b.Fatal);
+        // Summed over the (at most one, since BucketCount == 1) bucket(s) GetLogSummaryAsync
+        // returns — unlike the retired GetLogHistogramAsync, it always returns a full bucket grid
+        // rather than omitting empty ones, so this sum is 0 for a quiet tenant rather than an
+        // empty list.
+        var logCount = logSummary.Buckets.Sum(b => b.Trace + b.Debug + b.Info + b.Warn + b.Error + b.Fatal);
+        var logErrorCount = logSummary.Buckets.Sum(b => b.Error + b.Fatal);
 
         // Prefer the in-window maximum when the tenant is active: it is exact and needs no
         // second query. Fall back to the unbounded lookback for a tenant that sent nothing in
@@ -138,8 +140,8 @@ public class GlobalController : ControllerBase
             P95Ms = summary.P95Ms,
             P99Ms = summary.P99Ms,
             ServiceCount = summary.ServiceCount,
-            LogCount = logCount,
-            LogErrorCount = logErrorCount,
+            LogCount = (int)logCount,
+            LogErrorCount = (int)logErrorCount,
             LastSeenUtc = lastSeen,
             Buckets = overview.Buckets,
         };

@@ -4,30 +4,38 @@ import { Observable } from 'rxjs';
 import { map } from 'rxjs/operators';
 import { APP_CONFIG } from '../../config/app-config';
 import { LogRecord } from '../../models/log.models';
-import { PagedResult } from '../../models/paged.models';
-import { LogBucket } from '../../../shared/utils/chart.utils';
 
-export interface LogSearchQuery {
+/** Filter shape shared by summary/page/facets (list-pages-server-side plan, Phase 2 Target API). */
+export interface LogFilter {
   start: Date;
   end: Date;
+  // Opaque and never parsed into a Date (decision 3: "returned to the client opaquely and never
+  // converted"): the server's asOf carries sub-millisecond precision that a JS Date can't hold,
+  // so round-tripping it through `new Date(...)`/`.toISOString()` silently truncates it and
+  // breaks the keyset cursor's filter-hash check on the very next page/next/prev/last request.
+  asOf?: string;
   service?: string;
   minSeverity?: number;
   q?: string;
-  limit: number;
-  offset: number;
 }
 
-export interface LogHistogramQuery {
-  start: Date;
-  end: Date;
+export interface LogSummaryQuery extends LogFilter {
   bucketCount?: number;
-  service?: string;
-  minSeverity?: number;
-  q?: string;
 }
 
-/** Wire shape of a log histogram bucket (backend field is `timestamp`, not `time`). */
-interface LogVolumeBucketDto {
+export interface LogPageQuery extends LogFilter {
+  size: number;
+  cursor?: string;
+  nav?: 'first' | 'next' | 'prev' | 'last';
+}
+
+export interface LogFacetsQuery extends LogFilter {
+  keys?: string[];
+  valueLimit?: number;
+}
+
+/** Wire shape of one summary bucket (backend field is `timestamp`, not `time`). */
+interface LogSummaryBucketDto {
   timestamp: string;
   trace: number;
   debug: number;
@@ -35,6 +43,63 @@ interface LogVolumeBucketDto {
   warn: number;
   error: number;
   fatal: number;
+}
+
+export interface LogSummaryBucket {
+  time: Date;
+  trace: number;
+  debug: number;
+  info: number;
+  warn: number;
+  error: number;
+  fatal: number;
+}
+
+interface LogSummaryDto {
+  source: 'rollup' | 'raw';
+  buckets: LogSummaryBucketDto[];
+  total: number;
+  totalIsLowerBound: boolean;
+  newSinceAsOf: number;
+  asOf: string;
+}
+
+export interface LogSummaryResult {
+  source: 'rollup' | 'raw';
+  buckets: LogSummaryBucket[];
+  total: number;
+  totalIsLowerBound: boolean;
+  newSinceAsOf: number;
+  asOf: string;
+}
+
+interface LogPageDto {
+  items: LogRecord[];
+  nextCursor: string | null;
+  prevCursor: string | null;
+  asOf: string;
+}
+
+export interface LogPageResult {
+  items: LogRecord[];
+  nextCursor: string | null;
+  prevCursor: string | null;
+  asOf: string;
+}
+
+export interface LogFacetValue {
+  value: string;
+  count: number;
+}
+
+export interface LogFacet {
+  key: string;
+  values: LogFacetValue[];
+}
+
+export interface LogFacetsResult {
+  sampleSize: number;
+  facets: LogFacet[];
 }
 
 @Injectable({ providedIn: 'root' })
@@ -49,34 +114,44 @@ export class LogsApiService {
     return this.http.get<LogRecord[]>(this.base, { params });
   }
 
-  /** Server-side filtered + paged logs for the logs list page. */
-  searchLogs(query: LogSearchQuery): Observable<PagedResult<LogRecord>> {
-    let params = new HttpParams()
-      .set('start', query.start.toISOString())
-      .set('end', query.end.toISOString())
-      .set('limit', query.limit)
-      .set('offset', query.offset);
-    if (query.service) params = params.set('service', query.service);
-    if (query.minSeverity != null && query.minSeverity >= 0) params = params.set('minSeverity', query.minSeverity);
-    if (query.q) params = params.set('q', query.q);
-    return this.http.get<PagedResult<LogRecord>>(`${this.base}/search`, { params });
+  /** Chart/stat-card summary — the "new since" count and per-severity bucket counts (decisions 3, 37). */
+  getLogSummary(query: LogSummaryQuery): Observable<LogSummaryResult> {
+    let params = this.filterParams(query).set('bucketCount', query.bucketCount ?? 60);
+    return this.http.get<LogSummaryDto>(`${this.base}/summary`, { params }).pipe(
+      map((dto) => ({
+        source: dto.source,
+        buckets: dto.buckets.map((b) => ({
+          time: new Date(b.timestamp),
+          trace: b.trace, debug: b.debug, info: b.info, warn: b.warn, error: b.error, fatal: b.fatal,
+        })),
+        total: dto.total,
+        totalIsLowerBound: dto.totalIsLowerBound,
+        newSinceAsOf: dto.newSinceAsOf,
+        asOf: dto.asOf,
+      }))
+    );
   }
 
-  /** True volume-by-severity histogram (unaffected by any row-count cap) for the logs chart. */
-  getLogHistogram(query: LogHistogramQuery): Observable<LogBucket[]> {
-    let params = new HttpParams()
-      .set('start', query.start.toISOString())
-      .set('end', query.end.toISOString())
-      .set('bucketCount', query.bucketCount ?? 24);
-    if (query.service) params = params.set('service', query.service);
-    if (query.minSeverity != null && query.minSeverity >= 0) params = params.set('minSeverity', query.minSeverity);
-    if (query.q) params = params.set('q', query.q);
-    return this.http.get<LogVolumeBucketDto[]>(`${this.base}/histogram`, { params }).pipe(
-      map((buckets) => buckets.map((b) => ({
-        time: new Date(b.timestamp),
-        trace: b.trace, debug: b.debug, info: b.info, warn: b.warn, error: b.error, fatal: b.fatal,
-      })))
+  /** Keyset-paged log rows (decision 1), pinned on `asOf` (decision 3). */
+  getLogPage(query: LogPageQuery): Observable<LogPageResult> {
+    let params = this.filterParams(query).set('size', query.size).set('nav', query.nav ?? 'first');
+    if (query.cursor) params = params.set('cursor', query.cursor);
+    return this.http.get<LogPageDto>(`${this.base}/page`, { params }).pipe(
+      map((dto) => ({
+        items: dto.items,
+        nextCursor: dto.nextCursor,
+        prevCursor: dto.prevCursor,
+        asOf: dto.asOf,
+      }))
     );
+  }
+
+  /** Server-side attribute facets over the newest matching rows (decision 15). */
+  getLogFacets(query: LogFacetsQuery): Observable<LogFacetsResult> {
+    let params = this.filterParams(query);
+    if (query.keys?.length) params = params.set('keys', query.keys.join(','));
+    if (query.valueLimit != null) params = params.set('valueLimit', query.valueLimit);
+    return this.http.get<LogFacetsResult>(`${this.base}/facets`, { params });
   }
 
   getLogsByTrace(traceId: string): Observable<LogRecord[]> {
@@ -91,5 +166,16 @@ export class LogsApiService {
       .set('after', after);
     if (service) params = params.set('service', service);
     return this.http.get<LogRecord[]>(`${this.base}/context`, { params });
+  }
+
+  private filterParams(query: LogFilter): HttpParams {
+    let params = new HttpParams()
+      .set('start', query.start.toISOString())
+      .set('end', query.end.toISOString());
+    if (query.asOf) params = params.set('asOf', query.asOf);
+    if (query.service) params = params.set('service', query.service);
+    if (query.minSeverity != null && query.minSeverity >= 0) params = params.set('minSeverity', query.minSeverity);
+    if (query.q) params = params.set('q', query.q);
+    return params;
   }
 }

@@ -308,12 +308,69 @@ CREATE TABLE log_records (
     CONSTRAINT fk_log_records_resources FOREIGN KEY (resource_id) REFERENCES resources (id),
     CONSTRAINT fk_log_records_scopes    FOREIGN KEY (scope_id)    REFERENCES instrumentation_scopes (id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
-CREATE INDEX idx_log_time          ON log_records (time_unix_nano          DESC);
+-- idx_log_time dropped in 2.13.0: it is a pure left prefix of idx_log_time_id below, the new
+-- keyset-paging tiebreak index (same provably-redundant reasoning as the 2.8.0 spans index
+-- cleanup documented in CLAUDE.md).
+CREATE INDEX idx_log_time_id       ON log_records (time_unix_nano DESC, id DESC);
 CREATE INDEX idx_observed_time     ON log_records (observed_time_unix_nano  DESC);
 CREATE INDEX idx_severity          ON log_records (severity_number);
 CREATE INDEX idx_log_severity_time ON log_records (severity_number, time_unix_nano DESC);
 CREATE INDEX idx_log_trace_span    ON log_records (trace_id, span_id);
 CREATE INDEX idx_log_resource_time ON log_records (resource_id, time_unix_nano DESC);
+
+-- =============================================================================
+-- ROLLUP TABLES (schema 2.13.0, list-pages-server-side plan decisions 37-38)
+-- =============================================================================
+
+-- One row per signal + granularity, claimed by RollupWorker with an atomic
+-- UPDATE ... WHERE lease_expires_at < now, the same pattern as alert_rules'
+-- TryClaimFireAsync. No foreign keys: the worker's writes must never lock resources or
+-- anything ingestion touches.
+CREATE TABLE rollup_state (
+    signal_name                   VARCHAR(20)  NOT NULL,
+    granularity              VARCHAR(10)  NOT NULL,
+    coverage_start_unix_nano BIGINT,
+    rolled_until_unix_nano   BIGINT       NOT NULL DEFAULT 0,
+    repassed_until_unix_nano BIGINT       NOT NULL DEFAULT 0,
+    lease_owner              VARCHAR(100),
+    lease_expires_at         DATETIME(6)  NOT NULL DEFAULT '1970-01-01 00:00:00',
+    PRIMARY KEY (signal_name, granularity)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- Per-minute log summary, recomputed from raw log_records by RollupWorker -- never
+-- incremented during ingestion (decision 38). Severity groups match
+-- LogReadRepositoryBase.GetLogHistogramAsync's six-group CASE exactly. No foreign key on
+-- resource_id: the worker's writes must never lock resources.
+CREATE TABLE log_rollup_minute (
+    bucket_unix_nano BIGINT NOT NULL,
+    resource_id      BIGINT NOT NULL,
+    trace_count      INT    NOT NULL DEFAULT 0,
+    debug_count      INT    NOT NULL DEFAULT 0,
+    info_count       INT    NOT NULL DEFAULT 0,
+    warn_count       INT    NOT NULL DEFAULT 0,
+    error_count      INT    NOT NULL DEFAULT 0,
+    fatal_count      INT    NOT NULL DEFAULT 0,
+    PRIMARY KEY (bucket_unix_nano, resource_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+CREATE INDEX idx_log_rollup_minute_bucket ON log_rollup_minute (bucket_unix_nano);
+
+-- Same shape, one row per hour.
+CREATE TABLE log_rollup_hour (
+    bucket_unix_nano BIGINT NOT NULL,
+    resource_id      BIGINT NOT NULL,
+    trace_count      INT    NOT NULL DEFAULT 0,
+    debug_count      INT    NOT NULL DEFAULT 0,
+    info_count       INT    NOT NULL DEFAULT 0,
+    warn_count       INT    NOT NULL DEFAULT 0,
+    error_count      INT    NOT NULL DEFAULT 0,
+    fatal_count      INT    NOT NULL DEFAULT 0,
+    PRIMARY KEY (bucket_unix_nano, resource_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+CREATE INDEX idx_log_rollup_hour_bucket ON log_rollup_hour (bucket_unix_nano);
+
+-- Seed the two rows this phase needs (logs/minute, logs/hour); phase 3 adds traces/*.
+INSERT INTO rollup_state (signal_name, granularity) VALUES ('logs', 'minute'), ('logs', 'hour')
+ON DUPLICATE KEY UPDATE signal_name = signal_name;
 
 -- =============================================================================
 -- UTILITY TABLES
@@ -481,7 +538,7 @@ GROUP BY severity_text, severity_number, day_bucket;
 -- Only inserted when every statement above succeeded, so a partial apply cannot
 -- leave a false version marker for the apply-schema.sh gate.
 INSERT INTO schema_version (version, applied_at)
-VALUES ('2.12.0', CURRENT_TIMESTAMP(6))
+VALUES ('2.13.0', CURRENT_TIMESTAMP(6))
 ON DUPLICATE KEY UPDATE applied_at = CURRENT_TIMESTAMP(6);
 
 -- =============================================================================

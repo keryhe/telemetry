@@ -97,6 +97,11 @@ public class MySqlLogReadRepository(IConfiguration configuration, ITenantContext
     protected override string PagingClause => "LIMIT @limit OFFSET @offset";
     // MySQL LIKE uses backslash as the default escape character (matches the Postgres base default).
 
+    // Decision 3/Phase 2 pin helper: MySQL's created_at default is evaluated at statement
+    // execution (not transaction start like Postgres/Timescale), so no 5-second back-off is
+    // needed here. Microsecond precision matches the column's DATETIME(6).
+    protected override string DatabaseClockNowExpr => "CURRENT_TIMESTAMP(6)";
+
     // MySQL's `/` always yields a DECIMAL result even for integer operands; DIV keeps histogram
     // bucket-index math as true integer floor division.
     protected override string BucketIndexExpr(string numerator, string denominator) => $"({numerator} DIV {denominator})";
@@ -129,6 +134,28 @@ public class MySqlTenantCatalogRepository(IConfiguration configuration)
         await conn.OpenAsync(cancellationToken);
         return conn;
     }
+}
+
+/// <summary>
+/// MySQL implementation of <see cref="IRollupRepository"/>. The recompute's <c>INSERT ... SELECT</c>
+/// runs at READ COMMITTED explicitly: under InnoDB's default REPEATABLE READ it would take shared
+/// locks on the <c>log_records</c> rows it reads, blocking ingestion.
+/// </summary>
+public class MySqlLogRollupRepository(IConfiguration configuration) : LogRollupRepositoryBase
+{
+    private readonly string _connectionString = configuration.GetConnectionString("Api")!;
+
+    protected override async Task<DbConnection> OpenConnectionAsync(CancellationToken cancellationToken)
+    {
+        var conn = new MySqlConnection(_connectionString);
+        await conn.OpenAsync(cancellationToken);
+        return conn;
+    }
+
+    protected override string IntDivExpr(string numerator, string denominator) => $"({numerator} DIV {denominator})";
+
+    protected override async Task<DbTransaction> BeginRecomputeTransactionAsync(DbConnection conn, CancellationToken cancellationToken)
+        => await conn.BeginTransactionAsync(System.Data.IsolationLevel.ReadCommitted, cancellationToken);
 }
 
 public class MySqlAlertRuleRepository(IConfiguration configuration, ITenantContext tenantContext)
@@ -188,8 +215,13 @@ public class MySqlRetentionSettingsRepository(IConfiguration configuration)
     public override Task<int> DeleteOldMetricDataPointsAsync(TimeSpan retentionPeriod, CancellationToken cancellationToken = default)
         => SweepAsync(TelemetryIngestionHelpers.TimePrunedMetricTables, "time_unix_nano", retentionPeriod, cancellationToken);
 
-    public override Task<int> DeleteOldLogRecordsAsync(TimeSpan retentionPeriod, CancellationToken cancellationToken = default)
-        => SweepAsync(["log_records"], "time_unix_nano", retentionPeriod, cancellationToken);
+    public override async Task<int> DeleteOldLogRecordsAsync(TimeSpan retentionPeriod, CancellationToken cancellationToken = default)
+    {
+        var removed = await SweepAsync(["log_records"], "time_unix_nano", retentionPeriod, cancellationToken);
+        await using var conn = await OpenConnectionAsync(cancellationToken);
+        await SweepLogRollupTablesAsync(conn, CutoffNano(retentionPeriod), cancellationToken);
+        return removed;
+    }
 
     /// <summary>
     /// Deletes every row in <paramref name="tables"/> whose <paramref name="timeColumn"/> predates the

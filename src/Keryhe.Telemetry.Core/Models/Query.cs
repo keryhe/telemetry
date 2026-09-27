@@ -24,7 +24,13 @@ public sealed class PagedResult<T>
     public static PagedResult<T> Empty { get; } = new();
 }
 
-/// <summary>Server-side filter + paging for the logs list page.</summary>
+/// <summary>
+/// Server-side filter for the logs list page's <c>summary</c>/<c>page</c>/<c>facets</c> endpoints
+/// (list-pages-server-side plan, Phase 2). Replaces the offset-paged <c>LogQuery</c>: <c>Search</c>
+/// carries the raw <c>q</c> text, parsed server-side by <see cref="Data.Read.SearchQueryParser"/>,
+/// and paging is keyset (<see cref="Cursor"/>/<see cref="Nav"/>) pinned on <see cref="AsOf"/>
+/// (decision 3) rather than offset-based.
+/// </summary>
 public sealed class LogQuery
 {
     public DateTime Start { get; init; }
@@ -36,11 +42,106 @@ public sealed class LogQuery
     /// <summary>Minimum OTLP severity number (inclusive), when set.</summary>
     public int? MinSeverity { get; init; }
 
-    /// <summary>Case-insensitive substring match against the log body, when set.</summary>
+    /// <summary>Raw search text (decision 10): free text, <c>key:value</c>/<c>key=value</c>, negation — parsed server-side.</summary>
     public string? Search { get; init; }
 
-    public int Limit { get; init; } = 100;
-    public int Offset { get; init; }
+    /// <summary>Page size, clamped 1-500 by the repository.</summary>
+    public int Size { get; init; } = 100;
+
+    /// <summary>Opaque keyset cursor from a previous page, or null for the first page.</summary>
+    public string? Cursor { get; init; }
+
+    /// <summary><c>first</c> | <c>next</c> | <c>prev</c> | <c>last</c> (decision 1).</summary>
+    public string Nav { get; init; } = "first";
+
+    /// <summary>
+    /// The ingestion-time pin (decision 3): rows with <c>created_at &gt; AsOf</c> are excluded from
+    /// every page. Null on the first request of a query, at which point the repository captures it
+    /// from the database clock and returns it for the client to echo on later requests.
+    /// </summary>
+    public DateTime? AsOf { get; init; }
+}
+
+/// <summary>Filter for <c>GET /api/logs/summary</c> (list-pages-server-side plan, Phase 2, Target API).</summary>
+public sealed class LogSummaryQuery
+{
+    public DateTime Start { get; init; }
+    public DateTime End { get; init; }
+    public string? Service { get; init; }
+    public int? MinSeverity { get; init; }
+    public string? Search { get; init; }
+    public DateTime? AsOf { get; init; }
+
+    /// <summary>Target bucket count for the raw-path fallback; the rollup path aligns to whole minutes/hours instead (Target API's "Summary source" note).</summary>
+    public int BucketCount { get; init; } = 60;
+}
+
+/// <summary>One chart bucket of a log summary (list-pages-server-side plan, Phase 2), whether sourced from the rollup tables or computed raw.</summary>
+public sealed class LogSummaryBucket
+{
+    public DateTime Timestamp { get; init; }
+    public long Trace { get; init; }
+    public long Debug { get; init; }
+    public long Info { get; init; }
+    public long Warn { get; init; }
+    public long Error { get; init; }
+    public long Fatal { get; init; }
+}
+
+/// <summary><c>GET /api/logs/summary</c>'s response (Target API): <c>{ source, buckets[], total, totalIsLowerBound, newSinceAsOf }</c>.</summary>
+public sealed class LogSummaryResult
+{
+    /// <summary><c>"rollup"</c> or <c>"raw"</c> (Target API's "Summary source" note).</summary>
+    public string Source { get; init; } = "raw";
+    public List<LogSummaryBucket> Buckets { get; init; } = [];
+    public long Total { get; init; }
+    public bool TotalIsLowerBound { get; init; }
+    public long NewSinceAsOf { get; init; }
+    public DateTime AsOf { get; init; }
+}
+
+/// <summary><c>GET /api/logs/page</c>'s response (Target API): <c>{ items[], nextCursor, prevCursor }</c>.</summary>
+public sealed class LogPageResult
+{
+    public List<LogRecordModel> Items { get; init; } = [];
+    public string? NextCursor { get; init; }
+    public string? PrevCursor { get; init; }
+    public DateTime AsOf { get; init; }
+}
+
+/// <summary>Filter for <c>GET /api/logs/facets</c> (list-pages-server-side plan, Phase 2, decision 15).</summary>
+public sealed class LogFacetsQuery
+{
+    public DateTime Start { get; init; }
+    public DateTime End { get; init; }
+    public string? Service { get; init; }
+    public int? MinSeverity { get; init; }
+    public string? Search { get; init; }
+
+    /// <summary>Restrict faceting to these attribute keys; null/empty means every key seen in the sample.</summary>
+    public IReadOnlyList<string>? Keys { get; init; }
+
+    /// <summary>Top-N values kept per key.</summary>
+    public int ValueLimit { get; init; } = 10;
+}
+
+public sealed class LogFacetValue
+{
+    public string Value { get; init; } = "";
+    public int Count { get; init; }
+}
+
+public sealed class LogFacet
+{
+    public string Key { get; init; } = "";
+    public List<LogFacetValue> Values { get; init; } = [];
+}
+
+/// <summary><c>GET /api/logs/facets</c>'s response (Target API): <c>{ sampleSize, facets[] }</c>.</summary>
+public sealed class LogFacetsResult
+{
+    public int SampleSize { get; init; }
+    public List<LogFacet> Facets { get; init; } = [];
 }
 
 /// <summary>Server-side filter + paging for the traces list page.</summary>

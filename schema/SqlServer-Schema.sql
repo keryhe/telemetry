@@ -37,6 +37,15 @@ SET QUOTED_IDENTIFIER ON;
 SET ANSI_NULLS ON;
 GO
 
+-- Schema 2.13.0 (decision 35, list-pages-server-side plan): required for the read
+-- repositories' SET TRANSACTION ISOLATION LEVEL SNAPSHOT connections. Chosen over
+-- READ_COMMITTED_SNAPSHOT so ingestion's own reads (e.g. the span INSERT ... WHERE NOT
+-- EXISTS) are unaffected -- only the API's read repositories opt into SNAPSHOT explicitly.
+-- Must run as its own batch, outside any transaction (a fresh-install run like this one has
+-- none); it waits for in-flight transactions to finish but needs no single-user mode.
+ALTER DATABASE CURRENT SET ALLOW_SNAPSHOT_ISOLATION ON;
+GO
+
 -- =============================================================================
 -- COMMON TABLES (shared across signals)
 -- =============================================================================
@@ -335,13 +344,73 @@ CREATE TABLE log_records (
     CONSTRAINT fk_log_records_resources FOREIGN KEY (resource_id) REFERENCES resources (id),
     CONSTRAINT fk_log_records_scopes    FOREIGN KEY (scope_id)    REFERENCES instrumentation_scopes (id)
 );
-CREATE INDEX idx_log_time          ON log_records (time_unix_nano          DESC);
+-- idx_log_time dropped in 2.13.0: it is a pure left prefix of idx_log_time_id below, the new
+-- keyset-paging tiebreak index (same provably-redundant reasoning as the 2.8.0 spans index
+-- cleanup documented in CLAUDE.md).
+CREATE INDEX idx_log_time_id       ON log_records (time_unix_nano DESC, id DESC);
 CREATE INDEX idx_observed_time     ON log_records (observed_time_unix_nano  DESC);
 CREATE INDEX idx_severity          ON log_records (severity_number);
 CREATE INDEX idx_log_severity_time ON log_records (severity_number, time_unix_nano DESC);
 CREATE INDEX idx_log_trace_span    ON log_records (trace_id, span_id);
 CREATE INDEX idx_log_resource_time ON log_records (resource_id, time_unix_nano DESC);
 -- GIN index on attributes_json omitted: no SQL Server equivalent.
+GO
+
+-- =============================================================================
+-- ROLLUP TABLES (schema 2.13.0, list-pages-server-side plan decisions 37-38)
+-- =============================================================================
+
+-- One row per signal + granularity, claimed by RollupWorker with an atomic
+-- UPDATE ... WHERE lease_expires_at < now, the same pattern as alert_rules'
+-- TryClaimFireAsync. No foreign keys: the worker's writes must never lock resources or
+-- anything ingestion touches.
+CREATE TABLE rollup_state (
+    [signal_name]                  NVARCHAR(20)  NOT NULL,
+    granularity               NVARCHAR(10)  NOT NULL,
+    coverage_start_unix_nano  BIGINT,
+    rolled_until_unix_nano    BIGINT        NOT NULL DEFAULT 0,
+    repassed_until_unix_nano  BIGINT        NOT NULL DEFAULT 0,
+    lease_owner               NVARCHAR(100),
+    lease_expires_at          DATETIME2     NOT NULL DEFAULT '1970-01-01T00:00:00',
+    CONSTRAINT pk_rollup_state PRIMARY KEY ([signal_name], granularity)
+);
+GO
+
+-- Per-minute log summary, recomputed from raw log_records by RollupWorker -- never
+-- incremented during ingestion (decision 38). Severity groups match
+-- LogReadRepositoryBase.GetLogHistogramAsync's six-group CASE exactly. No foreign key on
+-- resource_id: the worker's writes must never lock resources.
+CREATE TABLE log_rollup_minute (
+    bucket_unix_nano BIGINT NOT NULL,
+    resource_id      BIGINT NOT NULL,
+    trace_count      INT    NOT NULL DEFAULT 0,
+    debug_count      INT    NOT NULL DEFAULT 0,
+    info_count       INT    NOT NULL DEFAULT 0,
+    warn_count       INT    NOT NULL DEFAULT 0,
+    error_count      INT    NOT NULL DEFAULT 0,
+    fatal_count      INT    NOT NULL DEFAULT 0,
+    CONSTRAINT pk_log_rollup_minute PRIMARY KEY (bucket_unix_nano, resource_id)
+);
+CREATE INDEX idx_log_rollup_minute_bucket ON log_rollup_minute (bucket_unix_nano);
+GO
+
+-- Same shape, one row per hour.
+CREATE TABLE log_rollup_hour (
+    bucket_unix_nano BIGINT NOT NULL,
+    resource_id      BIGINT NOT NULL,
+    trace_count      INT    NOT NULL DEFAULT 0,
+    debug_count      INT    NOT NULL DEFAULT 0,
+    info_count       INT    NOT NULL DEFAULT 0,
+    warn_count       INT    NOT NULL DEFAULT 0,
+    error_count      INT    NOT NULL DEFAULT 0,
+    fatal_count      INT    NOT NULL DEFAULT 0,
+    CONSTRAINT pk_log_rollup_hour PRIMARY KEY (bucket_unix_nano, resource_id)
+);
+CREATE INDEX idx_log_rollup_hour_bucket ON log_rollup_hour (bucket_unix_nano);
+GO
+
+-- Seed the two rows this phase needs (logs/minute, logs/hour); phase 3 adds traces/*.
+INSERT INTO rollup_state ([signal_name], granularity) VALUES (N'logs', N'minute'), (N'logs', N'hour');
 GO
 
 -- =============================================================================
@@ -521,7 +590,7 @@ GO
 -- Only reached when every statement above succeeded, so a partial apply cannot
 -- leave a false version marker for the apply-schema.sh gate.
 MERGE schema_version AS target
-USING (VALUES (N'2.12.0')) AS src (version)
+USING (VALUES (N'2.13.0')) AS src (version)
 ON target.version = src.version
 WHEN MATCHED     THEN UPDATE SET applied_at = SYSDATETIME()
 WHEN NOT MATCHED THEN INSERT (version, applied_at) VALUES (src.version, SYSDATETIME());

@@ -58,8 +58,15 @@ public abstract class BaselineCharacterizationTestsBase : IAsyncLifetime
         Assert.Equal(logs.Count, records.Count());
     }
 
+    /// <summary>
+    /// Replaces the retired <c>GetLogHistogramAsync</c> baseline (list-pages-server-side plan,
+    /// Phase 2: "these tests are replaced, not deleted, as each phase changes the behavior they pin
+    /// down"). No rollup coverage exists in this test (the fixture never runs RollupWorker), so
+    /// this necessarily exercises <c>GetLogSummaryAsync</c>'s raw path — the rollup-vs-raw parity
+    /// check lives in <c>RollupWorkerTests</c>.
+    /// </summary>
     [Fact]
-    public async Task LogHistogram_Totals_MatchSeededWindow()
+    public async Task LogSummary_Totals_MatchSeededWindow()
     {
         var logs = SeededDataBuilder.BasicLogWindow(_fixture.TenantId, WindowStart, count: 600);
         using (var writeScope = Scope())
@@ -68,18 +75,18 @@ public abstract class BaselineCharacterizationTestsBase : IAsyncLifetime
         using var readScope = Scope();
         var repo = readScope.ServiceProvider.GetRequiredService<ILogReadRepository>();
 
-        var buckets = await repo.GetLogHistogramAsync(new HistogramQuery
+        var summary = await repo.GetLogSummaryAsync(new LogSummaryQuery
         {
             Start = WindowStart.AddMinutes(-1),
             End = WindowStart.AddHours(1),
             BucketCount = 24
         });
 
-        var total = buckets.Sum(b => b.Trace + b.Debug + b.Info + b.Warn + b.Error + b.Fatal);
-        Assert.Equal(logs.Count, total);
+        Assert.Equal("raw", summary.Source);
+        Assert.Equal(logs.Count, summary.Total);
 
         var expectedErrors = logs.Count(l => l.SeverityNumber == 17);
-        Assert.Equal(expectedErrors, buckets.Sum(b => b.Error));
+        Assert.Equal(expectedErrors, summary.Buckets.Sum(b => b.Error));
     }
 
     [Fact]

@@ -107,6 +107,10 @@ public class Program
         // above by AddKeryheTelemetryApi.
         builder.Services.AddRetention(builder.Configuration);
 
+        // Periodic log summary rollups (list-pages-server-side plan, Phase 2). Depends on
+        // IRollupRepository, registered above by the provider registration.
+        builder.Services.AddRollups(builder.Configuration);
+
         var app = builder.Build();
 
         // ── MIDDLEWARE ────────────────────────────────────────────────────────────

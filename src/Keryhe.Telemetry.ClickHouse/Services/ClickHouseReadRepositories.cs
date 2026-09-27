@@ -111,6 +111,14 @@ public class ClickHouseLogReadRepository(IConfiguration configuration, ITenantCo
     // ClickHouse's `/` on Int64 operands promotes to Float64; intDiv keeps histogram
     // bucket-index math as true integer floor division.
     protected override string BucketIndexExpr(string numerator, string denominator) => $"intDiv({numerator}, {denominator})";
+
+    // Decision 3/Phase 2 pin helper: ClickHouse's created_at default is evaluated at statement
+    // execution, so no 5-second back-off is needed here.
+    protected override string DatabaseClockNowExpr => "now64(9)";
+
+    // Rollup tables are ReplacingMergeTree(rolled_at); FINAL collapses a minute rolled twice to
+    // its newest row without waiting for a background merge (decisions 37-38).
+    protected override string RollupFinalHint => " FINAL";
 }
 
 public class ClickHouseResourceReadRepository(IConfiguration configuration, ITenantContext tenantContext)
@@ -389,6 +397,124 @@ public class ClickHouseRetentionSettingsRepository(IConfiguration configuration)
             "DELETE FROM log_records WHERE time_unix_nano < @cutoff",
             args, cancellationToken: cancellationToken));
 
+        await conn.ExecuteAsync(new CommandDefinition(
+            "DELETE FROM log_rollup_minute WHERE bucket_unix_nano < @cutoff", args, cancellationToken: cancellationToken));
+        await conn.ExecuteAsync(new CommandDefinition(
+            "DELETE FROM log_rollup_hour WHERE bucket_unix_nano < @cutoff", args, cancellationToken: cancellationToken));
+
         return count;
+    }
+}
+
+/// <summary>
+/// ClickHouse implementation of <see cref="IRollupRepository"/>. Does not extend
+/// <see cref="LogRollupRepositoryBase"/> — that base's delete-then-insert-in-one-transaction shape
+/// doesn't fit ClickHouse (no transactions, mutations are asynchronous). Instead:
+/// <list type="bullet">
+/// <item>The lease claim is best-effort, read-check-then-update, the same "control-plane is
+/// best-effort" pattern as <c>ClickHouseAlertRuleRepository.TryClaimFireAsync</c> — acceptable
+/// because a double-rolled minute is harmless (see the next point), unlike a double-fired alert.</item>
+/// <item>A roll is a plain INSERT with a fresh <c>rolled_at</c>, never a DELETE: log_rollup_minute/
+/// _hour are <c>ReplacingMergeTree(rolled_at)</c>, so a minute rolled twice by two racing API
+/// instances collapses to the newest row at merge time, and every read goes through FINAL
+/// (<see cref="ClickHouseLogReadRepository.RollupFinalHint"/>) so it never depends on that merge
+/// having already happened.</item>
+/// </list>
+/// </summary>
+public class ClickHouseLogRollupRepository(IConfiguration configuration) : IRollupRepository
+{
+    private readonly string _connectionString = configuration.GetConnectionString("Api")!;
+
+    private Task<DbConnection> OpenConnectionAsync(CancellationToken ct) => ClickHouseConnectionFactory.OpenReadAsync(_connectionString, ct);
+
+    public async Task<bool> TryClaimLeaseAsync(string signal, string granularity, string owner, TimeSpan leaseDuration, CancellationToken ct = default)
+    {
+        await using var conn = await OpenConnectionAsync(ct);
+
+        var leaseExpiresAt = await conn.ExecuteScalarAsync<DateTime?>(new CommandDefinition(
+            "SELECT lease_expires_at FROM rollup_state WHERE signal_name = @signal AND granularity = @granularity LIMIT 1",
+            new { signal, granularity }, cancellationToken: ct));
+
+        if (leaseExpiresAt is { } expires && expires >= DateTime.UtcNow)
+            return false;
+
+        await conn.ExecuteAsync(new CommandDefinition(
+            """
+            ALTER TABLE rollup_state UPDATE lease_owner = @owner, lease_expires_at = @newExpiry
+            WHERE signal_name = @signal AND granularity = @granularity
+            """,
+            new { owner, newExpiry = DateTime.UtcNow + leaseDuration, signal, granularity }, cancellationToken: ct));
+        return true;
+    }
+
+    public async Task<RollupStateInfo?> GetStateAsync(string signal, string granularity, CancellationToken ct = default)
+    {
+        await using var conn = await OpenConnectionAsync(ct);
+        return await conn.QuerySingleOrDefaultAsync<RollupStateInfo>(new CommandDefinition(
+            """
+            SELECT coverage_start_unix_nano AS CoverageStartUnixNano,
+                   rolled_until_unix_nano   AS RolledUntilUnixNano,
+                   repassed_until_unix_nano AS RepassedUntilUnixNano
+            FROM rollup_state FINAL WHERE signal_name = @signal AND granularity = @granularity
+            """,
+            new { signal, granularity }, cancellationToken: ct));
+    }
+
+    public async Task SetCoverageStartAsync(string signal, string granularity, long coverageStartUnixNano, CancellationToken ct = default)
+    {
+        await using var conn = await OpenConnectionAsync(ct);
+        await conn.ExecuteAsync(new CommandDefinition(
+            """
+            ALTER TABLE rollup_state UPDATE coverage_start_unix_nano = @coverageStartUnixNano
+            WHERE signal_name = @signal AND granularity = @granularity AND coverage_start_unix_nano IS NULL
+            """,
+            new { coverageStartUnixNano, signal, granularity }, cancellationToken: ct));
+    }
+
+    public async Task AdvanceRolledUntilAsync(string signal, string granularity, long rolledUntilUnixNano, CancellationToken ct = default)
+    {
+        await using var conn = await OpenConnectionAsync(ct);
+        await conn.ExecuteAsync(new CommandDefinition(
+            "ALTER TABLE rollup_state UPDATE rolled_until_unix_nano = @v WHERE signal_name = @signal AND granularity = @granularity",
+            new { v = rolledUntilUnixNano, signal, granularity }, cancellationToken: ct));
+    }
+
+    public async Task AdvanceRepassedUntilAsync(string signal, string granularity, long repassedUntilUnixNano, CancellationToken ct = default)
+    {
+        await using var conn = await OpenConnectionAsync(ct);
+        await conn.ExecuteAsync(new CommandDefinition(
+            "ALTER TABLE rollup_state UPDATE repassed_until_unix_nano = @v WHERE signal_name = @signal AND granularity = @granularity",
+            new { v = repassedUntilUnixNano, signal, granularity }, cancellationToken: ct));
+    }
+
+    public async Task RollLogMinutesAsync(long fromInclusive, long toExclusive, CancellationToken ct = default)
+    {
+        const long nanosPerMinute = 60_000_000_000L;
+        var sql = $"""
+            INSERT INTO log_rollup_minute (bucket_unix_nano, resource_id, trace_count, debug_count, info_count, warn_count, error_count, fatal_count, rolled_at)
+            SELECT intDiv(lr.time_unix_nano, {nanosPerMinute}) * {nanosPerMinute}, lr.resource_id,
+                   {LogSeverityGroupSql.SumCaseColumns("lr.severity_number")}, now64(9)
+            FROM log_records lr
+            WHERE lr.time_unix_nano >= @from AND lr.time_unix_nano < @to
+            GROUP BY intDiv(lr.time_unix_nano, {nanosPerMinute}) * {nanosPerMinute}, lr.resource_id
+            """;
+        await using var conn = await OpenConnectionAsync(ct);
+        await conn.ExecuteAsync(new CommandDefinition(sql, new { from = fromInclusive, to = toExclusive }, cancellationToken: ct));
+    }
+
+    public async Task RollLogHoursAsync(long fromInclusive, long toExclusive, CancellationToken ct = default)
+    {
+        const long nanosPerHour = 3_600_000_000_000L;
+        var sql = $"""
+            INSERT INTO log_rollup_hour (bucket_unix_nano, resource_id, trace_count, debug_count, info_count, warn_count, error_count, fatal_count, rolled_at)
+            SELECT intDiv(lrm.bucket_unix_nano, {nanosPerHour}) * {nanosPerHour}, lrm.resource_id,
+                   SUM(lrm.trace_count), SUM(lrm.debug_count), SUM(lrm.info_count),
+                   SUM(lrm.warn_count), SUM(lrm.error_count), SUM(lrm.fatal_count), now64(9)
+            FROM log_rollup_minute AS lrm FINAL
+            WHERE lrm.bucket_unix_nano >= @from AND lrm.bucket_unix_nano < @to
+            GROUP BY intDiv(lrm.bucket_unix_nano, {nanosPerHour}) * {nanosPerHour}, lrm.resource_id
+            """;
+        await using var conn = await OpenConnectionAsync(ct);
+        await conn.ExecuteAsync(new CommandDefinition(sql, new { from = fromInclusive, to = toExclusive }, cancellationToken: ct));
     }
 }

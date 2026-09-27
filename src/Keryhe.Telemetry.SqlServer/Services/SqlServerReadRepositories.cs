@@ -34,17 +34,67 @@ internal static class SqlServerJsonAttributeHooks
     }
 }
 
+/// <summary>
+/// SQL Server read isolation (list-pages-server-side plan, Phase 2, decision 35): every read
+/// repository's connection opts into <c>SNAPSHOT</c> isolation at <c>DEADLOCK_PRIORITY LOW</c>
+/// instead of read committed, so index-seek-plus-lookup reads never take the shared locks that
+/// deadlock against ingestion's own writes. Factored here once rather than duplicated across the
+/// trace/metric/log read repository classes, which each still own their own
+/// <c>OpenConnectionAsync</c> override (matching this file's existing per-class-body convention)
+/// but delegate its work to <see cref="OpenAsync"/>.
+///
+/// A distinct <c>Application Name</c> is appended to the connection string so a pooled read
+/// connection is never handed back to a writer sharing the same base connection string (the
+/// all-in-one host's single-container case) — independent of whether <c>sp_reset_connection</c>
+/// would otherwise reset the isolation level on reuse.
+/// </summary>
+internal static class SqlServerReadConnection
+{
+    private const string ReadApplicationName = "Keryhe.Telemetry.Api.Read";
+
+    public static async Task<SqlConnection> OpenAsync(string connectionString, CancellationToken cancellationToken)
+    {
+        var builder = new SqlConnectionStringBuilder(connectionString) { ApplicationName = ReadApplicationName };
+        var conn = new SqlConnection(builder.ConnectionString);
+        await conn.OpenAsync(cancellationToken);
+        await conn.ExecuteAsync(new CommandDefinition(
+            "SET TRANSACTION ISOLATION LEVEL SNAPSHOT; SET DEADLOCK_PRIORITY LOW;",
+            cancellationToken: cancellationToken));
+        return conn;
+    }
+
+    /// <summary>
+    /// Retries an idempotent read once on error 1205 (deadlock victim / snapshot update conflict),
+    /// after a short jittered delay — an export that has already started streaming is explicitly
+    /// NOT a caller of this (decision 35: "not retried; the client gets a truncated download and
+    /// re-requests").
+    /// </summary>
+    public static async Task<T> WithRetryOnDeadlockAsync<T>(Func<Task<T>> operation)
+    {
+        try
+        {
+            return await operation();
+        }
+        catch (SqlException ex) when (ex.Number == 1205)
+        {
+            await Task.Delay(Random.Shared.Next(50, 200));
+            return await operation();
+        }
+    }
+}
+
 public class SqlServerTraceReadRepository(IConfiguration configuration, ITenantContext tenantContext, TraceQueryCache traceQueryCache)
     : TraceReadRepositoryBase(tenantContext, traceQueryCache)
 {
     private readonly string _connectionString = configuration.GetConnectionString("Api")!;
 
+    // Decision 35: read repositories open under SNAPSHOT isolation, DEADLOCK_PRIORITY LOW, on a
+    // distinct Application Name — see SqlServerReadConnection's own doc comment.
     protected override async Task<DbConnection> OpenConnectionAsync(CancellationToken cancellationToken)
-    {
-        var conn = new SqlConnection(_connectionString);
-        await conn.OpenAsync(cancellationToken);
-        return conn;
-    }
+        => await SqlServerReadConnection.OpenAsync(_connectionString, cancellationToken);
+
+    protected override Task<T> ExecuteWithRetryAsync<T>(Func<Task<T>> operation)
+        => SqlServerReadConnection.WithRetryOnDeadlockAsync(operation);
 
     // Same dialect hooks as SqlServerLogReadRepository, needed here too now that the service/tag
     // filters run in SQL (list-page-scale plan, Phase 4) — see DapperReadRepository's own doc
@@ -65,12 +115,13 @@ public class SqlServerMetricReadRepository(IConfiguration configuration, ITenant
 {
     private readonly string _connectionString = configuration.GetConnectionString("Api")!;
 
+    // Decision 35: read repositories open under SNAPSHOT isolation, DEADLOCK_PRIORITY LOW, on a
+    // distinct Application Name — see SqlServerReadConnection's own doc comment.
     protected override async Task<DbConnection> OpenConnectionAsync(CancellationToken cancellationToken)
-    {
-        var conn = new SqlConnection(_connectionString);
-        await conn.OpenAsync(cancellationToken);
-        return conn;
-    }
+        => await SqlServerReadConnection.OpenAsync(_connectionString, cancellationToken);
+
+    protected override Task<T> ExecuteWithRetryAsync<T>(Func<Task<T>> operation)
+        => SqlServerReadConnection.WithRetryOnDeadlockAsync(operation);
 
     // SqlServer dialect: paging uses OFFSET/FETCH, not LIMIT/OFFSET.
     protected override string PagingClause => "OFFSET @offset ROWS FETCH NEXT @limit ROWS ONLY";
@@ -88,12 +139,13 @@ public class SqlServerLogReadRepository(IConfiguration configuration, ITenantCon
 {
     private readonly string _connectionString = configuration.GetConnectionString("Api")!;
 
+    // Decision 35: read repositories open under SNAPSHOT isolation, DEADLOCK_PRIORITY LOW, on a
+    // distinct Application Name — see SqlServerReadConnection's own doc comment.
     protected override async Task<DbConnection> OpenConnectionAsync(CancellationToken cancellationToken)
-    {
-        var conn = new SqlConnection(_connectionString);
-        await conn.OpenAsync(cancellationToken);
-        return conn;
-    }
+        => await SqlServerReadConnection.OpenAsync(_connectionString, cancellationToken);
+
+    protected override Task<T> ExecuteWithRetryAsync<T>(Func<Task<T>> operation)
+        => SqlServerReadConnection.WithRetryOnDeadlockAsync(operation);
 
     // SqlServer dialect: LIKE is case-insensitive under the default collation, JSON is read via
     // JSON_VALUE, paging uses OFFSET/FETCH, and LIKE wildcards escape with square brackets.
@@ -105,6 +157,11 @@ public class SqlServerLogReadRepository(IConfiguration configuration, ITenantCon
     protected override object AttributeKeyParamValue(string key) => SqlServerJsonAttributeHooks.KeyParamValue(key);
     protected override string AttributePredicate(string column, string keyParam, string valueParam, bool negated)
         => SqlServerJsonAttributeHooks.Predicate(column, keyParam, valueParam, negated);
+
+    // Decision 3/Phase 2 pin helper: SqlServer's created_at default is evaluated at statement
+    // execution (not transaction start like Postgres/Timescale), so no 5-second back-off is
+    // needed here.
+    protected override string DatabaseClockNowExpr => "SYSDATETIME()";
 }
 
 public class SqlServerResourceReadRepository(IConfiguration configuration, ITenantContext tenantContext)
@@ -131,6 +188,29 @@ public class SqlServerTenantCatalogRepository(IConfiguration configuration)
         await conn.OpenAsync(cancellationToken);
         return conn;
     }
+}
+
+/// <summary>
+/// SQL Server implementation of <see cref="IRollupRepository"/>. The lease claim and state
+/// reads/writes use the plain (read-committed) connection; only the recompute
+/// (<see cref="LogRollupRepositoryBase.RollLogMinutesAsync"/>/<see cref="LogRollupRepositoryBase.RollLogHoursAsync"/>)
+/// opens under SNAPSHOT isolation (decision 35), so it never takes shared locks against ingestion
+/// while it reads raw <c>log_records</c> — this repository is the sole writer of the rollup tables
+/// and holds the lease for the duration, so its own snapshot writes can't hit an update conflict.
+/// </summary>
+public class SqlServerLogRollupRepository(IConfiguration configuration) : LogRollupRepositoryBase
+{
+    private readonly string _connectionString = configuration.GetConnectionString("Api")!;
+
+    protected override async Task<DbConnection> OpenConnectionAsync(CancellationToken cancellationToken)
+    {
+        var conn = new SqlConnection(_connectionString);
+        await conn.OpenAsync(cancellationToken);
+        return conn;
+    }
+
+    protected override async Task<DbConnection> OpenRecomputeConnectionAsync(CancellationToken cancellationToken)
+        => await SqlServerReadConnection.OpenAsync(_connectionString, cancellationToken);
 }
 
 public class SqlServerAlertRuleRepository(IConfiguration configuration, ITenantContext tenantContext)
@@ -192,8 +272,12 @@ public class SqlServerRetentionSettingsRepository(IConfiguration configuration)
     public override Task<int> DeleteOldMetricDataPointsAsync(TimeSpan retentionPeriod, CancellationToken cancellationToken = default)
         => SweepAsync(TelemetryIngestionHelpers.TimePrunedMetricTables, "time_unix_nano", retentionPeriod, cancellationToken);
 
-    public override Task<int> DeleteOldLogRecordsAsync(TimeSpan retentionPeriod, CancellationToken cancellationToken = default)
-        => SweepAsync(["log_records"], "time_unix_nano", retentionPeriod, cancellationToken);
+    public override async Task<int> DeleteOldLogRecordsAsync(TimeSpan retentionPeriod, CancellationToken cancellationToken = default)
+    {
+        var removed = await SweepAsync(["log_records"], "time_unix_nano", retentionPeriod, cancellationToken);
+        await SweepAsync(["log_rollup_minute", "log_rollup_hour"], "bucket_unix_nano", retentionPeriod, cancellationToken);
+        return removed;
+    }
 
     /// <summary>
     /// Deletes every row in <paramref name="tables"/> whose <paramref name="timeColumn"/> predates the

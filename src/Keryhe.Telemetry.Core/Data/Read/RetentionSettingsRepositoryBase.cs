@@ -88,6 +88,24 @@ public abstract class RetentionSettingsRepositoryBase : IRetentionSettingsReposi
         return TimeConversion.DateTimeToUnixNano(DateTime.UtcNow - retentionPeriod);
     }
 
+    /// <summary>
+    /// Prunes <c>log_rollup_minute</c>/<c>log_rollup_hour</c> with the same cutoff as the raw log
+    /// sweep (list-pages-server-side plan, Phase 2) — summary rows for data that no longer exists
+    /// as raw <c>log_records</c> would otherwise accumulate forever. Called by every provider's
+    /// <see cref="DeleteOldLogRecordsAsync"/> override on the connection it already has open.
+    /// Deliberately not reflected in that method's returned count, which stays "log record rows
+    /// removed" — the contract existing callers/logging already depend on.
+    /// </summary>
+    protected static async Task SweepLogRollupTablesAsync(DbConnection conn, long cutoffNano, CancellationToken ct)
+    {
+        await conn.ExecuteAsync(new CommandDefinition(
+            "DELETE FROM log_rollup_minute WHERE bucket_unix_nano < @cutoff",
+            new { cutoff = cutoffNano }, cancellationToken: ct));
+        await conn.ExecuteAsync(new CommandDefinition(
+            "DELETE FROM log_rollup_hour WHERE bucket_unix_nano < @cutoff",
+            new { cutoff = cutoffNano }, cancellationToken: ct));
+    }
+
     private sealed class RetentionSettingsRow
     {
         public int TraceRetentionDays { get; set; }

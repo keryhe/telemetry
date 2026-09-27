@@ -94,6 +94,9 @@ public sealed class SqlServerFixture : ProviderFixture
             DELETE FROM summary_data_points;
             DELETE FROM metrics;
             DELETE FROM log_records;
+            DELETE FROM log_rollup_minute;
+            DELETE FROM log_rollup_hour;
+            UPDATE rollup_state SET coverage_start_unix_nano = NULL, rolled_until_unix_nano = 0, repassed_until_unix_nano = 0, lease_owner = NULL, lease_expires_at = '1970-01-01T00:00:00';
             """;
         await using var cmd = new SqlCommand(sql, conn) { CommandTimeout = 120 };
         await cmd.ExecuteNonQueryAsync();

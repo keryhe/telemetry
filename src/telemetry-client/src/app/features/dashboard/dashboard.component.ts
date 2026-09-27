@@ -217,14 +217,14 @@ export class DashboardComponent {
       // backend scan (list-page-scale plan, Phase 2) — replaces the former separate `limit: 500`
       // trace fetch of which only 5 rows of each table were ever shown.
       overview:   this.tracesApi.getTraceOverview({ start, end, service: svc || undefined }),
-      logHist:    this.logsApi.getLogHistogram({ start, end, service: svc || undefined }),
+      logSummary: this.logsApi.getLogSummary({ start, end, service: svc || undefined }),
     }).subscribe({
-      next: ({ overview, logHist }) => {
+      next: ({ overview, logSummary }) => {
         this.traceHistogram.set(overview.buckets);
         this.serviceStats.set(overview.services);
         this.recentErrors.set(overview.recentErrors);
         this.slowTraces.set(overview.slowestTraces);
-        this.logHistogram.set(logHist);
+        this.logHistogram.set(logSummary.buckets);
         this.buildCharts(overview.buckets);
         this.loading.set(false);
       },

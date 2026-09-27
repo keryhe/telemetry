@@ -60,6 +60,12 @@
       <mat-icon>search</mat-icon>
     </button>
 
+    @if (rawSearchWindowMessage(); as msg) {
+      <span class="search-limit-message">
+        <mat-icon>info</mat-icon>{{ msg }}
+      </span>
+    }
+
     <button mat-icon-button color="primary" (click)="openSearchHelp()" matTooltip="Search syntax help">
       <mat-icon>help_outline</mat-icon>
     </button>
@@ -134,7 +140,7 @@
                 }
                 @if (f.values.length > visibleValueCount(f.key)) {
                   <div class="facet-more">
-                    <span class="facet-more-caption">top {{ visibleValueCount(f.key) }} of {{ f.distinct }}{{ capped() ? ' in loaded sample' : '' }}</span>
+                    <span class="facet-more-caption">top {{ visibleValueCount(f.key) }} of {{ f.distinct }} (latest {{ facetSampleSize() | number }} matches)</span>
                     <div class="facet-more-actions">
                       <button class="facet-more-btn" (click)="showMoreValues(f.key)">Show {{ facetValueStep }} more</button>
                       <button class="facet-more-btn" (click)="openFacetValues(f)">Show all</button>
@@ -174,16 +180,19 @@
 
   <mat-card>
     <mat-card-content class="table-content">
+      @if (newSinceCount() > 0) {
+        <div class="new-since-banner" (click)="resetAsOf()">
+          <mat-icon>refresh</mat-icon>
+          {{ newSinceCount() | number }} new log{{ newSinceCount() === 1 ? '' : 's' }} since this view loaded — click to refresh
+        </div>
+      }
       @if (displayRows().length === 0 && !loading() && !pageLoading()) {
-        <app-empty-state icon="receipt_long" message="No logs found"
-                         [hint]="capped() && clientMode()
-                           ? 'Searched only the most recent ' + (overview().length | number) + ' of ' + (total() | number) + ' logs. Narrow the time range to search further.'
-                           : 'Adjust the time range or filters'" />
+        <app-empty-state icon="receipt_long" message="No logs found" hint="Adjust the time range or filters" />
       } @else {
-        @if (capped() && clientMode()) {
+        @if (totalIsLowerBound()) {
           <div class="capped-notice">
             <mat-icon>info</mat-icon>
-            Searched the most recent {{ overview().length | number }} of {{ total() | number }} logs — {{ effectiveTotal() | number }} matched. Narrow the time range to search further.
+            Showing an approximate total (≥ {{ effectiveTotal() | number }}) — the exact count timed out. Narrow the time range for an exact total.
           </div>
         }
         <table mat-table [dataSource]="displayRows()" multiTemplateDataRows class="full-width log-table">
@@ -362,6 +371,8 @@
           [pageSize]="pageSize()"
           [pageIndex]="pageIndex()"
           [pageSizeOptions]="pageSizeOptions"
+          [showFirstLastButtons]="true"
+          [disabled]="traceFilterActive()"
           (page)="onPage($event)" />
       }
     </mat-card-content>

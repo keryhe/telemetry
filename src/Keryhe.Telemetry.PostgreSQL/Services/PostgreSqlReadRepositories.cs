@@ -53,6 +53,13 @@ public class PostgreSqlTenantCatalogRepository(NpgsqlDataSource dataSource)
         => await dataSource.OpenConnectionAsync(cancellationToken);
 }
 
+/// <summary>PostgreSQL (plain) implementation of <see cref="IRollupRepository"/> — plain read-committed connections suit Postgres's MVCC (readers never block writers).</summary>
+public class PostgreSqlLogRollupRepository(NpgsqlDataSource dataSource) : LogRollupRepositoryBase
+{
+    protected override async Task<DbConnection> OpenConnectionAsync(CancellationToken cancellationToken)
+        => await dataSource.OpenConnectionAsync(cancellationToken);
+}
+
 public class PostgreSqlAlertRuleRepository(NpgsqlDataSource dataSource, ITenantContext tenantContext)
     : AlertRuleRepositoryBase(tenantContext)
 {
@@ -175,8 +182,10 @@ public class PostgreSqlRetentionSettingsRepository(NpgsqlDataSource dataSource)
         var cutoffNano = CutoffNano(retentionPeriod);
 
         await using var conn = await dataSource.OpenConnectionAsync(cancellationToken);
-        return await conn.ExecuteAsync(new CommandDefinition(
+        var removed = await conn.ExecuteAsync(new CommandDefinition(
             "DELETE FROM log_records WHERE time_unix_nano < @cutoff",
             new { cutoff = cutoffNano }, cancellationToken: cancellationToken));
+        await SweepLogRollupTablesAsync(conn, cutoffNano, cancellationToken);
+        return removed;
     }
 }

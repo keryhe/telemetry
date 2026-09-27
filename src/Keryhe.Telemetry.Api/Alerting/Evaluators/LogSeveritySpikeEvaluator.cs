@@ -34,20 +34,22 @@ public class LogSeveritySpikeEvaluator : IAlertEvaluator
 
         var windowStart = now.AddMinutes(-condition.WindowMinutes);
 
-        var records = await _logs.GetLogRecordsBySeverityAsync(condition.MinSeverity, windowStart, now, ct);
-
-        if (!string.IsNullOrEmpty(rule.ServiceName))
+        // GetLogSummaryAsync's rollup path can't answer an arbitrary severity cutoff (see
+        // LogReadRepositoryBase's own note on why MinSeverity always falls back to raw), but this
+        // evaluator's rule condition IS a MinSeverity filter by definition — so this always takes
+        // the raw path today. Still a large improvement over the retired
+        // GetLogRecordsBySeverityAsync, which loaded every matching row just to count them; this
+        // reads a SQL GROUP BY aggregate instead.
+        var summary = await _logs.GetLogSummaryAsync(new LogSummaryQuery
         {
-            records = records.Where(l =>
-            {
-                var serviceName = l.Resource?.Attributes?.TryGetValue("service.name", out var s) == true
-                    ? s?.ToString()
-                    : null;
-                return serviceName == rule.ServiceName;
-            });
-        }
+            Start = windowStart,
+            End = now,
+            Service = rule.ServiceName,
+            MinSeverity = condition.MinSeverity,
+            BucketCount = 1
+        }, ct);
 
-        var count = records.Count();
+        var count = summary.Buckets.Sum(b => b.Trace + b.Debug + b.Info + b.Warn + b.Error + b.Fatal);
 
         if (count <= condition.CountThreshold)
             return AlertResult.NotFiring();

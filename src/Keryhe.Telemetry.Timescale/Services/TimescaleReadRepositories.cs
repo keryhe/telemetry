@@ -43,3 +43,7 @@ public sealed class TimescaleTenantCatalogRepository(NpgsqlDataSource dataSource
 /// </summary>
 public sealed class TimescaleRetentionSettingsRepository(NpgsqlDataSource dataSource)
     : PostgreSqlRetentionSettingsRepository(dataSource);
+
+/// <summary>Rollups reuse the plain-Postgres DML unchanged: log_rollup_minute/_hour are plain tables on both providers, and the recompute's SELECT from the log_records hypertable needs no Timescale-specific syntax.</summary>
+public sealed class TimescaleLogRollupRepository(NpgsqlDataSource dataSource)
+    : PostgreSqlLogRollupRepository(dataSource);

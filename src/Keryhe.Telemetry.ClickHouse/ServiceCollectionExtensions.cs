@@ -37,6 +37,7 @@ public static class ClickHouseServiceCollectionExtensions
         services.AddScoped<IAlertRuleRepository, ClickHouseAlertRuleRepository>();
         services.AddScoped<ITenantCatalogRepository, ClickHouseTenantCatalogRepository>();
         services.AddScoped<IRetentionSettingsRepository, ClickHouseRetentionSettingsRepository>();
+        services.AddScoped<IRollupRepository, ClickHouseLogRollupRepository>();
         services.AddSingleton(ProviderCapabilities.FromConfiguration(ProviderTier.Analytics, configuration));
         return services;
     }
