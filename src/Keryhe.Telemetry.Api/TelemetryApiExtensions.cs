@@ -47,6 +47,13 @@ public static class TelemetryApiServiceCollectionExtensions
         services.Configure<TraceQueryCacheOptions>(configuration.GetSection(TraceQueryCacheOptions.SectionName));
         services.AddSingleton<TraceQueryCache>();
 
+        // Query timeout / raw-search-window override settings (list-pages-server-side plan, Phase
+        // 1) — bound here so phases 2/3's summary endpoints and ProviderCapabilities.FromConfiguration
+        // (read directly from IConfiguration at provider registration time, not through this
+        // IOptions) agree on the same Telemetry:Query section.
+        services.Configure<QueryOptions>(configuration.GetSection(QueryOptions.SectionName));
+        services.Configure<ExportOptions>(configuration.GetSection(ExportOptions.SectionName));
+
         return services;
     }
 }

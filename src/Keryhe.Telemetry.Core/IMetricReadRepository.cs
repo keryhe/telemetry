@@ -43,5 +43,12 @@ public interface IMetricReadRepository
     Task<Dictionary<string, double>> GetLatestMetricValuesAsync(string serviceName, CancellationToken cancellationToken = default);
     Task<Dictionary<string, int>> GetMetricCountsByTypeAsync(string? serviceName = null, CancellationToken cancellationToken = default);
     Task<List<string>> GetUniqueMetricNamesAsync(string? serviceName = null, CancellationToken cancellationToken = default);
-    Task<Dictionary<string, List<string>>> GetMetricLabelsAsync(string metricName, CancellationToken cancellationToken = default);
+    /// <summary>
+    /// Distinct attribute (label) sets for a metric, time-bounded to <paramref name="startTime"/>/
+    /// <paramref name="endTime"/> (defaults to the last 24 hours) and capped at 1,000 distinct rows
+    /// (list-pages-server-side plan, Phase 1, decision 25); <see cref="MetricLabelsResult.Partial"/>
+    /// is true when the cap was hit.
+    /// </summary>
+    Task<MetricLabelsResult> GetMetricLabelsAsync(string metricName, DateTime? startTime = null,
+        DateTime? endTime = null, CancellationToken cancellationToken = default);
 }

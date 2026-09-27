@@ -36,6 +36,7 @@ public static class PostgreSqlServiceCollectionExtensions
         services.AddScoped<IAlertRuleRepository, PostgreSqlAlertRuleRepository>();
         services.AddScoped<ITenantCatalogRepository, PostgreSqlTenantCatalogRepository>();
         services.AddScoped<IRetentionSettingsRepository, PostgreSqlRetentionSettingsRepository>();
+        services.AddSingleton(ProviderCapabilities.FromConfiguration(ProviderTier.Analytics, configuration));
         return services;
     }
 }

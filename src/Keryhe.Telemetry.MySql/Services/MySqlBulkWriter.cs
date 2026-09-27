@@ -511,7 +511,7 @@ public sealed class MySqlBulkWriter(
             {
                 metricId, BoxOrNull(d.StartTimeUnixNano), d.TimeUnixNano,
                 BoxOrNull(d.ValueDouble), BoxOrNull(d.ValueInt), d.Flags,
-                (object?)SerializeJsonOrNull(d.Attributes) ?? DBNull.Value,
+                (object?)SerializeDeterministicJson(d.Attributes) ?? DBNull.Value,
                 (object?)SerializeJsonOrNull(d.Exemplars) ?? DBNull.Value
             });
 
@@ -536,7 +536,7 @@ public sealed class MySqlBulkWriter(
                 metricId, BoxOrNull(d.StartTimeUnixNano), d.TimeUnixNano,
                 BoxOrNull(d.ValueDouble), BoxOrNull(d.ValueInt),
                 d.AggregationTemporality.ToString(), d.IsMonotonic, d.Flags,
-                (object?)SerializeJsonOrNull(d.Attributes) ?? DBNull.Value,
+                (object?)SerializeDeterministicJson(d.Attributes) ?? DBNull.Value,
                 (object?)SerializeJsonOrNull(d.Exemplars) ?? DBNull.Value
             });
 
@@ -565,7 +565,7 @@ public sealed class MySqlBulkWriter(
                 (object?)SerializeJsonOrNull(d.ExplicitBounds) ?? DBNull.Value,
                 d.AggregationTemporality.ToString(), d.Flags,
                 BoxOrNull(d.Min), BoxOrNull(d.Max),
-                (object?)SerializeJsonOrNull(d.Attributes) ?? DBNull.Value,
+                (object?)SerializeDeterministicJson(d.Attributes) ?? DBNull.Value,
                 (object?)SerializeJsonOrNull(d.Exemplars) ?? DBNull.Value
             });
 
@@ -597,7 +597,7 @@ public sealed class MySqlBulkWriter(
                 (object?)SerializeJsonOrNull(d.NegativeBucketCounts) ?? DBNull.Value,
                 d.AggregationTemporality.ToString(), d.Flags,
                 BoxOrNull(d.Min), BoxOrNull(d.Max),
-                (object?)SerializeJsonOrNull(d.Attributes) ?? DBNull.Value,
+                (object?)SerializeDeterministicJson(d.Attributes) ?? DBNull.Value,
                 (object?)SerializeJsonOrNull(d.Exemplars) ?? DBNull.Value
             });
 
@@ -623,7 +623,7 @@ public sealed class MySqlBulkWriter(
                 d.Count, d.Sum,
                 (object?)SerializeJsonOrNull(d.QuantileValues) ?? DBNull.Value,
                 d.Flags,
-                (object?)SerializeJsonOrNull(d.Attributes) ?? DBNull.Value
+                (object?)SerializeDeterministicJson(d.Attributes) ?? DBNull.Value
             });
 
         await BulkInsertAsync(conn, tx, "summary_data_points", columns, values, ct);

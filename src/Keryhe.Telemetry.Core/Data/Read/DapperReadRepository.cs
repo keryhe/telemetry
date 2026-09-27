@@ -74,6 +74,135 @@ public abstract class DapperReadRepository
     /// </summary>
     protected virtual string BucketIndexExpr(string numerator, string denominator) => $"({numerator} / {denominator})";
 
+    /// <summary>
+    /// Escapes LIKE/ILIKE wildcards in user search text so <c>%</c>/<c>_</c> match literally.
+    /// Postgres/ILIKE default: backslash escape. SqlServer overrides to bracket escaping. Moved
+    /// here from <c>LogReadRepositoryBase</c> (list-pages-server-side plan, Phase 1) so
+    /// <see cref="FreeTextPredicate"/> and the search-query-to-SQL compiler can reuse it for
+    /// traces too, not just logs.
+    /// </summary>
+    protected virtual string EscapeLike(string value)
+        => value.Replace("\\", "\\\\").Replace("%", "\\%").Replace("_", "\\_");
+
+    /// <summary>
+    /// Substring-match predicate for a free-text search term (decision 5/6). The caller binds
+    /// <paramref name="valueParam"/> to a <c>%</c>-wrapped, <see cref="EscapeLike"/>-escaped
+    /// pattern. Postgres/Timescale default to case-insensitive <c>ILIKE</c>; SqlServer/MySql
+    /// override <see cref="LikeOperator"/> to plain <c>LIKE</c> (case-insensitive under their
+    /// default collation already), so this hook needs no per-provider override of its own.
+    /// </summary>
+    protected virtual string FreeTextPredicate(string column, string valueParam) => $"{column} {LikeOperator} {valueParam}";
+
+    /// <summary>
+    /// The parameter VALUE to bind for a <c>key:value</c>/<c>key=value</c> attribute filter's key
+    /// (list-pages-server-side plan, Phase 1, decision 7). PostgreSQL, Timescale and ClickHouse
+    /// take the raw key: their extraction functions (<c>-&gt;&gt;</c>, <c>JSONExtractRaw</c>) treat
+    /// it as an object member name literal. SQL Server's <c>JSON_VALUE</c> and MySQL's
+    /// <c>JSON_EXTRACT</c> instead take a JSON *path*, and an OpenTelemetry key routinely contains
+    /// dots (e.g. <c>service.name</c>) that a naive path would read as nesting — so those two
+    /// providers override this to build <c>'$."' + escaped key + '"'</c> in C# and bind that
+    /// instead, keeping the key itself out of the SQL text entirely (never interpolated).
+    /// </summary>
+    protected virtual object AttributeKeyParamValue(string key) => key;
+
+    /// <summary>
+    /// SQL predicate testing a JSON column's extracted value (as text) against
+    /// <paramref name="valueParam"/> (decisions 7 and 10). <paramref name="keyParam"/>/
+    /// <paramref name="valueParam"/> are parameter name references (e.g. <c>"@key0"</c>) whose
+    /// values the caller binds — the key parameter's bound value comes from
+    /// <see cref="AttributeKeyParamValue"/>, so it is a raw key on three providers and a JSON path
+    /// on two. Comparing the extracted TEXT form (not a typed value) is what lets <c>k:500</c>
+    /// match both the string <c>"500"</c> and the number <c>500</c> (decision 7).
+    ///
+    /// Both sides are compared case-insensitively (mirrors <c>MetricReadRepositoryBase</c>'s
+    /// retired <c>MatchesLabelFilters</c>, which this hook now replaces for metric label filters —
+    /// see that type's doc comment). The attribute KEY itself is matched case-sensitively: OpenTelemetry
+    /// semantic-convention keys are lowercase-dotted by convention, and a case-insensitive key
+    /// lookup would need scanning every key in the JSON document on every provider instead of a
+    /// single indexed-or-not extraction, which is out of Phase 1's scope.
+    ///
+    /// Negation keeps rows that lack the key (decision 10): <c>NOT (x = @v)</c> evaluates to NULL
+    /// for a missing key and would drop the row, so negation is compiled as an explicit
+    /// null-tolerant form per provider (<c>IS DISTINCT FROM</c> on Postgres/Timescale;
+    /// <c>IS NULL OR &lt;&gt;</c> on SqlServer/MySql; <c>JSONHas(...) = 0 OR !=</c> on ClickHouse).
+    /// </summary>
+    protected virtual string AttributePredicate(string column, string keyParam, string valueParam, bool negated)
+    {
+        var expr = $"LOWER({column} ->> {keyParam})";
+        var valueExpr = $"LOWER({valueParam})";
+        return negated ? $"{expr} IS DISTINCT FROM {valueExpr}" : $"{expr} = {valueExpr}";
+    }
+
+    /// <summary>
+    /// "Any span in this trace matches" form of an attribute/free-text predicate (decision 9),
+    /// for use once trace search is wired up (Phase 3) — built now, per the Phase 1 spec, even
+    /// though nothing calls it yet. <paramref name="innerPredicate"/> is a complete boolean SQL
+    /// expression (typically an <see cref="AttributePredicate"/> or <see cref="FreeTextPredicate"/>
+    /// result) referencing the correlated alias <paramref name="spanAlias"/> (default <c>s2</c>,
+    /// matching <c>TraceReadRepositoryBase</c>'s existing correlated-subquery convention). The time
+    /// range is mandatory: on Timescale a subquery without it checks every chunk, and it is what
+    /// keeps this narrowing rather than an unbounded scan on every provider.
+    ///
+    /// PostgreSQL/Timescale/SqlServer/MySql use a correlated <c>EXISTS</c>; ClickHouse — which
+    /// doesn't reliably support correlated <c>EXISTS</c> — uses an uncorrelated <c>trace_id IN
+    /// (...)</c> instead, overridden below.
+    /// </summary>
+    protected virtual string SpanLevelMatchPredicate(string traceIdColumn, string innerTimeClause, string innerPredicate, string spanAlias = "s2")
+        => $"EXISTS (SELECT 1 FROM spans {spanAlias} WHERE {spanAlias}.trace_id = {traceIdColumn}{innerTimeClause} AND {innerPredicate})";
+
+    // =========================================================================
+    // SEARCH QUERY -> SQL COMPILER (list-pages-server-side plan, Phase 1)
+    // =========================================================================
+
+    /// <summary>
+    /// Compiles a <see cref="ParsedSearchQuery"/>'s terms into one SQL fragment (leading " AND ",
+    /// empty when there are no terms) plus the parameters it references, using
+    /// <see cref="FreeTextPredicate"/>/<see cref="AttributePredicate"/> so every provider gets the
+    /// same compiled shape through its own dialect hooks. Terms are ANDed, mirroring the parser's
+    /// own <c>' AND '</c> split. Nothing calls this yet — phases 2 and 3 wire it into the logs and
+    /// traces endpoints; it is built now, correct and reusable, because the AttributePredicate/
+    /// FreeTextPredicate hooks it depends on are also built in this phase with nothing else
+    /// exercising them yet.
+    ///
+    /// Decision 7's exact-vs-contains distinction (<c>key=value</c> vs <c>key:value</c>) has no
+    /// separate SQL form in Phase 1's scope: both compile through the same
+    /// <see cref="AttributePredicate"/> equality check, since attribute values aren't free text to
+    /// substring-match — there is nothing for "contains" to mean differently from "exact" once the
+    /// value is extracted as text. If a future phase needs a real substring match on an attribute
+    /// value, that would be a new hook, not a change to this one.
+    /// </summary>
+    protected (string Sql, DynamicParameters Parameters) CompileSearch(
+        ParsedSearchQuery query, string freeTextColumn, string attributesColumn)
+    {
+        var parameters = new DynamicParameters();
+        if (query.Terms.Count == 0)
+            return ("", parameters);
+
+        var clauses = new List<string>();
+        var i = 0;
+        foreach (var term in query.Terms)
+        {
+            if (term.IsAttributeFilter)
+            {
+                var keyParam = $"searchKey{i}";
+                var valueParam = $"searchVal{i}";
+                parameters.Add(keyParam, AttributeKeyParamValue(term.Key ?? ""));
+                parameters.Add(valueParam, term.Value ?? "");
+                clauses.Add(AttributePredicate(attributesColumn, $"@{keyParam}", $"@{valueParam}", term.Negate));
+            }
+            else
+            {
+                var valueParam = $"searchText{i}";
+                parameters.Add(valueParam, $"%{EscapeLike(term.FreeText ?? "")}%");
+                var predicate = FreeTextPredicate(freeTextColumn, $"@{valueParam}");
+                clauses.Add(term.Negate ? $"NOT ({predicate})" : predicate);
+            }
+            i++;
+        }
+
+        return (" AND " + string.Join(" AND ", clauses), parameters);
+    }
+
     // =========================================================================
     // JSON / ATTRIBUTE HELPERS (parity with the former EF [NotMapped] getters)
     // =========================================================================

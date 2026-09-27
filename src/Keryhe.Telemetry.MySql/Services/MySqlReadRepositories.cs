@@ -15,6 +15,24 @@ namespace Keryhe.Telemetry.MySql.Services;
 // SQL carry MySQL-specific overrides.
 // =============================================================================
 
+/// <summary>
+/// Shared bodies for the <c>AttributeKeyParamValue</c>/<c>AttributePredicate</c> dialect hooks
+/// (list-pages-server-side plan, Phase 1), duplicated as an override on every MySQL read
+/// repository class below (there is no mixin) but sharing one implementation.
+/// </summary>
+internal static class MySqlJsonAttributeHooks
+{
+    public static object KeyParamValue(string key)
+        => $"$.\"{key.Replace("\\", "\\\\").Replace("\"", "\\\"")}\"";
+
+    public static string Predicate(string column, string keyParam, string valueParam, bool negated)
+    {
+        var expr = $"LOWER(JSON_UNQUOTE(JSON_EXTRACT({column}, {keyParam})))";
+        var valueExpr = $"LOWER({valueParam})";
+        return negated ? $"({expr} IS NULL OR {expr} <> {valueExpr})" : $"{expr} = {valueExpr}";
+    }
+}
+
 public class MySqlTraceReadRepository(IConfiguration configuration, ITenantContext tenantContext, TraceQueryCache traceQueryCache)
     : TraceReadRepositoryBase(tenantContext, traceQueryCache)
 {
@@ -34,6 +52,9 @@ public class MySqlTraceReadRepository(IConfiguration configuration, ITenantConte
     protected override string ResourceServiceNameExpr(string resourceAlias = "r") => $"{resourceAlias}.attributes_json ->> '$.\"service.name\"'";
     protected override string JsonHasKeyExpr(string jsonColumn, string keyParam)
         => $"JSON_CONTAINS(JSON_KEYS(COALESCE({jsonColumn}, JSON_OBJECT())), JSON_QUOTE({keyParam}))";
+    protected override object AttributeKeyParamValue(string key) => MySqlJsonAttributeHooks.KeyParamValue(key);
+    protected override string AttributePredicate(string column, string keyParam, string valueParam, bool negated)
+        => MySqlJsonAttributeHooks.Predicate(column, keyParam, valueParam, negated);
 }
 
 public class MySqlMetricReadRepository(IConfiguration configuration, ITenantContext tenantContext)
@@ -47,6 +68,13 @@ public class MySqlMetricReadRepository(IConfiguration configuration, ITenantCont
         await conn.OpenAsync(cancellationToken);
         return conn;
     }
+
+    // Load-bearing for the metric label-filter fix (list-pages-server-side plan, Phase 1):
+    // MetricReadRepositoryBase's data-point getters call AttributePredicate/AttributeKeyParamValue
+    // polymorphically, so MySQL needs its own override here too, not just on the trace/log repos.
+    protected override object AttributeKeyParamValue(string key) => MySqlJsonAttributeHooks.KeyParamValue(key);
+    protected override string AttributePredicate(string column, string keyParam, string valueParam, bool negated)
+        => MySqlJsonAttributeHooks.Predicate(column, keyParam, valueParam, negated);
 }
 
 public class MySqlLogReadRepository(IConfiguration configuration, ITenantContext tenantContext)
@@ -72,6 +100,9 @@ public class MySqlLogReadRepository(IConfiguration configuration, ITenantContext
     // MySQL's `/` always yields a DECIMAL result even for integer operands; DIV keeps histogram
     // bucket-index math as true integer floor division.
     protected override string BucketIndexExpr(string numerator, string denominator) => $"({numerator} DIV {denominator})";
+    protected override object AttributeKeyParamValue(string key) => MySqlJsonAttributeHooks.KeyParamValue(key);
+    protected override string AttributePredicate(string column, string keyParam, string valueParam, bool negated)
+        => MySqlJsonAttributeHooks.Predicate(column, keyParam, valueParam, negated);
 }
 
 public class MySqlResourceReadRepository(IConfiguration configuration, ITenantContext tenantContext)

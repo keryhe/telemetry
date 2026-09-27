@@ -47,13 +47,15 @@ public class MetricsController : ControllerBase
         return Ok(metrics);
     }
 
-    // GET /api/metrics/labels/{name}
+    // GET /api/metrics/labels/{name}?start=&end=
     [HttpGet("labels/{name}")]
-    public async Task<ActionResult<Dictionary<string, List<string>>>> GetMetricLabels(
+    public async Task<ActionResult<MetricLabelsResult>> GetMetricLabels(
         string name,
+        [FromQuery] DateTime? start,
+        [FromQuery] DateTime? end,
         CancellationToken ct = default)
     {
-        var labels = await _metrics.GetMetricLabelsAsync(name, ct);
+        var labels = await _metrics.GetMetricLabelsAsync(name, start, end, ct);
         return Ok(labels);
     }
 

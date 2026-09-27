@@ -27,6 +27,30 @@ internal static class ClickHouseConnectionFactory
     }
 }
 
+/// <summary>
+/// Shared body for the <c>AttributePredicate</c> dialect hook (list-pages-server-side plan,
+/// Phase 1), duplicated as an override on every ClickHouse read repository class below (there is
+/// no mixin) but sharing one implementation. <c>JSONExtractRaw</c>, not <c>JSONExtractString</c>,
+/// is deliberate: <c>JSONExtractString</c> returns <c>''</c> for a non-string (number/boolean)
+/// value, which would silently break a filter like <c>http.status_code:500</c> (decision 7).
+/// Trimming the surrounding quotes in SQL normalizes a JSON string's raw form (<c>"500"</c>) to
+/// the same text as a JSON number's raw form (<c>500</c>), so both match the same bound value.
+/// <c>AttributeKeyParamValue</c> needs no override: ClickHouse's key parameter is the raw key,
+/// same as the base default.
+/// </summary>
+internal static class ClickHouseJsonAttributeHooks
+{
+    public static string Predicate(string column, string keyParam, string valueParam, bool negated)
+    {
+        var col = $"coalesce({column}, '')";
+        var expr = $"lowerUTF8(trim(BOTH '\"' FROM JSONExtractRaw({col}, {keyParam})))";
+        var valueExpr = $"lowerUTF8({valueParam})";
+        return negated
+            ? $"(JSONHas({col}, {keyParam}) = 0 OR {expr} != {valueExpr})"
+            : $"JSONHas({col}, {keyParam}) = 1 AND {expr} = {valueExpr}";
+    }
+}
+
 public class ClickHouseTraceReadRepository(IConfiguration configuration, ITenantContext tenantContext, TraceQueryCache traceQueryCache)
     : TraceReadRepositoryBase(tenantContext, traceQueryCache)
 {
@@ -41,6 +65,16 @@ public class ClickHouseTraceReadRepository(IConfiguration configuration, ITenant
     protected override string ResourceServiceNameExpr(string resourceAlias = "r") => $"JSONExtractString(coalesce({resourceAlias}.attributes_json, ''), 'service.name')";
     protected override string JsonHasKeyExpr(string jsonColumn, string keyParam)
         => $"JSONHas(coalesce({jsonColumn}, ''), {keyParam}) = 1";
+
+    protected override string AttributePredicate(string column, string keyParam, string valueParam, bool negated)
+        => ClickHouseJsonAttributeHooks.Predicate(column, keyParam, valueParam, negated);
+
+    // ClickHouse can't reliably correlate a subquery to the outer row, so "any span in this trace
+    // matches" is expressed as an uncorrelated membership test instead of EXISTS (decision 9,
+    // list-pages-server-side plan Phase 1). The subquery's own spans alias is still needed so
+    // innerPredicate/innerTimeClause (built against that alias by the caller) resolve.
+    protected override string SpanLevelMatchPredicate(string traceIdColumn, string innerTimeClause, string innerPredicate, string spanAlias = "s2")
+        => $"{traceIdColumn} IN (SELECT {spanAlias}.trace_id FROM spans {spanAlias} WHERE 1=1{innerTimeClause} AND {innerPredicate})";
 }
 
 public class ClickHouseMetricReadRepository(IConfiguration configuration, ITenantContext tenantContext)
@@ -50,6 +84,12 @@ public class ClickHouseMetricReadRepository(IConfiguration configuration, ITenan
 
     protected override Task<DbConnection> OpenConnectionAsync(CancellationToken cancellationToken)
         => ClickHouseConnectionFactory.OpenReadAsync(_connectionString, cancellationToken);
+
+    // Load-bearing for the metric label-filter fix (list-pages-server-side plan, Phase 1):
+    // MetricReadRepositoryBase's data-point getters call AttributePredicate polymorphically, so
+    // ClickHouse needs its own override here too, not just on the trace/log repos.
+    protected override string AttributePredicate(string column, string keyParam, string valueParam, bool negated)
+        => ClickHouseJsonAttributeHooks.Predicate(column, keyParam, valueParam, negated);
 }
 
 public class ClickHouseLogReadRepository(IConfiguration configuration, ITenantContext tenantContext)
@@ -59,6 +99,9 @@ public class ClickHouseLogReadRepository(IConfiguration configuration, ITenantCo
 
     protected override Task<DbConnection> OpenConnectionAsync(CancellationToken cancellationToken)
         => ClickHouseConnectionFactory.OpenReadAsync(_connectionString, cancellationToken);
+
+    protected override string AttributePredicate(string column, string keyParam, string valueParam, bool negated)
+        => ClickHouseJsonAttributeHooks.Predicate(column, keyParam, valueParam, negated);
 
     // attributes_json is a Nullable(String) holding JSON text; extract service.name with
     // JSONExtractString (coalesce guards NULL rows). ILIKE, LIMIT/OFFSET paging, and backslash

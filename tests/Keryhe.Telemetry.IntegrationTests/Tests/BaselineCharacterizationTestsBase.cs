@@ -135,7 +135,7 @@ public abstract class BaselineCharacterizationTestsBase : IAsyncLifetime
     /// until then; un-skip when Phase 1 lands the fix (`AttributePredicate` compiled into SQL
     /// before `ORDER BY … LIMIT`).
     /// </summary>
-    [Fact(Skip = "known bug: label filter runs after the row cap (GetGroupedMetricSeriesAsync/FilterByLabelFilters), fixed in phase 1 — see plans/list-pages-server-side.md decision 24 and Phase 1")]
+    [Fact]
     public async Task MetricSeries_LabelFilter_MatchesEveryRow_NotJustTheCappedSample()
     {
         var metrics = SeededDataBuilder.MultiInstanceGauge(_fixture.TenantId, WindowStart, instanceCount: 4, pointsPerInstance: 30);

@@ -302,13 +302,6 @@ public abstract class LogReadRepositoryBase : DapperReadRepository, ILogReadRepo
         public int Fatal { get; set; }
     }
 
-    /// <summary>
-    /// Escapes LIKE/ILIKE wildcards in user search text so <c>%</c>/<c>_</c> match literally.
-    /// Postgres/ILIKE default: backslash escape. SqlServer overrides to bracket escaping.
-    /// </summary>
-    protected virtual string EscapeLike(string value)
-        => value.Replace("\\", "\\\\").Replace("%", "\\%").Replace("_", "\\_");
-
     public async Task<IEnumerable<LogRecordModel>> GetSurroundingLogRecordsAsync(
         long anchorTimeUnixNano, string? service, int before, int after, CancellationToken cancellationToken = default)
     {

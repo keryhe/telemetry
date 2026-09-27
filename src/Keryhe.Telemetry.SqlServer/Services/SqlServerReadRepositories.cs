@@ -14,6 +14,26 @@ namespace Keryhe.Telemetry.SqlServer.Services;
 // dialect-neutral read SQL + shaping; only the alert CRUD/cooldown SQL differs.
 // =============================================================================
 
+/// <summary>
+/// Shared bodies for the <c>AttributeKeyParamValue</c>/<c>AttributePredicate</c> dialect hooks
+/// (list-pages-server-side plan, Phase 1), duplicated as an override on every SqlServer read
+/// repository class below (there is no mixin, matching the existing convention for
+/// <c>ResourceServiceNameExpr</c>/<c>JsonHasKeyExpr</c> in this file) but sharing one
+/// implementation so the escaping logic isn't copy-pasted three times.
+/// </summary>
+internal static class SqlServerJsonAttributeHooks
+{
+    public static object KeyParamValue(string key)
+        => $"$.\"{key.Replace("\\", "\\\\").Replace("\"", "\\\"")}\"";
+
+    public static string Predicate(string column, string keyParam, string valueParam, bool negated)
+    {
+        var expr = $"LOWER(JSON_VALUE({column}, {keyParam}))";
+        var valueExpr = $"LOWER({valueParam})";
+        return negated ? $"({expr} IS NULL OR {expr} <> {valueExpr})" : $"{expr} = {valueExpr}";
+    }
+}
+
 public class SqlServerTraceReadRepository(IConfiguration configuration, ITenantContext tenantContext, TraceQueryCache traceQueryCache)
     : TraceReadRepositoryBase(tenantContext, traceQueryCache)
 {
@@ -34,6 +54,10 @@ public class SqlServerTraceReadRepository(IConfiguration configuration, ITenantC
     protected override string JsonHasKeyExpr(string jsonColumn, string keyParam)
         => $"EXISTS (SELECT 1 FROM OPENJSON(ISNULL({jsonColumn}, '{{}}')) WHERE [key] = {keyParam})";
     protected override string PagingClause => "OFFSET @offset ROWS FETCH NEXT @limit ROWS ONLY";
+
+    protected override object AttributeKeyParamValue(string key) => SqlServerJsonAttributeHooks.KeyParamValue(key);
+    protected override string AttributePredicate(string column, string keyParam, string valueParam, bool negated)
+        => SqlServerJsonAttributeHooks.Predicate(column, keyParam, valueParam, negated);
 }
 
 public class SqlServerMetricReadRepository(IConfiguration configuration, ITenantContext tenantContext)
@@ -50,6 +74,13 @@ public class SqlServerMetricReadRepository(IConfiguration configuration, ITenant
 
     // SqlServer dialect: paging uses OFFSET/FETCH, not LIMIT/OFFSET.
     protected override string PagingClause => "OFFSET @offset ROWS FETCH NEXT @limit ROWS ONLY";
+
+    // Load-bearing for the metric label-filter fix (list-pages-server-side plan, Phase 1):
+    // MetricReadRepositoryBase's data-point getters call AttributePredicate/AttributeKeyParamValue
+    // polymorphically, so SqlServer needs its own override here too, not just on the trace/log repos.
+    protected override object AttributeKeyParamValue(string key) => SqlServerJsonAttributeHooks.KeyParamValue(key);
+    protected override string AttributePredicate(string column, string keyParam, string valueParam, bool negated)
+        => SqlServerJsonAttributeHooks.Predicate(column, keyParam, valueParam, negated);
 }
 
 public class SqlServerLogReadRepository(IConfiguration configuration, ITenantContext tenantContext)
@@ -71,6 +102,9 @@ public class SqlServerLogReadRepository(IConfiguration configuration, ITenantCon
     protected override string PagingClause => "OFFSET @offset ROWS FETCH NEXT @limit ROWS ONLY";
     protected override string EscapeLike(string value)
         => value.Replace("[", "[[]").Replace("%", "[%]").Replace("_", "[_]");
+    protected override object AttributeKeyParamValue(string key) => SqlServerJsonAttributeHooks.KeyParamValue(key);
+    protected override string AttributePredicate(string column, string keyParam, string valueParam, bool negated)
+        => SqlServerJsonAttributeHooks.Predicate(column, keyParam, valueParam, negated);
 }
 
 public class SqlServerResourceReadRepository(IConfiguration configuration, ITenantContext tenantContext)

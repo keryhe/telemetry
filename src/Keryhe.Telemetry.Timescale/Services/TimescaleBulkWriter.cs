@@ -619,7 +619,7 @@ public sealed class TimescaleBulkWriter(
             await WriteNullableAsync(writer, d.ValueDouble, NpgsqlDbType.Double, ct);
             await WriteNullableAsync(writer, d.ValueInt, NpgsqlDbType.Bigint, ct);
             await writer.WriteAsync(d.Flags, NpgsqlDbType.Integer, ct);
-            await WriteNullableAsync(writer, SerializeJsonOrNull(d.Attributes), NpgsqlDbType.Jsonb, ct);
+            await WriteNullableAsync(writer, SerializeDeterministicJson(d.Attributes), NpgsqlDbType.Jsonb, ct);
             await WriteNullableAsync(writer, SerializeJsonOrNull(d.Exemplars), NpgsqlDbType.Jsonb, ct);
         }
         await writer.CompleteAsync(ct);
@@ -648,7 +648,7 @@ public sealed class TimescaleBulkWriter(
             await writer.WriteAsync(d.AggregationTemporality.ToString(), NpgsqlDbType.Text, ct);
             await writer.WriteAsync(d.IsMonotonic, NpgsqlDbType.Boolean, ct);
             await writer.WriteAsync(d.Flags, NpgsqlDbType.Integer, ct);
-            await WriteNullableAsync(writer, SerializeJsonOrNull(d.Attributes), NpgsqlDbType.Jsonb, ct);
+            await WriteNullableAsync(writer, SerializeDeterministicJson(d.Attributes), NpgsqlDbType.Jsonb, ct);
             await WriteNullableAsync(writer, SerializeJsonOrNull(d.Exemplars), NpgsqlDbType.Jsonb, ct);
         }
         await writer.CompleteAsync(ct);
@@ -682,7 +682,7 @@ public sealed class TimescaleBulkWriter(
             await writer.WriteAsync(d.Flags, NpgsqlDbType.Integer, ct);
             await WriteNullableAsync(writer, d.Min, NpgsqlDbType.Double, ct);
             await WriteNullableAsync(writer, d.Max, NpgsqlDbType.Double, ct);
-            await WriteNullableAsync(writer, SerializeJsonOrNull(d.Attributes), NpgsqlDbType.Jsonb, ct);
+            await WriteNullableAsync(writer, SerializeDeterministicJson(d.Attributes), NpgsqlDbType.Jsonb, ct);
             await WriteNullableAsync(writer, SerializeJsonOrNull(d.Exemplars), NpgsqlDbType.Jsonb, ct);
         }
         await writer.CompleteAsync(ct);
@@ -721,7 +721,7 @@ public sealed class TimescaleBulkWriter(
             await writer.WriteAsync(d.Flags, NpgsqlDbType.Integer, ct);
             await WriteNullableAsync(writer, d.Min, NpgsqlDbType.Double, ct);
             await WriteNullableAsync(writer, d.Max, NpgsqlDbType.Double, ct);
-            await WriteNullableAsync(writer, SerializeJsonOrNull(d.Attributes), NpgsqlDbType.Jsonb, ct);
+            await WriteNullableAsync(writer, SerializeDeterministicJson(d.Attributes), NpgsqlDbType.Jsonb, ct);
             await WriteNullableAsync(writer, SerializeJsonOrNull(d.Exemplars), NpgsqlDbType.Jsonb, ct);
         }
         await writer.CompleteAsync(ct);
@@ -746,7 +746,7 @@ public sealed class TimescaleBulkWriter(
             await WriteNullableAsync(writer, (double?)d.Sum, NpgsqlDbType.Double, ct);
             await WriteNullableAsync(writer, SerializeJsonOrNull(d.QuantileValues), NpgsqlDbType.Jsonb, ct);
             await writer.WriteAsync(d.Flags, NpgsqlDbType.Integer, ct);
-            await WriteNullableAsync(writer, SerializeJsonOrNull(d.Attributes), NpgsqlDbType.Jsonb, ct);
+            await WriteNullableAsync(writer, SerializeDeterministicJson(d.Attributes), NpgsqlDbType.Jsonb, ct);
         }
         await writer.CompleteAsync(ct);
     }

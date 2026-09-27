@@ -108,6 +108,8 @@ export class MetricDetailComponent implements OnInit {
   protected metricName = computed(() => decodeURIComponent(this.name));
   protected instances = signal<MetricInfo[]>([]);
   protected labels = signal<Record<string, string[]>>({});
+  /** True when the label picker's 1,000-row distinct-set cap was hit; some rare labels may be missing. */
+  protected labelsPartial = signal(false);
   protected series = signal<MetricSeries | null>(null);
   protected multiSeries = signal<MultiSeriesMetricData | null>(null);
 
@@ -491,11 +493,12 @@ export class MetricDetailComponent implements OnInit {
 
     forkJoin({
       instances: this.api.getByName(name),
-      labels: this.api.getLabels(name),
+      labels: this.api.getLabels(name, start, end),
     }).subscribe({
       next: ({ instances, labels }) => {
         this.instances.set(instances);
-        this.labels.set(labels);
+        this.labels.set(labels.labels);
+        this.labelsPartial.set(labels.partial);
         // Every type loads from the grouped path (honoring any restored service/label filters);
         // reloadSeries() also populates series() (the flattened fallback used by points()).
         this.reloadSeries();

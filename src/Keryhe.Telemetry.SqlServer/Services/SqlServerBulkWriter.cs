@@ -572,7 +572,7 @@ public sealed class SqlServerBulkWriter(
         foreach (var (metricId, d) in rows)
             values.Add([metricId, BoxOrNull(d.StartTimeUnixNano), d.TimeUnixNano,
                 BoxOrNull(d.ValueDouble), BoxOrNull(d.ValueInt), d.Flags,
-                SerializeJsonOrNull(d.Attributes), SerializeJsonOrNull(d.Exemplars)]);
+                SerializeDeterministicJson(d.Attributes), SerializeJsonOrNull(d.Exemplars)]);
 
         using var bulk = CreateBulkCopy(conn, tx, "gauge_data_points");
         for (var i = 0; i < GaugeColumns.Length; i++)
@@ -597,7 +597,7 @@ public sealed class SqlServerBulkWriter(
             values.Add([metricId, BoxOrNull(d.StartTimeUnixNano), d.TimeUnixNano,
                 BoxOrNull(d.ValueDouble), BoxOrNull(d.ValueInt),
                 d.AggregationTemporality.ToString(), d.IsMonotonic, d.Flags,
-                SerializeJsonOrNull(d.Attributes), SerializeJsonOrNull(d.Exemplars)]);
+                SerializeDeterministicJson(d.Attributes), SerializeJsonOrNull(d.Exemplars)]);
 
         using var bulk = CreateBulkCopy(conn, tx, "sum_data_points");
         for (var i = 0; i < SumColumns.Length; i++)
@@ -625,7 +625,7 @@ public sealed class SqlServerBulkWriter(
                 SerializeJsonOrNull(d.BucketCounts), SerializeJsonOrNull(d.ExplicitBounds),
                 d.AggregationTemporality.ToString(), d.Flags,
                 BoxOrNull(d.Min), BoxOrNull(d.Max),
-                SerializeJsonOrNull(d.Attributes), SerializeJsonOrNull(d.Exemplars)]);
+                SerializeDeterministicJson(d.Attributes), SerializeJsonOrNull(d.Exemplars)]);
 
         using var bulk = CreateBulkCopy(conn, tx, "histogram_data_points");
         for (var i = 0; i < HistogramColumns.Length; i++)
@@ -655,7 +655,7 @@ public sealed class SqlServerBulkWriter(
                 BoxOrNull(d.NegativeOffset), SerializeJsonOrNull(d.NegativeBucketCounts),
                 d.AggregationTemporality.ToString(), d.Flags,
                 BoxOrNull(d.Min), BoxOrNull(d.Max),
-                SerializeJsonOrNull(d.Attributes), SerializeJsonOrNull(d.Exemplars)]);
+                SerializeDeterministicJson(d.Attributes), SerializeJsonOrNull(d.Exemplars)]);
 
         using var bulk = CreateBulkCopy(conn, tx, "exponential_histogram_data_points");
         for (var i = 0; i < ExpHistogramColumns.Length; i++)
@@ -675,7 +675,7 @@ public sealed class SqlServerBulkWriter(
         var values = new List<object?[]>(rows.Count);
         foreach (var (metricId, d) in rows)
             values.Add([metricId, BoxOrNull(d.StartTimeUnixNano), d.TimeUnixNano,
-                d.Count, d.Sum, SerializeJsonOrNull(d.QuantileValues), d.Flags, SerializeJsonOrNull(d.Attributes)]);
+                d.Count, d.Sum, SerializeJsonOrNull(d.QuantileValues), d.Flags, SerializeDeterministicJson(d.Attributes)]);
 
         using var bulk = CreateBulkCopy(conn, tx, "summary_data_points");
         for (var i = 0; i < SummaryColumns.Length; i++)

@@ -233,3 +233,15 @@ public class MetricExemplarPage
     /// <summary>True when the scan hit its cap: more exemplars exist beyond those returned.</summary>
     public bool HasMore { get; set; }
 }
+
+/// <summary>
+/// Result of <see cref="IMetricReadRepository.GetMetricLabelsAsync"/> (list-pages-server-side
+/// plan, Phase 1, decision 25): the label picker's distinct-attribute-set scan is time-bounded and
+/// capped at 1,000 rows, so <see cref="Partial"/> tells the client when rare labels might be
+/// missing because the cap was hit before every distinct set was seen.
+/// </summary>
+public sealed class MetricLabelsResult
+{
+    public Dictionary<string, List<string>> Labels { get; set; } = new();
+    public bool Partial { get; set; }
+}

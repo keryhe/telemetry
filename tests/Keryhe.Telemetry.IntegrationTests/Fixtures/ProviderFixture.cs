@@ -79,6 +79,12 @@ public abstract class ProviderFixture : IAsyncLifetime
         services.Configure<TraceQueryCacheOptions>(configuration.GetSection(TraceQueryCacheOptions.SectionName));
         services.AddSingleton<TraceQueryCache>();
 
+        // Mirrors AddKeryheTelemetryApi's own registration (list-pages-server-side plan, Phase 1)
+        // so the integration harness sees these options too, even though this harness doesn't call
+        // AddKeryheTelemetryApi itself (see class doc comment).
+        services.Configure<QueryOptions>(configuration.GetSection(QueryOptions.SectionName));
+        services.Configure<ExportOptions>(configuration.GetSection(ExportOptions.SectionName));
+
         services.AddSingleton<ITenantContext>(TenantContext);
 
         AddProviderServices(services, configuration);

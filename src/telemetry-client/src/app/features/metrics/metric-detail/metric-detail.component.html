@@ -204,6 +204,12 @@
           @if (labelKeys().length === 0) {
             <app-empty-state icon="label_off" message="No labels" />
           } @else {
+            @if (labelsPartial()) {
+              <div class="exemplars-hint">
+                Showing labels from a sample of this metric's data in the current window; some rare
+                label values may be missing.
+              </div>
+            }
             @for (key of labelKeys(); track key) {
               <div class="label-group">
                 <div class="label-key">{{ key }} <span class="label-count">({{ labels()[key].length }})</span></div>
@@ -284,7 +290,7 @@
             @if (exemplarsHasMore()) {
               <div class="exemplars-hint">
                 Showing the {{ exemplars().length }} most recent exemplars in this range. Narrow the
-                time range or filter by service/label to see others.
+                time range to see others.
               </div>
             }
           }

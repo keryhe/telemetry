@@ -37,6 +37,7 @@ public static class TimescaleServiceCollectionExtensions
         services.AddScoped<IAlertRuleRepository, TimescaleAlertRuleRepository>();
         services.AddScoped<ITenantCatalogRepository, TimescaleTenantCatalogRepository>();
         services.AddScoped<IRetentionSettingsRepository, TimescaleRetentionSettingsRepository>();
+        services.AddSingleton(ProviderCapabilities.FromConfiguration(ProviderTier.Analytics, configuration));
         return services;
     }
 }

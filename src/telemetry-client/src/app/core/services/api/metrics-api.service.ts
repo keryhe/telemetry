@@ -35,8 +35,12 @@ export class MetricsApiService {
     return this.http.get<MetricInfo[]>(`${this.base}/by-name/${encodeURIComponent(name)}`);
   }
 
-  getLabels(name: string): Observable<Record<string, string[]>> {
-    return this.http.get<Record<string, string[]>>(`${this.base}/labels/${encodeURIComponent(name)}`);
+  getLabels(name: string, start: Date, end: Date): Observable<{ partial: boolean; labels: Record<string, string[]> }> {
+    const params = new HttpParams().set('start', start.toISOString()).set('end', end.toISOString());
+    return this.http.get<{ partial: boolean; labels: Record<string, string[]> }>(
+      `${this.base}/labels/${encodeURIComponent(name)}`,
+      { params },
+    );
   }
 
   getSeries(p: MetricSeriesParams): Observable<MetricSeries> {

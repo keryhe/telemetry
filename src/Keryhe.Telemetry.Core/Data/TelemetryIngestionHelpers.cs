@@ -128,6 +128,14 @@ public static class TelemetryIngestionHelpers
     public static string MetricKey(long resourceId, long scopeId, string name, string type)
         => $"{resourceId}__{scopeId}__{name}__{type}";
 
+    /// <summary>
+    /// Used for resource/scope attributes since the write path's inception, and, as of the
+    /// list-pages-server-side plan's Phase 1, for every data-point table's <c>attributes_json</c>
+    /// too (all five providers' bulk writers). Rows written before that change keep whatever key
+    /// order <c>SerializeJsonOrNull</c> produced; on SQL Server and ClickHouse, which group series
+    /// by comparing <c>attributes_json</c> as text, an old and a new row for the same attribute set
+    /// can therefore compare unequal and show as two series until retention ages the old row out.
+    /// </summary>
     public static string SerializeDeterministicJson(Dictionary<string, object>? attributes)
     {
         // SortedDictionary keeps the same Ordinal key order as the OrderBy+ToDictionary this
