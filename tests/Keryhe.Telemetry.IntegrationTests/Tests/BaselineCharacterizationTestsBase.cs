@@ -150,13 +150,12 @@ public abstract class BaselineCharacterizationTestsBase : IAsyncLifetime
     /// <summary>
     /// The plan's Decision-1-fix regression check (list-pages-server-side.md Verification #7):
     /// a selective label filter on a metric with plenty of data must match every matching series
-    /// over the whole window, not just whatever survived the row cap. Today's
-    /// <c>GetGroupedMetricSeriesAsync</c> applies <c>FilterByLabelFilters</c> in C# AFTER the
-    /// per-metric-row <c>LIMIT</c>, so a filter selective enough to be rare in the capped sample
-    /// can come back sparse or empty even though matching data exists elsewhere in the window —
-    /// this is exactly the "correctness, not just slowness" bug the plan's Phase 1 fixes. Skipped
-    /// until then; un-skip when Phase 1 lands the fix (`AttributePredicate` compiled into SQL
-    /// before `ORDER BY … LIMIT`).
+    /// over the whole window, not just whatever survived a row cap. Originally written against
+    /// the pre-Phase-4 <c>GetGroupedMetricSeriesAsync</c>'s raw point list; updated for Phase 4's
+    /// bucketed <c>GetMetricSeriesAsync(MetricSeriesQuery)</c> shape, which has no raw point list
+    /// to sum any more — instead this asserts the filtered-out pod's data never contributes to any
+    /// bucket (every bucket's value comes from exactly one stream, "shared-svc-3"'s own gauge
+    /// values), using a wide bucket count so each of the 30 seeded points gets its own bucket.
     /// </summary>
     [Fact]
     public async Task MetricSeries_LabelFilter_MatchesEveryRow_NotJustTheCappedSample()
@@ -168,16 +167,30 @@ public abstract class BaselineCharacterizationTestsBase : IAsyncLifetime
         using var readScope = Scope();
         var repo = readScope.ServiceProvider.GetRequiredService<IMetricReadRepository>();
 
-        var grouped = await repo.GetGroupedMetricSeriesAsync(
-            "phase0.cpu.utilization",
-            WindowStart.AddMinutes(-1),
-            WindowStart.AddHours(1),
-            labelFilters: new Dictionary<string, string> { ["k8s.pod.name"] = "shared-svc-3" });
+        var result = await repo.GetMetricSeriesAsync(new MetricSeriesQuery
+        {
+            MetricName = "phase0.cpu.utilization",
+            Start = WindowStart.AddMinutes(-1),
+            End = WindowStart.AddHours(1),
+            LabelFilters = new Dictionary<string, string> { ["k8s.pod.name"] = "shared-svc-3" },
+            Points = 1000,
+            Top = 8
+        });
 
-        Assert.NotNull(grouped);
-        var expectedPoints = metrics.Single(m => m.GaugeDataPoints!.All(p => (string)p.Attributes!["k8s.pod.name"] == "shared-svc-3"))
-            .GaugeDataPoints!.Count;
-        var actualPoints = grouped!.Series.Sum(s => s.Points.Count);
-        Assert.Equal(expectedPoints, actualPoints);
+        Assert.NotNull(result);
+        var expected = metrics.Single(m => m.GaugeDataPoints!.All(p => (string)p.Attributes!["k8s.pod.name"] == "shared-svc-3"));
+        var expectedValues = expected.GaugeDataPoints!
+            .Select(p => p.ValueDouble ?? p.ValueInt ?? 0)
+            .OrderBy(v => v)
+            .ToList();
+
+        // With the filter applied, only the one matching stream should ever contribute — so every
+        // non-empty bucket's value must be one of that stream's own raw values (never another
+        // pod's), and the bucketed series must carry the same number of non-empty buckets as the
+        // matching stream's own point count (one point per bucket at this resolution).
+        var nonEmpty = result!.Series.Single().Points.Where(p => p.Value.HasValue).ToList();
+        Assert.Equal(expected.GaugeDataPoints!.Count, nonEmpty.Count);
+        foreach (var point in nonEmpty)
+            Assert.Contains(expectedValues, v => Math.Abs(v - point.Value!.Value) < 0.0001);
     }
 }

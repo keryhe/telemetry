@@ -62,8 +62,7 @@ public sealed record ProviderCapabilities(
     /// (rather than through a bound <see cref="QueryOptions"/>/<c>ExportOptions</c>) since it runs
     /// during service registration, before the options infrastructure it would otherwise depend on
     /// is available to resolve — matching the existing <c>configuration["..."]</c> + <c>TryParse</c>
-    /// idiom this codebase already uses at registration time (e.g.
-    /// <see cref="Data.Read.MetricReadRepositoryBase"/>'s <c>Metrics:MaxDataPointsPerQuery</c> read).
+    /// idiom this codebase already uses at registration time.
     /// </summary>
     public static ProviderCapabilities FromConfiguration(ProviderTier tier, IConfiguration configuration)
     {

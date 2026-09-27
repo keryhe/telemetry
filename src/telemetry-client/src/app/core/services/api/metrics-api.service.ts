@@ -4,11 +4,11 @@ import { Observable } from 'rxjs';
 import { APP_CONFIG } from '../../config/app-config';
 import {
   MetricExemplarPage,
+  MetricExemplarQueryParams,
   MetricInfo,
-  MetricSeries,
-  MetricSeriesParams,
+  MetricSeriesQueryParams,
+  MetricSeriesResult,
   MetricsSummary,
-  MultiSeriesMetricData,
 } from '../../models/metric.models';
 
 @Injectable({ providedIn: 'root' })
@@ -43,43 +43,34 @@ export class MetricsApiService {
     );
   }
 
-  getSeries(p: MetricSeriesParams): Observable<MetricSeries> {
-    let params = new HttpParams().set('metricName', p.metricName);
-    if (p.start) params = params.set('start', p.start.toISOString());
-    if (p.end) params = params.set('end', p.end.toISOString());
-    if (p.metricId != null) params = params.set('metricId', p.metricId);
-    if (p.labelFilters) {
-      for (const [k, v] of Object.entries(p.labelFilters)) {
-        params = params.append('labelFilter', `${k}:${v}`);
-      }
-    }
-    return this.http.get<MetricSeries>(`${this.base}/series`, { params });
+  /** Database-bucketed series (Phase 4): one query, pre-aggregated per type, top-N + "other" folded server-side. */
+  getSeries(p: MetricSeriesQueryParams): Observable<MetricSeriesResult> {
+    let params = this.filterParams(p).set('points', p.points);
+    if (p.top != null) params = params.set('top', p.top);
+    return this.http.get<MetricSeriesResult>(`${this.base}/series`, { params });
   }
 
-  getGroupedSeries(p: MetricSeriesParams): Observable<MultiSeriesMetricData> {
-    let params = new HttpParams().set('metricName', p.metricName);
-    if (p.start) params = params.set('start', p.start.toISOString());
-    if (p.end) params = params.set('end', p.end.toISOString());
-    if (p.metricId != null) params = params.set('metricId', p.metricId);
-    if (p.labelFilters) {
-      for (const [k, v] of Object.entries(p.labelFilters)) {
-        params = params.append('labelFilter', `${k}:${v}`);
-      }
-    }
-    return this.http.get<MultiSeriesMetricData>(`${this.base}/series-grouped`, { params });
-  }
-
-  getExemplars(p: MetricSeriesParams & { limit?: number }): Observable<MetricExemplarPage> {
-    let params = new HttpParams().set('metricName', p.metricName);
-    if (p.start) params = params.set('start', p.start.toISOString());
-    if (p.end) params = params.set('end', p.end.toISOString());
-    if (p.metricId != null) params = params.set('metricId', p.metricId);
-    if (p.limit != null) params = params.set('limit', p.limit);
-    if (p.labelFilters) {
-      for (const [k, v] of Object.entries(p.labelFilters)) {
-        params = params.append('labelFilter', `${k}:${v}`);
-      }
-    }
+  /** Tier-aware exemplars (Phase 4): real keyset paging on the analytics tier, newest-500 capped on standard. */
+  getExemplars(p: MetricExemplarQueryParams): Observable<MetricExemplarPage> {
+    let params = this.filterParams(p);
+    if (p.size != null) params = params.set('size', p.size);
+    if (p.cursor) params = params.set('cursor', p.cursor);
+    if (p.nav) params = params.set('nav', p.nav);
     return this.http.get<MetricExemplarPage>(`${this.base}/exemplars`, { params });
+  }
+
+  private filterParams(p: { metricName: string; start: Date; end: Date; metricId?: number; labelFilters?: Record<string, string>; q?: string }): HttpParams {
+    let params = new HttpParams()
+      .set('metricName', p.metricName)
+      .set('start', p.start.toISOString())
+      .set('end', p.end.toISOString());
+    if (p.metricId != null) params = params.set('metricId', p.metricId);
+    if (p.q) params = params.set('q', p.q);
+    if (p.labelFilters) {
+      for (const [k, v] of Object.entries(p.labelFilters)) {
+        params = params.append('labelFilter', `${k}:${v}`);
+      }
+    }
+    return params;
   }
 }

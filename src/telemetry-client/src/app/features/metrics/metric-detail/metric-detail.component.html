@@ -11,17 +11,17 @@
       <mat-chip>{{ instances()[0].unit }}</mat-chip>
     }
     <span class="spacer"></span>
-    <button mat-stroked-button (click)="exportCsv()" [disabled]="points().length === 0">
+    <button mat-stroked-button (click)="exportCsv()" [disabled]="allGroups().length === 0">
       <mat-icon>download</mat-icon> Export CSV
     </button>
   </div>
 
   <!-- Stats -->
   <div class="stat-grid">
-    <app-stat-card [label]="(isHistogram() || isSummary()) ? 'Mean' : (statsAreRates() ? 'Current Rate' : 'Current')" icon="show_chart" [value]="fmtStat(currentValue())" />
+    <app-stat-card [label]="(isHistogram() || isSummary() || isExpHistogram()) ? 'Mean' : (statsAreRates() ? 'Current Rate' : 'Current')" icon="show_chart" [value]="fmtStat(currentValue())" />
     <app-stat-card label="Min" icon="arrow_downward" [value]="fmtStat(minValue())" />
     <app-stat-card label="Max" icon="arrow_upward" [value]="fmtStat(maxValue())" />
-    <app-stat-card [label]="(isHistogram() || isSummary()) ? 'Count' : 'Average'" icon="functions" [value]="(isHistogram() || isSummary()) ? fmt(avgValue()) : fmtStat(avgValue())" />
+    <app-stat-card [label]="isDistribution() ? 'Count' : 'Average'" icon="functions" [value]="isDistribution() ? fmt(avgValue()) : fmtStat(avgValue())" />
   </div>
 
   <!-- Controls -->
@@ -29,7 +29,7 @@
     @if (services().length > 1) {
       <mat-form-field appearance="outline" subscriptSizing="dynamic" class="ctrl-field">
         <mat-label>Service</mat-label>
-        <mat-select panelWidth="auto" [value]="selectedService()" (selectionChange)="selectedService.set($event.value); reloadSeries()">
+        <mat-select panelWidth="auto" [value]="selectedService()" (selectionChange)="selectedService.set($event.value)">
           <mat-option value="">All</mat-option>
           @for (s of services(); track s) { <mat-option [value]="s">{{ s }}</mat-option> }
         </mat-select>
@@ -47,26 +47,31 @@
       </mat-form-field>
     }
 
-    @if (!isDistribution() && showSeriesControls() && (services().length > 1 || labelKeys().length > 0)) {
+    <mat-form-field appearance="outline" subscriptSizing="dynamic" class="search-field">
+      <mat-label>Search (key:value)</mat-label>
+      <input matInput [ngModel]="searchInput()" (ngModelChange)="searchInput.set($event)"
+        (keydown.enter)="submitSearch()" placeholder="e.g. http.method:GET" />
+      @if (searchInput()) {
+        <button matSuffix mat-icon-button (click)="onSearchChange(''); submitSearch()" aria-label="Clear search">
+          <mat-icon>close</mat-icon>
+        </button>
+      }
+    </mat-form-field>
+    <button mat-icon-button (click)="submitSearch()" matTooltip="Search" aria-label="Search">
+      <mat-icon>search</mat-icon>
+    </button>
+
+    @if (!isDistribution() && allGroups().length > 1) {
       <mat-button-toggle-group>
-        <mat-button-toggle [checked]="groupMode() === 'labels'" (change)="groupMode.set('labels'); reloadSeries()">Per Series</mat-button-toggle>
-        <mat-button-toggle [checked]="groupMode() === 'service'" (change)="groupMode.set('service'); reloadSeries()">Per Service</mat-button-toggle>
+        <mat-button-toggle [checked]="groupMode() === 'labels'" (change)="onGroupModeChange('labels')">Per Series</mat-button-toggle>
+        <mat-button-toggle [checked]="groupMode() === 'service'" (change)="onGroupModeChange('service')">Per Service</mat-button-toggle>
       </mat-button-toggle-group>
     }
 
-    @if (!isDistribution() && showSeriesControls() && chartStyle() !== 'stacked' && (services().length > 1 || labelKeys().length > 0)) {
-      <mat-form-field appearance="outline" subscriptSizing="dynamic" class="ctrl-field">
-        <mat-label>Aggregate</mat-label>
-        <mat-select panelWidth="auto" [value]="aggMode()" (selectionChange)="onAggModeChange($event.value)">
-          @for (m of aggModes; track m.value) { <mat-option [value]="m.value">{{ m.label }}</mat-option> }
-        </mat-select>
-      </mat-form-field>
-    }
-
-    @if (isCounter()) {
+    @if (isSum()) {
       <mat-button-toggle-group>
-        <mat-button-toggle [checked]="!showRaw()" (change)="showRaw.set(false); reloadSeries()">Rate</mat-button-toggle>
-        <mat-button-toggle [checked]="showRaw()" (change)="showRaw.set(true); reloadSeries()">Raw</mat-button-toggle>
+        <mat-button-toggle [checked]="!showRaw()" (change)="showRaw.set(false)">Rate</mat-button-toggle>
+        <mat-button-toggle [checked]="showRaw()" (change)="showRaw.set(true)">Raw</mat-button-toggle>
       </mat-button-toggle-group>
     }
   </div>
@@ -78,106 +83,58 @@
     <mat-tab label="Chart">
       <mat-card class="chart-card">
         <mat-card-content>
-          @if (isTruncated()) {
-            <div class="truncated-banner">
-              <mat-icon>warning</mat-icon>
-              Showing a partial view — this range has more data than can be displayed at once.
-              Narrow the time range or add a filter to see everything.
-            </div>
-          }
-          @if (!isDistribution() && chartStyles().length > 1) {
-            <mat-button-toggle-group class="chart-style-tiles" [value]="chartStyle()"
-              (change)="onChartStyleChange($event.value)" aria-label="Chart style">
-              @for (style of chartStyles(); track style) {
-                <mat-button-toggle [value]="style" matTooltip="{{ chartStyleMeta[style].label }}">
-                  <mat-icon>{{ chartStyleMeta[style].icon }}</mat-icon>
-                </mat-button-toggle>
-              }
-            </mat-button-toggle-group>
-          }
+         <div #chartContainer class="chart-container">
+          @if (timeoutFailed()) {
+            <app-empty-state icon="hourglass_disabled"
+              message="This range timed out even at reduced resolution. Narrow the time range or add a filter, then try again." />
+          } @else {
+            @if (timeoutDegraded()) {
+              <div class="timeout-banner">
+                <mat-icon>warning</mat-icon>
+                This query timed out at full resolution — showing a reduced-resolution retry. Narrow
+                the time range for the full picture.
+              </div>
+            }
+            @if (excludedStreams() > 0) {
+              <div class="excluded-note">
+                {{ excludedStreams() }} stream{{ excludedStreams() === 1 ? '' : 's' }} with a
+                different bucket layout not shown.
+              </div>
+            }
 
-          @if (chartOptions().series) {
-            <apx-chart
-              [series]="chartOptions().series!"
-              [chart]="chartOptions().chart!"
-              [xaxis]="chartOptions().xaxis!"
-              [stroke]="chartOptions().stroke!"
-              [fill]="chartOptions().fill!"
-              [theme]="chartOptions().theme!"
-              [dataLabels]="chartOptions().dataLabels!"
-              [yaxis]="chartOptions().yaxis!"
-              [grid]="chartOptions().grid!"
-              [plotOptions]="chartOptions().plotOptions!"
-              [labels]="chartOptions().labels!"
-              [colors]="chartOptions().colors!"
-              [legend]="chartOptions().legend!" />
-          } @else if (!loading()) {
-            <app-empty-state icon="show_chart" message="No data for selected range" />
-          }
+            @if (chartOptions().series && chartOptions().series!.length) {
+              <apx-chart
+                [series]="chartOptions().series!"
+                [chart]="chartOptions().chart!"
+                [xaxis]="chartOptions().xaxis!"
+                [stroke]="chartOptions().stroke!"
+                [fill]="chartOptions().fill!"
+                [theme]="chartOptions().theme!"
+                [dataLabels]="chartOptions().dataLabels!"
+                [yaxis]="chartOptions().yaxis!"
+                [grid]="chartOptions().grid!"
+                [colors]="chartOptions().colors!"
+                [legend]="chartOptions().legend!" />
+            } @else if (!loading()) {
+              <app-empty-state icon="show_chart" message="No data for selected range" />
+            }
 
-          @if (isSummary() && (multiSeries()?.series?.length ?? 0) > 1) {
-            <div class="summary-note">
-              Quantiles shown for one series ({{ summarySeries()?.seriesName }}) — summary quantiles can't be
-              aggregated across series. Use the Service / label filters to compare.
-            </div>
+            @if (isSummary() && summarySnapshot().length) {
+              <div class="sub-chart-title">Latest quantile snapshot</div>
+              <table class="snapshot-table">
+                <thead><tr>@if (allGroups().length > 1) {<th>Series</th>}<th>Quantile</th><th>Value</th></tr></thead>
+                <tbody>
+                  @for (q of summarySnapshot(); track q.series + q.label) {
+                    <tr>
+                      @if (allGroups().length > 1) {<td>{{ q.series }}</td>}
+                      <td>{{ q.label }}</td><td>{{ q.value | number:'1.0-2' }}</td>
+                    </tr>
+                  }
+                </tbody>
+              </table>
+            }
           }
-
-          <!-- Windowed throughput (histogram / exp-histogram / summary) -->
-          @if (throughputChartOptions(); as cs) {
-            <div class="sub-chart-title">Throughput</div>
-            <apx-chart
-              [series]="cs.series!"
-              [chart]="cs.chart!"
-              [xaxis]="cs.xaxis!"
-              [stroke]="cs.stroke!"
-              [theme]="cs.theme!"
-              [dataLabels]="cs.dataLabels!"
-              [yaxis]="cs.yaxis!"
-              [grid]="cs.grid!"
-              [legend]="cs.legend!" />
-          }
-
-          <!-- Histogram latest-window bucket distribution (bars) -->
-          @if (bucketBarOptions(); as bar) {
-            <div class="sub-chart-title">Bucket distribution</div>
-            <apx-chart
-              [series]="bar.series!"
-              [chart]="bar.chart!"
-              [xaxis]="bar.xaxis!"
-              [theme]="bar.theme!"
-              [dataLabels]="bar.dataLabels!"
-              [grid]="bar.grid!"
-              [legend]="bar.legend!"
-              [plotOptions]="bar.plotOptions!" />
-          }
-
-          <!-- Histogram bucket-distribution heatmap -->
-          @if (heatmapOptions(); as hm) {
-            <div class="sub-chart-title">Bucket distribution over time</div>
-            <apx-chart
-              [series]="hm.series!"
-              [chart]="hm.chart!"
-              [xaxis]="hm.xaxis!"
-              [theme]="hm.theme!"
-              [dataLabels]="hm.dataLabels!"
-              [stroke]="hm.stroke!"
-              [grid]="hm.grid!"
-              [legend]="hm.legend!"
-              [plotOptions]="hm.plotOptions!" />
-          }
-
-          <!-- Summary quantile snapshot -->
-          @if (isSummary() && summarySnapshot().length) {
-            <div class="sub-chart-title">Latest quantile snapshot</div>
-            <table class="snapshot-table">
-              <thead><tr><th>Quantile</th><th>Value</th></tr></thead>
-              <tbody>
-                @for (q of summarySnapshot(); track q.label) {
-                  <tr><td>{{ q.label }}</td><td>{{ q.value | number:'1.0-2' }}</td></tr>
-                }
-              </tbody>
-            </table>
-          }
+         </div>
         </mat-card-content>
       </mat-card>
     </mat-tab>
@@ -231,9 +188,9 @@
           @if (exemplarsLoading()) {
             <mat-progress-bar mode="indeterminate" />
           }
-          @if (!exemplarsLoading() && exemplars().length === 0) {
+          @if (!exemplarsLoading() && pagedExemplars().length === 0) {
             <app-empty-state icon="scatter_plot" message="No exemplars" />
-          } @else if (exemplars().length > 0) {
+          } @else if (pagedExemplars().length > 0) {
             <table mat-table [dataSource]="pagedExemplars()" class="full-width">
               <ng-container matColumnDef="time">
                 <th mat-header-cell *matHeaderCellDef>Time</th>
@@ -285,12 +242,19 @@
               <tr mat-header-row *matHeaderRowDef="exemplarColumns"></tr>
               <tr mat-row *matRowDef="let row; columns: exemplarColumns"></tr>
             </table>
-            <mat-paginator [length]="exemplars().length" [pageSize]="25" [pageSizeOptions]="[25, 50, 100]"
-              (page)="exemplarsPage.set($event)" />
-            @if (exemplarsHasMore()) {
+            <mat-paginator [length]="exemplarsTotal()" [pageIndex]="exemplarPageIndex()"
+              [pageSize]="exemplarPageSize()" [pageSizeOptions]="exemplarPageSizeOptions"
+              (page)="onExemplarsPage($event)" />
+            @if (exemplarsCapped()) {
               <div class="exemplars-hint">
-                Showing the {{ exemplars().length }} most recent exemplars in this range. Narrow the
+                Showing the newest 500 exemplars in this range (standard-tier provider). Narrow the
                 time range to see others.
+              </div>
+            }
+            @if (exemplarsTotalIsLowerBound()) {
+              <div class="exemplars-hint">
+                Showing {{ exemplarsTotal() }}+ exemplars — the exact count timed out. Narrow the
+                time range for an exact total.
               </div>
             }
           }

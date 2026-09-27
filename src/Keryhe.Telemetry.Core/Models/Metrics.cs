@@ -127,52 +127,6 @@ public class MetricInfo
     public int DataPointCount { get; set; }
 }
 
-public class MetricSeries
-{
-    public string Name { get; set; } = null!;
-    public MetricType Type { get; set; }
-    public Dictionary<string, string> Labels { get; set; } = new();
-    public List<MetricDataPoint> Points { get; set; } = new();
-    /// <summary>True when the per-metric-row row cap (<c>Metrics:MaxDataPointsPerQuery</c>) was hit
-    /// for at least one underlying metric row — the requested range may hold more data than shown.</summary>
-    public bool Truncated { get; set; }
-}
-
-public class MetricDataPoint
-{
-    public DateTime? StartTimestamp { get; set; }
-    public DateTime Timestamp { get; set; }
-    public double? DoubleValue { get; set; }
-    public long? IntValue { get; set; }
-    public long? Count { get; set; }
-    public double? Sum { get; set; }
-    public int? Scale { get; set; }
-    public long? ZeroCount { get; set; }
-    public int? PositiveOffset { get; set; }
-    public List<long>? PositiveBucketCounts { get; set; }
-    public int? NegativeOffset { get; set; }
-    public List<long>? NegativeBucketCounts { get; set; }
-    public AggregationTemporality? AggregationTemporality { get; set; }
-    public bool? IsMonotonic { get; set; }
-    public int Flags { get; set; }
-    public double? Min { get; set; }
-    public double? Max { get; set; }
-    public List<double>? Quantiles { get; set; }
-    public List<double>? QuantileValues { get; set; }
-    public List<long>? BucketCounts { get; set; }
-    public List<double>? BucketBounds { get; set; }
-    public Dictionary<string, object>? Attributes { get; set; }
-    /// <summary>
-    /// Write-only on the read side: the write path still populates <c>exemplars_json</c> for every
-    /// data point, but the series reads (<c>MetricReadRepositoryBase.Get*DataPointsAsync</c>) no
-    /// longer select it — exemplars are served exclusively via <see cref="MetricExemplar"/> /
-    /// <c>GetMetricExemplarsAsync</c>, a dedicated on-demand endpoint (metric-detail-performance
-    /// plan §4). A realistic histogram range carries tens of thousands of exemplars; bundling them
-    /// with every series read was ~12 MB of an 18 MB one-hour response and froze the client.
-    /// </summary>
-    public List<ExemplarModel>? Exemplars { get; set; }
-}
-
 public class UniqueMetricSummary
 {
     public string Name { get; set; } = "";
@@ -182,28 +136,6 @@ public class UniqueMetricSummary
     public int InstanceCount { get; set; }
     public List<string> Services { get; set; } = new();
     public DateTime LastSeen { get; set; }
-}
-
-public class MultiSeriesMetricData
-{
-    public string Name { get; set; } = "";
-    public MetricType Type { get; set; }
-    public List<NamedMetricSeries> Series { get; set; } = new();
-    /// <summary>True when the per-metric-row row cap (<c>Metrics:MaxDataPointsPerQuery</c>) was hit
-    /// for at least one underlying metric row — the requested range may hold more data than shown.</summary>
-    public bool Truncated { get; set; }
-}
-
-public class NamedMetricSeries
-{
-    /// <summary>Human-readable display label for the series, e.g. "svc | method=GET, route=/api".</summary>
-    public string SeriesName { get; set; } = "";
-    public long MetricId { get; set; }
-    /// <summary>The series' originating service (service.name from the metric's resource attributes).</summary>
-    public string ServiceName { get; set; } = "";
-    /// <summary>The data point attribute (label) set that defines this series' identity.</summary>
-    public Dictionary<string, string> Labels { get; set; } = new();
-    public List<MetricDataPoint> Points { get; set; } = new();
 }
 
 /// <summary>
@@ -225,14 +157,7 @@ public class MetricExemplar
     public long? PointIntValue { get; set; }
 }
 
-public class MetricExemplarPage
-{
-    public string Name { get; set; } = "";
-    public MetricType Type { get; set; }
-    public List<MetricExemplar> Exemplars { get; set; } = new();
-    /// <summary>True when the scan hit its cap: more exemplars exist beyond those returned.</summary>
-    public bool HasMore { get; set; }
-}
+// MetricExemplarPage moved to MetricSeriesModels.cs (Phase 4: gained cursor/capped fields).
 
 /// <summary>
 /// Result of <see cref="IMetricReadRepository.GetMetricLabelsAsync"/> (list-pages-server-side

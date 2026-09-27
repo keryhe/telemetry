@@ -1,14 +1,19 @@
-import { Component, Input, OnInit, computed, effect, inject, signal, untracked } from '@angular/core';
+import {
+  AfterViewInit, Component, ElementRef, Input, OnDestroy, OnInit, ViewChild,
+  computed, effect, inject, signal, untracked,
+} from '@angular/core';
 import { DatePipe, DecimalPipe, KeyValuePipe, SlicePipe } from '@angular/common';
 import { RouterLink } from '@angular/router';
 import { Title } from '@angular/platform-browser';
-import { forkJoin } from 'rxjs';
+import { forkJoin, Subscription } from 'rxjs';
+import { FormsModule } from '@angular/forms';
 import { MatButtonModule } from '@angular/material/button';
 import { MatButtonToggleModule } from '@angular/material/button-toggle';
 import { MatCardModule } from '@angular/material/card';
 import { MatChipsModule } from '@angular/material/chips';
 import { MatFormFieldModule } from '@angular/material/form-field';
 import { MatIconModule } from '@angular/material/icon';
+import { MatInputModule } from '@angular/material/input';
 import { MatPaginatorModule, PageEvent } from '@angular/material/paginator';
 import { MatProgressBarModule } from '@angular/material/progress-bar';
 import { MatSelectModule } from '@angular/material/select';
@@ -22,53 +27,35 @@ import { MetricsApiService } from '../../../core/services/api/metrics-api.servic
 import { ResourcesApiService } from '../../../core/services/api/resources-api.service';
 import { TimeRangeService } from '../../../core/services/time-range.service';
 import { ThemeService } from '../../../core/services/theme.service';
+import { CapabilitiesService } from '../../../core/services/capabilities.service';
 import {
-  AggregationTemporality, ExemplarModel, MetricDataPoint, MetricExemplar, MetricInfo, MetricSeries,
-  MetricType, MultiSeriesMetricData, NamedMetricSeries, TYPE_LABELS, getTypeColor,
+  ExemplarModel, MetricBucketPoint, MetricExemplar, MetricExemplarPage,
+  MetricInfo, MetricSeriesResult, MetricType, TYPE_LABELS, getTypeColor,
 } from '../../../core/models/metric.models';
 import { StatCardComponent } from '../../../shared/components/stat-card/stat-card.component';
 import { EmptyStateComponent } from '../../../shared/components/empty-state/empty-state.component';
 import { PageHeaderComponent } from '../../../shared/components/page-header/page-header.component';
 import {
-  AggregateFn, aggregateHistogramWindows, aggregateSeries, aggregateSummaryWindows,
-  buildHistogramBarFromWindows, buildHistogramHeatmapFromWindows, buildRadialGauge, buildShareDonut,
-  chartGrid, computeRateSeries, formatUnitValue,
-  HistogramWindow, histogramQuantile,
-  isCounterMetric, isDeltaSum, normalizeExpHistogramSeries, PERCENTILE_COLORS, timeRangeZoom,
+  chartGrid, formatUnitValue, histogramQuantile, timeRangeZoom,
 } from '../../../shared/utils/chart.utils';
 import { loadPageState, savePageState } from '../../../shared/utils/page-state';
+import { UrlStateService } from '../../../shared/utils/url-state';
+import { downloadCsv, fileStamp } from '../../../shared/utils/export.utils';
 
 const STATE_KEY = 'state.metricDetail';
 
-type GroupMode = 'service' | 'labels';
-type AggMode = 'none' | AggregateFn;
-/** How the scalar (gauge/sum) chart is drawn; distributions ignore this. */
-type ChartStyle = 'timeseries' | 'stacked' | 'share' | 'dial';
+/** How the scalar (gauge/sum) chart folds multiple pods of one service into one line. Distribution
+ *  types (histogram/exp-histogram/summary) are always grouped per-service by the server, so this
+ *  control only appears for Gauge/Sum. */
+type GroupMode = 'labels' | 'service';
 
-/** Icon + label for each chart-style tile (Material glyphs chosen to read distinctly at 24px). */
-const CHART_STYLE_META: Record<ChartStyle, { icon: string; label: string }> = {
-  timeseries: { icon: 'show_chart', label: 'Time series' },
-  stacked: { icon: 'stacked_line_chart', label: 'Stacked' },
-  share: { icon: 'donut_large', label: 'Share' },
-  dial: { icon: 'speed', label: 'Dial' },
-};
+/** ~1 point per 3px of chart width, capped at 1,000 (decision 21 / plan's "Chart-width driven
+ *  resolution"). A sane floor keeps a very narrow chart from requesting an unusably coarse series. */
+const PX_PER_POINT = 3;
+const MIN_POINTS = 50;
+const MAX_POINTS = 1000;
 
-/** Aggregation choices for the grouped-series control. */
-const AGG_MODES: { value: AggMode; label: string }[] = [
-  { value: 'none', label: 'None' }, { value: 'sum', label: 'Sum' },
-  { value: 'avg', label: 'Avg' }, { value: 'min', label: 'Min' }, { value: 'max', label: 'Max' },
-];
-
-/** Series rendered individually before the rest are folded into an "others" line. */
-const MAX_SERIES = 8;
-
-const TEMPORALITY_LABELS: Record<AggregationTemporality, string> = {
-  [AggregationTemporality.Unspecified]: 'Unspecified',
-  [AggregationTemporality.Delta]: 'Delta',
-  [AggregationTemporality.Cumulative]: 'Cumulative',
-};
-
-const val = (p: MetricDataPoint): number => p.doubleValue ?? p.intValue ?? 0;
+const TYPE_LABEL_OF = TYPE_LABELS;
 
 /** One table row on the Exemplars tab: the exemplar plus the data point it was sampled from. */
 interface ExemplarRow {
@@ -82,27 +69,41 @@ interface ExemplarRow {
   value: string;
 }
 
+/** One group of points ready to chart: a real display series or the folded "other" bucket. */
+interface ChartGroup {
+  name: string;
+  serviceName: string;
+  points: MetricBucketPoint[];
+}
+
 @Component({
   selector: 'app-metric-detail',
   standalone: true,
   imports: [
-    DatePipe, DecimalPipe, KeyValuePipe, SlicePipe, RouterLink,
+    DatePipe, DecimalPipe, KeyValuePipe, SlicePipe, RouterLink, FormsModule,
     MatCardModule, MatButtonModule, MatButtonToggleModule, MatIconModule,
-    MatTabsModule, MatTableModule, MatChipsModule, MatFormFieldModule,
+    MatTabsModule, MatTableModule, MatChipsModule, MatFormFieldModule, MatInputModule,
     MatSelectModule, MatProgressBarModule, MatTooltipModule, MatPaginatorModule, NgApexchartsModule,
     StatCardComponent, EmptyStateComponent, PageHeaderComponent,
   ],
   templateUrl: './metric-detail.component.html',
   styleUrl: './metric-detail.component.scss',
 })
-export class MetricDetailComponent implements OnInit {
+export class MetricDetailComponent implements OnInit, AfterViewInit, OnDestroy {
   @Input() name!: string;
+
+  /** Chart card content area — its pixel width drives the requested point resolution. */
+  @ViewChild('chartContainer', { read: ElementRef }) chartContainerRef?: ElementRef<HTMLElement>;
 
   private readonly api = inject(MetricsApiService);
   private readonly resourcesApi = inject(ResourcesApiService);
   private readonly timeRange = inject(TimeRangeService);
   private readonly theme = inject(ThemeService);
   private readonly title = inject(Title);
+  private readonly urlState = inject(UrlStateService);
+  private readonly capabilitiesService = inject(CapabilitiesService);
+
+  protected capabilities = this.capabilitiesService.capabilities;
 
   protected loading = signal(true);
   protected metricName = computed(() => decodeURIComponent(this.name));
@@ -110,196 +111,131 @@ export class MetricDetailComponent implements OnInit {
   protected labels = signal<Record<string, string[]>>({});
   /** True when the label picker's 1,000-row distinct-set cap was hit; some rare labels may be missing. */
   protected labelsPartial = signal(false);
-  protected series = signal<MetricSeries | null>(null);
-  protected multiSeries = signal<MultiSeriesMetricData | null>(null);
+  protected seriesResult = signal<MetricSeriesResult | null>(null);
+  private seriesSub?: Subscription;
 
   protected selectedService = signal('');
   protected selectedLabels = signal<Record<string, string>>({});
-  /** Scalar-metric grouping: 'labels' = one line per full label set, 'service' = one line per service. */
-  protected groupMode = signal<GroupMode>('labels');
-  /** Cross-series aggregation applied in a grouping mode; 'none' keeps per-series lines. */
-  protected aggMode = signal<AggMode>('none');
+  /** Applied query text (shared `q` grammar, decision 30) — changes only on submit. */
+  protected searchText = signal<string>(this.urlState.get('q') ?? '');
+  /** Draft text in the search box; applied to `searchText` by `submitSearch()`. */
+  protected searchInput = signal<string>(this.searchText());
+  /** Scalar-metric grouping: 'labels' = one line per full label set (server default), 'service' =
+   *  client-side fold across pods of one service. Distribution types ignore this (server already
+   *  groups per-service only — see MetricSeriesModels.cs's IsDistributionType doc comment). */
+  protected groupMode = signal<GroupMode>((this.urlState.get('groupBy') as GroupMode) ?? 'labels');
+  /** Sum only: raw per-bucket increase vs. a per-second rate (Value / bucket width). */
   protected showRaw = signal(false);
   protected activeTab = signal(0);
-  /** Chart shape for scalar (gauge/sum) metrics; guarded to a value valid for the current type. */
-  protected chartStyle = signal<ChartStyle>('timeseries');
 
-  protected readonly aggModes = AGG_MODES;
-  protected readonly chartStyleMeta = CHART_STYLE_META;
+  /** Chart-width-driven point resolution (decision 21). Updated by a ResizeObserver but never
+   *  itself triggers a refetch — only read (via `untracked`) the next time a real filter changes,
+   *  per the plan's "re-request on window change, not on resize". */
+  private chartWidthPx = signal(900);
+  private resizeObserver?: ResizeObserver;
 
-  protected metricType = computed(() => this.instances()[0]?.type ?? MetricType.Gauge);
-  protected metricUnit = computed(() => this.instances()[0]?.unit ?? '');
+  protected metricType = computed(() => this.instances()[0]?.type ?? this.seriesResult()?.type ?? MetricType.Gauge);
+  protected metricUnit = computed(() => this.instances()[0]?.unit ?? this.seriesResult()?.unit ?? '');
+  protected typeLabel = computed(() => TYPE_LABEL_OF[this.metricType()] ?? 'Unknown');
+  protected typeColor = computed(() => getTypeColor(this.metricType()));
 
-  /**
-   * Points feeding the stat cards / metadata / exemplars / export. For scalar metrics this is the
-   * largest grouped series (a real single time series) rather than an interleaved merge, so counter
-   * rates and min/max stay meaningful. Distribution metrics keep the merged series, whose per-point
-   * percentiles/heatmap the chart derives directly.
-   */
-  protected points = computed(() => {
-    if (this.isDistribution()) return this.series()?.points ?? [];
-    const grouped = this.multiSeries()?.series ?? [];
-    if (!grouped.length) return this.series()?.points ?? [];
-    return grouped.reduce((a, b) => (b.points.length > a.points.length ? b : a)).points;
-  });
-  protected isCounter = computed(() => isCounterMetric(this.metricType(), this.points()));
-  protected isDelta = computed(() => isDeltaSum(this.metricType(), this.points()));
   protected isHistogram = computed(() => this.metricType() === MetricType.Histogram);
   protected isExpHistogram = computed(() => this.metricType() === MetricType.ExponentialHistogram);
   protected isSummary = computed(() => this.metricType() === MetricType.Summary);
-  /** Distribution metrics render derived percentiles/heatmap (via buildChart), not per-series grouping. */
+  protected isSum = computed(() => this.metricType() === MetricType.Sum);
   protected isDistribution = computed(() => this.isHistogram() || this.isExpHistogram() || this.isSummary());
 
-  /** True when the server-side row cap (Metrics:MaxDataPointsPerQuery) truncated this range's series. */
-  protected isTruncated = computed(() => this.multiSeries()?.truncated ?? false);
-
-  /**
-   * A gauge whose unit gives the dial a real 0–100 / 0–1 bound (`%` or the OTLP dimensionless
-   * ratio `1`). Only these get a Dial; unbounded gauges (bytes, temperature, …) have no honest
-   * reference for a radial fill.
-   */
-  protected isBoundedGauge = computed(() => {
-    if (this.metricType() !== MetricType.Gauge) return false;
-    const unit = this.instances()[0]?.unit ?? '';
-    return unit === '%' || unit === '1';
-  });
-
-  /**
-   * Chart-style tiles available for the current metric type. Empty for distributions (selector
-   * hidden). Gauges are instantaneous levels: they don't stack, and share-of-total is a Sum
-   * concept, so they only add a Dial when bounded. Sums get stacked + share composition views.
-   */
-  protected chartStyles = computed<ChartStyle[]>(() => {
-    if (this.isDistribution()) return [];
-    if (this.metricType() === MetricType.Gauge) {
-      return this.isBoundedGauge() ? ['timeseries', 'dial'] : ['timeseries'];
+  /** Every real display series plus the folded "other" bucket, as one flat list for stats/export. */
+  protected allGroups = computed<ChartGroup[]>(() => {
+    const result = this.seriesResult();
+    if (!result) return [];
+    const groups: ChartGroup[] = result.series.map((s) => ({ name: s.seriesName, serviceName: s.serviceName, points: s.points }));
+    if (result.other && result.other.seriesCount > 0) {
+      groups.push({ name: `other (${result.other.seriesCount})`, serviceName: '', points: result.other.points });
     }
-    return ['timeseries', 'stacked', 'share'];
-  });
-  /** The per-series grouping / aggregate controls only make sense for the time-series & stacked views. */
-  protected showSeriesControls = computed(() =>
-    this.chartStyle() === 'timeseries' || this.chartStyle() === 'stacked');
-
-  /**
-   * Single windowed aggregate for an explicit histogram (across all series). Percentiles, throughput,
-   * mean, min/max and the heatmap all derive from this, keeping them self-consistent.
-   */
-  protected histogramWindows = computed(() => {
-    const multi = this.multiSeries();
-    if (!multi) return null;
-    const { start, end } = this.timeRange.range();
-    if (this.isHistogram()) return aggregateHistogramWindows(multi.series, start, end);
-    // Exp histograms: normalize onto one shared bucket schema, then use the identical windowing.
-    if (this.isExpHistogram()) return aggregateHistogramWindows(normalizeExpHistogramSeries(multi.series), start, end);
-    return null;
+    return groups;
   });
 
-  /** Additive (count/sum) window aggregate for summaries — feeds the Throughput/Mean view. */
-  protected summaryWindows = computed(() => {
-    if (!this.isSummary()) return null;
-    const multi = this.multiSeries();
-    if (!multi) return null;
-    const { start, end } = this.timeRange.range();
-    return aggregateSummaryWindows(multi.series, start, end);
+  protected timedOut = computed(() => this.seriesResult()?.timedOut ?? false);
+  protected hasSeriesData = computed(() => this.allGroups().length > 0);
+  /** Full failure per decision 31: the retry at a quarter of the requested points also timed out. */
+  protected timeoutFailed = computed(() => this.timedOut() && !this.hasSeriesData());
+  /** Partial success: the quarter-resolution retry returned something. */
+  protected timeoutDegraded = computed(() => this.timedOut() && this.hasSeriesData());
+
+  /** Histogram/exp-histogram streams folded out because their bucket layout didn't match the
+   *  layout actually charted (decision 42). */
+  protected excludedStreams = computed(() => {
+    const result = this.seriesResult();
+    if (!result) return 0;
+    const fromSeries = result.series.reduce((a, s) => a + (s.excludedStreams ?? 0), 0);
+    return fromSeries + (result.other?.excludedStreams ?? 0);
   });
-
-  /** Representative single series for summary quantiles (quantiles can't be aggregated across series). */
-  protected summarySeries = computed(() => {
-    const series = this.multiSeries()?.series ?? [];
-    if (!series.length) return null;
-    return series.reduce((a, b) => (b.points.length > a.points.length ? b : a));
-  });
-
-  /** Default cross-series fold by type: gauges average (levels), all sum types sum (additive). */
-  protected defaultFold = computed<AggregateFn>(() => (this.metricType() === MetricType.Gauge ? 'avg' : 'sum'));
-  /** Fold actually applied: an explicit Aggregate choice, else the type default. */
-  protected effectiveFold = computed<AggregateFn>(() => (this.aggMode() === 'none' ? this.defaultFold() : this.aggMode() as AggregateFn));
-
-  /**
-   * Whole-metric aggregate for scalar (gauge/sum) stat cards: fold every series with effectiveFold
-   * (rate-first for counters) rather than picking one series. Empty for distribution metrics.
-   */
-  protected scalarAggregateData = computed<[number, number][]>(() => {
-    if (this.isDistribution()) return [];
-    const grouped = this.multiSeries()?.series ?? [];
-    const list = grouped.length ? grouped : (this.series() ? [{ points: this.series()!.points }] : []);
-    if (!list.length) return [];
-    const { start, end } = this.timeRange.range();
-    return aggregateSeries(list, start, end, this.effectiveFold(), this.isCounter() && !this.showRaw());
-  });
-  protected typeLabel = computed(() => TYPE_LABELS[this.metricType()] ?? 'Unknown');
-  protected typeColor = computed(() => getTypeColor(this.metricType()));
-
-  /** Stats are rates only for a cumulative counter when not showing raw values. */
-  protected statsAreRates = computed(() => this.isCounter() && !this.showRaw());
-  protected statsUnitSuffix = computed(() => (this.statsAreRates() ? '/s' : ''));
-
-  protected services = signal<string[]>([]);
-  protected labelKeys = computed(() => Object.keys(this.labels()));
 
   protected chartOptions = signal<ApexOptions>({});
-  /** Windowed throughput (req/s) trend for histogram / exp-histogram / summary metrics. */
-  protected throughputChartOptions = signal<ApexOptions | null>(null);
-  /** Latest-window bucket distribution bar chart for histogram / exp-histogram metrics. */
-  protected bucketBarOptions = signal<ApexOptions | null>(null);
-  /** Bucket-distribution heatmap for histogram / exponential-histogram metrics. */
-  protected heatmapOptions = signal<ApexOptions | null>(null);
 
-  /** Percentiles plotted for histogram metrics. */
-  private static readonly PERCENTILES: { q: number; label: string }[] = [
-    { q: 0.5, label: 'p50' }, { q: 0.95, label: 'p95' }, { q: 0.99, label: 'p99' },
-  ];
-
-  /** Latest-point quantile snapshot for summary metrics (from the representative series). */
+  /** Latest quantile snapshot per group, for the Summary tab's snapshot table. */
   protected summarySnapshot = computed(() => {
-    const pts = this.summarySeries()?.points ?? [];
-    if (!pts.length) return [];
-    const latest = [...pts].sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime())[0];
-    const qs = latest.quantiles, vs = latest.quantileValues;
-    if (!qs || !vs) return [];
-    return qs.map((q, i) => ({ label: `P${(q * 100).toFixed(0)}`, value: vs[i] }))
-      .filter((r) => r.value != null);
+    if (!this.isSummary()) return [];
+    const groups = this.allGroups();
+    if (!groups.length) return [];
+    const rows: { series: string; label: string; value: number }[] = [];
+    const multi = groups.length > 1;
+    for (const g of groups) {
+      const withQ = [...g.points].reverse().find((p) => p.quantiles && p.quantiles.length);
+      if (!withQ?.quantiles || !withQ.quantileValues) continue;
+      withQ.quantiles.forEach((q, i) => {
+        const v = withQ.quantileValues![i];
+        if (v == null) return;
+        rows.push({ series: g.name, label: `P${(q * 100).toFixed(0)}`, value: v });
+      });
+    }
+    return multi ? rows : rows.map((r) => ({ ...r, series: '' }));
   });
 
-  /** Stats: histogram window aggregate; scalar whole-metric fold; exp-hist/summary raw per-point. */
+  /** Stats card values, computed directly from the pre-bucketed server points — no client windowing. */
   private stats = computed(() => {
-    const empty = { current: null, min: null, max: null, avg: null };
+    const empty = { current: null as number | null, min: null as number | null, max: null as number | null, avg: null as number | null };
+    const groups = this.allGroups();
+    if (!groups.length) return empty;
+    const bucketSeconds = (this.seriesResult()?.bucketWidthMs ?? 0) / 1000;
 
-    if (this.isHistogram() || this.isExpHistogram()) {
-      // Aggregate over the whole visible window across all series: Mean, Count, and a min/max envelope.
-      const windows = (this.histogramWindows()?.windows ?? []).filter((w) => w.total > 0);
-      if (!windows.length) return empty;
-      const totalCount = windows.reduce((a, w) => a + w.total, 0);
-      const totalSum = windows.reduce((a, w) => a + w.sum, 0);
-      const mins = windows.map((w) => w.min).filter((v): v is number => v != null);
-      const maxs = windows.map((w) => w.max).filter((v): v is number => v != null);
+    if (this.isHistogram() || this.isExpHistogram() || this.isSummary()) {
+      const allPoints = groups.flatMap((g) => g.points);
+      const totalCount = allPoints.reduce((a, p) => a + (p.count ?? 0), 0);
+      const totalSum = allPoints.reduce((a, p) => a + (p.sum ?? 0), 0);
+      const mins = allPoints.map((p) => p.min).filter((v): v is number => v != null);
+      const maxs = allPoints.map((p) => p.max).filter((v): v is number => v != null);
       return {
-        current: totalCount > 0 ? totalSum / totalCount : null, // Mean
+        current: totalCount > 0 ? totalSum / totalCount : null,
         min: mins.length ? Math.min(...mins) : null,
         max: maxs.length ? Math.max(...maxs) : null,
-        avg: totalCount, // Count card
+        avg: totalCount,
       };
     }
 
-    if (this.isSummary()) {
-      // Only the additive count/sum are aggregatable: window Mean and total Count (no min/max).
-      const windows = (this.summaryWindows() ?? []).filter((w) => w.total > 0);
-      if (!windows.length) return empty;
-      const totalCount = windows.reduce((a, w) => a + w.total, 0);
-      const totalSum = windows.reduce((a, w) => a + w.sum, 0);
-      return { current: totalCount > 0 ? totalSum / totalCount : null, min: null, max: null, avg: totalCount };
+    // Gauge/Sum: merge every group's points index-wise (all groups share the identical bucket
+    // grid the server built — see MetricReadRepositoryBase.MergeBucketsForDisplaySeries).
+    const bucketCount = Math.max(...groups.map((g) => g.points.length), 0);
+    const merged: (number | null)[] = [];
+    for (let i = 0; i < bucketCount; i++) {
+      const vals = groups.map((g) => g.points[i]?.value).filter((v): v is number => v != null);
+      merged.push(vals.length ? (this.metricType() === MetricType.Gauge
+        ? vals.reduce((a, b) => a + b, 0) / vals.length
+        : vals.reduce((a, b) => a + b, 0)) : null);
     }
+    const rate = this.metricType() === MetricType.Sum && !this.showRaw() && bucketSeconds > 0;
+    const scaled = merged.map((v) => (v == null ? null : (rate ? v / bucketSeconds : v)));
+    const present = scaled.filter((v): v is number => v != null);
+    if (!present.length) return empty;
 
-    // Scalar (gauge/sum): stats over the whole-metric aggregate (fold across all series; rate-first
-    // for counters), so they describe the metric rather than the largest single series.
-    const agg = this.scalarAggregateData();
-    if (!agg.length) return empty;
-    const vals = agg.map(([, v]) => v);
+    const allMins = groups.flatMap((g) => g.points.map((p) => p.min)).filter((v): v is number => v != null);
+    const allMaxs = groups.flatMap((g) => g.points.map((p) => p.max)).filter((v): v is number => v != null);
     return {
-      current: vals[vals.length - 1],
-      min: Math.min(...vals),
-      max: Math.max(...vals),
-      avg: vals.reduce((a, b) => a + b, 0) / vals.length,
+      current: present[present.length - 1],
+      min: allMins.length ? Math.min(...allMins) : Math.min(...present),
+      max: allMaxs.length ? Math.max(...allMaxs) : Math.max(...present),
+      avg: present.reduce((a, b) => a + b, 0) / present.length,
     };
   });
 
@@ -308,13 +244,22 @@ export class MetricDetailComponent implements OnInit {
   protected maxValue = computed(() => this.stats().max);
   protected avgValue = computed(() => this.stats().avg);
 
-  /** Metadata rows for the Metadata tab. */
+  /** Stats are rates only for Sum when not showing raw per-bucket increases. */
+  protected statsAreRates = computed(() => this.isSum() && !this.showRaw());
+  protected statsUnitSuffix = computed(() => (this.statsAreRates() ? '/s' : ''));
+  /** Stat cards unit-format for Gauge and every distribution type; Sum can be a "/s" rate or a
+   *  raw per-bucket increase, which formatUnitValue can't represent, so it keeps plain/rate formatting. */
+  protected statsUseUnit = computed(() => this.isDistribution() || this.metricType() === MetricType.Gauge);
+
+  protected services = signal<string[]>([]);
+  protected labelKeys = computed(() => Object.keys(this.labels()));
+
+  /** Metadata rows for the Metadata tab. Per-point metadata (flags, temporality, exponential-
+   *  histogram scale/offsets) is no longer available — the server returns pre-aggregated buckets,
+   *  not raw points, so those per-point fields have nothing to summarize. */
   protected metadataRows = computed(() => {
     const info = this.instances()[0];
-    const pts = this.points();
-    const latest = pts.length
-      ? [...pts].sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime())[0]
-      : null;
+    const result = this.seriesResult();
     const rows: { label: string; value: string }[] = [];
     rows.push({ label: 'Metric Name', value: this.metricName() });
     rows.push({ label: 'Type', value: this.typeLabel() });
@@ -327,82 +272,106 @@ export class MetricDetailComponent implements OnInit {
       rows.push({ label: 'Last Seen', value: new Date(info.lastSeen).toLocaleString() });
       rows.push({ label: 'Data Point Count', value: String(info.dataPointCount) });
     }
-    rows.push({ label: 'Current Data Points', value: String(pts.length) });
-    if (latest?.flags != null) rows.push({ label: 'Latest Flags', value: String(latest.flags) });
-    if (latest?.aggregationTemporality != null) {
-      rows.push({ label: 'Aggregation Temporality', value: TEMPORALITY_LABELS[latest.aggregationTemporality] });
-    }
-    if (latest?.isMonotonic != null) rows.push({ label: 'Is Monotonic', value: String(latest.isMonotonic) });
-    if (this.isExpHistogram() && latest) {
-      rows.push({ label: 'Scale', value: latest.scale?.toString() ?? 'N/A' });
-      rows.push({ label: 'Zero Count', value: latest.zeroCount?.toString() ?? 'N/A' });
-      rows.push({ label: 'Positive Offset', value: latest.positiveOffset?.toString() ?? 'N/A' });
-      rows.push({ label: 'Negative Offset', value: latest.negativeOffset?.toString() ?? 'N/A' });
+    if (result) {
+      rows.push({ label: 'Bucket Width', value: `${(result.bucketWidthMs / 1000).toFixed(1)}s` });
+      rows.push({ label: 'Series Returned', value: String(result.series.length + (result.other ? 1 : 0)) });
     }
     return rows;
   });
 
   /**
-   * Exemplars are fetched from their own on-demand endpoint (§4, metric-detail-performance plan),
-   * never bundled with the series — a realistic histogram's exemplars are tens of thousands of
-   * rows and were the entire cause of the page freezing. Loaded only once the Exemplars tab is
-   * opened (see the `activeTab` effect in the constructor).
+   * Exemplars — tier-aware (decision 26). Analytics tier: real server keyset paging, mirroring the
+   * Logs/Traces paginator pattern. Standard tier: the newest-500 capped response, paged client-side.
    */
-  protected exemplars = signal<ExemplarRow[]>([]);
+  protected exemplarsPage = signal<MetricExemplarPage | null>(null);
   protected exemplarsLoading = signal(false);
   protected exemplarsLoaded = signal(false);
-  protected exemplarsHasMore = signal(false);
-  protected exemplarsPage = signal<PageEvent>({ pageIndex: 0, pageSize: 25, length: 0 });
+  private exemplarSub?: Subscription;
   private static readonly EXEMPLARS_TAB = 3;
 
-  /** The current paginator page, sliced client-side from the already-capped exemplars() list. */
+  protected isAnalyticsExemplars = computed(() => this.capabilities().exemplarPaging);
+
+  /** Tracked client-side (decision 1: keyset paging has no server page number); also used as the
+   *  standard-tier client-paginator index over the capped newest-500 list. */
+  protected exemplarPageIndex = signal(0);
+  protected exemplarPageSize = signal(25);
+  protected readonly exemplarPageSizeOptions = [25, 50, 100];
+
+  private toExemplarRow(e: MetricExemplar): ExemplarRow {
+    const measured = e.exemplar.valueDouble ?? e.exemplar.valueInt;
+    const unit = this.metricUnit();
+    return {
+      exemplar: e.exemplar,
+      seriesName: e.seriesName,
+      pointTimestamp: new Date(e.pointTimestamp),
+      pointValue: this.isDistribution()
+        ? `${e.pointCount ?? 0} obs`
+        : formatUnitValue(e.pointDoubleValue ?? e.pointIntValue ?? 0, unit),
+      value: measured == null ? '—' : formatUnitValue(measured, unit),
+    };
+  }
+
+  /** Rows currently on screen: server-paged on the analytics tier, client-sliced on the standard tier. */
   protected pagedExemplars = computed<ExemplarRow[]>(() => {
-    const { pageIndex, pageSize } = this.exemplarsPage();
-    const start = pageIndex * pageSize;
-    return this.exemplars().slice(start, start + pageSize);
+    const page = this.exemplarsPage();
+    if (!page) return [];
+    const rows = page.exemplars.map((e) => this.toExemplarRow(e));
+    if (this.isAnalyticsExemplars()) return rows;
+    const start = this.exemplarPageIndex() * this.exemplarPageSize();
+    return rows.slice(start, start + this.exemplarPageSize());
   });
+
+  /** Paginator length: the server's own total on the analytics tier (a lower bound if it timed
+   *  out under the summary timeout), the capped list length on the standard tier. */
+  protected exemplarsTotal = computed(() => {
+    const page = this.exemplarsPage();
+    if (!page) return 0;
+    if (this.isAnalyticsExemplars()) return page.total ?? page.exemplars.length;
+    return page.exemplars.length;
+  });
+  protected exemplarsTotalIsLowerBound = computed(() => this.isAnalyticsExemplars() && (this.exemplarsPage()?.totalIsLowerBound ?? false));
+  protected exemplarsCapped = computed(() => !this.isAnalyticsExemplars() && (this.exemplarsPage()?.capped ?? false));
 
   protected exemplarsTabLabel = computed(() => {
     if (!this.exemplarsLoaded()) return 'Exemplars';
-    return this.exemplarsHasMore() ? `Exemplars (${this.exemplars().length}+)` : `Exemplars (${this.exemplars().length})`;
+    const n = this.exemplarsTotal();
+    return this.exemplarsTotalIsLowerBound() ? `Exemplars (${n}+)` : `Exemplars (${n})`;
   });
 
   protected readonly exemplarColumns = ['time', 'value', 'series', 'point', 'traceId', 'spanId', 'attrs'];
 
-  private loadExemplars(): void {
+  private currentFilter() {
     const { start, end } = this.timeRange.range();
     const name = this.metricName();
     const svc = this.selectedService();
     const metricId = svc ? this.instances().find((i) => i.serviceName === svc)?.id : undefined;
     const labelFilters = Object.keys(this.selectedLabels()).length > 0 ? this.selectedLabels() : undefined;
-    const unit = this.metricUnit();
-    const distribution = this.isDistribution();
+    const q = this.searchText().trim() || undefined;
+    return { name, start, end, svc, metricId, labelFilters, q };
+  }
+
+  private loadExemplars(nav: 'first' | 'next' | 'prev' | 'last' = 'first'): void {
+    const { name, start, end, svc, metricId, labelFilters, q } = this.currentFilter();
 
     if (svc && metricId === undefined) {
-      this.exemplars.set([]);
-      this.exemplarsHasMore.set(false);
+      this.exemplarsPage.set({ name, type: this.metricType(), exemplars: [], totalIsLowerBound: false, capped: false });
       this.exemplarsLoaded.set(true);
       return;
     }
 
+    const current = this.exemplarsPage();
+    const cursor = nav === 'next' ? current?.nextCursor ?? undefined
+      : nav === 'prev' ? current?.prevCursor ?? undefined
+      : undefined;
+
     this.exemplarsLoading.set(true);
-    this.api.getExemplars({ metricName: name, start, end, metricId, labelFilters }).subscribe({
+    this.exemplarSub?.unsubscribe();
+    this.exemplarSub = this.api.getExemplars({
+      metricName: name, start, end, metricId, labelFilters, q,
+      size: this.exemplarPageSize(), cursor, nav,
+    }).subscribe({
       next: (page) => {
-        const rows: ExemplarRow[] = page.exemplars.map((e) => {
-          const measured = e.exemplar.valueDouble ?? e.exemplar.valueInt;
-          return {
-            exemplar: e.exemplar,
-            seriesName: e.seriesName,
-            pointTimestamp: new Date(e.pointTimestamp),
-            pointValue: distribution
-              ? `${e.pointCount ?? 0} obs`
-              : formatUnitValue(e.pointDoubleValue ?? e.pointIntValue ?? 0, unit),
-            value: measured == null ? '—' : formatUnitValue(measured, unit),
-          };
-        });
-        this.exemplars.set(rows);
-        this.exemplarsHasMore.set(page.hasMore);
-        this.exemplarsPage.set({ pageIndex: 0, pageSize: this.exemplarsPage().pageSize, length: rows.length });
+        this.exemplarsPage.set(page);
         this.exemplarsLoaded.set(true);
         this.exemplarsLoading.set(false);
       },
@@ -426,26 +395,48 @@ export class MetricDetailComponent implements OnInit {
 
     effect(() => {
       this.timeRange.range();
+      this.selectedService();
+      this.selectedLabels();
+      this.searchText();
       untracked(() => this.loadAll());
     });
 
-    // Rebuild the charts when the theme toggles so colors track light/dark without a refresh.
+    // Rebuild the chart when the theme toggles or the group mode/raw-rate toggle changes so colors
+    // and folding track the UI without a refetch.
     effect(() => {
       this.theme.isDark();
+      this.groupMode();
+      this.showRaw();
       untracked(() => {
-        const multi = this.multiSeries();
-        if (!multi) return; // nothing loaded yet
-        if (this.isDistribution()) this.buildChart();
-        else this.buildMultiChart(multi);
+        if (this.seriesResult()) this.buildChart();
       });
     });
 
     // Load exemplars lazily, only once the Exemplars tab is actually opened — including the
     // restored-page-state case where a user's last visit ended on that tab (activeTab is persisted).
+    // Also reload whenever the active filter changes while the tab is already open.
     effect(() => {
       const tab = this.activeTab();
+      this.timeRange.range();
+      this.selectedService();
+      this.selectedLabels();
+      this.searchText();
       untracked(() => {
-        if (tab === MetricDetailComponent.EXEMPLARS_TAB && !this.exemplarsLoaded()) this.loadExemplars();
+        if (tab === MetricDetailComponent.EXEMPLARS_TAB) {
+          this.exemplarPageIndex.set(0);
+          this.loadExemplars('first');
+        } else {
+          this.exemplarsLoaded.set(false);
+        }
+      });
+    });
+
+    // Mirror filter state into the URL (shareable/deep-linkable). `points` is derived from chart
+    // width, never persisted (plan's explicit URL-state list).
+    effect(() => {
+      this.urlState.patch({
+        q: this.searchText() || null,
+        groupBy: this.groupMode() !== 'labels' ? this.groupMode() : null,
       });
     });
 
@@ -456,10 +447,8 @@ export class MetricDetailComponent implements OnInit {
         selectedService: this.selectedService(),
         selectedLabels: this.selectedLabels(),
         groupMode: this.groupMode(),
-        aggMode: this.aggMode(),
         showRaw: this.showRaw(),
         activeTab: this.activeTab(),
-        chartStyle: this.chartStyle(),
       });
     });
   }
@@ -470,20 +459,37 @@ export class MetricDetailComponent implements OnInit {
     // Restore state only if it belongs to the metric we're now viewing.
     const saved = loadPageState(STATE_KEY, {
       metricName: '', selectedService: '', selectedLabels: {} as Record<string, string>,
-      groupMode: 'labels' as GroupMode, aggMode: 'none' as AggMode, showRaw: false, activeTab: 0,
-      chartStyle: 'timeseries' as ChartStyle,
+      groupMode: 'labels' as GroupMode, showRaw: false, activeTab: 0,
     });
     if (saved.metricName === this.metricName()) {
       this.selectedService.set(saved.selectedService);
       this.selectedLabels.set(saved.selectedLabels);
-      // Coerce any legacy persisted mode (e.g. the removed 'single') to a valid one.
       this.groupMode.set(saved.groupMode === 'service' ? 'service' : 'labels');
-      this.aggMode.set(saved.aggMode);
       this.showRaw.set(saved.showRaw);
       this.activeTab.set(saved.activeTab);
-      // buildMultiChart guards this against a style invalid for the metric's (not-yet-loaded) type.
-      this.chartStyle.set(saved.chartStyle);
     }
+  }
+
+  ngAfterViewInit(): void {
+    const el = this.chartContainerRef?.nativeElement;
+    if (!el || typeof ResizeObserver === 'undefined') return;
+    this.resizeObserver = new ResizeObserver((entries) => {
+      const w = entries[0]?.contentRect?.width;
+      if (w && w > 0) this.chartWidthPx.set(Math.round(w));
+    });
+    this.resizeObserver.observe(el);
+  }
+
+  ngOnDestroy(): void {
+    this.resizeObserver?.disconnect();
+    this.seriesSub?.unsubscribe();
+    this.exemplarSub?.unsubscribe();
+  }
+
+  /** Requested point count for the current chart width (decision 21), clamped to [MIN_POINTS, MAX_POINTS]. */
+  private requestedPoints(): number {
+    const px = untracked(() => this.chartWidthPx());
+    return Math.min(MAX_POINTS, Math.max(MIN_POINTS, Math.round(px / PX_PER_POINT)));
   }
 
   private loadAll(): void {
@@ -499,8 +505,6 @@ export class MetricDetailComponent implements OnInit {
         this.instances.set(instances);
         this.labels.set(labels.labels);
         this.labelsPartial.set(labels.partial);
-        // Every type loads from the grouped path (honoring any restored service/label filters);
-        // reloadSeries() also populates series() (the flattened fallback used by points()).
         this.reloadSeries();
         this.loading.set(false);
       },
@@ -509,60 +513,27 @@ export class MetricDetailComponent implements OnInit {
   }
 
   protected reloadSeries(): void {
-    const { start, end } = this.timeRange.range();
-    const name = this.metricName();
-    const svc = this.selectedService();
-    const metricId = svc
-      ? this.instances().find((i) => i.serviceName === svc)?.id
-      : undefined;
+    const { name, start, end, svc, metricId } = this.currentFilter();
     const labelFilters = Object.keys(this.selectedLabels()).length > 0 ? this.selectedLabels() : undefined;
-
-    // The time range, service or label filter changed — the loaded exemplar page no longer matches.
-    // Clear it, and if the Exemplars tab is currently open, refetch immediately.
-    this.exemplars.set([]);
-    this.exemplarsLoaded.set(false);
-    if (this.activeTab() === MetricDetailComponent.EXEMPLARS_TAB) this.loadExemplars();
+    const q = this.searchText().trim() || undefined;
 
     // A service can be selected (from the tenant-wide list) with no instance of this particular
     // metric. Rather than querying with metricId=undefined — which means "no filter" and would
     // silently show every service's data — render the same "no data" empty state as a genuinely
     // empty range.
     if (svc && metricId === undefined) {
-      const empty: MultiSeriesMetricData = { name, type: this.metricType(), series: [] };
-      this.multiSeries.set(empty);
-      this.series.set(this.flattenSeries(empty));
-      if (this.isDistribution()) this.buildChart();
-      else this.buildMultiChart(empty);
+      this.seriesResult.set({ name, type: this.metricType(), bucketWidthMs: 0, timedOut: false, series: [] });
+      this.buildChart();
       return;
     }
 
-    // Distributions (histogram, exp-histogram, summary): fetch the real per-series data for a correct
-    // windowed aggregate, but keep a flattened merged series so stats/exemplars/export/Metadata work.
-    if (this.isDistribution()) {
-      this.api.getGroupedSeries({ metricName: name, start, end, metricId, labelFilters }).subscribe((multi) => {
-        this.multiSeries.set(multi);
-        this.series.set(this.flattenSeries(multi));
-        this.buildChart();
-      });
-      return;
-    }
-
-    // Scalar metrics: fetch the real per-(service, label-set) series; groupMode only controls how
-    // buildMultiChart folds them (per service vs. per full label set). Also flatten into series()
-    // so its consumers (points()'s fallback, exportCsv) stay populated without a second request.
-    this.api.getGroupedSeries({ metricName: name, start, end, metricId, labelFilters }).subscribe((multi) => {
-      this.multiSeries.set(multi);
-      this.series.set(this.flattenSeries(multi));
-      this.buildMultiChart(multi);
+    this.seriesSub?.unsubscribe();
+    this.seriesSub = this.api.getSeries({
+      metricName: name, start, end, metricId, labelFilters, q, points: this.requestedPoints(), top: 8,
+    }).subscribe((result) => {
+      this.seriesResult.set(result);
+      this.buildChart();
     });
-  }
-
-  /** Collapse grouped series back into one time-sorted merged series (for stats/sub-charts/export). */
-  private flattenSeries(multi: MultiSeriesMetricData): MetricSeries {
-    const points = multi.series
-      .flatMap((s) => s.points)
-      .sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
-    return { name: multi.name, type: multi.type, labels: {}, points, truncated: multi.truncated };
   }
 
   /** Wheel-zoom off + drag-select drives the shared time-range picker (datetime charts). */
@@ -570,101 +541,74 @@ export class MetricDetailComponent implements OnInit {
     return timeRangeZoom((start, end) => this.timeRange.setCustom(start, end));
   }
 
+  /** Folds groups sharing a service name into one line, index-wise — safe because every group
+   *  shares the identical server-built bucket grid (same start/width/count). Gauge/Sum only. */
+  private foldByService(groups: ChartGroup[]): ChartGroup[] {
+    const byService = new Map<string, ChartGroup[]>();
+    for (const g of groups) {
+      const key = g.serviceName || g.name;
+      const list = byService.get(key) ?? [];
+      list.push(g);
+      byService.set(key, list);
+    }
+    const isGauge = this.metricType() === MetricType.Gauge;
+    return [...byService.entries()].map(([svc, list]) => {
+      const len = Math.max(...list.map((g) => g.points.length), 0);
+      const points: MetricBucketPoint[] = [];
+      for (let i = 0; i < len; i++) {
+        const vals = list.map((g) => g.points[i]?.value).filter((v): v is number => v != null);
+        const ts = list.find((g) => g.points[i])?.points[i]?.timestamp ?? '';
+        points.push({
+          timestamp: ts,
+          value: vals.length ? (isGauge ? vals.reduce((a, b) => a + b, 0) / vals.length : vals.reduce((a, b) => a + b, 0)) : undefined,
+        });
+      }
+      return { name: svc, serviceName: svc, points };
+    });
+  }
+
   private buildChart(): void {
-    const s = this.series();
-    if (!s) return;
+    const result = this.seriesResult();
+    if (!result) { this.chartOptions.set({}); return; }
     const isDark = this.theme.isDark();
-    const points = s.points;
     const { start: rangeStart, end: rangeEnd } = this.timeRange.range();
-    this.throughputChartOptions.set(null);
-    this.bucketBarOptions.set(null);
-    this.heatmapOptions.set(null);
 
+    let chartSeries: { name: string; data: [number, number | null][] }[];
     let chartType: 'area' | 'bar' | 'line' = 'area';
-    let chartSeries: { name: string; data: [number, number][] }[];
-    // Per-series stroke for the main chart; histograms override it to render Max faint/dashed.
-    let stroke: ApexOptions['stroke'] = { curve: 'smooth', width: 2 };
-    // Only the histogram percentile chart pins its colors; elsewhere `undefined` leaves ApexCharts
-    // on its default palette.
-    let chartColors: string[] | undefined;
 
-    if (this.isSummary()) {
-      // Quantiles can't be aggregated across series — plot them for one representative series. The
-      // additive count/sum become a windowed Throughput aggregate across all series.
+    if (this.isDistribution()) {
       chartType = 'line';
-      const pts = this.summarySeries()?.points ?? [];
-      const quantiles = [...new Set(pts.flatMap((p) => p.quantiles ?? []))].sort((a, b) => a - b);
-      chartSeries = quantiles.map((q) => ({
-        name: `P${(q * 100).toFixed(0)}`,
-        data: pts.map((p) => {
-          const idx = p.quantiles?.findIndex((x) => Math.abs(x - q) < 1e-7) ?? -1;
-          const v = idx >= 0 ? p.quantileValues?.[idx] ?? null : null;
-          return [new Date(p.timestamp).getTime(), v ?? 0] as [number, number];
-        }),
-      }));
-      const sw = this.summaryWindows();
-      if (sw) {
-        const { start, end } = this.timeRange.range();
-        this.buildThroughputChart(sw, start, end, isDark);
-      }
-    } else if ((this.isHistogram() || this.isExpHistogram()) && this.histogramWindows()) {
-      // Histogram / exp-histogram: every view derives from one windowed aggregate across all series,
-      // so the percentiles, throughput, bucket distribution and heatmap stay mutually consistent.
-      chartType = 'line';
-      const { start, end } = this.timeRange.range();
-      const { bounds, windows } = this.histogramWindows()!;
-      const nonEmpty = windows.filter((w) => w.total > 0);
-      chartSeries = MetricDetailComponent.PERCENTILES.map(({ q, label }) => ({
-        name: label,
-        data: nonEmpty
-          .map((w) => [w.edge, histogramQuantile(w.counts, bounds, q)] as [number, number])
-          .filter(([, v]) => Number.isFinite(v)),
-      })).filter((s2) => s2.data.length > 0);
-      // Fold Max into the percentile chart as a faint dashed line (worst-case context).
-      const maxData = nonEmpty
-        .filter((w) => w.max != null)
-        .map((w) => [w.edge, w.max!] as [number, number]);
-      if (maxData.length) {
-        chartSeries.push({ name: 'Max', data: maxData });
-        const n = chartSeries.length;
-        stroke = {
-          curve: 'smooth',
-          width: [...Array(n - 1).fill(2), 1],
-          dashArray: [...Array(n - 1).fill(0), 6],
-        };
-      }
-      // Name-keyed, not positional: the `.filter` above drops percentiles with no finite data and
-      // Max is conditional, so mapping over the surviving names is what keeps colors aligned to
-      // series. A positional array would silently shift green onto p95 whenever p50 drops out.
-      chartColors = chartSeries.map((s2) => PERCENTILE_COLORS[s2.name]).filter((c): c is string => !!c);
-      this.buildThroughputChart(windows, start, end, isDark);
-      this.bucketBarOptions.set(buildHistogramBarFromWindows(bounds, windows, isDark, this.metricUnit()));
-      const heatmap = buildHistogramHeatmapFromWindows(bounds, windows, isDark, this.metricUnit());
-      this.heatmapOptions.set(heatmap ? { ...heatmap, chart: { ...heatmap.chart!, ...this.zoomChart() } } : null);
-    } else if (this.isDelta()) {
-      chartType = 'bar';
-      chartSeries = [{ name: s.name, data: points.map((p) => [new Date(p.timestamp).getTime(), val(p)]) }];
-    } else if (this.isCounter() && !this.showRaw()) {
-      chartType = 'area';
-      chartSeries = [{ name: `${s.name} (rate/s)`, data: computeRateSeries(points) }];
+      chartSeries = this.buildDistributionSeries();
     } else {
-      chartType = 'area';
-      chartSeries = [{ name: s.name, data: points.map((p) => [new Date(p.timestamp).getTime(), val(p)]) }];
+      const bucketSeconds = result.bucketWidthMs / 1000;
+      const rate = this.isSum() && !this.showRaw() && bucketSeconds > 0;
+      let groups = this.allGroups();
+      // "other" never folds into a per-service group — fold real series only.
+      if (this.groupMode() === 'service' && groups.length > 1) {
+        const other = result.other && result.other.seriesCount > 0
+          ? [{ name: `other (${result.other.seriesCount})`, serviceName: '', points: result.other.points }]
+          : [];
+        groups = [...this.foldByService(result.series.map((s) => ({ name: s.seriesName, serviceName: s.serviceName, points: s.points }))), ...other];
+      }
+      chartType = this.isSum() && this.showRaw() ? 'bar' : 'area';
+      chartSeries = groups.map((g) => ({
+        name: g.name,
+        data: g.points.map((p) => [
+          new Date(p.timestamp).getTime(),
+          p.value == null ? null : (rate ? p.value / bucketSeconds : p.value),
+        ] as [number, number | null]),
+      }));
     }
 
-    // Distribution charts (histogram/exp-histogram/summary) plot values in the metric's own unit
-    // (durations, bytes, …); other chart types plot raw/rate values with no unit semantics.
-    const unit = this.isDistribution() ? this.metricUnit() : '';
+    const unit = this.isDistribution() || this.metricType() === MetricType.Gauge ? this.metricUnit() : '';
     const valueFormatter = (v: number) => (unit ? formatUnitValue(v, unit) : v.toFixed(2));
 
     this.chartOptions.set({
       chart: { type: chartType, height: 300, toolbar: { show: false }, background: 'transparent', ...this.zoomChart() },
       theme: { mode: isDark ? 'dark' : 'light' },
       series: chartSeries,
-      // Pin the axis to the header-selected window so the chart tracks that range (not the data extent).
       xaxis: { type: 'datetime', min: rangeStart.getTime(), max: rangeEnd.getTime(), labels: { datetimeUTC: false } },
-      stroke,
-      colors: chartColors,
+      stroke: { curve: 'smooth', width: 2 },
       fill: { opacity: chartType === 'area' ? 0.15 : 1 },
       dataLabels: { enabled: false },
       yaxis: { labels: { formatter: valueFormatter } },
@@ -674,223 +618,51 @@ export class MetricDetailComponent implements OnInit {
     });
   }
 
-  /** Explicit-histogram / summary detail: windowed throughput (req/s), aggregated across series. */
-  private buildThroughputChart(windows: HistogramWindow[], start: Date, end: Date, isDark: boolean): void {
-    const intervals = Math.max(1, windows.length - 1);
-    const windowSec = (end.getTime() - start.getTime()) / intervals / 1000;
-    const nonEmpty = windows.filter((w) => w.total > 0);
-    if (!nonEmpty.length) { this.throughputChartOptions.set(null); return; }
+  /** Histogram/exp-histogram: p50/p95/p99 + Max per group, from the server's already-merged bucket
+   *  counts. Summary: one line per quantile fraction present, per group. Groups are prefixed with
+   *  their name only when more than one contributes (kept plain otherwise, matching prior UX). */
+  private buildDistributionSeries(): { name: string; data: [number, number | null][] }[] {
+    const groups = this.allGroups();
+    const multi = groups.length > 1;
+    const out: { name: string; data: [number, number | null][] }[] = [];
 
-    const throughput = nonEmpty.map((w) => [w.edge, windowSec > 0 ? w.total / windowSec : 0] as [number, number]);
-
-    this.throughputChartOptions.set({
-      chart: { type: 'line', height: 220, toolbar: { show: false }, background: 'transparent', ...this.zoomChart() },
-      theme: { mode: isDark ? 'dark' : 'light' },
-      series: [{ name: 'Throughput (/s)', data: throughput }],
-      xaxis: { type: 'datetime', min: start.getTime(), max: end.getTime(), labels: { datetimeUTC: false } },
-      stroke: { curve: 'smooth', width: 2 },
-      dataLabels: { enabled: false },
-      grid: chartGrid(isDark),
-      legend: { position: 'top' },
-      yaxis: { labels: { formatter: (v: number) => v.toFixed(2) }, title: { text: '/s' } },
-    });
-  }
-
-  private buildMultiChart(multi: MultiSeriesMetricData): void {
-    // A restored/foreign style not valid for this metric type falls back to the time-series view.
-    if (!this.chartStyles().includes(this.chartStyle())) this.chartStyle.set('timeseries');
-
-    const isDark = this.theme.isDark();
-    const first = multi.series[0]?.points ?? [];
-    const counter = isCounterMetric(multi.type, first);
-    const delta = isDeltaSum(multi.type, first);
-    const asRate = counter && !this.showRaw();
-    this.throughputChartOptions.set(null);
-    this.bucketBarOptions.set(null);
-    this.heatmapOptions.set(null);
-
-    // Composition views collapse each series to a single value — a different shape entirely.
-    if (this.chartStyle() === 'share') { this.buildShareChart(multi, counter, delta, isDark); return; }
-    if (this.chartStyle() === 'dial') { this.buildDialChart(isDark); return; }
-
-    // Time-series & Stacked share the same series computation; Stacked aligns onto the shared grid
-    // (via aggregateSeries) so the bands sum correctly, and turns on chart.stacked.
-    const stacked = this.chartStyle() === 'stacked';
-    // Stacked ignores the collapse-to-one-line Aggregate (its control is hidden) so bands remain.
-    const agg = stacked ? 'none' : this.aggMode();
-    const { start, end } = this.timeRange.range();
-
-    let chartSeries: { name: string; data: [number, number][] }[];
-    if (this.groupMode() === 'service') {
-      // One line per service, folded by the effective function (sum for counters/rate; avg for
-      // gauges by default; overridable via the Aggregate control). Already grid-aligned.
-      chartSeries = this.foldByService(multi.series, asRate, this.effectiveFold());
-    } else if (agg !== 'none') {
-      // Collapse all grouped series into one aggregated line (rate-then-aggregate for counters).
-      const data = aggregateSeries(multi.series, start, end, agg, asRate);
-      chartSeries = [{ name: `${agg} of ${multi.series.length} series`, data }];
-    } else {
-      chartSeries = this.capTopN(multi.series, asRate, stacked);
+    if (this.isSummary()) {
+      for (const g of groups) {
+        const fracs = new Set<number>();
+        for (const p of g.points) for (const q of p.quantiles ?? []) fracs.add(q);
+        const sorted = [...fracs].sort((a, b) => a - b);
+        for (const q of sorted) {
+          const label = `P${(q * 100).toFixed(0)}`;
+          out.push({
+            name: multi ? `${g.name} ${label}` : label,
+            data: g.points.map((p) => {
+              const idx = p.quantiles?.findIndex((x) => Math.abs(x - q) < 1e-7) ?? -1;
+              const v = idx >= 0 ? p.quantileValues?.[idx] ?? null : null;
+              return [new Date(p.timestamp).getTime(), v] as [number, number | null];
+            }),
+          });
+        }
+      }
+      return out;
     }
 
-    // Delta sums render as bars only in the per-series time-series view; per-service folds them into
-    // a line. Stacked uses area for rates/levels and bars for delta/raw values.
-    const useBar = delta && agg === 'none' && this.groupMode() === 'labels';
-    const chartType = stacked ? (asRate ? 'area' : 'bar') : (useBar ? 'bar' : 'line');
-
-    // Gauges plot instantaneous levels in the metric's own unit, so unit-format the axis/tooltip
-    // like the distribution chart does. Sums can be a "/s" rate or a delta — formatUnitValue has
-    // no notion of "per second" and would mislabel a rate as a plain magnitude, so they're excluded.
-    const unit = multi.type === MetricType.Gauge ? this.metricUnit() : '';
-    const valueFormatter = (v: number) => (unit ? formatUnitValue(v, unit) : v.toFixed(2));
-
-    this.chartOptions.set({
-      chart: {
-        type: chartType,
-        stacked,
-        height: 300, toolbar: { show: false }, background: 'transparent',
-        ...this.zoomChart(),
-      },
-      theme: { mode: isDark ? 'dark' : 'light' },
-      series: chartSeries,
-      // Pin the axis to the header-selected window so the chart always reflects that range,
-      // rather than auto-fitting to the data extent (which made sparse/single-series gauges
-      // appear to span a different, narrower time frame than the header).
-      xaxis: { type: 'datetime', min: start.getTime(), max: end.getTime(), labels: { datetimeUTC: false } },
-      stroke: { curve: 'smooth', width: stacked && asRate ? 1 : 2 },
-      fill: { opacity: stacked && asRate ? 0.7 : 1 },
-      dataLabels: { enabled: false },
-      yaxis: { labels: { formatter: valueFormatter } },
-      tooltip: unit ? { y: { formatter: valueFormatter } } : undefined,
-      grid: chartGrid(isDark),
-      legend: { position: 'top' },
-    });
-  }
-
-  /** Latest-timestamp raw value of a series (for gauge snapshots / dial). */
-  private latestVal(points: MetricDataPoint[]): number {
-    if (!points.length) return 0;
-    const latest = points.reduce((a, b) =>
-      new Date(b.timestamp).getTime() > new Date(a.timestamp).getTime() ? b : a);
-    return val(latest);
-  }
-
-  /** Reset-safe total increase of a cumulative counter over its points (Σ positive consecutive deltas). */
-  private windowIncrease(points: MetricDataPoint[]): number {
-    let sum = 0;
-    for (let i = 1; i < points.length; i++) {
-      const d = val(points[i]) - val(points[i - 1]);
-      if (d > 0) sum += d;
+    const percentiles: { q: number; label: string }[] = [{ q: 0.5, label: 'p50' }, { q: 0.95, label: 'p95' }, { q: 0.99, label: 'p99' }];
+    for (const g of groups) {
+      for (const { q, label } of percentiles) {
+        out.push({
+          name: multi ? `${g.name} ${label}` : label,
+          data: g.points.map((p) => {
+            if (!p.bucketCounts || !p.count) return [new Date(p.timestamp).getTime(), null];
+            const v = histogramQuantile(p.bucketCounts, p.bucketBounds ?? [], q);
+            return [new Date(p.timestamp).getTime(), Number.isFinite(v) ? v : null] as [number, number | null];
+          }),
+        });
+      }
+      out.push({
+        name: multi ? `${g.name} Max` : 'Max',
+        data: g.points.map((p) => [new Date(p.timestamp).getTime(), p.max ?? null] as [number, number | null]),
+      });
     }
-    return sum;
-  }
-
-  /** Group raw series by service name (for the per-service slice/band grouping). */
-  private groupByService(series: NamedMetricSeries[]): { name: string; list: NamedMetricSeries[] }[] {
-    const byService = new Map<string, NamedMetricSeries[]>();
-    for (const s of series) {
-      const key = s.serviceName || 'unknown';
-      const list = byService.get(key) ?? [];
-      list.push(s);
-      byService.set(key, list);
-    }
-    return [...byService.entries()].map(([name, list]) => ({ name, list }));
-  }
-
-  /**
-   * Donut of share-of-total, for Sum metrics only (composition of a real total). Uses the window
-   * total: true increase for cumulative counters, Σ values for deltas, latest value for raw/
-   * non-monotonic sums. Slices follow the per-series / per-service grouping; the top MAX_SERIES are
-   * kept and the rest folded into "others".
-   */
-  private buildShareChart(multi: MultiSeriesMetricData, counter: boolean, delta: boolean, isDark: boolean): void {
-    const groups = this.groupMode() === 'service'
-      ? this.groupByService(multi.series)
-      : multi.series.map((s) => ({ name: s.seriesName, list: [s] }));
-
-    const groupValue = (list: NamedMetricSeries[]): number => list.reduce((acc, s) => {
-      if (delta) return acc + s.points.reduce((a, p) => a + val(p), 0);
-      if (counter && !this.showRaw()) return acc + this.windowIncrease(s.points);
-      return acc + this.latestVal(s.points); // raw counter / non-monotonic sum
-    }, 0);
-
-    const slices = groups.map((g) => ({ name: g.name, value: groupValue(g.list) }));
-    const ranked = [...slices].sort((a, b) => b.value - a.value);
-    const kept = ranked.slice(0, MAX_SERIES);
-    const rest = ranked.slice(MAX_SERIES);
-    if (rest.length) {
-      kept.push({ name: `others (${rest.length})`, value: rest.reduce((a, s) => a + s.value, 0) });
-    }
-
-    this.chartOptions.set(buildShareDonut(kept, isDark) ?? {});
-  }
-
-  /**
-   * Radial gauge of the whole-metric current value against its unit's natural bound. Only offered
-   * for bounded gauges (see {@link isBoundedGauge}): `%` → 0–100, ratio `1` → 0–1.
-   */
-  private buildDialChart(isDark: boolean): void {
-    const unit = this.instances()[0]?.unit ?? '';
-    const value = this.stats().current ?? 0;
-    const max = unit === '%' ? 100 : 1; // '1' (dimensionless ratio) or any other bounded unit
-    this.chartOptions.set(buildRadialGauge(value, max, this.metricName(), isDark, unit === '1' ? '' : unit));
-  }
-
-  /**
-   * Renders the MAX_SERIES largest series individually and folds the remainder into a single
-   * summed "others" line, keeping the legend readable when a metric has many label sets. When
-   * `aligned` (stacked view), each series is resampled onto the shared grid so the bands stack.
-   */
-  private capTopN(series: NamedMetricSeries[], asRate: boolean, aligned = false): { name: string; data: [number, number][] }[] {
-    const { start, end } = this.timeRange.range();
-    const toData = (s: NamedMetricSeries): [number, number][] =>
-      aligned ? aggregateSeries([s], start, end, 'sum', asRate)
-             : asRate ? computeRateSeries(s.points)
-             : s.points.map((p) => [new Date(p.timestamp).getTime(), val(p)] as [number, number]);
-
-    if (series.length <= MAX_SERIES) {
-      return series.map((s) => ({ name: s.seriesName, data: toData(s) }));
-    }
-
-    const peak = (data: [number, number][]) => data.reduce((m, [, v]) => Math.max(m, Math.abs(v)), 0);
-    const ranked = [...series].sort((a, b) => peak(toData(b)) - peak(toData(a)));
-    const kept = ranked.slice(0, MAX_SERIES);
-    const rest = ranked.slice(MAX_SERIES);
-
-    const out = kept.map((s) => ({ name: s.seriesName, data: toData(s) }));
-    out.push({ name: `others (${rest.length})`, data: aggregateSeries(rest, start, end, 'sum', asRate) });
-    return out;
-  }
-
-  /**
-   * Per-service view: collapse each service's real series into one line via `foldFn` (rate-first for
-   * counters — Grafana's `<fold> by (service)`). Caps to MAX_SERIES services, folding the remainder
-   * (by peak) into a single "others" line so the legend stays readable.
-   */
-  private foldByService(series: NamedMetricSeries[], asRate: boolean, foldFn: AggregateFn): { name: string; data: [number, number][] }[] {
-    const { start, end } = this.timeRange.range();
-    const byService = new Map<string, NamedMetricSeries[]>();
-    for (const s of series) {
-      const key = s.serviceName || 'unknown';
-      const list = byService.get(key) ?? [];
-      list.push(s);
-      byService.set(key, list);
-    }
-
-    const fold = (list: NamedMetricSeries[]) => aggregateSeries(list, start, end, foldFn, asRate);
-
-    if (byService.size <= MAX_SERIES) {
-      return [...byService.entries()].map(([name, list]) => ({ name, data: fold(list) }));
-    }
-
-    const peak = (data: [number, number][]) => data.reduce((m, [, v]) => Math.max(m, Math.abs(v)), 0);
-    const ranked = [...byService.entries()]
-      .map(([name, list]) => ({ name, list, data: fold(list) }))
-      .sort((a, b) => peak(b.data) - peak(a.data));
-
-    const out = ranked.slice(0, MAX_SERIES).map(({ name, data }) => ({ name, data }));
-    const rest = ranked.slice(MAX_SERIES);
-    out.push({ name: `others (${rest.length})`, data: fold(rest.flatMap((r) => r.list)) });
     return out;
   }
 
@@ -898,28 +670,10 @@ export class MetricDetailComponent implements OnInit {
     return v != null ? v.toFixed(3) : '—';
   }
 
-  /** Stat cards unit-format for Gauge and every distribution type; Sum can be a "/s" rate or a
-   *  delta, which formatUnitValue can't represent, so it keeps the plain/rate formatting. */
-  protected statsUseUnit = computed(() => this.isDistribution() || this.metricType() === MetricType.Gauge);
-
   protected fmtStat(v: number | null | undefined): string {
     if (v == null) return '—';
     if (this.statsUseUnit()) return formatUnitValue(v, this.metricUnit());
     return `${v.toFixed(3)}${this.statsUnitSuffix()}`;
-  }
-
-  /** Aggregation/top-N only re-shapes the already-loaded grouped series — no refetch needed. */
-  protected onAggModeChange(mode: AggMode): void {
-    this.aggMode.set(mode);
-    const multi = this.multiSeries();
-    if (multi) this.buildMultiChart(multi);
-  }
-
-  /** Chart style only re-draws the already-loaded grouped series — no refetch needed. */
-  protected onChartStyleChange(style: ChartStyle): void {
-    this.chartStyle.set(style);
-    const multi = this.multiSeries();
-    if (multi && !this.isDistribution()) this.buildMultiChart(multi);
   }
 
   /** Current selection for a label key; '' (the "All" option) when no filter is set. */
@@ -933,55 +687,75 @@ export class MetricDetailComponent implements OnInit {
       if (value) next[key] = value; else delete next[key];
       return next;
     });
-    this.reloadSeries();
   }
 
-  /** Build and download a per-type CSV of the current series. Mirrors Blazor's ExportData. */
+  protected onSearchChange(value: string): void {
+    this.searchInput.set(value);
+    this.searchText.set(value);
+  }
+  protected submitSearch(): void { this.onSearchChange(this.searchInput().trim()); }
+
+  protected onGroupModeChange(mode: GroupMode): void {
+    this.groupMode.set(mode);
+  }
+
+  /**
+   * Maps MatPaginator's page event onto a keyset `nav` on the analytics tier (decision 1: no
+   * arbitrary page jump); a plain client-side slice on the standard tier (already-capped list).
+   */
+  protected onExemplarsPage(e: PageEvent): void {
+    if (!this.isAnalyticsExemplars()) {
+      this.exemplarPageIndex.set(e.pageIndex);
+      this.exemplarPageSize.set(e.pageSize);
+      return;
+    }
+
+    if (e.pageSize !== this.exemplarPageSize()) {
+      this.exemplarPageSize.set(e.pageSize);
+      this.exemplarPageIndex.set(0);
+      this.loadExemplars('first');
+      return;
+    }
+
+    const lastIndex = Math.max(0, Math.ceil(this.exemplarsTotal() / this.exemplarPageSize()) - 1);
+    let nav: 'first' | 'next' | 'prev' | 'last';
+    if (e.pageIndex === 0) nav = 'first';
+    else if (!this.exemplarsTotalIsLowerBound() && e.pageIndex >= lastIndex) nav = 'last';
+    else if (e.pageIndex > (e.previousPageIndex ?? 0)) nav = 'next';
+    else nav = 'prev';
+
+    this.exemplarPageIndex.set(e.pageIndex);
+    this.loadExemplars(nav);
+  }
+
+  /** Build and download a per-type CSV of the currently charted bucket points. */
   protected exportCsv(): void {
-    const pts = this.points();
-    if (!pts.length) return;
+    const groups = this.allGroups();
+    if (!groups.length) return;
     const type = this.metricType();
 
     const ser = (v: unknown): string => (v == null ? '' : JSON.stringify(v));
-    const ts = (p: MetricDataPoint) => new Date(p.timestamp).toLocaleString();
+    const ts = (p: MetricBucketPoint) => new Date(p.timestamp).toLocaleString();
 
     let headers: string[];
-    let row: (p: MetricDataPoint) => (string | number)[];
+    let row: (series: string, p: MetricBucketPoint) => (string | number)[];
 
     switch (type) {
       case MetricType.Histogram:
-        headers = ['Timestamp', 'Count', 'Sum', 'Min', 'Max', 'BucketCounts', 'BucketBounds', 'Attributes'];
-        row = (p) => [ts(p), p.count ?? '', p.sum ?? '', p.min ?? '', p.max ?? '', ser(p.bucketCounts), ser(p.bucketBounds), ser(p.attributes)];
-        break;
       case MetricType.ExponentialHistogram:
-        headers = ['Timestamp', 'Count', 'Sum', 'Min', 'Max', 'Attributes'];
-        row = (p) => [ts(p), p.count ?? '', p.sum ?? '', p.min ?? '', p.max ?? '', ser(p.attributes)];
+        headers = ['Timestamp', 'Series', 'Count', 'Sum', 'Min', 'Max', 'BucketCounts', 'BucketBounds'];
+        row = (s, p) => [ts(p), s, p.count ?? '', p.sum ?? '', p.min ?? '', p.max ?? '', ser(p.bucketCounts), ser(p.bucketBounds)];
         break;
       case MetricType.Summary:
-        headers = ['Timestamp', 'Count', 'Sum', 'Quantiles', 'QuantileValues', 'Attributes'];
-        row = (p) => [ts(p), p.count ?? '', p.sum ?? '', ser(p.quantiles), ser(p.quantileValues), ser(p.attributes)];
+        headers = ['Timestamp', 'Series', 'Count', 'Sum', 'Quantiles', 'QuantileValues', 'IsApproximate'];
+        row = (s, p) => [ts(p), s, p.count ?? '', p.sum ?? '', ser(p.quantiles), ser(p.quantileValues), String(p.isApproximate ?? false)];
         break;
       default: // Gauge / Sum
-        headers = ['Timestamp', 'Value', 'Attributes'];
-        row = (p) => [ts(p), p.doubleValue ?? p.intValue ?? '', ser(p.attributes)];
+        headers = ['Timestamp', 'Series', 'Value', 'Min', 'Max'];
+        row = (s, p) => [ts(p), s, p.value ?? '', p.min ?? '', p.max ?? ''];
     }
 
-    const escape = (v: string | number): string => {
-      const s = String(v);
-      return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
-    };
-
-    const lines = [headers.join(',')];
-    for (const p of pts) lines.push(row(p).map(escape).join(','));
-    const csv = lines.join('\n');
-
-    const stamp = new Date().toISOString().replace(/[:.]/g, '').slice(0, 15);
-    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `${this.metricName()}_${stamp}Z.csv`;
-    a.click();
-    URL.revokeObjectURL(url);
+    const data = groups.flatMap((g) => g.points.map((p) => row(g.name, p)));
+    downloadCsv(`${this.metricName()}_${fileStamp()}.csv`, headers, data);
   }
 }

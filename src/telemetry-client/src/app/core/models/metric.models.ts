@@ -99,39 +99,87 @@ export interface ExemplarModel {
   filteredAttributes?: Record<string, unknown>;
 }
 
-export interface MetricSeries {
-  name: string;
-  type: MetricType;
-  labels: Record<string, string>;
-  points: MetricDataPoint[];
-  /** True when the server-side row cap was hit for at least one underlying metric row — the
-   *  requested range may hold more data than shown. */
-  truncated?: boolean;
+// =============================================================================
+// Phase 4 (list-pages-server-side plan): database-side, pre-bucketed metric series.
+// Mirrors Keryhe.Telemetry.Core.Models.MetricSeriesModels.cs exactly — see that file for the
+// aggregation semantics (per-type bucket math, top-N + "other" folding, mismatched histogram
+// bucket layouts). The client no longer windows, groups or computes percentiles itself.
+// =============================================================================
+
+/** One pre-aggregated bucket for a display series. Which fields are populated depends on the
+ *  metric type: `value`/`min`/`max` for gauge/sum; `count`/`sum`/`bucketCounts`/`bucketBounds`/
+ *  `min`/`max` for histogram and exponential histogram; `quantiles`/`quantileValues` for summary. */
+export interface MetricBucketPoint {
+  timestamp: string;
+  /** Gauge: bucket average. Sum: bucket delta (summed across streams), already normalized —
+   *  the same shape whether the underlying sum was delta or cumulative temporality. */
+  value?: number;
+  min?: number;
+  max?: number;
+  count?: number;
+  sum?: number;
+  bucketCounts?: number[];
+  bucketBounds?: number[];
+  quantiles?: number[];
+  quantileValues?: number[];
+  /** Summary only: true when more than one stream contributed — the quantiles shown are an
+   *  average-of-quantiles approximation, not a true merged quantile. */
+  isApproximate?: boolean;
 }
 
-export interface NamedMetricSeries {
+export interface DisplayMetricSeries {
   seriesName: string;
-  metricId: number;
   serviceName: string;
   labels: Record<string, string>;
-  points: MetricDataPoint[];
+  points: MetricBucketPoint[];
+  /** Histogram/exponential-histogram only: count of streams folded into this display series whose
+   *  bucket layout didn't match the layout actually charted. Only render the "N streams not shown"
+   *  note when this is a positive number. */
+  excludedStreams?: number | null;
 }
 
-export interface MultiSeriesMetricData {
+export interface OtherMetricSeries {
+  /** Number of display series folded into "other". */
+  seriesCount: number;
+  points: MetricBucketPoint[];
+  excludedStreams?: number | null;
+}
+
+export interface MetricSeriesResult {
   name: string;
   type: MetricType;
-  series: NamedMetricSeries[];
-  /** True when the server-side row cap was hit for at least one underlying metric row — the
-   *  requested range may hold more data than shown. */
-  truncated?: boolean;
+  unit?: string;
+  bucketWidthMs: number;
+  /** True when the full-resolution query timed out and a quarter-resolution retry was used, or
+   *  when that retry also timed out — `series`/`other` are empty in the latter case. */
+  timedOut: boolean;
+  series: DisplayMetricSeries[];
+  other?: OtherMetricSeries | null;
 }
 
-export interface MetricSeriesParams {
+export interface MetricSeriesQueryParams {
   metricName: string;
-  start?: Date;
-  end?: Date;
+  start: Date;
+  end: Date;
   metricId?: number;
   labelFilters?: Record<string, string>;
+  q?: string;
+  /** Target point count per stream, derived from chart pixel width — never persisted in URL state. */
+  points: number;
+  top?: number;
+}
+
+export interface MetricExemplarQueryParams {
+  metricName: string;
+  start: Date;
+  end: Date;
+  metricId?: number;
+  labelFilters?: Record<string, string>;
+  q?: string;
+  size?: number;
+  /** Opaque, unparsed keyset cursor (analytics tier only). */
+  cursor?: string | null;
+  nav?: 'first' | 'next' | 'prev' | 'last';
 }
 
 /** One exemplar plus the identity of the data point and series it was sampled from. Served by the
@@ -153,6 +201,14 @@ export interface MetricExemplarPage {
   name: string;
   type: MetricType;
   exemplars: MetricExemplar[];
-  /** True when the scan hit its cap: more exemplars exist beyond those returned. */
-  hasMore: boolean;
+
+  // Analytics tier: real keyset paging.
+  nextCursor?: string | null;
+  prevCursor?: string | null;
+  total?: number | null;
+  totalIsLowerBound: boolean;
+
+  // Standard tier: newest-500, no cursor.
+  /** True when the standard-tier scan hit its 500-row cap: more exemplars exist beyond those returned. */
+  capped: boolean;
 }

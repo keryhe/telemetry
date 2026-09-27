@@ -28,33 +28,16 @@
 
 .ctrl-field { width: 160px; }
 
+.search-field { width: 240px; }
+
 .spacer { flex: 1; }
-
-// Chart-style view switcher above the chart: compact icon-left / label-right tiles.
-// ::ng-deep pierces Material's internally-rendered label content.
-.chart-style-tiles {
-  margin-bottom: 12px;
-
-  ::ng-deep .mat-button-toggle-button { height: auto; }
-
-  ::ng-deep .mat-button-toggle-label-content {
-    display: flex;
-    flex-direction: row;
-    align-items: center;
-    gap: 6px;
-    line-height: 1.15;
-    padding: 4px 14px;
-  }
-
-  mat-icon { margin: 0; }
-
-  .tile-label { font-size: 12px; font-weight: 500; }
-}
 
 .chart-card {
   margin-top: 16px;
   margin-bottom: 16px;
 }
+
+.chart-container { min-height: 1px; }
 
 .sub-chart-title {
   font-size: 13px;
@@ -63,7 +46,7 @@
   margin: 16px 0 4px;
 }
 
-.summary-note {
+.summary-note, .excluded-note {
   font-size: 12px;
   color: var(--mat-sys-on-surface-variant);
   font-style: italic;
@@ -120,7 +103,7 @@
   color: var(--mat-sys-on-surface-variant);
   font-size: 12px;
 }
-.truncated-banner {
+.timeout-banner {
   display: flex;
   align-items: center;
   gap: 8px;

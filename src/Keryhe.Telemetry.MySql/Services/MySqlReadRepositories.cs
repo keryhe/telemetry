@@ -89,6 +89,16 @@ public class MySqlMetricReadRepository(IConfiguration configuration, ITenantCont
     protected override object AttributeKeyParamValue(string key) => MySqlJsonAttributeHooks.KeyParamValue(key);
     protected override string AttributePredicate(string column, string keyParam, string valueParam, bool negated)
         => MySqlJsonAttributeHooks.Predicate(column, keyParam, valueParam, negated);
+
+    // MySQL's `/` always yields a DECIMAL result even for integer operands; DIV keeps Phase 4's
+    // bucket-index math as true integer floor division — see MySqlLogReadRepository's identical
+    // override. Same real bug shape as the ClickHouse BucketIndexExpr gap this phase also fixed.
+    protected override string BucketIndexExpr(string numerator, string denominator) => $"({numerator} DIV {denominator})";
+
+    // Standard tier (decision 26): newest-500, no cursor — not the analytics-tier keyset default.
+    public override Task<Keryhe.Telemetry.Core.Models.MetricExemplarPage?> GetMetricExemplarsAsync(
+        Keryhe.Telemetry.Core.Models.MetricExemplarQuery query, CancellationToken cancellationToken = default)
+        => GetMetricExemplarsCappedAsync(query, cancellationToken);
 }
 
 public class MySqlLogReadRepository(IConfiguration configuration, ITenantContext tenantContext)

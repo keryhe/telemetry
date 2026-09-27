@@ -143,6 +143,11 @@ public class SqlServerMetricReadRepository(IConfiguration configuration, ITenant
     protected override object AttributeKeyParamValue(string key) => SqlServerJsonAttributeHooks.KeyParamValue(key);
     protected override string AttributePredicate(string column, string keyParam, string valueParam, bool negated)
         => SqlServerJsonAttributeHooks.Predicate(column, keyParam, valueParam, negated);
+
+    // Standard tier (decision 26): newest-500, no cursor — not the analytics-tier keyset default.
+    public override Task<Keryhe.Telemetry.Core.Models.MetricExemplarPage?> GetMetricExemplarsAsync(
+        Keryhe.Telemetry.Core.Models.MetricExemplarQuery query, CancellationToken cancellationToken = default)
+        => GetMetricExemplarsCappedAsync(query, cancellationToken);
 }
 
 public class SqlServerLogReadRepository(IConfiguration configuration, ITenantContext tenantContext)

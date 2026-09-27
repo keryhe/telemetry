@@ -18,26 +18,19 @@ public interface IMetricReadRepository
     /// <summary>True (unbounded) distinct-metric-name counts per type for a time range, unaffected by <see cref="GetAllMetricsAsync"/>'s row limit.</summary>
     Task<MetricsSummary> GetMetricsSummaryAsync(DateTime? startTime = null, DateTime? endTime = null, CancellationToken cancellationToken = default);
 
-    // Time series data
-    Task<MetricSeries?> GetMetricSeriesAsync(string metricName, Dictionary<string, string>? labelFilters = null,
-        DateTime? startTime = null, DateTime? endTime = null, long? metricId = null,
-        CancellationToken cancellationToken = default);
-    Task<List<MetricSeries>> GetMultipleMetricSeriesAsync(List<string> metricNames,
-        Dictionary<string, string>? labelFilters = null, DateTime? startTime = null, DateTime? endTime = null,
-        CancellationToken cancellationToken = default);
-    Task<MultiSeriesMetricData?> GetGroupedMetricSeriesAsync(string metricName,
-        DateTime? startTime = null, DateTime? endTime = null, long? metricId = null,
-        Dictionary<string, string>? labelFilters = null,
-        CancellationToken cancellationToken = default);
+    // Time series data — Phase 4 (list-pages-server-side plan): one bucketed query over every
+    // metric row sharing the name, with per-stream math, top-N ranking and "other" folding done
+    // per decisions 21-23, 42. Replaces the former GetMetricSeriesAsync(raw)/GetGroupedMetricSeriesAsync
+    // pair; see MetricReadRepositoryBase's doc comment for the aggregation pipeline.
+    Task<MetricSeriesResult?> GetMetricSeriesAsync(MetricSeriesQuery query, CancellationToken cancellationToken = default);
 
     /// <summary>
     /// The newest exemplars for a metric, independent of the series reads. Returns an empty page for
     /// SUMMARY, whose table has no exemplars_json column (OTLP declares no exemplars on Summary).
+    /// Analytics-tier providers override this for real keyset paging (decision 26); the base
+    /// implementation is the standard-tier newest-500 scan with <see cref="MetricExemplarPage.Capped"/>.
     /// </summary>
-    Task<MetricExemplarPage?> GetMetricExemplarsAsync(string metricName,
-        DateTime? startTime = null, DateTime? endTime = null, long? metricId = null,
-        Dictionary<string, string>? labelFilters = null, int limit = 500,
-        CancellationToken cancellationToken = default);
+    Task<MetricExemplarPage?> GetMetricExemplarsAsync(MetricExemplarQuery query, CancellationToken cancellationToken = default);
 
     // Aggregation and analysis
     Task<Dictionary<string, double>> GetLatestMetricValuesAsync(string serviceName, CancellationToken cancellationToken = default);

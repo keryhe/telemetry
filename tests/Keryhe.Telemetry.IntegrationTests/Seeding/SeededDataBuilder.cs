@@ -331,4 +331,244 @@ public static class SeededDataBuilder
         }
         return metrics;
     }
+
+    // =========================================================================
+    // METRICS — Phase 4 (list-pages-server-side plan): database-side bucketed aggregation
+    // =========================================================================
+
+    /// <summary>One delta-temporality sum stream, one point per second — for SQL SUM-per-bucket checks.</summary>
+    public static MetricModel SumDeltaSeries(long tenantId, DateTime start, string serviceName = "orders-svc", int points = 20, long perPointValue = 3)
+    {
+        var resource = Resource(tenantId, serviceName);
+        var dps = new List<SumDataPointModel>(points);
+        for (var i = 0; i < points; i++)
+        {
+            dps.Add(new SumDataPointModel
+            {
+                TimeUnixNano = ToUnixNano(start.AddSeconds(i)),
+                ValueInt = perPointValue,
+                AggregationTemporality = AggregationTemporality.DELTA,
+                IsMonotonic = true,
+                Attributes = new Dictionary<string, object> { ["route"] = "/orders" }
+            });
+        }
+        return new MetricModel
+        {
+            Name = "phase4.orders.delta",
+            Type = MetricType.SUM,
+            Unit = "1",
+            SumDataPoints = dps,
+            Resource = resource,
+            InstrumentationScope = Scope()
+        };
+    }
+
+    /// <summary>One explicit-bounds histogram stream, delta temporality, increasing counts over time — for SQL SUM(count)/unbuffered bucket-count merge checks.</summary>
+    public static MetricModel HistogramDeltaSeries(long tenantId, DateTime start, string serviceName = "latency-svc", int points = 10)
+    {
+        var bounds = new[] { 10d, 50d, 100d, 500d };
+        var resource = Resource(tenantId, serviceName);
+        var dps = new List<HistogramDataPointModel>(points);
+        for (var i = 0; i < points; i++)
+        {
+            dps.Add(new HistogramDataPointModel
+            {
+                TimeUnixNano = ToUnixNano(start.AddSeconds(i)),
+                Count = 4,
+                Sum = 120,
+                Min = 5,
+                Max = 400,
+                ExplicitBounds = bounds,
+                BucketCounts = [1, 1, 1, 1, 0], // len = bounds.Length + 1
+                AggregationTemporality = AggregationTemporality.DELTA,
+                Attributes = new Dictionary<string, object> { ["route"] = "/checkout" }
+            });
+        }
+        return new MetricModel
+        {
+            Name = "phase4.latency.delta",
+            Type = MetricType.HISTOGRAM,
+            Unit = "ms",
+            HistogramDataPoints = dps,
+            Resource = resource,
+            InstrumentationScope = Scope()
+        };
+    }
+
+    /// <summary>
+    /// Two streams of the same histogram metric with DIFFERENT explicit_bounds (a config change
+    /// between two service instances) — for decision 42's layout-exclusion check. The first stream
+    /// carries more total observations, so it should be the one charted.
+    /// </summary>
+    public static List<MetricModel> HistogramMismatchedLayouts(long tenantId, DateTime start, string serviceName = "mixed-svc")
+    {
+        var scope = Scope();
+        var majority = new MetricModel
+        {
+            Name = "phase4.mixed.histogram",
+            Type = MetricType.HISTOGRAM,
+            Unit = "ms",
+            HistogramDataPoints =
+            [
+                new HistogramDataPointModel
+                {
+                    TimeUnixNano = ToUnixNano(start.AddSeconds(1)),
+                    Count = 100, Sum = 1000, Min = 1, Max = 50,
+                    ExplicitBounds = [10, 20, 30],
+                    BucketCounts = [25, 25, 25, 25],
+                    AggregationTemporality = AggregationTemporality.DELTA,
+                    Attributes = new Dictionary<string, object> { ["k8s.pod.name"] = "mixed-svc-0" }
+                }
+            ],
+            Resource = Resource(tenantId, serviceName, instanceId: "pod-0"),
+            InstrumentationScope = scope
+        };
+        var minority = new MetricModel
+        {
+            Name = "phase4.mixed.histogram",
+            Type = MetricType.HISTOGRAM,
+            Unit = "ms",
+            HistogramDataPoints =
+            [
+                new HistogramDataPointModel
+                {
+                    TimeUnixNano = ToUnixNano(start.AddSeconds(1)),
+                    Count = 5, Sum = 50, Min = 1, Max = 20,
+                    ExplicitBounds = [5, 15], // different layout, fewer total observations
+                    BucketCounts = [2, 2, 1],
+                    AggregationTemporality = AggregationTemporality.DELTA,
+                    Attributes = new Dictionary<string, object> { ["k8s.pod.name"] = "mixed-svc-1" }
+                }
+            ],
+            Resource = Resource(tenantId, serviceName, instanceId: "pod-1"),
+            InstrumentationScope = scope
+        };
+        return [majority, minority];
+    }
+
+    /// <summary>
+    /// Two exponential-histogram points at different scales (a scale change mid-stream) — for
+    /// decision 42's exp-histogram downscale-to-coarsest check. Scale 3 is finer (narrower buckets)
+    /// than scale 1; the coarser scale 1 should be the query's target.
+    /// </summary>
+    public static MetricModel ExpHistogramMultiScale(long tenantId, DateTime start, string serviceName = "exp-svc")
+    {
+        var resource = Resource(tenantId, serviceName);
+        return new MetricModel
+        {
+            Name = "phase4.exp.histogram",
+            Type = MetricType.EXPONENTIAL_HISTOGRAM,
+            Unit = "ms",
+            ExponentialHistogramDataPoints =
+            [
+                new ExponentialHistogramDataPointModel
+                {
+                    TimeUnixNano = ToUnixNano(start.AddSeconds(1)),
+                    Count = 8, Sum = 80, Min = 1, Max = 20,
+                    Scale = 3, ZeroCount = 0, PositiveOffset = 0,
+                    PositiveBucketCounts = [1, 1, 1, 1, 1, 1, 1, 1],
+                    AggregationTemporality = AggregationTemporality.DELTA,
+                    Attributes = new Dictionary<string, object> { ["route"] = "/search" }
+                },
+                new ExponentialHistogramDataPointModel
+                {
+                    TimeUnixNano = ToUnixNano(start.AddSeconds(2)),
+                    Count = 4, Sum = 80, Min = 1, Max = 20,
+                    Scale = 1, ZeroCount = 0, PositiveOffset = 0,
+                    PositiveBucketCounts = [1, 1, 1, 1],
+                    AggregationTemporality = AggregationTemporality.DELTA,
+                    Attributes = new Dictionary<string, object> { ["route"] = "/search" }
+                }
+            ],
+            Resource = resource,
+            InstrumentationScope = Scope()
+        };
+    }
+
+    /// <summary>A summary stream (quantiles p50/p90/p99) — for the per-bucket-average summary check.</summary>
+    public static MetricModel SummarySeries(long tenantId, DateTime start, string serviceName = "gateway-svc", int points = 5)
+    {
+        var resource = Resource(tenantId, serviceName);
+        var dps = new List<SummaryDataPointModel>(points);
+        for (var i = 0; i < points; i++)
+        {
+            dps.Add(new SummaryDataPointModel
+            {
+                TimeUnixNano = ToUnixNano(start.AddSeconds(i * 10)),
+                Count = 100 + i,
+                Sum = 5000 + i * 10,
+                QuantileValues =
+                [
+                    new QuantileValueModel { Quantile = 0.5, Value = 20 + i },
+                    new QuantileValueModel { Quantile = 0.9, Value = 80 + i },
+                    new QuantileValueModel { Quantile = 0.99, Value = 150 + i }
+                ]
+            });
+        }
+        return new MetricModel
+        {
+            Name = "phase4.gateway.summary",
+            Type = MetricType.SUMMARY,
+            Unit = "ms",
+            SummaryDataPoints = dps,
+            Resource = resource,
+            InstrumentationScope = Scope()
+        };
+    }
+
+    /// <summary>Ten distinct gauge streams (services) for one metric name, with a clear magnitude ranking — for the top-N + "other" fold check (default top = 8).</summary>
+    public static List<MetricModel> ManyStreamsForTopN(long tenantId, DateTime start, int streamCount = 10)
+    {
+        var scope = Scope();
+        var metrics = new List<MetricModel>(streamCount);
+        for (var i = 0; i < streamCount; i++)
+        {
+            var serviceName = $"svc-{i:D2}";
+            // Descending magnitude: svc-00 is the largest, svc-09 the smallest — so the two lowest
+            // (indices 8, 9, ranks past top=8) fold into "other".
+            var value = (streamCount - i) * 100;
+            metrics.Add(new MetricModel
+            {
+                Name = "phase4.topn.gauge",
+                Type = MetricType.GAUGE,
+                Unit = "1",
+                GaugeDataPoints =
+                [
+                    new GaugeDataPointModel { TimeUnixNano = ToUnixNano(start.AddSeconds(1)), ValueDouble = value }
+                ],
+                Resource = Resource(tenantId, serviceName),
+                InstrumentationScope = scope
+            });
+        }
+        return metrics;
+    }
+
+    /// <summary>A gauge metric whose points each carry one exemplar — for exemplar keyset/capped paging checks.</summary>
+    public static MetricModel GaugeWithExemplars(long tenantId, DateTime start, string serviceName = "exemplar-svc", int points = 30)
+    {
+        var resource = Resource(tenantId, serviceName);
+        var dps = new List<GaugeDataPointModel>(points);
+        for (var i = 0; i < points; i++)
+        {
+            dps.Add(new GaugeDataPointModel
+            {
+                TimeUnixNano = ToUnixNano(start.AddSeconds(i)),
+                ValueDouble = i,
+                Attributes = new Dictionary<string, object> { ["route"] = "/checkout" },
+                Exemplars =
+                [
+                    new ExemplarModel { TimeUnixNano = ToUnixNano(start.AddSeconds(i)), ValueDouble = i, TraceIdHex = i.ToString("x").PadLeft(32, '0') }
+                ]
+            });
+        }
+        return new MetricModel
+        {
+            Name = "phase4.exemplar.gauge",
+            Type = MetricType.GAUGE,
+            Unit = "1",
+            GaugeDataPoints = dps,
+            Resource = resource,
+            InstrumentationScope = Scope()
+        };
+    }
 }

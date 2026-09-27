@@ -129,6 +129,54 @@ public class ClickHouseMetricReadRepository(IConfiguration configuration, ITenan
     // ClickHouse needs its own override here too, not just on the trace/log repos.
     protected override string AttributePredicate(string column, string keyParam, string valueParam, bool negated)
         => ClickHouseJsonAttributeHooks.Predicate(column, keyParam, valueParam, negated);
+
+    // Real bug found while wiring Phase 4's bucketed series queries (same shape as the
+    // DatabaseClockNowExpr gap Phase 3 found on SqlServer/MySql/ClickHouse's trace repositories):
+    // this class had no BucketIndexExpr override, so the new bucket-index SQL every series loader
+    // builds would have fallen back to the Postgres-only `numerator / denominator`, which ClickHouse
+    // promotes to Float64 instead of truncating — see DapperReadRepository's own doc comment.
+    protected override string BucketIndexExpr(string numerator, string denominator) => $"intDiv({numerator}, {denominator})";
+
+    // Real bug found via the Phase 4 integration tests: ClickHouse's COALESCE requires one common
+    // supertype across its branches and refuses to promote Int64 (value_int) to Float64
+    // (value_double) implicitly — "NO_COMMON_TYPE". Cast the integer branch explicitly first; see
+    // MetricReadRepositoryBase.CoalesceValueExpr's own doc comment.
+    protected override string CoalesceValueExpr() => "COALESCE(dp.value_double, CAST(dp.value_int AS Nullable(Float64)))";
+
+    // Decision 22/Phase 4: ClickHouse's "last point per stream-bucket" query uses argMax per
+    // column instead of ROW_NUMBER() OVER (...) — see MetricReadRepositoryBase's own doc comment
+    // on BuildLastPerStreamBucketSql for why.
+    protected override string BuildLastPerStreamBucketSql(string table, string idInList, string timeClause,
+        string labelClause, string bucketExpr, IReadOnlyList<string> valueColumns)
+    {
+        var cols = string.Join(", ", valueColumns.Select(c => $"argMax(dp.{c}, dp.time_unix_nano) AS {c}"));
+        return $"""
+            SELECT dp.metric_id AS metric_id, dp.attributes_json AS attributes_json, {bucketExpr} AS bucket,
+                   max(dp.time_unix_nano) AS time_unix_nano, {cols}
+            FROM {table} dp
+            WHERE dp.metric_id IN ({idInList}){timeClause}{labelClause}
+            GROUP BY dp.metric_id, dp.attributes_json, {bucketExpr}
+            """;
+    }
+
+    protected override string BuildLastPerStreamSql(string table, string idInList, string timeClause,
+        string labelClause, IReadOnlyList<string> valueColumns)
+    {
+        var cols = string.Join(", ", valueColumns.Select(c => $"argMax(dp.{c}, dp.time_unix_nano) AS {c}"));
+        return $"""
+            SELECT dp.metric_id AS metric_id, dp.attributes_json AS attributes_json,
+                   max(dp.time_unix_nano) AS time_unix_nano, {cols}
+            FROM {table} dp
+            WHERE dp.metric_id IN ({idInList}){timeClause}{labelClause}
+            GROUP BY dp.metric_id, dp.attributes_json
+            """;
+    }
+
+    // Analytics-tier exemplar keyset paging (decision 26) is inherited unchanged from
+    // MetricReadRepositoryBase.GetMetricExemplarsAsync — see that method's own doc comment for why
+    // the base implementation (not the standard-tier newest-500 scan) is what every analytics
+    // provider uses, and for the documented simplification versus the plan's literal
+    // per-exemplar-ordinal SQL unnesting.
 }
 
 public class ClickHouseLogReadRepository(IConfiguration configuration, ITenantContext tenantContext)
