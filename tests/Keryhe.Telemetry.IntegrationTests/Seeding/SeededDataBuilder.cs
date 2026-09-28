@@ -363,6 +363,123 @@ public static class SeededDataBuilder
         };
     }
 
+    /// <summary>
+    /// One cumulative monotonic counter stream that started at <paramref name="start"/>, reporting
+    /// <paramref name="values"/> every <paramref name="intervalSeconds"/> seconds (first report one
+    /// interval after start) — the export cadence of a real SDK, for rate/elapsed-time checks.
+    /// </summary>
+    public static MetricModel CumulativeCounterSeries(long tenantId, DateTime start, long[] values, int intervalSeconds = 15, string serviceName = "rate-svc")
+    {
+        var streamStart = ToUnixNano(start);
+        return new MetricModel
+        {
+            Name = "correctness.requests.cumulative",
+            Type = MetricType.SUM,
+            Unit = "1",
+            SumDataPoints = values.Select((v, i) => new SumDataPointModel
+            {
+                StartTimeUnixNano = streamStart,
+                TimeUnixNano = ToUnixNano(start.AddSeconds((i + 1) * intervalSeconds)),
+                ValueInt = v,
+                AggregationTemporality = AggregationTemporality.CUMULATIVE,
+                IsMonotonic = true,
+                Attributes = new Dictionary<string, object> { ["route"] = "/rate" }
+            }).ToList(),
+            Resource = Resource(tenantId, serviceName),
+            InstrumentationScope = Scope()
+        };
+    }
+
+    /// <summary>
+    /// One cumulative explicit-bounds histogram stream that started at <paramref name="start"/>:
+    /// (count, sum) pairs reported every <paramref name="intervalSeconds"/> seconds, every
+    /// observation landing in the first bucket — for the cumulative-sum-is-differenced check.
+    /// </summary>
+    public static MetricModel CumulativeHistogramSeries(long tenantId, DateTime start, (long Count, double Sum)[] points, int intervalSeconds = 10, string serviceName = "latency-cumulative-svc")
+    {
+        var streamStart = ToUnixNano(start);
+        return new MetricModel
+        {
+            Name = "correctness.latency.cumulative",
+            Type = MetricType.HISTOGRAM,
+            Unit = "ms",
+            HistogramDataPoints = points.Select((p, i) => new HistogramDataPointModel
+            {
+                StartTimeUnixNano = streamStart,
+                TimeUnixNano = ToUnixNano(start.AddSeconds((i + 1) * intervalSeconds)),
+                Count = p.Count,
+                Sum = p.Sum,
+                Min = 1,
+                Max = 400,
+                ExplicitBounds = [500d],
+                BucketCounts = [p.Count, 0],
+                AggregationTemporality = AggregationTemporality.CUMULATIVE,
+                Attributes = new Dictionary<string, object> { ["route"] = "/checkout" }
+            }).ToList(),
+            Resource = Resource(tenantId, serviceName),
+            InstrumentationScope = Scope()
+        };
+    }
+
+    /// <summary>
+    /// One cumulative explicit-bounds histogram stream built to exercise all three
+    /// <c>MetricBucketPoint.MinMaxApproximate</c> cases (still-not-changed correctness plan, item 3):
+    /// a pre-window baseline, then three in-window points — both Min and Max move together at each
+    /// point, so each assertion is unambiguous (the flag is a single bool covering both dimensions:
+    /// approximate whenever *either* one is, per the model's own doc comment).
+    /// <list type="bullet">
+    /// <item>+10s: the lifetime min/max both move (50 → 10, 250 → 350); a moved extreme is
+    /// necessarily attributable to this bucket, so both are exact.</item>
+    /// <item>+20s: the lifetime min/max stay put (new observations all land in one lower
+    /// explicit-bounds bucket); both are only bound estimates, tightened to that bucket's own
+    /// edges — approximate.</item>
+    /// <item>+30s: <c>StartTimeUnixNano</c> advances (a counter reset), so the reported min/max cover
+    /// exactly this bucket's own lifetime — exact again.</item>
+    /// </list>
+    /// Bounds <c>[100, 200, 300]</c> give four buckets: [0,100), [100,200), [200,300), [300,∞).
+    /// </summary>
+    public static MetricModel CumulativeHistogramMinMaxSeries(long tenantId, DateTime start, string serviceName = "minmax-svc")
+    {
+        var bounds = new[] { 100d, 200d, 300d };
+        var streamStart = ToUnixNano(start.AddSeconds(-5));
+        var resetStart = ToUnixNano(start.AddSeconds(25));
+        var attrs = new Dictionary<string, object> { ["route"] = "/search" };
+
+        HistogramDataPointModel Point(DateTime ts, long? startNano, long count, double sum, double min, double max, long[] bucketCounts) => new()
+        {
+            StartTimeUnixNano = startNano,
+            TimeUnixNano = ToUnixNano(ts),
+            Count = count,
+            Sum = sum,
+            Min = min,
+            Max = max,
+            ExplicitBounds = bounds,
+            BucketCounts = bucketCounts,
+            AggregationTemporality = AggregationTemporality.CUMULATIVE,
+            Attributes = attrs
+        };
+
+        return new MetricModel
+        {
+            Name = "correctness.minmax.cumulative",
+            Type = MetricType.HISTOGRAM,
+            Unit = "ms",
+            HistogramDataPoints =
+            [
+                // Pre-window baseline: 10 obs, all in [200,300).
+                Point(start.AddSeconds(-5), streamStart, 10, 1000, 50, 250, [0, 0, 10, 0]),
+                // +10s: min drops to 10, max grows to 350 — the 5 new obs land in [300,∞).
+                Point(start.AddSeconds(10), streamStart, 15, 1500, 10, 350, [0, 0, 10, 5]),
+                // +20s: min/max unchanged — the 5 new obs land in [100,200) this time.
+                Point(start.AddSeconds(20), streamStart, 20, 2000, 10, 350, [0, 5, 10, 5]),
+                // +30s: reset (new StartTimeUnixNano) — reported min/max cover just this bucket.
+                Point(start.AddSeconds(30), resetStart, 3, 300, 2, 99, [1, 0, 2, 0]),
+            ],
+            Resource = Resource(tenantId, serviceName),
+            InstrumentationScope = Scope()
+        };
+    }
+
     /// <summary>One explicit-bounds histogram stream, delta temporality, increasing counts over time — for SQL SUM(count)/unbuffered bucket-count merge checks.</summary>
     public static MetricModel HistogramDeltaSeries(long tenantId, DateTime start, string serviceName = "latency-svc", int points = 10)
     {

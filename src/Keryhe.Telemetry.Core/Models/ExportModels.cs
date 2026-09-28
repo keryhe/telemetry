@@ -68,4 +68,6 @@ public sealed class MetricExportRow
     public List<double>? BucketBounds { get; set; }
     public List<double>? Quantiles { get; set; }
     public List<double>? QuantileValues { get; set; }
+    /// <summary>See <see cref="MetricBucketPoint.Rate"/>.</summary>
+    public double? Rate { get; set; }
 }

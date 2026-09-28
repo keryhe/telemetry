@@ -81,8 +81,28 @@ public sealed class MetricBucketPoint
     public List<double>? BucketBounds { get; set; }
     public List<double>? Quantiles { get; set; }
     public List<double>? QuantileValues { get; set; }
+    /// <summary>
+    /// Per-second rate over the time the bucket's observations actually cover — Sum: value
+    /// increase/s; Histogram/ExpHistogram/Summary: observations/s. Measured from each stream's
+    /// previous observation (cumulative) or its points' own start/end times (delta), never from
+    /// the bucket width, which is narrower than the export interval on short windows. Summed
+    /// across streams for the display series. Null for Gauge, or when no interval is known.
+    /// </summary>
+    public double? Rate { get; set; }
     /// <summary>Summary only: true when more than one stream contributed to this bucket, so the quantiles shown are an average-of-quantiles approximation, not a true merged quantile (decision 22).</summary>
     public bool IsApproximate { get; set; }
+    /// <summary>
+    /// Histogram/ExpHistogram, cumulative temporality only: true when <see cref="Min"/>/<see cref="Max"/>
+    /// are an estimate rather than this bucket's true extreme. A cumulative point's reported min/max
+    /// cover the stream's whole lifetime, not the bucket, so they can only be attributed to a
+    /// specific bucket when they are new (the lifetime extreme changed since the previous point) or
+    /// the counter itself started/reset inside this bucket — otherwise the true bucket-local
+    /// extreme is unknown and this is a bound estimate (tightened, for HISTOGRAM, to the nearest
+    /// edge of a bucket that actually received new observations this interval). False whenever
+    /// Min/Max are exact or absent — including every non-cumulative (delta) point, which is always
+    /// exact. True when any stream contributing to a merged/"other" bucket is approximate.
+    /// </summary>
+    public bool MinMaxApproximate { get; set; }
 }
 
 /// <summary>Request shape for <see cref="IMetricReadRepository.GetMetricExemplarsAsync(MetricExemplarQuery, CancellationToken)"/>.</summary>

@@ -122,9 +122,20 @@ export interface MetricBucketPoint {
   bucketBounds?: number[];
   quantiles?: number[];
   quantileValues?: number[];
+  /** Per-second rate over the time the bucket's observations actually cover (Sum: increase/s;
+   *  Histogram/Exp-Histogram/Summary: observations/s), summed across streams. Computed server-side
+   *  from real elapsed time — never divide `value`/`count` by the bucket width instead, which is
+   *  narrower than the export interval on short windows and overstates the rate. */
+  rate?: number;
   /** Summary only: true when more than one stream contributed — the quantiles shown are an
    *  average-of-quantiles approximation, not a true merged quantile. */
   isApproximate?: boolean;
+  /** Histogram/Exp-Histogram, cumulative temporality only: true when `min`/`max` are a bound
+   *  estimate rather than this bucket's true extreme — a cumulative point's reported min/max cover
+   *  the stream's whole lifetime, not the bucket, so they're only exact when the lifetime extreme
+   *  changed in this bucket or the counter started/reset here. False (including absent) whenever
+   *  min/max are exact, missing, or the metric is delta temporality (always exact). */
+  minMaxApproximate?: boolean;
 }
 
 export interface DisplayMetricSeries {

@@ -38,7 +38,7 @@ import { EmptyStateComponent } from '../../../shared/components/empty-state/empt
 import { PageHeaderComponent } from '../../../shared/components/page-header/page-header.component';
 import {
   buildHistogramBarFromBuckets, buildHistogramHeatmapFromBuckets, buildRadialGauge, buildShareDonut,
-  chartGrid, foldPointsAcrossGroups, formatUnitValue, histogramQuantile, timeRangeZoom,
+  chartGrid, foldPointsAcrossGroups, formatUnitValue, histogramQuantile, sumDefined, timeRangeZoom,
 } from '../../../shared/utils/chart.utils';
 import { loadPageState, savePageState } from '../../../shared/utils/page-state';
 import { UrlStateService } from '../../../shared/utils/url-state';
@@ -93,6 +93,26 @@ interface ChartGroup {
   name: string;
   serviceName: string;
   points: MetricBucketPoint[];
+}
+
+/**
+ * Line/area charts break the line at every `null`, and the server's bucket grid is typically much
+ * finer than the export interval on short windows, so most buckets are empty and a line of real
+ * observations renders as isolated, unconnected points. Drop the empty buckets instead so
+ * consecutive observations connect (the pre-bucketing behavior). Stacked series must share their
+ * x values for the bands to sum, so there an x is kept when any series has data and the others
+ * contribute 0 at it.
+ */
+function connectAcrossEmptyBuckets(
+  series: { name: string; data: [number, number | null][] }[],
+  stacked: boolean,
+): { name: string; data: [number, number | null][] }[] {
+  if (!stacked) return series.map((s) => ({ ...s, data: s.data.filter(([, v]) => v != null) }));
+  const xs = new Set(series.flatMap((s) => s.data.filter(([, v]) => v != null).map(([x]) => x)));
+  return series.map((s) => ({
+    ...s,
+    data: s.data.filter(([x]) => xs.has(x)).map(([x, v]) => [x, v ?? 0] as [number, number | null]),
+  }));
 }
 
 @Component({
@@ -229,18 +249,17 @@ export class MetricDetailComponent implements OnInit, AfterViewInit, OnDestroy {
     return groups;
   });
 
-  /** Windowed throughput (Count / bucket width) for Histogram/Exp-Histogram/Summary — always
+  /** Throughput (observations/s, the server's elapsed-time-based `rate`) for Histogram/Exp-Histogram/Summary — always
    *  folded across every display series (mirroring the pre-Phase-4 UI, which showed one whole-
    *  metric throughput trend regardless of the per-series/per-service selection above it). */
   protected throughputChartOptions = computed<ApexOptions | null>(() => {
     if (!this.isDistribution()) return null;
     const result = this.seriesResult();
-    if (!result || !result.bucketWidthMs) return null;
+    if (!result) return null;
     const folded = foldPointsAcrossGroups(this.allGroups(), this.metricType());
-    const bucketSeconds = result.bucketWidthMs / 1000;
     const data = folded
-      .filter((p) => p.count != null)
-      .map((p) => [new Date(p.timestamp).getTime(), p.count! / bucketSeconds] as [number, number]);
+      .filter((p) => p.rate != null)
+      .map((p) => [new Date(p.timestamp).getTime(), p.rate!] as [number, number]);
     if (!data.length) return null;
     const isDark = this.theme.isDark();
     const { start: rangeStart, end: rangeEnd } = this.timeRange.range();
@@ -313,38 +332,34 @@ export class MetricDetailComponent implements OnInit, AfterViewInit, OnDestroy {
 
   /** Stats card values, computed directly from the pre-bucketed server points — no client windowing. */
   private stats = computed(() => {
-    const empty = { current: null as number | null, min: null as number | null, max: null as number | null, avg: null as number | null };
+    const empty = { current: null as number | null, min: null as number | null, max: null as number | null, avg: null as number | null, minMaxApproximate: false };
     const groups = this.allGroups();
     if (!groups.length) return empty;
-    const bucketSeconds = (this.seriesResult()?.bucketWidthMs ?? 0) / 1000;
-
     if (this.isHistogram() || this.isExpHistogram() || this.isSummary()) {
       const allPoints = groups.flatMap((g) => g.points);
       const totalCount = allPoints.reduce((a, p) => a + (p.count ?? 0), 0);
       const totalSum = allPoints.reduce((a, p) => a + (p.sum ?? 0), 0);
-      const mins = allPoints.map((p) => p.min).filter((v): v is number => v != null);
-      const maxs = allPoints.map((p) => p.max).filter((v): v is number => v != null);
+      const minsWithFlag = allPoints.filter((p) => p.min != null);
+      const maxsWithFlag = allPoints.filter((p) => p.max != null);
+      const minPoint = minsWithFlag.length ? minsWithFlag.reduce((a, b) => (a.min! < b.min! ? a : b)) : null;
+      const maxPoint = maxsWithFlag.length ? maxsWithFlag.reduce((a, b) => (a.max! > b.max! ? a : b)) : null;
       return {
         current: totalCount > 0 ? totalSum / totalCount : null,
-        min: mins.length ? Math.min(...mins) : null,
-        max: maxs.length ? Math.max(...maxs) : null,
+        min: minPoint?.min ?? null,
+        max: maxPoint?.max ?? null,
         avg: totalCount,
+        // The reported min/max stat is only as trustworthy as the single point it came from.
+        minMaxApproximate: !!(minPoint?.minMaxApproximate || maxPoint?.minMaxApproximate),
       };
     }
 
     // Gauge/Sum: merge every group's points index-wise (all groups share the identical bucket
     // grid the server built — see MetricReadRepositoryBase.MergeBucketsForDisplaySeries).
-    const bucketCount = Math.max(...groups.map((g) => g.points.length), 0);
-    const merged: (number | null)[] = [];
-    for (let i = 0; i < bucketCount; i++) {
-      const vals = groups.map((g) => g.points[i]?.value).filter((v): v is number => v != null);
-      merged.push(vals.length ? (this.metricType() === MetricType.Gauge
-        ? vals.reduce((a, b) => a + b, 0) / vals.length
-        : vals.reduce((a, b) => a + b, 0)) : null);
-    }
-    const rate = this.metricType() === MetricType.Sum && !this.showRaw() && bucketSeconds > 0;
-    const scaled = merged.map((v) => (v == null ? null : (rate ? v / bucketSeconds : v)));
-    const present = scaled.filter((v): v is number => v != null);
+    // Sum in rate mode reads the server's elapsed-time-based `rate` rather than value / bucket width.
+    const rate = this.metricType() === MetricType.Sum && !this.showRaw();
+    const present = foldPointsAcrossGroups(groups, this.metricType())
+      .map((p) => (rate ? p.rate : p.value))
+      .filter((v): v is number => v != null);
     if (!present.length) return empty;
 
     const allMins = groups.flatMap((g) => g.points.map((p) => p.min)).filter((v): v is number => v != null);
@@ -354,6 +369,7 @@ export class MetricDetailComponent implements OnInit, AfterViewInit, OnDestroy {
       min: allMins.length ? Math.min(...allMins) : Math.min(...present),
       max: allMaxs.length ? Math.max(...allMaxs) : Math.max(...present),
       avg: present.reduce((a, b) => a + b, 0) / present.length,
+      minMaxApproximate: false, // Gauge/Sum min/max is never a cumulative-histogram estimate.
     };
   });
 
@@ -361,6 +377,8 @@ export class MetricDetailComponent implements OnInit, AfterViewInit, OnDestroy {
   protected minValue = computed(() => this.stats().min);
   protected maxValue = computed(() => this.stats().max);
   protected avgValue = computed(() => this.stats().avg);
+  /** True when the Min/Max stat cards are a bound estimate — see MetricBucketPoint.minMaxApproximate. */
+  protected minMaxApproximate = computed(() => this.stats().minMaxApproximate);
 
   /** Stats are rates only for Sum when not showing raw per-bucket increases. */
   protected statsAreRates = computed(() => this.isSum() && !this.showRaw());
@@ -683,6 +701,7 @@ export class MetricDetailComponent implements OnInit, AfterViewInit, OnDestroy {
         points.push({
           timestamp: ts,
           value: vals.length ? (isGauge ? vals.reduce((a, b) => a + b, 0) / vals.length : vals.reduce((a, b) => a + b, 0)) : undefined,
+          rate: isGauge ? undefined : sumDefined(list.map((g) => g.points[i]?.rate)),
         });
       }
       return { name: svc, serviceName: svc, points };
@@ -711,21 +730,23 @@ export class MetricDetailComponent implements OnInit, AfterViewInit, OnDestroy {
       chartType = 'line';
       chartSeries = this.buildDistributionSeries();
     } else {
-      const bucketSeconds = result.bucketWidthMs / 1000;
-      const rate = this.isSum() && !this.showRaw() && bucketSeconds > 0;
+      const rate = this.isSum() && !this.showRaw();
       const groups = this.effectiveGroups();
       chartType = stacked ? (rate ? 'area' : 'bar') : (this.isSum() && this.showRaw() ? 'bar' : 'area');
       chartSeries = groups.map((g) => ({
         name: g.name,
-        data: g.points.map((p) => [
-          new Date(p.timestamp).getTime(),
-          p.value == null ? null : (rate ? p.value / bucketSeconds : p.value),
-        ] as [number, number | null]),
+        data: g.points.map((p) => [new Date(p.timestamp).getTime(), (rate ? p.rate : p.value) ?? null] as [number, number | null]),
       }));
     }
 
+    if (chartType !== 'bar') chartSeries = connectAcrossEmptyBuckets(chartSeries, stacked);
+
     const unit = this.isDistribution() || this.metricType() === MetricType.Gauge ? this.metricUnit() : '';
     const valueFormatter = (v: number) => (unit ? formatUnitValue(v, unit) : v.toFixed(2));
+
+    // With empty buckets dropped, only a series holding a single point draws no line — mark
+    // those so a lone observation is still visible; every other series stays a plain line.
+    const markerSizes = chartSeries.map((s) => (chartType !== 'bar' && s.data.length === 1 ? 4 : 0));
 
     this.chartOptions.set({
       chart: { type: chartType, height: 300, stacked, toolbar: { show: false }, background: 'transparent', ...this.zoomChart() },
@@ -733,6 +754,7 @@ export class MetricDetailComponent implements OnInit, AfterViewInit, OnDestroy {
       series: chartSeries,
       xaxis: { type: 'datetime', min: rangeStart.getTime(), max: rangeEnd.getTime(), labels: { datetimeUTC: false } },
       stroke: { curve: 'smooth', width: stacked && chartType === 'area' ? 1 : 2 },
+      markers: { size: markerSizes, strokeWidth: 0, hover: { sizeOffset: 2 } },
       fill: { opacity: chartType === 'area' ? (stacked ? 0.7 : 0.15) : 1 },
       dataLabels: { enabled: false },
       yaxis: { labels: { formatter: valueFormatter } },
@@ -801,23 +823,33 @@ export class MetricDetailComponent implements OnInit, AfterViewInit, OnDestroy {
           }),
         });
       }
+      // "Max (≈)" whenever any charted point's max is an estimate, not this bucket's true extreme
+      // (cumulative histogram, unchanged lifetime max — see MetricBucketPoint.minMaxApproximate).
+      const maxLabel = g.points.some((p) => p.minMaxApproximate) ? 'Max (≈)' : 'Max';
       out.push({
-        name: multi ? `${g.name} Max` : 'Max',
+        name: multi ? `${g.name} ${maxLabel}` : maxLabel,
         data: g.points.map((p) => [new Date(p.timestamp).getTime(), p.max ?? null] as [number, number | null]),
       });
     }
     return out;
   }
 
+  /** Count card only: a whole-number observation count, thousands-separated — never decimals. */
   protected fmt(v: number | null | undefined): string {
-    return v != null ? v.toFixed(3) : '—';
+    return v != null ? Math.round(v).toLocaleString() : '—';
   }
 
-  protected fmtStat(v: number | null | undefined): string {
+  protected fmtStat(v: number | null | undefined, approximate = false): string {
     if (v == null) return '—';
-    if (this.statsUseUnit()) return formatUnitValue(v, this.metricUnit());
-    return `${v.toFixed(3)}${this.statsUnitSuffix()}`;
+    const prefix = approximate ? '≈ ' : '';
+    if (this.statsUseUnit()) return prefix + formatUnitValue(v, this.metricUnit());
+    return `${prefix}${v.toFixed(3)}${this.statsUnitSuffix()}`;
   }
+
+  /** Tooltip text for the Min/Max stat cards when {@link minMaxApproximate} is true. */
+  protected readonly minMaxApproximateTooltip =
+    'Estimated: this metric reports cumulative min/max since it started, not per interval, so the ' +
+    'exact value within this time range can\'t always be recovered. This is a bound, not the true extreme.';
 
   /** Current selection for a label key; '' (the "All" option) when no filter is set. */
   protected labelValue(key: string): string {
@@ -890,16 +922,16 @@ export class MetricDetailComponent implements OnInit, AfterViewInit, OnDestroy {
     switch (type) {
       case MetricType.Histogram:
       case MetricType.ExponentialHistogram:
-        headers = ['Timestamp', 'Series', 'Count', 'Sum', 'Min', 'Max', 'BucketCounts', 'BucketBounds'];
-        row = (s, p) => [ts(p), s, p.count ?? '', p.sum ?? '', p.min ?? '', p.max ?? '', ser(p.bucketCounts), ser(p.bucketBounds)];
+        headers = ['Timestamp', 'Series', 'Count', 'Sum', 'Min', 'Max', 'BucketCounts', 'BucketBounds', 'Rate'];
+        row = (s, p) => [ts(p), s, p.count ?? '', p.sum ?? '', p.min ?? '', p.max ?? '', ser(p.bucketCounts), ser(p.bucketBounds), p.rate ?? ''];
         break;
       case MetricType.Summary:
-        headers = ['Timestamp', 'Series', 'Count', 'Sum', 'Quantiles', 'QuantileValues', 'IsApproximate'];
-        row = (s, p) => [ts(p), s, p.count ?? '', p.sum ?? '', ser(p.quantiles), ser(p.quantileValues), String(p.isApproximate ?? false)];
+        headers = ['Timestamp', 'Series', 'Count', 'Sum', 'Quantiles', 'QuantileValues', 'IsApproximate', 'Rate'];
+        row = (s, p) => [ts(p), s, p.count ?? '', p.sum ?? '', ser(p.quantiles), ser(p.quantileValues), String(p.isApproximate ?? false), p.rate ?? ''];
         break;
       default: // Gauge / Sum
-        headers = ['Timestamp', 'Series', 'Value', 'Min', 'Max'];
-        row = (s, p) => [ts(p), s, p.value ?? '', p.min ?? '', p.max ?? ''];
+        headers = ['Timestamp', 'Series', 'Value', 'Min', 'Max', 'Rate'];
+        row = (s, p) => [ts(p), s, p.value ?? '', p.min ?? '', p.max ?? '', p.rate ?? ''];
     }
 
     const data = groups.flatMap((g) => g.points.map((p) => row(g.name, p)));

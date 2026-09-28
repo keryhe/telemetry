@@ -229,7 +229,7 @@ public class MetricsController : ControllerBase
         if (exportFormat == ExportFormat.Csv)
         {
             await using var csv = new CsvRowWriter(Response.Body);
-            await csv.WriteHeaderAsync(["metricName", "seriesName", "serviceName", "labels", "bucketStart", "value", "min", "max", "count", "sum", "bucketCounts", "bucketBounds"]);
+            await csv.WriteHeaderAsync(["metricName", "seriesName", "serviceName", "labels", "bucketStart", "value", "min", "max", "count", "sum", "bucketCounts", "bucketBounds", "rate"]);
             await foreach (var row in _metrics.ExportMetricSeriesAsync(query, ct))
             {
                 await csv.WriteRowAsync(MetricCsvCells(row));
@@ -271,6 +271,7 @@ public class MetricsController : ControllerBase
         yield return row.Sum?.ToString("R");
         yield return row.BucketCounts == null ? null : System.Text.Json.JsonSerializer.Serialize(row.BucketCounts);
         yield return row.BucketBounds == null ? null : System.Text.Json.JsonSerializer.Serialize(row.BucketBounds);
+        yield return row.Rate?.ToString("R");
     }
 
     /// <summary>

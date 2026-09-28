@@ -319,7 +319,7 @@ export function formatUnitValue(value: number, unit?: string | null): string {
 
   if (u in TIME_UNIT_TO_MS) return sign + formatDurationMs(abs * TIME_UNIT_TO_MS[u]);
   if (u in BYTE_UNIT_TO_BYTES) return sign + formatBytes(abs * BYTE_UNIT_TO_BYTES[u]);
-  if (u === '%') return `${value}%`;
+  if (u === '%') return `${plainNumber(value)}%`;
   if (u === '1' || u === '') return plainNumber(value);
   return `${plainNumber(value)} ${u}`;
 }
@@ -618,6 +618,12 @@ export function buildHistogramBarFromBuckets(
  * whole window, not per bucket) — acceptable here since this fold is a client-only convenience
  * view, not the canonical per-series chart.
  */
+/** Σ of the defined values, or undefined when none is — an unmeasured rate isn't 0/s. */
+export function sumDefined(values: (number | undefined)[]): number | undefined {
+  const present = values.filter((v): v is number => v != null);
+  return present.length ? present.reduce((a, b) => a + b, 0) : undefined;
+}
+
 export function foldPointsAcrossGroups(
   groups: { points: MetricBucketPoint[] }[],
   type: MetricType,
@@ -643,15 +649,17 @@ export function foldPointsAcrossGroups(
       const matching = withBuckets.filter((p) => p.bucketCounts!.length === majorityLen);
       const bounds = matching.find((p) => p.bucketBounds?.length)?.bucketBounds;
       const counts = new Array(majorityLen).fill(0);
-      let count = 0; let sum = 0; let min: number | undefined; let max: number | undefined;
+      let count = 0; let sum = 0; let min: number | undefined; let max: number | undefined; let minMaxApproximate = false;
+      const rate = sumDefined(matching.map((p) => p.rate));
       for (const p of matching) {
         for (let k = 0; k < majorityLen; k++) counts[k] += p.bucketCounts![k] ?? 0;
         count += p.count ?? 0;
         sum += p.sum ?? 0;
         if (p.min != null) min = min == null ? p.min : Math.min(min, p.min);
         if (p.max != null) max = max == null ? p.max : Math.max(max, p.max);
+        if (p.minMaxApproximate) minMaxApproximate = true;
       }
-      out.push({ timestamp, count, sum, min, max, bucketCounts: counts, bucketBounds: bounds });
+      out.push({ timestamp, count, sum, min, max, minMaxApproximate, rate, bucketCounts: counts, bucketBounds: bounds });
       continue;
     }
 
@@ -677,6 +685,7 @@ export function foldPointsAcrossGroups(
         quantileValues,
         count: withQ.reduce((a, p) => a + (p.count ?? 0), 0),
         sum: withQ.reduce((a, p) => a + (p.sum ?? 0), 0),
+        rate: sumDefined(withQ.map((p) => p.rate)),
         isApproximate: withQ.length > 1 || withQ.some((p) => p.isApproximate),
       });
       continue;
@@ -692,6 +701,7 @@ export function foldPointsAcrossGroups(
     out.push({
       timestamp,
       value,
+      rate: isGauge ? undefined : sumDefined(pts.map((p) => p.rate)),
       min: mins.length ? Math.min(...mins) : undefined,
       max: maxs.length ? Math.max(...maxs) : undefined,
     });

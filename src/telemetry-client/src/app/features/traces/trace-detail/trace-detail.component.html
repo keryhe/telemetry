@@ -17,7 +17,7 @@
         {{ nanoToDate(rootStartNano()) | date:'MM/dd/yyyy, h:mm:ss a' }}
       </span>
     }
-    <a mat-stroked-button class="view-logs" [routerLink]="['/logs']" [queryParams]="{ traceId: id }">
+    <a mat-stroked-button class="view-logs" [routerLink]="['/logs']" [queryParams]="{ q: id }">
       <mat-icon>receipt_long</mat-icon> View Logs
     </a>
   </div>

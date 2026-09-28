@@ -510,6 +510,21 @@ path queries it. Note the .NET SDK emits no exemplars unless a meter provider se
 — `Keryhe.Telemetry.TestDataGenerator` does, and records its measurements inside an `Activity` so
 they carry trace ids.
 
+**Cumulative histogram/exp-histogram Min/Max are sometimes an estimate, not the true bucket
+extreme** (`MetricBucketPoint.MinMaxApproximate`, `MetricReadRepositoryBase.EstimateMax`/
+`EstimateMin`). OTLP's cumulative temporality reports Min/Max since the stream started, not since
+the previous export, so a bucket's own extreme can only be recovered exactly when it's provably
+attributable to that bucket: the counter started/reset there, or the lifetime extreme itself moved
+there (a moved extreme can only have moved within the interval since the previous observation).
+Otherwise the reported value is a bound, tightened — for `HISTOGRAM` only, via the explicit bucket
+that received new observations — to the smaller of the lifetime value and that bucket's own edge;
+`EXPONENTIAL_HISTOGRAM` keeps the coarser lifetime-value bound, since recovering a real boundary
+value from an (index, scale) pair isn't implemented in this read path (same gap
+`FinalizeExpHistogramBounds`'s own doc comment records for exp-histogram bucket bounds generally).
+Delta temporality is always exact — the flag only ever applies to cumulative points. The metric
+detail page marks the Min/Max stat cards and the percentile chart's Max line with "≈" when any
+charted point is approximate.
+
 **Multi-tenant architecture**: Telemetry is tenant-scoped *through* `resources.tenant_id` — only
 `resources`, `api_keys` and `alert_rules` carry a `tenant_id` column, while every signal table
 (`spans`, `metrics`, the data-point tables, `log_records`, …) carries just `resource_id` and joins

@@ -176,6 +176,43 @@ public abstract class ExportTestsBase : IAsyncLifetime
         Assert.Equal(streamCount * 1, exportedRowCount); // series × buckets (1 requested point)
     }
 
+    /// <summary>
+    /// The export row carries the same elapsed-time-based <c>Rate</c> as the chart endpoint
+    /// (<c>MetricPhase4TestsBase.SumCumulative_RateUsesElapsedTimeNotBucketWidth</c>) — added to
+    /// <see cref="MetricExportRow"/>/the CSV export as a still-not-changed follow-up to the metric
+    /// chart correctness fixes. +15/15s → 1/s; one wide bucket covers the whole 60s stream.
+    /// </summary>
+    [Fact]
+    public async Task MetricsExport_IncludesRate()
+    {
+        // Distinct service name from MetricPhase4TestsBase's own rate test (same metric name is
+        // hardcoded in the shared builder): both classes share this provider's fixture collection,
+        // and the process-lifetime ResourceScopeCache isn't cleared between test classes even
+        // though `metrics`/`sum_data_points` are truncated (see ManyStreamsForTopN's doc comment)
+        // — reusing the exact same resource+metric identity would hand this flush a stale cached
+        // metric id and fail its data-point insert on the FK.
+        var metric = SeededDataBuilder.CumulativeCounterSeries(_fixture.TenantId, WindowStart, [15, 30, 45], intervalSeconds: 15, serviceName: "rate-export-svc");
+        using (var writeScope = Scope())
+            await writeScope.ServiceProvider.GetRequiredService<ITelemetryBulkWriter>().FlushMetricsAsync([metric]);
+
+        using var readScope = Scope();
+        var repo = readScope.ServiceProvider.GetRequiredService<IMetricReadRepository>();
+
+        var rows = new List<MetricExportRow>();
+        await foreach (var row in repo.ExportMetricSeriesAsync(new MetricExportQuery
+        {
+            MetricName = "correctness.requests.cumulative",
+            Start = WindowStart,
+            End = WindowStart.AddSeconds(60),
+            Points = 600
+        }))
+            rows.Add(row);
+
+        var valued = rows.Where(r => r.Value.HasValue).ToList();
+        Assert.Equal(3, valued.Count);
+        Assert.All(valued, r => Assert.Equal(1.0, r.Rate!.Value, precision: 6));
+    }
+
     [Fact]
     public async Task MetricsExport_UnknownMetricName_ReturnsEmpty()
     {

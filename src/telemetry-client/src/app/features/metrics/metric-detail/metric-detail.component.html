@@ -28,8 +28,10 @@
   <!-- Stats -->
   <div class="stat-grid">
     <app-stat-card [label]="(isHistogram() || isSummary() || isExpHistogram()) ? 'Mean' : (statsAreRates() ? 'Current Rate' : 'Current')" icon="show_chart" [value]="fmtStat(currentValue())" />
-    <app-stat-card label="Min" icon="arrow_downward" [value]="fmtStat(minValue())" />
-    <app-stat-card label="Max" icon="arrow_upward" [value]="fmtStat(maxValue())" />
+    <app-stat-card label="Min" icon="arrow_downward" [value]="fmtStat(minValue(), minMaxApproximate())"
+      [matTooltip]="minMaxApproximate() ? minMaxApproximateTooltip : ''" />
+    <app-stat-card label="Max" icon="arrow_upward" [value]="fmtStat(maxValue(), minMaxApproximate())"
+      [matTooltip]="minMaxApproximate() ? minMaxApproximateTooltip : ''" />
     <app-stat-card [label]="isDistribution() ? 'Count' : 'Average'" icon="functions" [value]="isDistribution() ? fmt(avgValue()) : fmtStat(avgValue())" />
   </div>
 
@@ -128,6 +130,7 @@
                 [chart]="chartOptions().chart!"
                 [xaxis]="chartOptions().xaxis!"
                 [stroke]="chartOptions().stroke!"
+                [markers]="chartOptions().markers!"
                 [fill]="chartOptions().fill!"
                 [theme]="chartOptions().theme!"
                 [dataLabels]="chartOptions().dataLabels!"

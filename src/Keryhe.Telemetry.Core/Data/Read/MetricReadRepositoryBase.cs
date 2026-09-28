@@ -765,7 +765,8 @@ public abstract class MetricReadRepositoryBase : DapperReadRepository, IMetricRe
                     BucketCounts = point.BucketCounts,
                     BucketBounds = point.BucketBounds,
                     Quantiles = point.Quantiles,
-                    QuantileValues = point.QuantileValues
+                    QuantileValues = point.QuantileValues,
+                    Rate = point.Rate
                 };
             }
         }
@@ -868,6 +869,66 @@ public abstract class MetricReadRepositoryBase : DapperReadRepository, IMetricRe
         return streams;
     }
 
+    /// <summary>
+    /// The interval one delta point covers, <c>time − start</c>, or NULL when the point carries no
+    /// usable start time (unset/0, or not before its own time) — so <c>SUM</c> over it totals only
+    /// the intervals actually known.
+    /// </summary>
+    private const string CoveredNanosExpr =
+        "CASE WHEN dp.start_time_unix_nano > 0 AND dp.start_time_unix_nano < dp.time_unix_nano " +
+        "THEN dp.time_unix_nano - dp.start_time_unix_nano END";
+
+    /// <summary>
+    /// Per-second rate of a delta bucket: its total over the intervals its points cover. Falls back
+    /// to the bucket width only for points with no start time, where no better interval exists.
+    /// </summary>
+    private static double? DeltaRate(double total, double? coveredNanos, Bucketing b)
+    {
+        var nanos = coveredNanos is > 0 ? coveredNanos.Value : b.BucketNanos;
+        return total / (nanos / 1e9);
+    }
+
+    /// <summary>How a cumulative point's value relates to the stream's previous observation.</summary>
+    private enum CumulativeStep
+    {
+        /// <summary>Same counter as the previous observation: the increase is the plain difference.</summary>
+        Diff,
+        /// <summary>
+        /// A fresh counter — reset (value decreased or start time changed) or first observed inside
+        /// the window after starting there — so its whole value accrued since its start time.
+        /// </summary>
+        Whole,
+        /// <summary>No previous observation, and the counter started before the window: its increase within the window can't be known.</summary>
+        Unknown
+    }
+
+    /// <summary>
+    /// Classifies one cumulative point against the stream's previous observation (the pre-window
+    /// baseline, or the last point of an earlier bucket) and returns the seconds its increase
+    /// covers — used for every cumulative type so Sum, Histogram, ExpHistogram and Summary share
+    /// one rule.
+    /// </summary>
+    private static (CumulativeStep Step, double? Seconds) ClassifyCumulativeStep(
+        MetricPointRow row, long? prevTime, long? prevStart, bool decreased, long windowStartNano)
+    {
+        var start = row.StartTimeUnixNano is long s && s > 0 && s < row.TimeUnixNano ? s : (long?)null;
+
+        if (prevTime is null)
+        {
+            return start is { } st && st >= windowStartNano
+                ? (CumulativeStep.Whole, (row.TimeUnixNano - st) / 1e9)
+                : (CumulativeStep.Unknown, null);
+        }
+
+        var elapsed = row.TimeUnixNano > prevTime.Value ? (row.TimeUnixNano - prevTime.Value) / 1e9 : (double?)null;
+        if (decreased || row.StartTimeUnixNano != prevStart)
+            return (CumulativeStep.Whole, start is { } rs ? (row.TimeUnixNano - rs) / 1e9 : elapsed);
+
+        return (CumulativeStep.Diff, elapsed);
+    }
+
+    private static double? PerSecond(double increase, double? seconds) => seconds is > 0 ? increase / seconds.Value : null;
+
     private async Task<Dictionary<string, StreamAgg>> LoadSumAsync(DbConnection conn, IList<long> metricIds,
         Bucketing b, Dictionary<string, string>? labelFilters, int timeoutSeconds, CancellationToken ct)
     {
@@ -884,7 +945,7 @@ public abstract class MetricReadRepositoryBase : DapperReadRepository, IMetricRe
         var bucketExpr = ClampedBucketExpr();
         var rows = await conn.QueryAsync<MetricPointRow>(new CommandDefinition($"""
             SELECT dp.metric_id AS MetricId, dp.attributes_json AS AttributesJson, {bucketExpr} AS Bucket,
-                   SUM({CoalesceValueExpr()}) AS SumOfValue
+                   SUM({CoalesceValueExpr()}) AS SumOfValue, SUM({CoveredNanosExpr}) AS CoveredNanos
             FROM sum_data_points dp
             WHERE dp.metric_id IN ({IdInList(metricIds)}) AND dp.time_unix_nano >= @start AND dp.time_unix_nano < @end{labelClause}
             GROUP BY dp.metric_id, dp.attributes_json, {bucketExpr}
@@ -895,7 +956,8 @@ public abstract class MetricReadRepositoryBase : DapperReadRepository, IMetricRe
         foreach (var r in rows)
         {
             var stream = GetOrAddStream(streams, r.MetricId, r.AttributesJson);
-            stream.Buckets[r.Bucket] = new BucketAgg { Value = r.SumOfValue ?? 0 };
+            var value = r.SumOfValue ?? 0;
+            stream.Buckets[r.Bucket] = new BucketAgg { Value = value, Rate = DeltaRate(value, r.CoveredNanos, b) };
         }
         return streams;
     }
@@ -919,55 +981,49 @@ public abstract class MetricReadRepositoryBase : DapperReadRepository, IMetricRe
         var baselineRows = (await conn.QueryAsync<MetricPointRow>(new CommandDefinition(baselineSql,
             Merge(new { start = b.StartNano }, lp), commandTimeout: timeoutSeconds, cancellationToken: ct))).ToList();
 
-        return ComputeCumulativeDeltas(bucketRows, baselineRows,
-            value: r => r.ValueDouble ?? r.ValueInt ?? 0,
-            makeBucket: delta => new BucketAgg { Value = delta });
+        return ComputeCumulativeDeltas(bucketRows, baselineRows, b.StartNano);
     }
 
     /// <summary>
-    /// Shared reset-detection delta walk for cumulative sums (decision 22): per stream, buckets
-    /// are visited oldest-first (preceded by the pre-window baseline, if any) and each bucket's
-    /// delta is the plain difference from the previous observed value — unless the value decreased
-    /// or <c>start_time_unix_nano</c> changed, either of which is treated as a counter reset, in
-    /// which case the whole current value is counted as the delta (a fresh counter's value to date
-    /// since it restarted). With no baseline and no prior bucket, the first observed bucket's delta
-    /// is 0 (there's nothing to diff against — counting it as a reset would usually wildly
-    /// overcount a long-running counter whose true start predates the window).
+    /// Reset-detecting delta walk for cumulative sums: per stream, buckets are visited oldest-first
+    /// (preceded by the pre-window baseline, if any) and each bucket's increase is classified by
+    /// <see cref="ClassifyCumulativeStep"/> — the plain difference from the previous observation,
+    /// the whole value for a counter that reset or started inside the window, and no bucket at all
+    /// when neither applies (a long-running counter's first in-window point with no baseline: its
+    /// in-window increase is unknowable, and reporting 0 would draw a false dip).
     /// </summary>
     private static Dictionary<string, StreamAgg> ComputeCumulativeDeltas(
-        List<MetricPointRow> bucketRows, List<MetricPointRow> baselineRows,
-        Func<MetricPointRow, double> value, Func<double, BucketAgg> makeBucket)
+        List<MetricPointRow> bucketRows, List<MetricPointRow> baselineRows, long windowStartNano)
     {
+        static double ValueOf(MetricPointRow r) => r.ValueDouble ?? r.ValueInt ?? 0;
+
         var streams = new Dictionary<string, StreamAgg>();
         var baselineByStream = baselineRows.ToDictionary(r => $"{r.MetricId}\u0001{r.AttributesJson}");
 
         foreach (var group in bucketRows.GroupBy(r => $"{r.MetricId}\u0001{r.AttributesJson}"))
         {
-            var ordered = group.OrderBy(r => r.Bucket).ToList();
-            var stream = GetOrAddStream(streams, ordered[0].MetricId, ordered[0].AttributesJson);
-
             double? prevValue = null;
-            long? prevStart = null;
+            long? prevStart = null, prevTime = null;
             if (baselineByStream.TryGetValue(group.Key, out var baseline))
             {
-                prevValue = value(baseline);
+                prevValue = ValueOf(baseline);
                 prevStart = baseline.StartTimeUnixNano;
+                prevTime = baseline.TimeUnixNano;
             }
 
-            foreach (var row in ordered)
+            foreach (var row in group.OrderBy(r => r.Bucket))
             {
-                var curVal = value(row);
-                double delta;
-                if (prevValue is null)
-                    delta = 0;
-                else if (curVal < prevValue.Value || row.StartTimeUnixNano != prevStart)
-                    delta = curVal; // reset: counted as usage since restart
-                else
-                    delta = curVal - prevValue.Value;
-
-                stream.Buckets[row.Bucket] = makeBucket(delta);
+                var curVal = ValueOf(row);
+                var (step, seconds) = ClassifyCumulativeStep(row, prevTime, prevStart, curVal < prevValue, windowStartNano);
+                if (step != CumulativeStep.Unknown)
+                {
+                    var delta = step == CumulativeStep.Diff ? curVal - prevValue!.Value : curVal;
+                    GetOrAddStream(streams, row.MetricId, row.AttributesJson).Buckets[row.Bucket] =
+                        new BucketAgg { Value = delta, Rate = PerSecond(delta, seconds) };
+                }
                 prevValue = curVal;
                 prevStart = row.StartTimeUnixNano;
+                prevTime = row.TimeUnixNano;
             }
         }
         return streams;
@@ -1007,11 +1063,20 @@ public abstract class MetricReadRepositoryBase : DapperReadRepository, IMetricRe
             Merge(new { start = b.StartNano }, lp), commandTimeout: timeoutSeconds, cancellationToken: ct))).ToList();
 
         return isExponential
-            ? ComputeExpHistogramCumulativeDeltas(bucketRows, baselineRows)
-            : ComputeHistogramCumulativeDeltas(bucketRows, baselineRows);
+            ? ComputeExpHistogramCumulativeDeltas(bucketRows, baselineRows, b.StartNano)
+            : ComputeHistogramCumulativeDeltas(bucketRows, baselineRows, b.StartNano);
     }
 
-    private static Dictionary<string, StreamAgg> ComputeHistogramCumulativeDeltas(List<MetricPointRow> bucketRows, List<MetricPointRow> baselineRows)
+    /// <summary>
+    /// Histogram counterpart of <see cref="ComputeCumulativeDeltas"/>, under the same
+    /// <see cref="ClassifyCumulativeStep"/> rule: bucket counts, count and sum are all turned into
+    /// the increase since the previous observation (sum included — it is cumulative too, so
+    /// passing it through raw would re-add the running total once per bucket). Min/Max stay as
+    /// reported: a cumulative point's min/max cover the whole stream lifetime and can't be
+    /// differenced.
+    /// </summary>
+    private static Dictionary<string, StreamAgg> ComputeHistogramCumulativeDeltas(
+        List<MetricPointRow> bucketRows, List<MetricPointRow> baselineRows, long windowStartNano)
     {
         var streams = new Dictionary<string, StreamAgg>();
         var baselineByStream = baselineRows.ToDictionary(r => $"{r.MetricId}\u0001{r.AttributesJson}");
@@ -1019,54 +1084,132 @@ public abstract class MetricReadRepositoryBase : DapperReadRepository, IMetricRe
         foreach (var group in bucketRows.GroupBy(r => $"{r.MetricId}\u0001{r.AttributesJson}"))
         {
             var ordered = group.OrderBy(r => r.Bucket).ToList();
-            var stream = GetOrAddStream(streams, ordered[0].MetricId, ordered[0].AttributesJson);
-            stream.Bounds = DeserializeDoubleArray(ordered.Select(r => r.ExplicitBounds).FirstOrDefault(x => x != null));
+            var bounds = DeserializeDoubleArray(ordered.Select(r => r.ExplicitBounds).FirstOrDefault(x => x != null));
 
             long[]? prevCounts = null;
-            long? prevStart = null;
-
-            baselineByStream.TryGetValue(group.Key, out var baseline);
-            if (baseline != null)
+            double? prevSum = null, prevMin = null, prevMax = null;
+            long? prevStart = null, prevTime = null;
+            if (baselineByStream.TryGetValue(group.Key, out var baseline))
             {
                 prevCounts = DeserializeLongArray(baseline.BucketCounts);
+                prevSum = baseline.SumValue;
+                prevMin = baseline.MinValue;
+                prevMax = baseline.MaxValue;
                 prevStart = baseline.StartTimeUnixNano;
+                prevTime = baseline.TimeUnixNano;
             }
 
             foreach (var row in ordered)
             {
                 var curCounts = DeserializeLongArray(row.BucketCounts) ?? Array.Empty<long>();
-                var reset = prevCounts == null || row.StartTimeUnixNano != prevStart
-                            || (prevCounts.Length == curCounts.Length && curCounts.Sum() < prevCounts.Sum());
+                var decreased = prevCounts != null && prevCounts.Length == curCounts.Length && curCounts.Sum() < prevCounts.Sum();
+                var (step, seconds) = ClassifyCumulativeStep(row, prevTime, prevStart, decreased, windowStartNano);
 
-                long[] delta;
-                if (reset || prevCounts == null || prevCounts.Length != curCounts.Length)
+                if (step != CumulativeStep.Unknown)
                 {
-                    delta = curCounts;
-                }
-                else
-                {
-                    delta = new long[curCounts.Length];
-                    for (var i = 0; i < curCounts.Length; i++)
-                        delta[i] = Math.Max(0, curCounts[i] - prevCounts[i]);
-                }
+                    // A changed bucket layout can't be differenced element-wise; count it whole.
+                    var whole = step == CumulativeStep.Whole || prevCounts == null || prevCounts.Length != curCounts.Length;
+                    long[] delta;
+                    if (whole)
+                    {
+                        delta = curCounts;
+                    }
+                    else
+                    {
+                        delta = new long[curCounts.Length];
+                        for (var i = 0; i < curCounts.Length; i++)
+                            delta[i] = Math.Max(0, curCounts[i] - prevCounts![i]);
+                    }
 
-                stream.Buckets[row.Bucket] = new BucketAgg
-                {
-                    Count = delta.Sum(),
-                    Sum = row.SumValue,
-                    Min = row.MinValue,
-                    Max = row.MaxValue,
-                    Counts = delta
-                };
+                    // See MetricBucketPoint.MinMaxApproximate: exact when `whole` (the reported
+                    // min/max cover exactly this bucket's own lifetime) or when the lifetime extreme
+                    // moved (it necessarily moved within this interval); otherwise a bound estimate,
+                    // tightened to the edge of the highest/lowest bucket that got new observations.
+                    var (estMax, maxApprox) = EstimateMax(row.MaxValue, prevMax, whole, HighestNonEmptyUpperBound(delta, bounds));
+                    var (estMin, minApprox) = EstimateMin(row.MinValue, prevMin, whole, LowestNonEmptyLowerBound(delta, bounds));
+
+                    var stream = GetOrAddStream(streams, row.MetricId, row.AttributesJson);
+                    stream.Bounds ??= bounds;
+                    var count = delta.Sum();
+                    stream.Buckets[row.Bucket] = new BucketAgg
+                    {
+                        Count = count,
+                        Sum = whole ? row.SumValue : SumIncrease(row.SumValue, prevSum),
+                        Min = estMin,
+                        Max = estMax,
+                        MinMaxApproximate = minApprox || maxApprox,
+                        Counts = delta,
+                        Rate = PerSecond(count, seconds)
+                    };
+                }
 
                 prevCounts = curCounts;
+                prevSum = row.SumValue;
+                prevMin = row.MinValue;
+                prevMax = row.MaxValue;
                 prevStart = row.StartTimeUnixNano;
+                prevTime = row.TimeUnixNano;
             }
         }
         return streams;
     }
 
-    private static Dictionary<string, StreamAgg> ComputeExpHistogramCumulativeDeltas(List<MetricPointRow> bucketRows, List<MetricPointRow> baselineRows)
+    /// <summary>A cumulative sum's increase over the previous observation, clamped at 0 (float noise / non-monotonic sums).</summary>
+    private static double? SumIncrease(double? current, double? previous) =>
+        current is { } c && previous is { } p ? Math.Max(0, c - p) : current;
+
+    /// <summary>
+    /// Upper edge (explicit bound) of the highest-indexed bucket that received a new (delta &gt; 0)
+    /// observation this interval, or null when that bucket is the unbounded overflow bucket (no
+    /// finite edge) or nothing in <paramref name="delta"/> is non-empty. Used to tighten a cumulative
+    /// histogram bucket's approximate Max estimate (see <see cref="MetricBucketPoint.MinMaxApproximate"/>).
+    /// </summary>
+    private static double? HighestNonEmptyUpperBound(long[] delta, double[]? bounds)
+    {
+        for (var i = delta.Length - 1; i >= 0; i--)
+        {
+            if (delta[i] <= 0) continue;
+            return bounds != null && i < bounds.Length ? bounds[i] : null;
+        }
+        return null;
+    }
+
+    /// <summary>Lower-edge counterpart of <see cref="HighestNonEmptyUpperBound"/>, for the approximate Min estimate. The first bucket's lower edge is 0 (explicit-bounds histograms assume non-negative values).</summary>
+    private static double? LowestNonEmptyLowerBound(long[] delta, double[]? bounds)
+    {
+        for (var i = 0; i < delta.Length; i++)
+        {
+            if (delta[i] <= 0) continue;
+            return i == 0 ? 0.0 : bounds != null && i - 1 < bounds.Length ? bounds[i - 1] : null;
+        }
+        return null;
+    }
+
+    /// <summary>
+    /// Estimates one bucket's Max from a cumulative point's lifetime <paramref name="curMax"/>:
+    /// exact when the lifetime max grew since <paramref name="prevMax"/> (the growth necessarily
+    /// happened in this bucket's interval) or when <paramref name="exactWhole"/> (the counter
+    /// started/reset here, so the whole lifetime value belongs to this bucket) — otherwise an
+    /// upper-bound estimate, tightened against <paramref name="upperEdge"/> when known.
+    /// </summary>
+    private static (double? Value, bool Approximate) EstimateMax(double? curMax, double? prevMax, bool exactWhole, double? upperEdge)
+    {
+        if (curMax is not { } cm) return (null, false);
+        if (exactWhole || prevMax is null || cm > prevMax.Value) return (cm, false);
+        return upperEdge is { } u ? (Math.Min(u, cm), true) : (cm, true);
+    }
+
+    /// <summary>Min counterpart of <see cref="EstimateMax"/>.</summary>
+    private static (double? Value, bool Approximate) EstimateMin(double? curMin, double? prevMin, bool exactWhole, double? lowerEdge)
+    {
+        if (curMin is not { } cm) return (null, false);
+        if (exactWhole || prevMin is null || cm < prevMin.Value) return (cm, false);
+        return lowerEdge is { } l ? (Math.Max(l, cm), true) : (cm, true);
+    }
+
+    /// <summary>Exponential-histogram counterpart of <see cref="ComputeHistogramCumulativeDeltas"/>.</summary>
+    private static Dictionary<string, StreamAgg> ComputeExpHistogramCumulativeDeltas(
+        List<MetricPointRow> bucketRows, List<MetricPointRow> baselineRows, long windowStartNano)
     {
         var streams = new Dictionary<string, StreamAgg>();
         var baselineByStream = baselineRows.ToDictionary(r => $"{r.MetricId}\u0001{r.AttributesJson}");
@@ -1074,54 +1217,67 @@ public abstract class MetricReadRepositoryBase : DapperReadRepository, IMetricRe
 
         foreach (var group in bucketRows.GroupBy(r => $"{r.MetricId}\u0001{r.AttributesJson}"))
         {
-            var ordered = group.OrderBy(r => r.Bucket).ToList();
-            var stream = GetOrAddStream(streams, ordered[0].MetricId, ordered[0].AttributesJson);
-
             Dictionary<long, long>? prevMap = null;
             long? prevZero = null;
-            long? prevStart = null;
-
-            baselineByStream.TryGetValue(group.Key, out var baseline);
-            if (baseline != null)
+            double? prevSum = null, prevMin = null, prevMax = null;
+            long? prevStart = null, prevTime = null;
+            if (baselineByStream.TryGetValue(group.Key, out var baseline))
             {
                 prevMap = DownscaleRow(baseline, globalTargetScale);
                 prevZero = baseline.ZeroCount;
+                prevSum = baseline.SumValue;
+                prevMin = baseline.MinValue;
+                prevMax = baseline.MaxValue;
                 prevStart = baseline.StartTimeUnixNano;
+                prevTime = baseline.TimeUnixNano;
             }
 
-            foreach (var row in ordered)
+            foreach (var row in group.OrderBy(r => r.Bucket))
             {
                 var curMap = DownscaleRow(row, globalTargetScale);
                 var curZero = row.ZeroCount ?? 0;
                 var curTotal = curMap.Values.Sum() + curZero;
                 var prevTotal = (prevMap?.Values.Sum() ?? 0) + (prevZero ?? 0);
-                var reset = prevMap == null || row.StartTimeUnixNano != prevStart || curTotal < prevTotal;
+                var (step, seconds) = ClassifyCumulativeStep(row, prevTime, prevStart, prevMap != null && curTotal < prevTotal, windowStartNano);
 
-                var delta = new Dictionary<long, long>();
-                if (reset || prevMap == null)
+                if (step != CumulativeStep.Unknown)
                 {
-                    foreach (var kv in curMap) delta[kv.Key] = kv.Value;
-                }
-                else
-                {
+                    var whole = step == CumulativeStep.Whole || prevMap == null;
+                    var delta = new Dictionary<long, long>();
                     foreach (var kv in curMap)
-                        delta[kv.Key] = Math.Max(0, kv.Value - prevMap.GetValueOrDefault(kv.Key));
-                }
-                var deltaZero = reset || prevZero == null ? curZero : Math.Max(0, curZero - prevZero.Value);
+                        delta[kv.Key] = whole ? kv.Value : Math.Max(0, kv.Value - prevMap!.GetValueOrDefault(kv.Key));
+                    var deltaZero = whole || prevZero == null ? curZero : Math.Max(0, curZero - prevZero.Value);
+                    var count = delta.Values.Sum() + deltaZero;
 
-                stream.Buckets[row.Bucket] = new BucketAgg
-                {
-                    Count = delta.Values.Sum() + deltaZero,
-                    Sum = row.SumValue,
-                    Min = row.MinValue,
-                    Max = row.MaxValue,
-                    SparseCounts = delta,
-                    ZeroCountValue = deltaZero
-                };
+                    // Same exactness rule as the explicit-bounds histogram (see
+                    // MetricBucketPoint.MinMaxApproximate), but with no tightened edge: recovering a
+                    // real bucket boundary from an (index, scale) pair isn't implemented anywhere in
+                    // this read path yet (see FinalizeExpHistogramBounds's doc comment on that same
+                    // gap), so an inexact point here is flagged approximate at the lifetime value
+                    // rather than given a falsely-precise tightened number.
+                    var (estMax, maxApprox) = EstimateMax(row.MaxValue, prevMax, whole, null);
+                    var (estMin, minApprox) = EstimateMin(row.MinValue, prevMin, whole, null);
+
+                    GetOrAddStream(streams, row.MetricId, row.AttributesJson).Buckets[row.Bucket] = new BucketAgg
+                    {
+                        Count = count,
+                        Sum = whole ? row.SumValue : SumIncrease(row.SumValue, prevSum),
+                        Min = estMin,
+                        Max = estMax,
+                        MinMaxApproximate = minApprox || maxApprox,
+                        SparseCounts = delta,
+                        ZeroCountValue = deltaZero,
+                        Rate = PerSecond(count, seconds)
+                    };
+                }
 
                 prevMap = curMap;
                 prevZero = curZero;
+                prevSum = row.SumValue;
+                prevMin = row.MinValue;
+                prevMax = row.MaxValue;
                 prevStart = row.StartTimeUnixNano;
+                prevTime = row.TimeUnixNano;
             }
         }
         return streams;
@@ -1173,7 +1329,8 @@ public abstract class MetricReadRepositoryBase : DapperReadRepository, IMetricRe
         // syntax) — see LoadGaugeAsync's identical fix/doc comment, found via the same test failure.
         var aggRows = await conn.QueryAsync<MetricPointRow>(new CommandDefinition($"""
             SELECT dp.metric_id AS MetricId, dp.attributes_json AS AttributesJson, {bucketExpr} AS Bucket,
-                   SUM(dp.count) AS Count, SUM(dp.sum_value) AS SumValue, MIN(dp.min_value) AS MinValue, MAX(dp.max_value) AS max_value
+                   SUM(dp.count) AS Count, SUM(dp.sum_value) AS SumValue, MIN(dp.min_value) AS MinValue, MAX(dp.max_value) AS max_value,
+                   SUM({CoveredNanosExpr}) AS CoveredNanos
             FROM {table} dp
             WHERE dp.metric_id IN ({IdInList(metricIds)}) AND dp.time_unix_nano >= @start AND dp.time_unix_nano < @end{labelClause}
             GROUP BY dp.metric_id, dp.attributes_json, {bucketExpr}
@@ -1183,7 +1340,12 @@ public abstract class MetricReadRepositoryBase : DapperReadRepository, IMetricRe
         foreach (var r in aggRows)
         {
             var stream = GetOrAddStream(streams, r.MetricId, r.AttributesJson);
-            stream.Buckets[r.Bucket] = new BucketAgg { Count = r.Count ?? 0, Sum = r.SumValue, Min = r.MinValue, Max = r.MaxValue };
+            var count = r.Count ?? 0;
+            stream.Buckets[r.Bucket] = new BucketAgg
+            {
+                Count = count, Sum = r.SumValue, Min = r.MinValue, Max = r.MaxValue,
+                Rate = DeltaRate(count, r.CoveredNanos, b)
+            };
         }
 
         // 2) Bucket-count arrays can't be summed in SQL (JSON text columns), so merge them in C#
@@ -1245,8 +1407,13 @@ public abstract class MetricReadRepositoryBase : DapperReadRepository, IMetricRe
         return streams;
     }
 
-    private static readonly string[] SummaryCols = { "count", "sum_value", "quantile_values" };
+    private static readonly string[] SummaryCols = { "count", "sum_value", "quantile_values", "start_time_unix_nano" };
 
+    /// <summary>
+    /// Summaries are cumulative by definition: each bucket keeps its last point's quantile snapshot
+    /// as-is, while count/sum become the increase since the previous observation under the same
+    /// <see cref="ClassifyCumulativeStep"/> rule as the other cumulative types (null when unknowable).
+    /// </summary>
     private async Task<Dictionary<string, StreamAgg>> LoadSummaryAsync(DbConnection conn, IList<long> metricIds,
         Bucketing b, Dictionary<string, string>? labelFilters, int timeoutSeconds, CancellationToken ct)
     {
@@ -1260,18 +1427,55 @@ public abstract class MetricReadRepositoryBase : DapperReadRepository, IMetricRe
             Merge(new { start = b.StartNano, end = b.EndNano, bucketNanos = b.BucketNanos, pointsMinus1 = b.Points - 1 }, lp),
             commandTimeout: timeoutSeconds, cancellationToken: ct));
 
+        var baselineSql = BuildLastPerStreamSql("summary_data_points", idList, " AND dp.time_unix_nano < @start", labelClause, SummaryCols);
+        var baselineByStream = (await conn.QueryAsync<MetricPointRow>(new CommandDefinition(baselineSql,
+                Merge(new { start = b.StartNano }, lp), commandTimeout: timeoutSeconds, cancellationToken: ct)))
+            .ToDictionary(r => $"{r.MetricId}\u0001{r.AttributesJson}");
+
         var streams = new Dictionary<string, StreamAgg>();
-        foreach (var r in rows)
+        foreach (var group in rows.GroupBy(r => $"{r.MetricId}\u0001{r.AttributesJson}"))
         {
-            var stream = GetOrAddStream(streams, r.MetricId, r.AttributesJson);
-            var quantiles = DeserializeArray<QuantileValueModel>(r.QuantileValues);
-            stream.Buckets[r.Bucket] = new BucketAgg
+            long? prevCount = null, prevStart = null, prevTime = null;
+            double? prevSum = null;
+            if (baselineByStream.TryGetValue(group.Key, out var baseline))
             {
-                Count = r.Count,
-                Sum = r.SumValue,
-                Quantiles = quantiles?.Select(q => q.Quantile).ToList(),
-                QuantileValues = quantiles?.Select(q => q.Value).ToList()
-            };
+                prevCount = baseline.Count;
+                prevSum = baseline.SumValue;
+                prevStart = baseline.StartTimeUnixNano;
+                prevTime = baseline.TimeUnixNano;
+            }
+
+            foreach (var r in group.OrderBy(r => r.Bucket))
+            {
+                var (step, seconds) = ClassifyCumulativeStep(r, prevTime, prevStart, r.Count < prevCount, b.StartNano);
+                long? count = step switch
+                {
+                    CumulativeStep.Diff => r.Count - prevCount,
+                    CumulativeStep.Whole => r.Count,
+                    _ => null
+                };
+                double? sum = step switch
+                {
+                    CumulativeStep.Diff => SumIncrease(r.SumValue, prevSum),
+                    CumulativeStep.Whole => r.SumValue,
+                    _ => null
+                };
+
+                var quantiles = DeserializeArray<QuantileValueModel>(r.QuantileValues);
+                GetOrAddStream(streams, r.MetricId, r.AttributesJson).Buckets[r.Bucket] = new BucketAgg
+                {
+                    Count = count,
+                    Sum = sum,
+                    Rate = count is { } c ? PerSecond(c, seconds) : null,
+                    Quantiles = quantiles?.Select(q => q.Quantile).ToList(),
+                    QuantileValues = quantiles?.Select(q => q.Value).ToList()
+                };
+
+                prevCount = r.Count;
+                prevSum = r.SumValue;
+                prevStart = r.StartTimeUnixNano;
+                prevTime = r.TimeUnixNano;
+            }
         }
         return streams;
     }
@@ -1394,15 +1598,18 @@ public abstract class MetricReadRepositoryBase : DapperReadRepository, IMetricRe
 
             case MetricType.SUM:
                 point.Value = contributing.Sum(c => c.Value ?? 0);
+                point.Rate = SumOrNull(contributing.Select(c => c.Rate));
                 break;
 
             case MetricType.HISTOGRAM:
                 point.Count = contributing.Sum(c => c.Count ?? 0);
                 point.Sum = contributing.Sum(c => c.Sum ?? 0);
+                point.Rate = SumOrNull(contributing.Select(c => c.Rate));
                 var hMins = contributing.Where(c => c.Min.HasValue).Select(c => c.Min!.Value).ToList();
                 if (hMins.Count > 0) point.Min = hMins.Min();
                 var hMaxs = contributing.Where(c => c.Max.HasValue).Select(c => c.Max!.Value).ToList();
                 if (hMaxs.Count > 0) point.Max = hMaxs.Max();
+                point.MinMaxApproximate = contributing.Any(c => c.MinMaxApproximate);
                 var len = contributing.FirstOrDefault(c => c.Counts != null)?.Counts?.Length;
                 if (len is { } l)
                 {
@@ -1418,17 +1625,22 @@ public abstract class MetricReadRepositoryBase : DapperReadRepository, IMetricRe
             case MetricType.EXPONENTIAL_HISTOGRAM:
                 point.Count = contributing.Sum(c => c.Count ?? 0);
                 point.Sum = contributing.Sum(c => c.Sum ?? 0);
+                point.Rate = SumOrNull(contributing.Select(c => c.Rate));
                 var eMins = contributing.Where(c => c.Min.HasValue).Select(c => c.Min!.Value).ToList();
                 if (eMins.Count > 0) point.Min = eMins.Min();
                 var eMaxs = contributing.Where(c => c.Max.HasValue).Select(c => c.Max!.Value).ToList();
                 if (eMaxs.Count > 0) point.Max = eMaxs.Max();
+                point.MinMaxApproximate = contributing.Any(c => c.MinMaxApproximate);
                 // BucketCounts/BucketBounds are filled in by FinalizeExpHistogramBounds once every
                 // bucket's sparse map is known (needs the series-wide index range).
                 break;
 
             case MetricType.SUMMARY:
-                point.Count = contributing.Sum(c => c.Count ?? 0);
-                point.Sum = contributing.Sum(c => c.Sum ?? 0);
+                // Count/Sum are null for a stream whose increase is unknowable (see LoadSummaryAsync) —
+                // left null rather than 0 when no stream knows it, so no false dip is charted.
+                if (contributing.Any(c => c.Count.HasValue)) point.Count = contributing.Sum(c => c.Count ?? 0);
+                if (contributing.Any(c => c.Sum.HasValue)) point.Sum = contributing.Sum(c => c.Sum ?? 0);
+                point.Rate = SumOrNull(contributing.Select(c => c.Rate));
                 point.IsApproximate = contributing.Count > 1;
                 var withQuantiles = contributing.Where(c => c.Quantiles is { Count: > 0 }).ToList();
                 if (withQuantiles.Count > 0)
@@ -1521,10 +1733,19 @@ public abstract class MetricReadRepositoryBase : DapperReadRepository, IMetricRe
         return (points, totalExcludedStreams);
     }
 
+    /// <summary>Σ of the known values, or null when none is known (a rate nobody could measure isn't 0/s).</summary>
+    private static double? SumOrNull(IEnumerable<double?> values)
+    {
+        double? total = null;
+        foreach (var v in values)
+            if (v.HasValue) total = (total ?? 0) + v.Value;
+        return total;
+    }
+
     private static MetricBucketPoint MergePointsOfType(MetricType type, List<MetricBucketPoint> contributing, DateTime ts)
     {
         var point = new MetricBucketPoint { Timestamp = ts };
-        var withValue = contributing.Where(p => p.Value.HasValue || p.Count.HasValue).ToList();
+        var withValue = contributing.Where(p => p.Value.HasValue || p.Count.HasValue || p.Quantiles != null).ToList();
         if (withValue.Count == 0) return point;
 
         switch (type)
@@ -1539,11 +1760,18 @@ public abstract class MetricReadRepositoryBase : DapperReadRepository, IMetricRe
                 break;
             case MetricType.SUM:
                 point.Value = contributing.Sum(p => p.Value ?? 0);
+                point.Rate = SumOrNull(contributing.Select(p => p.Rate));
                 break;
             case MetricType.HISTOGRAM:
             case MetricType.EXPONENTIAL_HISTOGRAM:
                 point.Count = contributing.Sum(p => p.Count ?? 0);
                 point.Sum = contributing.Sum(p => p.Sum ?? 0);
+                point.Rate = SumOrNull(contributing.Select(p => p.Rate));
+                var hoMins = contributing.Where(p => p.Min.HasValue).Select(p => p.Min!.Value).ToList();
+                if (hoMins.Count > 0) point.Min = hoMins.Min();
+                var hoMaxs = contributing.Where(p => p.Max.HasValue).Select(p => p.Max!.Value).ToList();
+                if (hoMaxs.Count > 0) point.Max = hoMaxs.Max();
+                point.MinMaxApproximate = contributing.Any(p => p.MinMaxApproximate);
                 var len = contributing.FirstOrDefault(p => p.BucketCounts != null)?.BucketCounts?.Count;
                 if (len is { } l)
                 {
@@ -1556,8 +1784,9 @@ public abstract class MetricReadRepositoryBase : DapperReadRepository, IMetricRe
                 }
                 break;
             case MetricType.SUMMARY:
-                point.Count = contributing.Sum(p => p.Count ?? 0);
-                point.Sum = contributing.Sum(p => p.Sum ?? 0);
+                if (contributing.Any(p => p.Count.HasValue)) point.Count = contributing.Sum(p => p.Count ?? 0);
+                if (contributing.Any(p => p.Sum.HasValue)) point.Sum = contributing.Sum(p => p.Sum ?? 0);
+                point.Rate = SumOrNull(contributing.Select(p => p.Rate));
                 point.IsApproximate = true;
                 var withQuantiles = contributing.Where(p => p.Quantiles is { Count: > 0 }).ToList();
                 if (withQuantiles.Count > 0)
@@ -2355,6 +2584,8 @@ public abstract class MetricReadRepositoryBase : DapperReadRepository, IMetricRe
         public double? MinValue { get; set; }
         public double? MaxValue { get; set; }
         public double? SumOfValue { get; set; }
+        /// <summary>Delta loaders: Σ(time − start) over the bucket's points that carry a usable start time, in nanos.</summary>
+        public double? CoveredNanos { get; set; }
         public long? Count { get; set; }
         public double? SumValue { get; set; }
         public string? BucketCounts { get; set; }
@@ -2388,7 +2619,11 @@ public abstract class MetricReadRepositoryBase : DapperReadRepository, IMetricRe
         public double? Max { get; set; }
         public long? Count { get; set; }
         public double? Sum { get; set; }
-        /// <summary>Histogram (explicit bounds) merged/deltaed bucket counts, dense, aligned to the stream's <see cref="StreamAgg.Bounds"/>.</summary>
+        /// <summary>See <see cref="MetricBucketPoint.Rate"/>.</summary>
+        public double? Rate { get; set; }
+        /// <summary>See <see cref="MetricBucketPoint.MinMaxApproximate"/>.</summary>
+        public bool MinMaxApproximate { get; set; }
+        ///<summary>Histogram (explicit bounds) merged/deltaed bucket counts, dense, aligned to the stream's <see cref="StreamAgg.Bounds"/>.</summary>
         public long[]? Counts { get; set; }
         /// <summary>Exponential histogram merged/deltaed bucket counts, sparse, keyed by absolute exponent index at the query's global target scale.</summary>
         public Dictionary<long, long>? SparseCounts { get; set; }

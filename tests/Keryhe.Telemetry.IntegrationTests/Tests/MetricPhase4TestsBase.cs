@@ -73,12 +73,151 @@ public abstract class MetricPhase4TestsBase : IAsyncLifetime
 
         Assert.NotNull(result);
         var series = Assert.Single(result!.Series);
-        // First point (1000, no baseline) contributes delta 0; the reset (50, lower than 1000)
-        // is treated as a fresh counter, contributing exactly 50 — never a huge negative delta
-        // and never (1000 + 50) as if it were a plain diff.
+        // The first counter started inside the window, so all 1000 of its value accrued in-window;
+        // the reset (50, lower than 1000, new start time) is a fresh counter contributing exactly
+        // 50 — never a huge negative delta, and never 50 − 1000 as if it were a plain diff.
         var total = series.Points.Sum(p => p.Value ?? 0);
-        Assert.Equal(50, total);
+        Assert.Equal(1050, total);
         Assert.All(series.Points, p => Assert.True((p.Value ?? 0) >= 0, "cumulative delta must never go negative"));
+    }
+
+    [Fact]
+    public async Task SumCumulative_CounterStartedBeforeWindow_FirstPointHasNoValue()
+    {
+        // Own service name: ResourceScopeCache outlives the per-test truncate of `metrics`, so
+        // reusing the reset test's metric identity would hand this flush a stale metric id.
+        var (first, second) = SeededDataBuilder.CumulativeCounterReset(_fixture.TenantId, WindowStart, serviceName: "requests-svc-late");
+        using (var writeScope = Scope())
+        {
+            var writer = writeScope.ServiceProvider.GetRequiredService<ITelemetryBulkWriter>();
+            await writer.FlushMetricsAsync([first]);
+            await writer.FlushMetricsAsync([second]);
+        }
+
+        using var readScope = Scope();
+        var repo = readScope.ServiceProvider.GetRequiredService<IMetricReadRepository>();
+
+        // The window opens after the first counter started (and there is no earlier point to use
+        // as a baseline), so its in-window increase is unknowable: that bucket is left empty — not
+        // charted as 0 — and only the post-reset counter's 50 is counted.
+        var result = await repo.GetMetricSeriesAsync(new MetricSeriesQuery
+        {
+            MetricName = "phase0.requests.total",
+            Start = WindowStart.AddSeconds(5),
+            End = WindowStart.AddSeconds(40),
+            Points = 35
+        });
+
+        Assert.NotNull(result);
+        var series = Assert.Single(result!.Series);
+        var valued = series.Points.Where(p => p.Value.HasValue).ToList();
+        var only = Assert.Single(valued);
+        Assert.Equal(50, only.Value);
+    }
+
+    [Fact]
+    public async Task SumCumulative_RateUsesElapsedTimeNotBucketWidth()
+    {
+        // +15/15s → 1/s throughout; buckets are 0.1s wide, 150× narrower than the export interval.
+        var metric = SeededDataBuilder.CumulativeCounterSeries(_fixture.TenantId, WindowStart, [15, 30, 45], intervalSeconds: 15);
+        using (var writeScope = Scope())
+            await writeScope.ServiceProvider.GetRequiredService<ITelemetryBulkWriter>().FlushMetricsAsync([metric]);
+
+        using var readScope = Scope();
+        var repo = readScope.ServiceProvider.GetRequiredService<IMetricReadRepository>();
+
+        var result = await repo.GetMetricSeriesAsync(new MetricSeriesQuery
+        {
+            MetricName = "correctness.requests.cumulative",
+            Start = WindowStart,
+            End = WindowStart.AddSeconds(60),
+            Points = 600
+        });
+
+        Assert.NotNull(result);
+        var series = Assert.Single(result!.Series);
+        var valued = series.Points.Where(p => p.Value.HasValue).ToList();
+        Assert.Equal(3, valued.Count);
+        Assert.Equal(45, valued.Sum(p => p.Value!.Value));
+        Assert.All(valued, p => Assert.Equal(1.0, p.Rate!.Value, precision: 6));
+    }
+
+    /// <summary>
+    /// Still-not-changed correctness plan, item 3: a cumulative histogram's reported min/max cover
+    /// the stream's whole lifetime, not the bucket, so a per-bucket value can only be trusted when
+    /// it's provably attributable to that bucket. Exercises all three cases via
+    /// <see cref="SeededDataBuilder.CumulativeHistogramMinMaxSeries"/>: the lifetime max growing
+    /// (exact), staying flat (a tightened bound estimate, flagged approximate), and a reset (exact).
+    /// </summary>
+    [Fact]
+    public async Task HistogramCumulative_MinMaxApproximation_ExactWhenAttributable_ApproximateOtherwise()
+    {
+        var metric = SeededDataBuilder.CumulativeHistogramMinMaxSeries(_fixture.TenantId, WindowStart);
+        using (var writeScope = Scope())
+            await writeScope.ServiceProvider.GetRequiredService<ITelemetryBulkWriter>().FlushMetricsAsync([metric]);
+
+        using var readScope = Scope();
+        var repo = readScope.ServiceProvider.GetRequiredService<IMetricReadRepository>();
+
+        var result = await repo.GetMetricSeriesAsync(new MetricSeriesQuery
+        {
+            MetricName = "correctness.minmax.cumulative",
+            Start = WindowStart,
+            End = WindowStart.AddSeconds(40),
+            Points = 40
+        });
+
+        Assert.NotNull(result);
+        var series = Assert.Single(result!.Series);
+        var points = series.Points.Where(p => p.Count is > 0).OrderBy(p => p.Timestamp).ToList();
+        Assert.Equal(3, points.Count);
+
+        // +10s: lifetime min/max both moved (50 → 10, 250 → 350) — attributable to this bucket,
+        // exact at the new values.
+        Assert.Equal(10, points[0].Min);
+        Assert.Equal(350, points[0].Max);
+        Assert.False(points[0].MinMaxApproximate);
+
+        // +20s: lifetime min/max unchanged — bound estimates, tightened to [100,200)'s own edges
+        // (100, 200) since that's the only bucket this interval's new observations landed in.
+        Assert.Equal(100, points[1].Min);
+        Assert.Equal(200, points[1].Max);
+        Assert.True(points[1].MinMaxApproximate);
+
+        // +30s: reset (new start time) — min/max cover exactly this bucket's own lifetime, exact.
+        Assert.Equal(99, points[2].Max);
+        Assert.Equal(2, points[2].Min);
+        Assert.False(points[2].MinMaxApproximate);
+    }
+
+    [Fact]
+    public async Task HistogramCumulative_DifferencesSumAndCount()
+    {
+        // Cumulative (count, sum): 2 obs totalling 200ms, then 2 more totalling 100ms.
+        var metric = SeededDataBuilder.CumulativeHistogramSeries(_fixture.TenantId, WindowStart, [(2, 200), (4, 300)], intervalSeconds: 10);
+        using (var writeScope = Scope())
+            await writeScope.ServiceProvider.GetRequiredService<ITelemetryBulkWriter>().FlushMetricsAsync([metric]);
+
+        using var readScope = Scope();
+        var repo = readScope.ServiceProvider.GetRequiredService<IMetricReadRepository>();
+
+        var result = await repo.GetMetricSeriesAsync(new MetricSeriesQuery
+        {
+            MetricName = "correctness.latency.cumulative",
+            Start = WindowStart,
+            End = WindowStart.AddSeconds(30),
+            Points = 30
+        });
+
+        Assert.NotNull(result);
+        var series = Assert.Single(result!.Series);
+        var valued = series.Points.Where(p => p.Count is > 0).ToList();
+        Assert.Equal(2, valued.Count);
+        // Summed across buckets, count and sum must equal the final cumulative totals — the
+        // running sum re-added per bucket would give 500 (a 125ms mean instead of 75ms).
+        Assert.Equal(4, valued.Sum(p => p.Count!.Value));
+        Assert.Equal(300, valued.Sum(p => p.Sum!.Value), precision: 6);
+        Assert.All(valued, p => Assert.Equal(0.2, p.Rate!.Value, precision: 6)); // 2 obs / 10s
     }
 
     [Fact]

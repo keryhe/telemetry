@@ -3,7 +3,7 @@
 }
 
 <app-page-header>
-  @if (traceIdFilter()) {
+  @if (traceFilterActive()) {
     <div class="trace-filter-banner">
       <mat-icon>filter_list</mat-icon>
       Filtered to trace: <span class="mono">{{ traceIdFilter() }}</span>
@@ -167,7 +167,7 @@
     </aside>
 
     <div class="logs-main">
-  @if (chartOptions().series) {
+  @if (chartOptions().series && !traceFilterActive()) {
     <mat-card class="chart-card">
       <mat-card-content>
         <apx-chart
@@ -192,8 +192,12 @@
           {{ newSinceCount() | number }} new log{{ newSinceCount() === 1 ? '' : 's' }} since this view loaded — click to refresh
         </div>
       }
-      @if (displayRows().length === 0 && !loading() && !pageLoading()) {
-        <app-empty-state icon="receipt_long" message="No logs found" hint="Adjust the time range or filters" />
+      @if (displayRows().length === 0 && !loading() && !rowsLoading()) {
+        @if (traceFilterActive()) {
+          <app-empty-state icon="receipt_long" message="No logs found for this trace" hint="Clear the trace ID from the search box to search by time range" />
+        } @else {
+          <app-empty-state icon="receipt_long" message="No logs found" hint="Adjust the time range or filters" />
+        }
       } @else {
         @if (totalIsLowerBound()) {
           <div class="capped-notice">

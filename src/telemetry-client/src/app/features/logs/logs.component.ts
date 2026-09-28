@@ -1,6 +1,6 @@
 import { Component, computed, effect, inject, signal, untracked, OnDestroy } from '@angular/core';
 import { DatePipe, DecimalPipe, SlicePipe, PercentPipe } from '@angular/common';
-import { ActivatedRoute, RouterLink } from '@angular/router';
+import { RouterLink } from '@angular/router';
 import { Subscription } from 'rxjs';
 import { MatCardModule } from '@angular/material/card';
 import { MatFormFieldModule } from '@angular/material/form-field';
@@ -96,7 +96,6 @@ export class LogsComponent implements OnDestroy {
   private readonly resourcesApi = inject(ResourcesApiService);
   private readonly timeRange = inject(TimeRangeService);
   private readonly theme = inject(ThemeService);
-  private readonly route = inject(ActivatedRoute);
   private readonly dialog = inject(MatDialog);
   private readonly urlState = inject(UrlStateService);
   private readonly capabilitiesService = inject(CapabilitiesService);
@@ -119,7 +118,10 @@ export class LogsComponent implements OnDestroy {
   private facetsSub?: Subscription;
   private newSincePollHandle?: ReturnType<typeof setInterval>;
 
-  /** Trace-id-filter mode (query-param jump from a trace link) bypasses summary/page/facets entirely. */
+  /**
+   * Trace-id mode — a search-box query that is exactly one trace id, whether typed or arrived via
+   * a trace's "View Logs" link — bypasses summary/page/facets entirely and ignores the time range.
+   */
   protected traceLogs = signal<LogRecord[]>([]);
   protected traceLogsLoading = signal(false);
 
@@ -129,12 +131,12 @@ export class LogsComponent implements OnDestroy {
    * Applied query — what parsing, filtering, refetching, the URL and saved state read. Changes
    * only on submit (or a facet toggle), so typing never re-runs anything server-side.
    */
-  protected searchText = signal<string>(this.urlState.get('q') ?? this.saved.searchText);
+  protected searchText = signal<string>(
+    this.urlState.get('traceId') ?? this.urlState.get('q') ?? this.saved.searchText);
   /** Draft text in the search box; applied to `searchText` by `submitSearch()`. */
   protected searchInput = signal<string>(this.searchText());
   protected selectedService = signal<string>(this.urlState.get('service') ?? this.saved.selectedService);
   protected selectedSeverity = signal<number>(this.readNum('severity') ?? this.saved.selectedSeverity);
-  protected traceIdFilter = signal('');
   protected expandedRow = signal<LogRecord | null>(null);
   /** Transient "Link copied!" affordance for the copy-permalink button. */
   protected linkCopied = signal(false);
@@ -182,8 +184,11 @@ export class LogsComponent implements OnDestroy {
   /** The whole raw search text goes to the server now (decision 10: parsed server-side). */
   private serverQuery = computed(() => this.searchText().trim());
 
-  /** True while the query-param trace-id jump is active (a distinct navigation, not the search box's own trace-id detection). */
-  protected traceFilterActive = computed(() => this.traceIdFilter().length > 0);
+  /** The trace id the search box resolves to, or '' — drives trace-id mode. */
+  protected traceIdFilter = computed(() => this.parsedQuery().traceId ?? '');
+
+  /** True while the search box holds a trace id: all of that trace's logs, whatever the time range. */
+  protected traceFilterActive = computed(() => this.isTraceIdSearch());
 
   /** Rows for the current page: the trace-filter's full unbounded set, or the current server page. */
   protected displayRows = computed<LogRecord[]>(() =>
@@ -191,17 +196,18 @@ export class LogsComponent implements OnDestroy {
   );
 
   protected loading = computed(() => this.traceFilterActive() ? this.traceLogsLoading() : this.summaryLoading());
+  protected rowsLoading = computed(() => this.traceFilterActive() ? this.traceLogsLoading() : this.pageLoading());
 
   protected effectiveTotal = computed(() => this.traceFilterActive() ? this.traceLogs().length : (this.summary()?.total ?? 0));
   protected totalIsLowerBound = computed(() => !this.traceFilterActive() && (this.summary()?.totalIsLowerBound ?? false));
 
   protected errorCount = computed(() => {
-    if (this.traceFilterActive()) return 0;
+    if (this.traceFilterActive()) return this.traceLogs().filter((l) => (l.severityNumber ?? 0) >= 17).length;
     const s = this.summary();
     return s ? s.buckets.reduce((a, b) => a + b.error + b.fatal, 0) : 0;
   });
   protected warnCount = computed(() => {
-    if (this.traceFilterActive()) return 0;
+    if (this.traceFilterActive()) return this.traceLogs().filter((l) => (l.severityNumber ?? 0) >= 13 && (l.severityNumber ?? 0) < 17).length;
     const s = this.summary();
     return s ? s.buckets.reduce((a, b) => a + b.warn, 0) : 0;
   });
@@ -287,8 +293,8 @@ export class LogsComponent implements OnDestroy {
     // Slide relative preset windows to "now" on (re)entry so navigating back refreshes.
     this.timeRange.refreshRelativeWindow();
 
-    const traceId = this.route.snapshot.queryParamMap.get('traceId');
-    if (traceId) this.traceIdFilter.set(traceId);
+    // Legacy `?traceId=` links land in the search box as `q` (see the searchText initializer).
+    if (this.urlState.get('traceId')) this.urlState.patch({ traceId: null });
 
     // Tenant-wide, signal-agnostic — fetched once, not on every reload.
     this.resourcesApi.getServices().subscribe({
@@ -349,7 +355,8 @@ export class LogsComponent implements OnDestroy {
 
     effect(() => {
       savePageState(STATE_KEY, {
-        searchText: this.searchText(),
+        // A trace-id search is a one-off jump, not a working filter to restore on the next visit.
+        searchText: this.isTraceIdSearch() ? '' : this.searchText(),
         selectedService: this.selectedService(),
         selectedSeverity: this.selectedSeverity(),
         pageSize: this.pageSize(),
@@ -416,7 +423,9 @@ export class LogsComponent implements OnDestroy {
 
   private loadByTraceFilter(traceId: string): void {
     this.traceLogsLoading.set(true);
-    this.api.getLogsByTrace(traceId).subscribe({
+    this.traceLogs.set([]);
+    this.pageSub?.unsubscribe();
+    this.pageSub = this.api.getLogsByTrace(traceId).subscribe({
       next: (logs) => {
         this.traceLogs.set(logs);
         this.traceLogsLoading.set(false);
@@ -533,8 +542,9 @@ export class LogsComponent implements OnDestroy {
     this.dialog.open(LogSearchHelpDialogComponent, { maxWidth: '720px', width: '90vw' });
   }
 
+  /** Drops the trace id from the search box, returning to the time-range-bound list. */
   protected clearTrace(): void {
-    this.traceIdFilter.set('');
+    this.onSearchChange('');
   }
 
   /**
