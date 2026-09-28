@@ -78,6 +78,7 @@ public sealed class MySqlFixture : ProviderFixture
             "TRUNCATE TABLE exponential_histogram_data_points",
             "TRUNCATE TABLE summary_data_points",
             "TRUNCATE TABLE metrics",
+            "TRUNCATE TABLE metric_last_seen",
             "TRUNCATE TABLE log_rollup_minute",
             "TRUNCATE TABLE log_rollup_hour",
             "TRUNCATE TABLE orphan_roots",

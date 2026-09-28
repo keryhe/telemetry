@@ -33,6 +33,23 @@ public static class TelemetryIngestionHelpers
     ];
 
     /// <summary>
+    /// Marks <paramref name="tracker"/> with the newest <c>time_unix_nano</c> per metric id in
+    /// <paramref name="rows"/> (list-pages-server-side plan, Phase 5, decision 27). Called once per
+    /// flush, after the data-point insert has committed, by each relational provider's
+    /// <c>FlushMetricsAsync</c> — every already-resolved <c>(metricId, dataPoint)</c> row across
+    /// all five data-point tables' batches for this flush, concatenated. Pre-aggregates to one
+    /// <see cref="MetricTouchTracker.MarkTouched"/> call per distinct metric id in the flush rather
+    /// than one per row, since a single metric can carry hundreds of data points in one batch.
+    /// Not called by <c>ClickHouseBulkWriter</c> — its <c>metric_last_seen</c> is fed by
+    /// materialized views instead (see <see cref="IMetricTouchStore"/>'s doc comment).
+    /// </summary>
+    public static void MarkMetricTouches(MetricTouchTracker tracker, IEnumerable<(long MetricId, long TimeUnixNano)> rows)
+    {
+        foreach (var group in rows.GroupBy(r => r.MetricId))
+            tracker.MarkTouched(group.Key, group.Max(r => r.TimeUnixNano));
+    }
+
+    /// <summary>
     /// Fills in the defaults a resource needs before it can be hashed or stored.
     ///
     /// The null branch is a last-resort guard, not a supported path. It runs inside the bulk writer,

@@ -18,16 +18,44 @@ public class MetricsController : ControllerBase
         _capabilities = capabilities;
     }
 
-    // GET /api/metrics?start=&end=&limit=
-    [HttpGet]
-    public async Task<ActionResult<List<MetricInfo>>> GetAllMetrics(
-        [FromQuery] DateTime? start,
-        [FromQuery] DateTime? end,
-        [FromQuery] int limit = 100,
+    /// <summary>
+    /// GET /api/metrics/catalog?start=&end=&q=&service=&type=&groupBy=name|instance&size=&cursor=&nav=
+    /// Phase 5 (list-pages-server-side plan): replaces the former unbounded-with-a-cap
+    /// <c>GET /api/metrics</c> (removed — its only caller, the metrics list page, now calls this).
+    /// <c>start</c>/<c>end</c> are required — every "seen in range" check runs against them
+    /// (decision 27).
+    /// </summary>
+    [HttpGet("catalog")]
+    public async Task<ActionResult<MetricCatalogPage>> GetMetricCatalog(
+        [FromQuery] DateTime start,
+        [FromQuery] DateTime end,
+        [FromQuery] string? q,
+        [FromQuery] string? service,
+        [FromQuery] MetricType? type,
+        [FromQuery] string groupBy = "instance",
+        [FromQuery] int size = 50,
+        [FromQuery] string? cursor = null,
+        [FromQuery] string nav = "first",
         CancellationToken ct = default)
     {
-        var metrics = await _metrics.GetAllMetricsAsync(limit, start, end, ct);
-        return Ok(metrics);
+        if (start >= end)
+            return BadRequest("start must be before end.");
+
+        var query = new MetricCatalogQuery
+        {
+            Start = start,
+            End = end,
+            Q = q,
+            Service = service,
+            Type = type,
+            GroupBy = groupBy,
+            Size = Math.Clamp(size, 1, 500),
+            Cursor = cursor,
+            Nav = nav
+        };
+
+        var page = await _metrics.GetMetricCatalogPageAsync(query, ct);
+        return Ok(page);
     }
 
     // GET /api/metrics/summary?start=&end=

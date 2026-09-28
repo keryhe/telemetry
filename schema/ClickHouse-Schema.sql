@@ -264,6 +264,51 @@ ENGINE = MergeTree
 PARTITION BY toYYYYMMDD(fromUnixTimestamp64Nano(time_unix_nano))
 ORDER BY (metric_id, time_unix_nano);
 
+-- metric_last_seen (schema 2.13.2, list-pages-server-side plan Phase 5, decision 27): the
+-- metrics catalog's "has data in range" check reads this instead of scanning the five
+-- data-point tables above. An AggregatingMergeTree holding a partial maxState(time_unix_nano)
+-- per metric_id, fed by one materialized view per data-point table below -- not a mutation per
+-- flush interval like the relational providers' MetricTouchWorker, since `ALTER TABLE ...
+-- UPDATE` on every flush would be a continuous stream of heavy mutations on ClickHouse. Reads
+-- merge partial states with maxMerge(last_seen_state). No worker, no mutations.
+CREATE TABLE IF NOT EXISTS metric_last_seen
+(
+    metric_id       Int64,
+    last_seen_state AggregateFunction(max, Int64)
+)
+ENGINE = AggregatingMergeTree
+ORDER BY metric_id;
+
+CREATE MATERIALIZED VIEW IF NOT EXISTS mv_metric_last_seen_gauge
+TO metric_last_seen AS
+SELECT metric_id, maxState(time_unix_nano) AS last_seen_state
+FROM gauge_data_points
+GROUP BY metric_id;
+
+CREATE MATERIALIZED VIEW IF NOT EXISTS mv_metric_last_seen_sum
+TO metric_last_seen AS
+SELECT metric_id, maxState(time_unix_nano) AS last_seen_state
+FROM sum_data_points
+GROUP BY metric_id;
+
+CREATE MATERIALIZED VIEW IF NOT EXISTS mv_metric_last_seen_histogram
+TO metric_last_seen AS
+SELECT metric_id, maxState(time_unix_nano) AS last_seen_state
+FROM histogram_data_points
+GROUP BY metric_id;
+
+CREATE MATERIALIZED VIEW IF NOT EXISTS mv_metric_last_seen_exponential_histogram
+TO metric_last_seen AS
+SELECT metric_id, maxState(time_unix_nano) AS last_seen_state
+FROM exponential_histogram_data_points
+GROUP BY metric_id;
+
+CREATE MATERIALIZED VIEW IF NOT EXISTS mv_metric_last_seen_summary
+TO metric_last_seen AS
+SELECT metric_id, maxState(time_unix_nano) AS last_seen_state
+FROM summary_data_points
+GROUP BY metric_id;
+
 -- =============================================================================
 -- LOGS
 -- =============================================================================
@@ -658,4 +703,4 @@ VALUES (1, 90, 90, 180);
 -- spans' ORDER BY (trace_id, span_id) with a daily partition already gave it what the relational
 -- providers got from the four indexes they dropped (see PostgreSQL-Schema.sql), and it has no
 -- GIN-style JSONB index to carry the equivalent write cost of.
-INSERT INTO schema_version (version) VALUES ('2.13.1');
+INSERT INTO schema_version (version) VALUES ('2.13.2');

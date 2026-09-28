@@ -22,6 +22,9 @@ public static class PostgreSqlServiceCollectionExtensions
         // provider-agnostic and registered once, in AddKeryheTelemetryCollector.
         services.AddScoped<IApiKeyLookup, TenantResolver>();
         services.AddScoped<IApiKeyTouchStore, PostgreSqlApiKeyTouchStore>();
+        // metric_last_seen maintenance (list-pages-server-side plan, Phase 5). MetricTouchWorker
+        // is provider-agnostic and registered once, in AddKeryheTelemetryCollector.
+        services.AddScoped<IMetricTouchStore, PostgreSqlMetricTouchStore>();
         return services;
     }
 

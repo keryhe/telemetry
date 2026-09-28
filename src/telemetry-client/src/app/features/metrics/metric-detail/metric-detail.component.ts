@@ -36,7 +36,8 @@ import { StatCardComponent } from '../../../shared/components/stat-card/stat-car
 import { EmptyStateComponent } from '../../../shared/components/empty-state/empty-state.component';
 import { PageHeaderComponent } from '../../../shared/components/page-header/page-header.component';
 import {
-  chartGrid, formatUnitValue, histogramQuantile, timeRangeZoom,
+  buildHistogramBarFromBuckets, buildHistogramHeatmapFromBuckets, buildRadialGauge, buildShareDonut,
+  chartGrid, foldPointsAcrossGroups, formatUnitValue, histogramQuantile, timeRangeZoom,
 } from '../../../shared/utils/chart.utils';
 import { loadPageState, savePageState } from '../../../shared/utils/page-state';
 import { UrlStateService } from '../../../shared/utils/url-state';
@@ -44,10 +45,27 @@ import { downloadCsv, fileStamp } from '../../../shared/utils/export.utils';
 
 const STATE_KEY = 'state.metricDetail';
 
-/** How the scalar (gauge/sum) chart folds multiple pods of one service into one line. Distribution
- *  types (histogram/exp-histogram/summary) are always grouped per-service by the server, so this
- *  control only appears for Gauge/Sum. */
-type GroupMode = 'labels' | 'service';
+/** How the chart folds multiple display series into fewer lines/bucket-sets.
+ *  - 'labels': no fold — one line per display series (Gauge/Sum only; distribution types are
+ *    always grouped per-service by the server, so this option never applies to them).
+ *  - 'service': fold pods of one service into one line (Gauge/Sum) — distribution types are
+ *    already at this granularity server-side, so it's a no-op display default for them.
+ *  - 'all': collapse every display series (and "other") into a single aggregate line/bucket-set —
+ *    phase 6's cross-series Aggregate fold, extended to every metric type. */
+type GroupMode = 'labels' | 'service' | 'all';
+
+/** Chart-style tiles (phase 6): alternate renderings of the same `DisplayMetricSeries[]`/
+ *  `OtherMetricSeries` the default time-series view renders. Distribution types (histogram/
+ *  exp-histogram/summary) only ever get 'timeseries' — a stacked/share/dial view of percentile
+ *  lines has no natural composition-of-a-whole meaning. */
+type ChartStyle = 'timeseries' | 'stacked' | 'share' | 'dial';
+
+const CHART_STYLE_META: Record<ChartStyle, { icon: string; label: string }> = {
+  timeseries: { icon: 'show_chart', label: 'Line' },
+  stacked: { icon: 'stacked_line_chart', label: 'Stacked' },
+  share: { icon: 'donut_large', label: 'Share' },
+  dial: { icon: 'speed', label: 'Dial' },
+};
 
 /** ~1 point per 3px of chart width, capped at 1,000 (decision 21 / plan's "Chart-width driven
  *  resolution"). A sane floor keeps a very narrow chart from requesting an unusably coarse series. */
@@ -120,13 +138,14 @@ export class MetricDetailComponent implements OnInit, AfterViewInit, OnDestroy {
   protected searchText = signal<string>(this.urlState.get('q') ?? '');
   /** Draft text in the search box; applied to `searchText` by `submitSearch()`. */
   protected searchInput = signal<string>(this.searchText());
-  /** Scalar-metric grouping: 'labels' = one line per full label set (server default), 'service' =
-   *  client-side fold across pods of one service. Distribution types ignore this (server already
-   *  groups per-service only — see MetricSeriesModels.cs's IsDistributionType doc comment). */
+  /** Cross-series fold (see {@link GroupMode}). */
   protected groupMode = signal<GroupMode>((this.urlState.get('groupBy') as GroupMode) ?? 'labels');
   /** Sum only: raw per-bucket increase vs. a per-second rate (Value / bucket width). */
   protected showRaw = signal(false);
   protected activeTab = signal(0);
+  /** Chart-style tile selection (phase 6). Not a data refetch — purely a re-render. */
+  protected chartStyle = signal<ChartStyle>((this.urlState.get('chartStyle') as ChartStyle) ?? 'timeseries');
+  protected readonly chartStyleMeta = CHART_STYLE_META;
 
   /** Chart-width-driven point resolution (decision 21). Updated by a ResizeObserver but never
    *  itself triggers a refetch — only read (via `untracked`) the next time a real filter changes,
@@ -145,6 +164,37 @@ export class MetricDetailComponent implements OnInit, AfterViewInit, OnDestroy {
   protected isSum = computed(() => this.metricType() === MetricType.Sum);
   protected isDistribution = computed(() => this.isHistogram() || this.isExpHistogram() || this.isSummary());
 
+  /** A gauge whose unit gives the Dial a real 0–100 / 0–1 bound (`%` or the OTLP dimensionless
+   *  ratio `1`). Only these get a Dial; unbounded gauges (bytes, temperature, …) have no honest
+   *  reference for a radial fill. */
+  protected isBoundedGauge = computed(() => {
+    if (this.metricType() !== MetricType.Gauge) return false;
+    const unit = this.metricUnit();
+    return unit === '%' || unit === '1';
+  });
+
+  /** Chart-style tiles available for the current metric type (phase 6). Empty for distributions
+   *  (selector hidden — a Stacked/Share/Dial rendering of percentile lines has no natural
+   *  composition-of-a-whole meaning). Gauges only add a Dial when bounded; Sums get Stacked and
+   *  Share composition views. */
+  protected chartStyles = computed<ChartStyle[]>(() => {
+    if (this.isDistribution()) return [];
+    if (this.metricType() === MetricType.Gauge) return this.isBoundedGauge() ? ['timeseries', 'dial'] : ['timeseries'];
+    return ['timeseries', 'stacked', 'share'];
+  });
+
+  /** Aggregate-fold options for the current metric type/chart-style. Distribution types only ever
+   *  offer Per Service (their server-side default granularity) and All — there is no finer,
+   *  per-label view to offer since the server already merges those. 'all' is hidden while Stacked
+   *  is selected: collapsing every band into one line defeats the point of a stacked chart. */
+  protected groupModeOptions = computed<{ value: GroupMode; label: string }[]>(() => {
+    const opts: { value: GroupMode; label: string }[] = this.isDistribution()
+      ? [{ value: 'service', label: 'Per Service' }]
+      : [{ value: 'labels', label: 'Per Series' }, { value: 'service', label: 'Per Service' }];
+    if (this.chartStyle() !== 'stacked') opts.push({ value: 'all', label: 'All' });
+    return opts;
+  });
+
   /** Every real display series plus the folded "other" bucket, as one flat list for stats/export. */
   protected allGroups = computed<ChartGroup[]>(() => {
     const result = this.seriesResult();
@@ -154,6 +204,73 @@ export class MetricDetailComponent implements OnInit, AfterViewInit, OnDestroy {
       groups.push({ name: `other (${result.other.seriesCount})`, serviceName: '', points: result.other.points });
     }
     return groups;
+  });
+
+  /** {@link allGroups} after applying the current {@link GroupMode} fold. 'stacked' never folds to
+   *  'all' (see {@link groupModeOptions}), so that combination is treated as 'service'. */
+  protected effectiveGroups = computed<ChartGroup[]>(() => {
+    const groups = this.allGroups();
+    if (groups.length <= 1) return groups;
+    let mode = this.groupMode();
+    if (mode === 'all' && this.chartStyle() === 'stacked') mode = 'service';
+
+    if (mode === 'service') {
+      const result = this.seriesResult();
+      const raw = result?.series.map((s) => ({ name: s.seriesName, serviceName: s.serviceName, points: s.points })) ?? [];
+      const other = result?.other && result.other.seriesCount > 0
+        ? [{ name: `other (${result.other.seriesCount})`, serviceName: '', points: result.other.points }]
+        : [];
+      return [...this.foldByService(raw), ...other];
+    }
+    if (mode === 'all') {
+      return [{ name: 'All', serviceName: '', points: foldPointsAcrossGroups(groups, this.metricType()) }];
+    }
+    return groups;
+  });
+
+  /** Windowed throughput (Count / bucket width) for Histogram/Exp-Histogram/Summary — always
+   *  folded across every display series (mirroring the pre-Phase-4 UI, which showed one whole-
+   *  metric throughput trend regardless of the per-series/per-service selection above it). */
+  protected throughputChartOptions = computed<ApexOptions | null>(() => {
+    if (!this.isDistribution()) return null;
+    const result = this.seriesResult();
+    if (!result || !result.bucketWidthMs) return null;
+    const folded = foldPointsAcrossGroups(this.allGroups(), this.metricType());
+    const bucketSeconds = result.bucketWidthMs / 1000;
+    const data = folded
+      .filter((p) => p.count != null)
+      .map((p) => [new Date(p.timestamp).getTime(), p.count! / bucketSeconds] as [number, number]);
+    if (!data.length) return null;
+    const isDark = this.theme.isDark();
+    const { start: rangeStart, end: rangeEnd } = this.timeRange.range();
+    return {
+      chart: { type: 'area', height: 160, toolbar: { show: false }, background: 'transparent' },
+      theme: { mode: isDark ? 'dark' : 'light' },
+      series: [{ name: 'Throughput (/s)', data }],
+      xaxis: { type: 'datetime', min: rangeStart.getTime(), max: rangeEnd.getTime(), labels: { datetimeUTC: false } },
+      stroke: { curve: 'smooth', width: 2 },
+      fill: { opacity: 0.15 },
+      dataLabels: { enabled: false },
+      yaxis: { labels: { formatter: (v: number) => v.toFixed(1) } },
+      grid: chartGrid(isDark),
+      legend: { show: false },
+    };
+  });
+
+  /** Bucket-distribution bar (whole-range shape) for Histogram/Exp-Histogram, folded across every
+   *  display series — same "always whole-metric" rationale as {@link throughputChartOptions}. */
+  protected bucketBarOptions = computed<ApexOptions | null>(() => {
+    if (!this.isHistogram() && !this.isExpHistogram()) return null;
+    const folded = foldPointsAcrossGroups(this.allGroups(), this.metricType());
+    return buildHistogramBarFromBuckets(folded, this.theme.isDark(), this.metricUnit());
+  });
+
+  /** Bucket-distribution heatmap (bucket range × time) for Histogram/Exp-Histogram, folded across
+   *  every display series — same "always whole-metric" rationale as {@link throughputChartOptions}. */
+  protected heatmapOptions = computed<ApexOptions | null>(() => {
+    if (!this.isHistogram() && !this.isExpHistogram()) return null;
+    const folded = foldPointsAcrossGroups(this.allGroups(), this.metricType());
+    return buildHistogramHeatmapFromBuckets(folded, this.theme.isDark(), this.metricUnit());
   });
 
   protected timedOut = computed(() => this.seriesResult()?.timedOut ?? false);
@@ -407,6 +524,7 @@ export class MetricDetailComponent implements OnInit, AfterViewInit, OnDestroy {
       this.theme.isDark();
       this.groupMode();
       this.showRaw();
+      this.chartStyle();
       untracked(() => {
         if (this.seriesResult()) this.buildChart();
       });
@@ -437,6 +555,7 @@ export class MetricDetailComponent implements OnInit, AfterViewInit, OnDestroy {
       this.urlState.patch({
         q: this.searchText() || null,
         groupBy: this.groupMode() !== 'labels' ? this.groupMode() : null,
+        chartStyle: this.chartStyle() !== 'timeseries' ? this.chartStyle() : null,
       });
     });
 
@@ -449,6 +568,7 @@ export class MetricDetailComponent implements OnInit, AfterViewInit, OnDestroy {
         groupMode: this.groupMode(),
         showRaw: this.showRaw(),
         activeTab: this.activeTab(),
+        chartStyle: this.chartStyle(),
       });
     });
   }
@@ -459,14 +579,15 @@ export class MetricDetailComponent implements OnInit, AfterViewInit, OnDestroy {
     // Restore state only if it belongs to the metric we're now viewing.
     const saved = loadPageState(STATE_KEY, {
       metricName: '', selectedService: '', selectedLabels: {} as Record<string, string>,
-      groupMode: 'labels' as GroupMode, showRaw: false, activeTab: 0,
+      groupMode: 'labels' as GroupMode, showRaw: false, activeTab: 0, chartStyle: 'timeseries' as ChartStyle,
     });
     if (saved.metricName === this.metricName()) {
       this.selectedService.set(saved.selectedService);
       this.selectedLabels.set(saved.selectedLabels);
-      this.groupMode.set(saved.groupMode === 'service' ? 'service' : 'labels');
+      this.groupMode.set(saved.groupMode === 'service' || saved.groupMode === 'all' ? saved.groupMode : 'labels');
       this.showRaw.set(saved.showRaw);
       this.activeTab.set(saved.activeTab);
+      this.chartStyle.set(['stacked', 'share', 'dial'].includes(saved.chartStyle) ? saved.chartStyle : 'timeseries');
     }
   }
 
@@ -570,8 +691,17 @@ export class MetricDetailComponent implements OnInit, AfterViewInit, OnDestroy {
   private buildChart(): void {
     const result = this.seriesResult();
     if (!result) { this.chartOptions.set({}); return; }
+    // Guard against a chart style that no longer applies (e.g. restored from a saved/URL state for
+    // a different metric, or the metric's own type/unit resolved after the initial guess).
+    if (!this.chartStyles().includes(this.chartStyle())) this.chartStyle.set('timeseries');
+
     const isDark = this.theme.isDark();
+
+    if (this.chartStyle() === 'share') { this.buildShareChart(isDark); return; }
+    if (this.chartStyle() === 'dial') { this.buildDialChart(isDark); return; }
+
     const { start: rangeStart, end: rangeEnd } = this.timeRange.range();
+    const stacked = this.chartStyle() === 'stacked';
 
     let chartSeries: { name: string; data: [number, number | null][] }[];
     let chartType: 'area' | 'bar' | 'line' = 'area';
@@ -582,15 +712,8 @@ export class MetricDetailComponent implements OnInit, AfterViewInit, OnDestroy {
     } else {
       const bucketSeconds = result.bucketWidthMs / 1000;
       const rate = this.isSum() && !this.showRaw() && bucketSeconds > 0;
-      let groups = this.allGroups();
-      // "other" never folds into a per-service group — fold real series only.
-      if (this.groupMode() === 'service' && groups.length > 1) {
-        const other = result.other && result.other.seriesCount > 0
-          ? [{ name: `other (${result.other.seriesCount})`, serviceName: '', points: result.other.points }]
-          : [];
-        groups = [...this.foldByService(result.series.map((s) => ({ name: s.seriesName, serviceName: s.serviceName, points: s.points }))), ...other];
-      }
-      chartType = this.isSum() && this.showRaw() ? 'bar' : 'area';
+      const groups = this.effectiveGroups();
+      chartType = stacked ? (rate ? 'area' : 'bar') : (this.isSum() && this.showRaw() ? 'bar' : 'area');
       chartSeries = groups.map((g) => ({
         name: g.name,
         data: g.points.map((p) => [
@@ -604,12 +727,12 @@ export class MetricDetailComponent implements OnInit, AfterViewInit, OnDestroy {
     const valueFormatter = (v: number) => (unit ? formatUnitValue(v, unit) : v.toFixed(2));
 
     this.chartOptions.set({
-      chart: { type: chartType, height: 300, toolbar: { show: false }, background: 'transparent', ...this.zoomChart() },
+      chart: { type: chartType, height: 300, stacked, toolbar: { show: false }, background: 'transparent', ...this.zoomChart() },
       theme: { mode: isDark ? 'dark' : 'light' },
       series: chartSeries,
       xaxis: { type: 'datetime', min: rangeStart.getTime(), max: rangeEnd.getTime(), labels: { datetimeUTC: false } },
-      stroke: { curve: 'smooth', width: 2 },
-      fill: { opacity: chartType === 'area' ? 0.15 : 1 },
+      stroke: { curve: 'smooth', width: stacked && chartType === 'area' ? 1 : 2 },
+      fill: { opacity: chartType === 'area' ? (stacked ? 0.7 : 0.15) : 1 },
       dataLabels: { enabled: false },
       yaxis: { labels: { formatter: valueFormatter } },
       tooltip: unit ? { y: { formatter: valueFormatter } } : undefined,
@@ -618,11 +741,30 @@ export class MetricDetailComponent implements OnInit, AfterViewInit, OnDestroy {
     });
   }
 
+  /** Share/donut view (phase 6): composition-of-total across display series, for Sum metrics only
+   *  (see {@link chartStyles}). Each slice is that series' total increase over the visible window
+   *  — the raw per-bucket sum, independent of the Rate/Raw toggle, since "share of total" is
+   *  meaningless for a rate. */
+  private buildShareChart(isDark: boolean): void {
+    const groups = this.allGroups();
+    const slices = groups.map((g) => ({ name: g.name, value: g.points.reduce((a, p) => a + (p.value ?? 0), 0) }));
+    this.chartOptions.set(buildShareDonut(slices, isDark) ?? {});
+  }
+
+  /** Dial/radial-gauge view (phase 6): current value against the unit's natural bound (100 for
+   *  `%`, 1 for the dimensionless ratio `1`) — see {@link isBoundedGauge}. */
+  private buildDialChart(isDark: boolean): void {
+    const value = this.currentValue() ?? 0;
+    const unit = this.metricUnit();
+    const max = unit === '1' ? 1 : 100;
+    this.chartOptions.set(buildRadialGauge(value, max, this.metricName(), isDark, unit === '1' ? '' : unit));
+  }
+
   /** Histogram/exp-histogram: p50/p95/p99 + Max per group, from the server's already-merged bucket
    *  counts. Summary: one line per quantile fraction present, per group. Groups are prefixed with
    *  their name only when more than one contributes (kept plain otherwise, matching prior UX). */
   private buildDistributionSeries(): { name: string; data: [number, number | null][] }[] {
-    const groups = this.allGroups();
+    const groups = this.effectiveGroups();
     const multi = groups.length > 1;
     const out: { name: string; data: [number, number | null][] }[] = [];
 
@@ -697,6 +839,10 @@ export class MetricDetailComponent implements OnInit, AfterViewInit, OnDestroy {
 
   protected onGroupModeChange(mode: GroupMode): void {
     this.groupMode.set(mode);
+  }
+
+  protected onChartStyleChange(style: ChartStyle): void {
+    this.chartStyle.set(style);
   }
 
   /**

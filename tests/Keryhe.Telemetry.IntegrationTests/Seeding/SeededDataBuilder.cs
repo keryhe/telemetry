@@ -571,4 +571,60 @@ public static class SeededDataBuilder
             InstrumentationScope = Scope()
         };
     }
+
+    // =========================================================================
+    // PHASE 5: metrics catalog (list-pages-server-side plan)
+    // =========================================================================
+
+    /// <summary>
+    /// One metric instance with a single data point at <paramref name="pointTime"/>, for catalog
+    /// paging/filtering tests. <paramref name="instanceId"/> distinguishes several instances of the
+    /// same <paramref name="name"/> (same or different <paramref name="serviceName"/>) so
+    /// <c>groupBy=name</c>'s instance count/service list can be exercised.
+    /// </summary>
+    public static MetricModel CatalogMetric(
+        long tenantId, string name, MetricType type, string serviceName, DateTime pointTime, string? instanceId = null)
+    {
+        var resource = Resource(tenantId, serviceName, instanceId);
+        var scope = Scope();
+        var metric = new MetricModel { Name = name, Type = type, Unit = "1", Resource = resource, InstrumentationScope = scope };
+        var nano = ToUnixNano(pointTime);
+        switch (type)
+        {
+            case MetricType.GAUGE:
+                metric.GaugeDataPoints = [new GaugeDataPointModel { TimeUnixNano = nano, ValueDouble = 1 }];
+                break;
+            case MetricType.SUM:
+                metric.SumDataPoints = [new SumDataPointModel { TimeUnixNano = nano, ValueDouble = 1, AggregationTemporality = AggregationTemporality.DELTA }];
+                break;
+            case MetricType.HISTOGRAM:
+                metric.HistogramDataPoints =
+                [
+                    new HistogramDataPointModel
+                    {
+                        TimeUnixNano = nano, Count = 1, Sum = 1,
+                        BucketCounts = [1, 0], ExplicitBounds = [10],
+                        AggregationTemporality = AggregationTemporality.DELTA
+                    }
+                ];
+                break;
+            case MetricType.EXPONENTIAL_HISTOGRAM:
+                metric.ExponentialHistogramDataPoints =
+                [
+                    new ExponentialHistogramDataPointModel
+                    {
+                        TimeUnixNano = nano, Count = 1, Sum = 1, Scale = 0, ZeroCount = 0,
+                        AggregationTemporality = AggregationTemporality.DELTA
+                    }
+                ];
+                break;
+            case MetricType.SUMMARY:
+                metric.SummaryDataPoints =
+                [
+                    new SummaryDataPointModel { TimeUnixNano = nano, Count = 1, Sum = 1, QuantileValues = [new QuantileValueModel { Quantile = 0.5, Value = 1 }] }
+                ];
+                break;
+        }
+        return metric;
+    }
 }

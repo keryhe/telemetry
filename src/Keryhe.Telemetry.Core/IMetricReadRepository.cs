@@ -12,10 +12,17 @@ public interface IMetricReadRepository
     Task<MetricModel?> GetMetricByIdAsync(long id, CancellationToken cancellationToken = default);
     Task<List<MetricInfo>> GetMetricsByNameAsync(string name, CancellationToken cancellationToken = default);
     Task<List<MetricInfo>> GetMetricsByTypeAsync(MetricType type, CancellationToken cancellationToken = default);
-    Task<List<MetricInfo>> GetAllMetricsAsync(int limit = 100, DateTime? startTime = null,
-        DateTime? endTime = null, CancellationToken cancellationToken = default);
 
-    /// <summary>True (unbounded) distinct-metric-name counts per type for a time range, unaffected by <see cref="GetAllMetricsAsync"/>'s row limit.</summary>
+    /// <summary>
+    /// Server-side, keyset-paged metrics catalog (list-pages-server-side plan, Phase 5, decisions
+    /// 27-28). Replaces the former <c>GetAllMetricsAsync</c> (deleted: unbounded-scan-with-a-cap,
+    /// removed rather than fixed — see this method's implementation for the
+    /// <c>metric_last_seen</c>-based "seen in range" approximation it uses instead of scanning the
+    /// five data-point tables).
+    /// </summary>
+    Task<MetricCatalogPage> GetMetricCatalogPageAsync(MetricCatalogQuery query, CancellationToken cancellationToken = default);
+
+    /// <summary>True (unbounded) distinct-metric-name counts per type for a time range, reimplemented in Phase 5 over <c>metric_last_seen</c>.</summary>
     Task<MetricsSummary> GetMetricsSummaryAsync(DateTime? startTime = null, DateTime? endTime = null, CancellationToken cancellationToken = default);
 
     // Time series data — Phase 4 (list-pages-server-side plan): one bucketed query over every

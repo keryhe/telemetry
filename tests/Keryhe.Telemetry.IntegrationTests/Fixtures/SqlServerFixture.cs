@@ -93,6 +93,7 @@ public sealed class SqlServerFixture : ProviderFixture
             DELETE FROM exponential_histogram_data_points;
             DELETE FROM summary_data_points;
             DELETE FROM metrics;
+            DELETE FROM metric_last_seen;
             DELETE FROM log_records;
             DELETE FROM log_rollup_minute;
             DELETE FROM log_rollup_hour;

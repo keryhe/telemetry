@@ -47,6 +47,15 @@ public static class TelemetryCollectorServiceCollectionExtensions
         services.AddScoped<ITenantResolver, CachingTenantResolver>();
         services.AddHostedService<ApiKeyTouchWorker>();
 
+        // metric_last_seen maintenance (list-pages-server-side plan, Phase 5, decision 27):
+        // registered unconditionally on every provider, same shape as ApiKeyTouchWorker above —
+        // ClickHouse opts out via a no-op IMetricTouchStore (materialized views feed its table
+        // instead), not by this worker knowing which provider is active. Bound from
+        // Telemetry:MetricTouch.
+        services.Configure<MetricTouchOptions>(configuration.GetSection(MetricTouchOptions.SectionName));
+        services.AddSingleton<MetricTouchTracker>();
+        services.AddHostedService<MetricTouchWorker>();
+
         // Write path: the generic worker drains the ingestion channel and delegates each
         // batch flush to the active provider's ITelemetryBulkWriter. The host is responsible
         // for registering that provider (ITelemetryBulkWriter, IApiKeyLookup,

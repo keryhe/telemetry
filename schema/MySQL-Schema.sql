@@ -291,6 +291,15 @@ CREATE TABLE summary_data_points (
 CREATE INDEX idx_summary_metric_time ON summary_data_points (metric_id, time_unix_nano DESC);
 CREATE INDEX idx_summary_time        ON summary_data_points (time_unix_nano DESC);
 
+-- metric_last_seen (schema 2.13.2, list-pages-server-side plan Phase 5, decision 27): not a
+-- column on metrics -- see PostgreSQL-Schema.sql's identical table for the full rationale (no
+-- FK, so ingestion's metrics upsert and this table's touch worker can never deadlock).
+CREATE TABLE metric_last_seen (
+    metric_id           BIGINT NOT NULL PRIMARY KEY,
+    last_seen_unix_nano BIGINT NOT NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+CREATE INDEX idx_metric_last_seen_last_seen ON metric_last_seen (last_seen_unix_nano);
+
 -- =============================================================================
 -- LOGS TABLES
 -- =============================================================================
@@ -675,13 +684,13 @@ GROUP BY severity_text, severity_number, day_bucket;
 -- Only inserted when every statement above succeeded, so a partial apply cannot
 -- leave a false version marker for the apply-schema.sh gate.
 INSERT INTO schema_version (version, applied_at)
-VALUES ('2.13.1', CURRENT_TIMESTAMP(6))
+VALUES ('2.13.2', CURRENT_TIMESTAMP(6))
 ON DUPLICATE KEY UPDATE applied_at = CURRENT_TIMESTAMP(6);
 
 -- =============================================================================
 -- POST-APPLY VERIFICATION (MANUAL SQL CHECKS)
 -- =============================================================================
--- 1) List all base tables (expect 18)
+-- 1) List all base tables (expect 19)
 --    SELECT table_name FROM information_schema.tables
 --    WHERE table_schema = DATABASE() AND table_type = 'BASE TABLE' ORDER BY table_name;
 --

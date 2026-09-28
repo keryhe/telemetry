@@ -61,14 +61,15 @@
       <mat-icon>search</mat-icon>
     </button>
 
-    @if (!isDistribution() && allGroups().length > 1) {
+    @if (allGroups().length > 1 && groupModeOptions().length > 1 && chartStyle() !== 'share' && chartStyle() !== 'dial') {
       <mat-button-toggle-group>
-        <mat-button-toggle [checked]="groupMode() === 'labels'" (change)="onGroupModeChange('labels')">Per Series</mat-button-toggle>
-        <mat-button-toggle [checked]="groupMode() === 'service'" (change)="onGroupModeChange('service')">Per Service</mat-button-toggle>
+        @for (opt of groupModeOptions(); track opt.value) {
+          <mat-button-toggle [checked]="groupMode() === opt.value" (change)="onGroupModeChange(opt.value)">{{ opt.label }}</mat-button-toggle>
+        }
       </mat-button-toggle-group>
     }
 
-    @if (isSum()) {
+    @if (isSum() && chartStyle() !== 'share') {
       <mat-button-toggle-group>
         <mat-button-toggle [checked]="!showRaw()" (change)="showRaw.set(false)">Rate</mat-button-toggle>
         <mat-button-toggle [checked]="showRaw()" (change)="showRaw.set(true)">Raw</mat-button-toggle>
@@ -84,6 +85,16 @@
       <mat-card class="chart-card">
         <mat-card-content>
          <div #chartContainer class="chart-container">
+          @if (chartStyles().length > 1) {
+            <mat-button-toggle-group class="chart-style-tiles" [value]="chartStyle()"
+              (change)="onChartStyleChange($event.value)" aria-label="Chart style">
+              @for (style of chartStyles(); track style) {
+                <mat-button-toggle [value]="style" matTooltip="{{ chartStyleMeta[style].label }}">
+                  <mat-icon>{{ chartStyleMeta[style].icon }}</mat-icon>
+                </mat-button-toggle>
+              }
+            </mat-button-toggle-group>
+          }
           @if (timeoutFailed()) {
             <app-empty-state icon="hourglass_disabled"
               message="This range timed out even at reduced resolution. Narrow the time range or add a filter, then try again." />
@@ -114,6 +125,8 @@
                 [yaxis]="chartOptions().yaxis!"
                 [grid]="chartOptions().grid!"
                 [colors]="chartOptions().colors!"
+                [labels]="chartOptions().labels!"
+                [plotOptions]="chartOptions().plotOptions!"
                 [legend]="chartOptions().legend!" />
             } @else if (!loading()) {
               <app-empty-state icon="show_chart" message="No data for selected range" />
@@ -132,6 +145,51 @@
                   }
                 </tbody>
               </table>
+            }
+
+            <!-- Windowed throughput (histogram / exp-histogram / summary) -->
+            @if (throughputChartOptions(); as cs) {
+              <div class="sub-chart-title">Throughput</div>
+              <apx-chart
+                [series]="cs.series!"
+                [chart]="cs.chart!"
+                [xaxis]="cs.xaxis!"
+                [stroke]="cs.stroke!"
+                [fill]="cs.fill!"
+                [theme]="cs.theme!"
+                [dataLabels]="cs.dataLabels!"
+                [yaxis]="cs.yaxis!"
+                [grid]="cs.grid!"
+                [legend]="cs.legend!" />
+            }
+
+            <!-- Histogram/exp-histogram bucket-distribution bar (whole-range shape) -->
+            @if (bucketBarOptions(); as bar) {
+              <div class="sub-chart-title">Bucket distribution</div>
+              <apx-chart
+                [series]="bar.series!"
+                [chart]="bar.chart!"
+                [xaxis]="bar.xaxis!"
+                [theme]="bar.theme!"
+                [dataLabels]="bar.dataLabels!"
+                [grid]="bar.grid!"
+                [legend]="bar.legend!"
+                [plotOptions]="bar.plotOptions!" />
+            }
+
+            <!-- Histogram/exp-histogram bucket-distribution heatmap (bucket range × time) -->
+            @if (heatmapOptions(); as hm) {
+              <div class="sub-chart-title">Bucket distribution over time</div>
+              <apx-chart
+                [series]="hm.series!"
+                [chart]="hm.chart!"
+                [xaxis]="hm.xaxis!"
+                [theme]="hm.theme!"
+                [dataLabels]="hm.dataLabels!"
+                [stroke]="hm.stroke!"
+                [grid]="hm.grid!"
+                [legend]="hm.legend!"
+                [plotOptions]="hm.plotOptions!" />
             }
           }
          </div>

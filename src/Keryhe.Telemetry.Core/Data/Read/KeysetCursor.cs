@@ -129,3 +129,67 @@ public static class KeysetCursor
         return Convert.FromBase64String(s);
     }
 }
+
+/// <summary>
+/// Decoded cursor for the ONE list in this plan whose keyset tiebreak isn't a numeric id: the
+/// metrics catalog's <c>groupBy=name</c> view, keyset on <c>(MAX(created_at), name)</c> (decision
+/// 28) — the group has no synthetic row id, so the metric NAME itself is the tiebreak. Otherwise
+/// identical in shape and guarantees to <see cref="KeysetCursor"/>/<see cref="DecodedCursor"/>,
+/// which is kept as-is (long tiebreak) rather than widened, since every other list in this plan
+/// pages on a real numeric id.
+/// </summary>
+public sealed record DecodedNameCursor(long K, string Name, string F, int V = 1);
+
+/// <summary>See <see cref="DecodedNameCursor"/>. Mirrors <see cref="KeysetCursor"/> exactly, substituting a string tiebreak for the numeric one.</summary>
+public static class NameKeysetCursor
+{
+    private sealed class CursorDto
+    {
+        [System.Text.Json.Serialization.JsonPropertyName("k")] public long K { get; set; }
+        [System.Text.Json.Serialization.JsonPropertyName("name")] public string Name { get; set; } = "";
+        [System.Text.Json.Serialization.JsonPropertyName("f")] public string F { get; set; } = "";
+        [System.Text.Json.Serialization.JsonPropertyName("v")] public int V { get; set; } = 1;
+    }
+
+    public static string Encode(long sortKey, string name, string filterHash)
+    {
+        var dto = new CursorDto { K = sortKey, Name = name, F = filterHash, V = 1 };
+        var json = System.Text.Json.JsonSerializer.Serialize(dto);
+        return Convert.ToBase64String(System.Text.Encoding.UTF8.GetBytes(json)).TrimEnd('=').Replace('+', '-').Replace('/', '_');
+    }
+
+    public static DecodedNameCursor? Decode(string? cursor)
+    {
+        if (string.IsNullOrEmpty(cursor))
+            return null;
+
+        try
+        {
+            var s = cursor.Replace('-', '+').Replace('_', '/');
+            switch (s.Length % 4)
+            {
+                case 2: s += "=="; break;
+                case 3: s += "="; break;
+                case 1: return null;
+            }
+            var json = System.Text.Encoding.UTF8.GetString(Convert.FromBase64String(s));
+            var dto = System.Text.Json.JsonSerializer.Deserialize<CursorDto>(json);
+            return dto == null ? null : new DecodedNameCursor(dto.K, dto.Name, dto.F, dto.V);
+        }
+        catch (Exception ex) when (ex is FormatException or System.Text.Json.JsonException or System.Text.DecoderFallbackException)
+        {
+            return null;
+        }
+    }
+
+    public static bool MatchesFilterHash(DecodedNameCursor cursor, string canonicalFilterText)
+        => string.Equals(cursor.F, KeysetCursor.ComputeFilterHash(canonicalFilterText), StringComparison.Ordinal);
+
+    /// <summary>Same expanded-form predicate as <see cref="KeysetCursor.Predicate"/>, with a text tiebreak column/parameter.</summary>
+    public static string Predicate(string sortColumn, string tiebreakColumn, string keyParam, string nameParam, bool descending)
+    {
+        var lt = descending ? "<" : ">";
+        var lte = descending ? "<=" : ">=";
+        return $"({sortColumn} {lte} @{keyParam} AND ({sortColumn} {lt} @{keyParam} OR {tiebreakColumn} {lt} @{nameParam}))";
+    }
+}

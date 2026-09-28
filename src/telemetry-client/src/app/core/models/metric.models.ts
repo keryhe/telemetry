@@ -212,3 +212,46 @@ export interface MetricExemplarPage {
   /** True when the standard-tier scan hit its 500-row cap: more exemplars exist beyond those returned. */
   capped: boolean;
 }
+
+// =============================================================================
+// Phase 5 (list-pages-server-side plan): server-paged metrics catalog. Mirrors
+// Keryhe.Telemetry.Core.Models.Metrics.cs's MetricCatalogQuery/MetricCatalogPage exactly.
+// Replaces the former GET /api/metrics (getAllMetrics) call and its client-side
+// uniqueMetrics/filteredUnique/filteredAll grouping.
+// =============================================================================
+
+/** One row of the groupBy=name view (reuses the server's UniqueMetricSummary shape). */
+export interface UniqueMetricSummary {
+  name: string;
+  type: MetricType;
+  unit?: string;
+  description?: string;
+  instanceCount: number;
+  services: string[];
+  lastSeen: string;
+}
+
+export type MetricCatalogGroupBy = 'instance' | 'name';
+
+export interface MetricCatalogQueryParams {
+  start: Date;
+  end: Date;
+  q?: string;
+  service?: string;
+  type?: MetricType;
+  groupBy: MetricCatalogGroupBy;
+  size?: number;
+  /** Opaque, unparsed keyset cursor. */
+  cursor?: string | null;
+  nav?: 'first' | 'next' | 'prev' | 'last';
+}
+
+/** Exactly one of `items` (groupBy=instance) or `names` (groupBy=name) is populated, matching the request's groupBy. */
+export interface MetricCatalogPage {
+  items: MetricInfo[];
+  names: UniqueMetricSummary[];
+  nextCursor?: string | null;
+  prevCursor?: string | null;
+  total?: number | null;
+  totalIsLowerBound: boolean;
+}

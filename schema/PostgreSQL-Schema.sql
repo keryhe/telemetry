@@ -280,6 +280,22 @@ CREATE TABLE summary_data_points (
 CREATE INDEX idx_summary_metric_time ON summary_data_points ("metric_id", "time_unix_nano" DESC);
 CREATE INDEX idx_summary_time_brin   ON summary_data_points USING BRIN ("time_unix_nano");
 
+-- metric_last_seen (schema 2.13.2, list-pages-server-side plan Phase 5, decision 27): the
+-- metrics catalog's "has data in range" check reads this instead of scanning the five
+-- data-point tables. Deliberately NOT a column on "metrics": ingestion's metrics upsert
+-- (MERGE/ON CONFLICT) never touches this table, so the two writers can't deadlock, and
+-- Timescale chunk creation (which locks "metrics" to attach foreign keys) never blocks it.
+-- No FK to "metrics" either -- a FK would make every touch lock-check the metrics row,
+-- reintroducing the exact contention this table exists to avoid. Nothing deletes metrics
+-- rows (see CLAUDE.md's dedup notes), so orphans can't occur; if a delete of a metrics row
+-- is ever added, it must delete the matching row here too. Written by the collector's
+-- MetricTouchWorker on a periodic interval, not per flush -- see that type's doc comment.
+CREATE TABLE metric_last_seen (
+    "metric_id"            BIGINT NOT NULL PRIMARY KEY,
+    "last_seen_unix_nano"  BIGINT NOT NULL
+);
+CREATE INDEX idx_metric_last_seen_last_seen ON metric_last_seen ("last_seen_unix_nano");
+
 -- =============================================================================
 -- LOGS TABLES
 -- =============================================================================
@@ -664,7 +680,7 @@ GROUP BY
 -- =============================================================================
 -- Only reached when every statement above succeeded, so a partial apply cannot
 -- leave a false version marker for the apply-schema.sh gate.
-INSERT INTO schema_version ("version") VALUES ('2.13.1')
+INSERT INTO schema_version ("version") VALUES ('2.13.2')
 ON CONFLICT ("version") DO UPDATE
 SET "applied_at" = NOW();
 

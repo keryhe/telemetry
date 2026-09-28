@@ -95,6 +95,12 @@ public class MySqlMetricReadRepository(IConfiguration configuration, ITenantCont
     // override. Same real bug shape as the ClickHouse BucketIndexExpr gap this phase also fixed.
     protected override string BucketIndexExpr(string numerator, string denominator) => $"({numerator} DIV {denominator})";
 
+    // Load-bearing for the metrics catalog's service/name filters (list-pages-server-side plan,
+    // Phase 5): MySqlTraceReadRepository/MySqlLogReadRepository already override these for the
+    // same reason; MetricReadRepositoryBase's catalog query calls them polymorphically too.
+    protected override string ResourceServiceNameExpr(string resourceAlias = "r") => $"{resourceAlias}.attributes_json ->> '$.\"service.name\"'";
+    protected override string LikeOperator => "LIKE";
+
     // Standard tier (decision 26): newest-500, no cursor — not the analytics-tier keyset default.
     public override Task<Keryhe.Telemetry.Core.Models.MetricExemplarPage?> GetMetricExemplarsAsync(
         Keryhe.Telemetry.Core.Models.MetricExemplarQuery query, CancellationToken cancellationToken = default)

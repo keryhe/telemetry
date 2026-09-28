@@ -78,6 +78,12 @@ public abstract class ProviderFixture : IAsyncLifetime
         // page no longer scans the whole window in memory), so it no longer needs registering here.
         services.AddSingleton<ResourceScopeCache>();
 
+        // Depended on directly by every provider's *BulkWriter since Phase 5 (list-pages-server-side
+        // plan) — normally registered by AddKeryheTelemetryCollector, which this harness deliberately
+        // does not call (see class doc comment). IMetricTouchStore itself is registered per-provider
+        // by AddProviderServices below (mirrors IApiKeyTouchStore).
+        services.AddSingleton<MetricTouchTracker>();
+
         // Mirrors AddKeryheTelemetryApi's own registration (list-pages-server-side plan, Phase 1)
         // so the integration harness sees these options too, even though this harness doesn't call
         // AddKeryheTelemetryApi itself (see class doc comment).

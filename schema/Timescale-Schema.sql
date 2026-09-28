@@ -321,6 +321,18 @@ SELECT create_hypertable('summary_data_points', 'time_unix_nano',
 );
 CREATE INDEX idx_summary_metric_time ON summary_data_points ("metric_id", "time_unix_nano" DESC);
 
+-- metric_last_seen (schema 2.13.2, list-pages-server-side plan Phase 5, decision 27): a plain
+-- (non-hypertable) control table, not a column on "metrics" -- see PostgreSQL-Schema.sql's
+-- identical table for the full rationale (no FK, no ingestion contention). Deliberately not a
+-- hypertable: it is keyed and updated by metric_id, not appended by time, so chunk partitioning
+-- would add compression/retention-policy overhead for no query benefit -- exactly like
+-- retention_settings/alert_rules staying plain tables on this provider.
+CREATE TABLE metric_last_seen (
+    "metric_id"            BIGINT NOT NULL PRIMARY KEY,
+    "last_seen_unix_nano"  BIGINT NOT NULL
+);
+CREATE INDEX idx_metric_last_seen_last_seen ON metric_last_seen ("last_seen_unix_nano");
+
 -- =============================================================================
 -- LOGS TABLES
 -- =============================================================================
@@ -824,7 +836,7 @@ FROM log_severity_stats_daily;
 -- =============================================================================
 -- Only reached when every statement above succeeded, so a partial apply cannot
 -- leave a false version marker for the apply-schema.sh gate.
-INSERT INTO schema_version ("version") VALUES ('2.13.1')
+INSERT INTO schema_version ("version") VALUES ('2.13.2')
 ON CONFLICT ("version") DO UPDATE
 SET "applied_at" = NOW();
 

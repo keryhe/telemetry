@@ -22,6 +22,9 @@ public static class MySqlServiceCollectionExtensions
         // provider-agnostic and registered once, in AddKeryheTelemetryCollector.
         services.AddScoped<IApiKeyLookup, MySqlTenantResolver>();
         services.AddScoped<IApiKeyTouchStore, MySqlApiKeyTouchStore>();
+        // metric_last_seen maintenance (list-pages-server-side plan, Phase 5). MetricTouchWorker
+        // is provider-agnostic and registered once, in AddKeryheTelemetryCollector.
+        services.AddScoped<IMetricTouchStore, MySqlMetricTouchStore>();
         return services;
     }
 

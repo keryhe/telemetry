@@ -70,7 +70,7 @@ public sealed class PostgreSqlFixture : ProviderFixture
         await conn.OpenAsync();
         await using var cmd = new NpgsqlCommand(
             """
-            TRUNCATE TABLE log_records, spans, metrics,
+            TRUNCATE TABLE log_records, spans, metrics, metric_last_seen,
                 gauge_data_points, sum_data_points, histogram_data_points,
                 exponential_histogram_data_points, summary_data_points,
                 log_rollup_minute, log_rollup_hour, orphan_roots, trace_rollup_minute, trace_rollup_hour

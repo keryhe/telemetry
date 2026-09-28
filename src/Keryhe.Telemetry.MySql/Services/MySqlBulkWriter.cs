@@ -42,6 +42,7 @@ namespace Keryhe.Telemetry.MySql.Services;
 public sealed class MySqlBulkWriter(
     IConfiguration configuration,
     ResourceScopeCache cache,
+    MetricTouchTracker metricTouchTracker,
     ILogger<MySqlBulkWriter> logger) : ITelemetryBulkWriter
 {
     private readonly string _connectionString = configuration.GetConnectionString("Collector")!;
@@ -159,6 +160,16 @@ public sealed class MySqlBulkWriter(
 
             await tx.CommitAsync(ct);
             foreach (var write in postCommitCacheWrites) write();
+
+            // metric_last_seen maintenance (list-pages-server-side plan, Phase 5, decision 27):
+            // recorded in-process after commit, flushed by MetricTouchWorker on its own interval.
+            TelemetryIngestionHelpers.MarkMetricTouches(metricTouchTracker,
+                gaugeRows.Select(r => (r.MetricId, r.DataPoint.TimeUnixNano))
+                    .Concat(sumRows.Select(r => (r.MetricId, r.DataPoint.TimeUnixNano)))
+                    .Concat(histogramRows.Select(r => (r.MetricId, r.DataPoint.TimeUnixNano)))
+                    .Concat(expHistogramRows.Select(r => (r.MetricId, r.DataPoint.TimeUnixNano)))
+                    .Concat(summaryRows.Select(r => (r.MetricId, r.DataPoint.TimeUnixNano))));
+
             logger.LogDebug("Flushed {Count} metrics", metrics.Count);
         }
     }

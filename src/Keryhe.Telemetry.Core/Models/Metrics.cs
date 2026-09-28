@@ -138,6 +138,46 @@ public class UniqueMetricSummary
     public DateTime LastSeen { get; set; }
 }
 
+// =============================================================================
+// Phase 5 (list-pages-server-side plan): metrics catalog paging (decision 28). Reuses
+// MetricInfo (groupBy=instance rows) and UniqueMetricSummary (groupBy=name rows) above, which
+// existed already but were unused until now.
+// =============================================================================
+
+/// <summary>Request shape for <see cref="IMetricReadRepository.GetMetricCatalogPageAsync(MetricCatalogQuery, CancellationToken)"/>.</summary>
+public sealed class MetricCatalogQuery
+{
+    public DateTime Start { get; set; }
+    public DateTime End { get; set; }
+    /// <summary>Name substring filter (decision 30's "the metrics list's q is a name substring").</summary>
+    public string? Q { get; set; }
+    public string? Service { get; set; }
+    public MetricType? Type { get; set; }
+    /// <summary>"instance" (default) | "name" — no other sort/group option (decision 4/28).</summary>
+    public string GroupBy { get; set; } = "instance";
+    public int Size { get; set; } = 50;
+    /// <summary>Opaque, unparsed keyset cursor.</summary>
+    public string? Cursor { get; set; }
+    /// <summary>first | next | prev | last.</summary>
+    public string Nav { get; set; } = "first";
+}
+
+/// <summary>
+/// Result shape for <see cref="IMetricReadRepository.GetMetricCatalogPageAsync(MetricCatalogQuery, CancellationToken)"/>.
+/// Exactly one of <see cref="Items"/> (groupBy=instance) or <see cref="Names"/> (groupBy=name) is
+/// populated, matching the request's <see cref="MetricCatalogQuery.GroupBy"/>.
+/// </summary>
+public sealed class MetricCatalogPage
+{
+    public List<MetricInfo> Items { get; set; } = new();
+    public List<UniqueMetricSummary> Names { get; set; } = new();
+    public string? NextCursor { get; set; }
+    public string? PrevCursor { get; set; }
+    /// <summary>Exact total under the summary timeout; null (with <see cref="TotalIsLowerBound"/> true) on timeout (decision 31).</summary>
+    public long? Total { get; set; }
+    public bool TotalIsLowerBound { get; set; }
+}
+
 /// <summary>
 /// One exemplar plus the identity of the data point and series it was sampled from. Served by the
 /// dedicated exemplar endpoint; the series endpoints deliberately no longer carry exemplars, which

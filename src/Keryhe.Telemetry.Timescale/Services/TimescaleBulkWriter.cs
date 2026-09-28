@@ -69,6 +69,7 @@ namespace Keryhe.Telemetry.Timescale.Services;
 public sealed class TimescaleBulkWriter(
     NpgsqlDataSource dataSource,
     ResourceScopeCache cache,
+    MetricTouchTracker metricTouchTracker,
     ILogger<TimescaleBulkWriter> logger) : ITelemetryBulkWriter
 {
     // =========================================================================
@@ -165,6 +166,16 @@ public sealed class TimescaleBulkWriter(
         if (summaryRows.Count > 0) await BulkInsertSummaryDataPointsAsync(conn, tx, summaryRows, ct);
 
         await tx.CommitAsync(ct);
+
+        // metric_last_seen maintenance (list-pages-server-side plan, Phase 5, decision 27):
+        // recorded in-process after commit, flushed by MetricTouchWorker on its own interval.
+        TelemetryIngestionHelpers.MarkMetricTouches(metricTouchTracker,
+            gaugeRows.Select(r => (r.MetricId, r.DataPoint.TimeUnixNano))
+                .Concat(sumRows.Select(r => (r.MetricId, r.DataPoint.TimeUnixNano)))
+                .Concat(histogramRows.Select(r => (r.MetricId, r.DataPoint.TimeUnixNano)))
+                .Concat(expHistogramRows.Select(r => (r.MetricId, r.DataPoint.TimeUnixNano)))
+                .Concat(summaryRows.Select(r => (r.MetricId, r.DataPoint.TimeUnixNano))));
+
         logger.LogDebug("Flushed {Count} metrics", metrics.Count);
     }
 

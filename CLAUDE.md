@@ -388,6 +388,25 @@ resource, scope or metrics catalog row — `IRetentionSettingsRepository` offers
 that removes catalog rows is ever added, it must clear the cache, or every data-point insert fails
 its foreign key on each subsequent batch until the process restarts.
 
+**`metric_last_seen`** (schema 2.13.2, list-pages-server-side plan Phase 5, decision 27): a
+separate table, deliberately not a column on `metrics`, that the metrics catalog reads for its
+"has data in range" check instead of scanning the five data-point tables. No FK to `metrics` — a
+FK would make every touch lock-check the `metrics` row, reintroducing the contention the table
+exists to avoid, and nothing deletes `metrics` rows so orphans can't occur. On the four relational
+providers it's written by a periodic `MetricTouchWorker`/`MetricTouchTracker` pair (mirroring
+`ApiKeyTouchWorker`/`ApiKeyTouchTracker` above, registered unconditionally by
+`AddKeryheTelemetryCollector`, bound from its own `Telemetry:MetricTouch` section), draining a
+`metric_id → newest time_unix_nano` map each interval into batches sorted by `metric_id` and
+capped under 4,000 rows so concurrent collector instances always lock in the same order and never
+escalate to a table lock on SQL Server (`DEADLOCK_PRIORITY LOW` plus one retry on error 1205
+there). On ClickHouse it's an `AggregatingMergeTree` fed by one materialized view per data-point
+table instead — no mutation per flush interval, no worker; `IMetricTouchStore`'s ClickHouse
+implementation is a deliberate no-op purely so `MetricTouchWorker` can stay registered
+unconditionally on every provider. "Seen in range" is an approximation
+(`last_seen_unix_nano >= start AND metrics.created_at <= end`), falling back to an exact
+per-candidate `EXISTS` over the five data-point tables when the window's end is more than an hour
+in the past.
+
 On Postgres and Timescale, resource/scope/metric-catalog upserts run as their own
 auto-committed statements **before** the data transaction opens, rather than inside it —
 `ResourceScopeCache` is populated the moment each upsert returns, with no post-commit deferral.

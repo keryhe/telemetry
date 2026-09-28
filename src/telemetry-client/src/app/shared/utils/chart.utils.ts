@@ -1,5 +1,6 @@
 import type { ApexOptions } from 'ng-apexcharts';
 import { getSeverityLabel, SEVERITY_COLORS } from '../../core/models/log.models';
+import { MetricBucketPoint, MetricType } from '../../core/models/metric.models';
 
 /** Shared grid / separator line color: light gray in light mode, darker gray in dark mode. */
 function gridLineColor(isDark: boolean): string {
@@ -353,4 +354,347 @@ export function parseDotnetTimespan(ts: string): number {
   const m = parseFloat(parts[1]);
   const s = parseFloat(parts[2]);
   return (days * 86400 + h * 3600 + m * 60 + s) * 1000;
+}
+
+// ===========================================================================
+// PHASE 6 (list-pages-server-side plan): chart-style views and cross-series fold, rebuilt
+// against the server-bucketed `MetricBucketPoint` shape (MetricSeriesModels.cs). These are
+// fresh implementations, not the pre-Phase-4 `MetricDataPoint`-based functions of the same
+// visual purpose (deleted in that phase) — there is no client-side windowing/resampling left
+// to do, since the server already delivers one bucket per (display series, time slot).
+// ===========================================================================
+
+/**
+ * Shared categorical palette for multi-slice charts (donut share). Slices are assigned by index
+ * modulo the length, matching the per-service coloring used elsewhere.
+ */
+export const CATEGORICAL_COLORS = [
+  '#1976d2', '#f57c00', '#388e3c', '#7b1fa2', '#00838f', '#5d4037', '#558b2f', '#4527a0',
+];
+
+/**
+ * Donut chart of share-of-total across slices (e.g. one slice per display series/service). Slices
+ * arrive pre-reduced to a single value each; zero/negative values are dropped so the ring only
+ * shows real contributions. Returns null if nothing positive remains.
+ */
+export function buildShareDonut(
+  slices: { name: string; value: number }[],
+  isDark: boolean,
+): ApexOptions | null {
+  const positive = slices.filter((s) => s.value > 0);
+  if (!positive.length) return null;
+  return {
+    chart: { type: 'donut', height: 320, toolbar: { show: false }, background: 'transparent' },
+    theme: { mode: isDark ? 'dark' : 'light' },
+    series: positive.map((s) => s.value),
+    labels: positive.map((s) => s.name),
+    colors: positive.map((_, i) => CATEGORICAL_COLORS[i % CATEGORICAL_COLORS.length]),
+    dataLabels: { enabled: true, formatter: (val: number) => `${val.toFixed(1)}%` },
+    legend: { position: 'right' },
+    stroke: { width: 0 },
+    grid: chartGrid(isDark),
+  };
+}
+
+/**
+ * Radial gauge (single value against a max). `value` and `max` are in the metric's own units;
+ * the ring shows the percentage while the center label shows the real value + optional unit.
+ */
+export function buildRadialGauge(
+  value: number,
+  max: number,
+  label: string,
+  isDark: boolean,
+  unit = '',
+): ApexOptions {
+  const pct = max > 0 ? Math.min(100, Math.max(0, (value / max) * 100)) : 0;
+  return {
+    chart: { type: 'radialBar', height: 320, toolbar: { show: false }, background: 'transparent' },
+    theme: { mode: isDark ? 'dark' : 'light' },
+    series: [Number(pct.toFixed(1))],
+    labels: [label],
+    colors: [CATEGORICAL_COLORS[0]],
+    plotOptions: {
+      radialBar: {
+        hollow: { size: '60%' },
+        dataLabels: {
+          name: { offsetY: -8 },
+          value: {
+            offsetY: 4,
+            formatter: () => `${Number(value.toFixed(2))}${unit}`,
+          },
+        },
+      },
+    },
+    grid: chartGrid(isDark),
+  };
+}
+
+function fmtBound(v: number, unit?: string | null): string {
+  if (!isFinite(v)) return '∞';
+  if (v === 0) return '0';
+  return formatUnitValue(v, unit);
+}
+
+/** Human-readable range label per bucket, e.g. "< 5", "5 – 10", "≥ 100". */
+function bucketLabels(counts: unknown[], bounds: number[], unit?: string | null): string[] {
+  const labels: string[] = [];
+  for (let i = 0; i < counts.length; i++) {
+    if (i === 0) labels.push(`< ${fmtBound(bounds[0] ?? Infinity, unit)}`);
+    else if (i < bounds.length) labels.push(`${fmtBound(bounds[i - 1], unit)} – ${fmtBound(bounds[i], unit)}`);
+    else labels.push(`≥ ${fmtBound(bounds[bounds.length - 1], unit)}`);
+  }
+  return labels;
+}
+
+/** Shared ApexCharts heatmap config for the bucket-distribution charts. */
+function renderHeatmap(
+  series: { name: string; data: { x: number; y: number }[] }[],
+  maxCount: number,
+  isDark: boolean,
+): ApexOptions {
+  const height = Math.min(420, Math.max(180, series.length * 18));
+  const zeroColor = isDark ? '#26272b' : '#f4f4f5';
+  const separatorColor = gridLineColor(isDark);
+  return {
+    chart: { type: 'heatmap', height, toolbar: { show: false }, background: 'transparent' },
+    theme: { mode: isDark ? 'dark' : 'light' },
+    series,
+    xaxis: { type: 'datetime', labels: { datetimeUTC: false } },
+    dataLabels: { enabled: false },
+    legend: { show: false },
+    stroke: { width: 0.5, colors: [separatorColor] },
+    grid: chartGrid(isDark),
+    plotOptions: {
+      heatmap: {
+        shadeIntensity: 0.5,
+        colorScale: {
+          ranges: [
+            { from: 0, to: 0, color: zeroColor, name: '0' },
+            { from: 0.001, to: maxCount * 0.25, color: '#90CAF9', name: 'Low' },
+            { from: maxCount * 0.25, to: maxCount * 0.6, color: '#1976D2', name: 'Medium' },
+            { from: maxCount * 0.6, to: Math.max(maxCount, 1), color: '#0D47A1', name: 'High' },
+          ],
+        },
+      },
+    },
+  };
+}
+
+/** Upper bound on heatmap Y-rows / bar X-categories; finer bucket schemas (exponential
+ *  histograms) are merged down to this. Matches the pre-Phase-4 `MAX_HEATMAP_ROWS`. */
+const MAX_HEATMAP_ROWS = 24;
+
+/**
+ * Groups an over-fine bucket schema into at most `maxRows` display bins by merging adjacent
+ * buckets. Returns the group ranges `[start, end)` into the original counts, plus the merged
+ * bounds (upper bound of each group except the final overflow group). Schemas already within
+ * `maxRows` yield one group per bucket (identity).
+ */
+function planBucketGroups(
+  refLen: number,
+  bounds: number[],
+  maxRows: number,
+): { groups: [number, number][]; bounds: number[] } {
+  if (refLen <= maxRows) {
+    return { groups: Array.from({ length: refLen }, (_, i) => [i, i + 1] as [number, number]), bounds };
+  }
+  const g = Math.ceil(refLen / maxRows);
+  const groups: [number, number][] = [];
+  const merged: number[] = [];
+  for (let start = 0; start < refLen; start += g) {
+    const end = Math.min(start + g, refLen);
+    groups.push([start, end]);
+    if (end < refLen) merged.push(bounds[end - 1]);
+  }
+  return { groups, bounds: merged };
+}
+
+/** The most common `bucketCounts` length among a set of already-bucketed points — the "reference"
+ *  bucket layout to merge onto. Points with any other length are left out, mirroring decision 42's
+ *  mismatched-layout handling (the server does this only within one display series; these two
+ *  bucket-distribution helpers apply the same rule again across whatever points/series they were
+ *  handed, since they may see points from more than one display series' worth of data). */
+function referenceBucketLayout(points: MetricBucketPoint[]): { refLen: number; bounds: number[] } | null {
+  const withBuckets = points.filter((p) => p.bucketCounts && p.bucketCounts.length);
+  if (!withBuckets.length) return null;
+  const lenCounts = new Map<number, number>();
+  for (const p of withBuckets) lenCounts.set(p.bucketCounts!.length, (lenCounts.get(p.bucketCounts!.length) ?? 0) + 1);
+  const refLen = [...lenCounts.entries()].sort((a, b) => b[1] - a[1])[0][0];
+  const bounds = withBuckets.find((p) => p.bucketCounts!.length === refLen && p.bucketBounds?.length)?.bucketBounds ?? [];
+  return { refLen, bounds };
+}
+
+/**
+ * Bucket-distribution heatmap (X = bucket point time, Y = bucket range, color = count) built
+ * directly from a display series' `MetricBucketPoint[]` — no client-side windowing, since the
+ * server already delivers one set of bucket counts per time bucket. Over-fine schemas
+ * (exponential histograms carry ~100+ buckets) are merged down to {@link MAX_HEATMAP_ROWS} rows.
+ * Returns null if there is no usable bucket data.
+ */
+export function buildHistogramHeatmapFromBuckets(
+  points: MetricBucketPoint[],
+  isDark: boolean,
+  unit?: string | null,
+): ApexOptions | null {
+  const layout = referenceBucketLayout(points);
+  if (!layout) return null;
+  const { refLen, bounds } = layout;
+  const { groups, bounds: rowBounds } = planBucketGroups(refLen, bounds, MAX_HEATMAP_ROWS);
+  const labels = bucketLabels(new Array(groups.length), rowBounds, unit);
+
+  const series = labels.map((label) => ({ name: label, data: [] as { x: number; y: number }[] }));
+  let maxCount = 0;
+  for (const p of points) {
+    if (!p.bucketCounts || p.bucketCounts.length !== refLen) continue;
+    const x = new Date(p.timestamp).getTime();
+    for (let r = 0; r < groups.length; r++) {
+      const [s, e] = groups[r];
+      let y = 0;
+      for (let i = s; i < e; i++) y += p.bucketCounts[i] ?? 0;
+      series[r].data.push({ x, y });
+      if (y > maxCount) maxCount = y;
+    }
+  }
+  if (maxCount === 0) return null;
+  return renderHeatmap(series, maxCount, isDark);
+}
+
+/**
+ * Bar chart of the bucket distribution summed across every bucket point handed in — the
+ * whole-range "overall shape" view. Over-fine schemas are merged down to at most
+ * {@link MAX_HEATMAP_ROWS} bars. Returns null if there is no usable bucket data.
+ */
+export function buildHistogramBarFromBuckets(
+  points: MetricBucketPoint[],
+  isDark: boolean,
+  unit?: string | null,
+): ApexOptions | null {
+  const layout = referenceBucketLayout(points);
+  if (!layout) return null;
+  const { refLen, bounds } = layout;
+
+  const counts = new Array(refLen).fill(0);
+  for (const p of points) {
+    if (!p.bucketCounts || p.bucketCounts.length !== refLen) continue;
+    for (let i = 0; i < refLen; i++) counts[i] += p.bucketCounts[i] ?? 0;
+  }
+  if (counts.reduce((a: number, b: number) => a + b, 0) === 0) return null;
+
+  const { groups, bounds: barBounds } = planBucketGroups(refLen, bounds, MAX_HEATMAP_ROWS);
+  const grouped = groups.map(([s, e]) => {
+    let sum = 0;
+    for (let i = s; i < e; i++) sum += counts[i];
+    return sum;
+  });
+  const labels = bucketLabels(new Array(groups.length), barBounds, unit);
+
+  return {
+    chart: { type: 'bar', height: 220, toolbar: { show: false }, background: 'transparent' },
+    theme: { mode: isDark ? 'dark' : 'light' },
+    series: [{ name: 'Count', data: grouped }],
+    xaxis: { categories: labels, labels: { rotate: -45, hideOverlappingLabels: true } },
+    dataLabels: { enabled: false },
+    legend: { show: false },
+    grid: chartGrid(isDark),
+    plotOptions: { bar: { columnWidth: '80%' } },
+  };
+}
+
+/**
+ * Index-wise fold of every display series (plus "other") sharing one response's identical dense
+ * bucket grid into a single aggregate `MetricBucketPoint[]` — the "Aggregate: All" cross-series
+ * view (decision 22's per-type math applied one level higher, extended per phase 6 to Histogram/
+ * Exponential-Histogram/Summary, not just Gauge/Sum). Safe because every group in one response
+ * shares the same bucket count/width (`MergeBucketsForDisplaySeries` on the server always emits
+ * one point per bucket index, even when empty).
+ *
+ * For Histogram/Exponential-Histogram, the server only guarantees one bucket layout *within* a
+ * display series (decision 42); folding *across* display series (e.g. across services) can still
+ * mix layouts, so each bucket index picks its own majority layout and drops points whose
+ * `bucketCounts` length disagrees, the same rule {@link buildHistogramHeatmapFromBuckets}/
+ * {@link buildHistogramBarFromBuckets} apply. This is a bucket-index-local approximation of
+ * decision 42, not the server's exact algorithm (which ranks by observation count across the
+ * whole window, not per bucket) — acceptable here since this fold is a client-only convenience
+ * view, not the canonical per-series chart.
+ */
+export function foldPointsAcrossGroups(
+  groups: { points: MetricBucketPoint[] }[],
+  type: MetricType,
+): MetricBucketPoint[] {
+  if (!groups.length) return [];
+  const bucketCount = Math.max(...groups.map((g) => g.points.length), 0);
+  const out: MetricBucketPoint[] = [];
+  const isGauge = type === MetricType.Gauge;
+  const isDist = type === MetricType.Histogram || type === MetricType.ExponentialHistogram;
+  const isSummary = type === MetricType.Summary;
+
+  for (let i = 0; i < bucketCount; i++) {
+    const pts = groups.map((g) => g.points[i]).filter((p): p is MetricBucketPoint => p != null);
+    const timestamp = pts[0]?.timestamp ?? '';
+    if (!pts.length) { out.push({ timestamp }); continue; }
+
+    if (isDist) {
+      const withBuckets = pts.filter((p) => p.bucketCounts && p.bucketCounts.length);
+      if (!withBuckets.length) { out.push({ timestamp, count: 0, sum: 0 }); continue; }
+      const lenCounts = new Map<number, number>();
+      for (const p of withBuckets) lenCounts.set(p.bucketCounts!.length, (lenCounts.get(p.bucketCounts!.length) ?? 0) + 1);
+      const majorityLen = [...lenCounts.entries()].sort((a, b) => b[1] - a[1])[0][0];
+      const matching = withBuckets.filter((p) => p.bucketCounts!.length === majorityLen);
+      const bounds = matching.find((p) => p.bucketBounds?.length)?.bucketBounds;
+      const counts = new Array(majorityLen).fill(0);
+      let count = 0; let sum = 0; let min: number | undefined; let max: number | undefined;
+      for (const p of matching) {
+        for (let k = 0; k < majorityLen; k++) counts[k] += p.bucketCounts![k] ?? 0;
+        count += p.count ?? 0;
+        sum += p.sum ?? 0;
+        if (p.min != null) min = min == null ? p.min : Math.min(min, p.min);
+        if (p.max != null) max = max == null ? p.max : Math.max(max, p.max);
+      }
+      out.push({ timestamp, count, sum, min, max, bucketCounts: counts, bucketBounds: bounds });
+      continue;
+    }
+
+    if (isSummary) {
+      const withQ = pts.filter((p) => p.quantiles && p.quantiles.length);
+      if (!withQ.length) { out.push({ timestamp }); continue; }
+      const fracs = new Set<number>();
+      for (const p of withQ) for (const q of p.quantiles!) fracs.add(q);
+      const sorted = [...fracs].sort((a, b) => a - b);
+      const quantileValues: number[] = [];
+      for (const q of sorted) {
+        const vals = withQ
+          .map((p) => {
+            const idx = p.quantiles!.findIndex((x) => Math.abs(x - q) < 1e-7);
+            return idx >= 0 ? p.quantileValues?.[idx] : undefined;
+          })
+          .filter((v): v is number => v != null);
+        quantileValues.push(vals.length ? vals.reduce((a, b) => a + b, 0) / vals.length : NaN);
+      }
+      out.push({
+        timestamp,
+        quantiles: sorted,
+        quantileValues,
+        count: withQ.reduce((a, p) => a + (p.count ?? 0), 0),
+        sum: withQ.reduce((a, p) => a + (p.sum ?? 0), 0),
+        isApproximate: withQ.length > 1 || withQ.some((p) => p.isApproximate),
+      });
+      continue;
+    }
+
+    // Gauge/Sum
+    const vals = pts.map((p) => p.value).filter((v): v is number => v != null);
+    const value = vals.length
+      ? (isGauge ? vals.reduce((a, b) => a + b, 0) / vals.length : vals.reduce((a, b) => a + b, 0))
+      : undefined;
+    const mins = pts.map((p) => p.min).filter((v): v is number => v != null);
+    const maxs = pts.map((p) => p.max).filter((v): v is number => v != null);
+    out.push({
+      timestamp,
+      value,
+      min: mins.length ? Math.min(...mins) : undefined,
+      max: maxs.length ? Math.max(...maxs) : undefined,
+    });
+  }
+  return out;
 }

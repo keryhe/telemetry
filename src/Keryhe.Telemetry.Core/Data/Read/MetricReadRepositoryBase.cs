@@ -83,48 +83,31 @@ public abstract class MetricReadRepositoryBase : DapperReadRepository, IMetricRe
         return rows.Select(m => ToMetricInfo(m, ExtractServiceName(DeserializeAttributes(m.ResourceAttributesJson)) ?? "", stats.GetValueOrDefault(m.Id))).ToList();
     }
 
-    public async Task<List<MetricInfo>> GetAllMetricsAsync(int limit = 100, DateTime? startTime = null,
-        DateTime? endTime = null, CancellationToken cancellationToken = default)
-    {
-        await using var conn = await OpenConnectionAsync(cancellationToken);
-
-        var metricIdsWithData = await GetMetricIdsWithDataInRangeAsync(conn, startTime, endTime, cancellationToken);
-        if (metricIdsWithData is { Count: 0 })
-            return new List<MetricInfo>();
-
-        var sql = MetricSelect;
-        if (metricIdsWithData != null) sql += $" AND m.id IN ({IdInList(metricIdsWithData)})";
-        sql += " ORDER BY m.created_at DESC";
-
-        var rows = (await conn.QueryAsync<MetricRow>(new CommandDefinition(sql,
-            new { tenantId = TenantId }, cancellationToken: cancellationToken)))
-            .Take(limit)
-            .ToList();
-
-        var stats = await GetMetricStatsAsync(conn, rows, cancellationToken);
-        return rows
-            .Select(m => ToMetricInfo(m, ExtractServiceName(DeserializeAttributes(m.ResourceAttributesJson)), stats.GetValueOrDefault(m.Id)))
-            .ToList();
-    }
-
     /// <summary>
-    /// True (unbounded) distinct-metric-name counts per type for a time range — reuses
-    /// <see cref="GetMetricIdsWithDataInRangeAsync"/> (already computes the full matching id set
-    /// across all data-point tables, no row cap), then a plain SELECT DISTINCT over the metrics
-    /// table restricted to those ids. No dialect-specific SQL needed.
+    /// True (unbounded) distinct-metric-name counts per type for a time range — reimplemented in
+    /// Phase 5 (list-pages-server-side plan) over <c>metric_last_seen</c> instead of scanning the
+    /// five data-point tables. Uses the same "seen in range" approximation as
+    /// <see cref="GetMetricCatalogPageAsync"/> (decision 27).
     /// </summary>
     public async Task<MetricsSummary> GetMetricsSummaryAsync(DateTime? startTime = null, DateTime? endTime = null, CancellationToken cancellationToken = default)
     {
         await using var conn = await OpenConnectionAsync(cancellationToken);
 
-        var idsWithData = await GetMetricIdsWithDataInRangeAsync(conn, startTime, endTime, cancellationToken);
-        if (idsWithData is { Count: 0 })
-            return new MetricsSummary();
+        var parameters = new DynamicParameters();
+        parameters.Add("tenantId", TenantId);
+        var where = "r.tenant_id = @tenantId";
+        if (startTime.HasValue && endTime.HasValue)
+            where += " AND " + SeenInRangeClause(startTime.Value, endTime.Value, parameters);
 
-        var sql = "SELECT DISTINCT m.name AS Name, m.type AS Type FROM metrics m JOIN resources r ON m.resource_id = r.id WHERE r.tenant_id = @tenantId";
-        if (idsWithData != null) sql += $" AND m.id IN ({IdInList(idsWithData)})";
+        var sql = $"""
+            SELECT DISTINCT m.name AS Name, m.type AS Type
+            FROM metrics m
+            JOIN resources r ON m.resource_id = r.id
+            LEFT JOIN {MetricLastSeenSql} mls ON mls.metric_id = m.id
+            WHERE {where}
+            """;
 
-        var rows = await conn.QueryAsync<NameTypeRow>(new CommandDefinition(sql, new { tenantId = TenantId }, cancellationToken: cancellationToken));
+        var rows = await conn.QueryAsync<NameTypeRow>(new CommandDefinition(sql, parameters, cancellationToken: cancellationToken));
 
         // A name could in principle appear with more than one type across instances (rare);
         // first-seen wins, matching the frontend's own uniqueMetrics grouping (items[0].type).
@@ -144,6 +127,501 @@ public abstract class MetricReadRepositoryBase : DapperReadRepository, IMetricRe
     {
         public string Name { get; set; } = null!;
         public string Type { get; set; } = null!;
+    }
+
+    // =========================================================================
+    // METRICS CATALOG (Phase 5: server-side paging, decisions 27-28)
+    // =========================================================================
+
+    /// <summary>
+    /// SQL source for <c>metric_last_seen</c> reads, aliased by the caller as <c>mls</c>. The
+    /// relational default reads the table directly; ClickHouse overrides this to a
+    /// <c>maxMerge(...)</c>-collapsing subquery, since its table holds partial aggregate states
+    /// (decision 27).
+    /// </summary>
+    protected virtual string MetricLastSeenSql => "metric_last_seen";
+
+    /// <summary>
+    /// Decision 27's "seen in range" predicate: approximate by default
+    /// (<c>last_seen_unix_nano >= start AND metrics.created_at &lt;= end</c>, reading the LEFT
+    /// JOINed <c>mls</c> alias every caller of this method joins in), or an exact per-candidate
+    /// <c>EXISTS</c> over the five data-point tables when <paramref name="end"/> is more than an
+    /// hour in the past — cheaper than a full scan because it is index-served
+    /// (<c>metric_id, time_unix_nano</c>) and only runs against the metrics already matching every
+    /// other filter, not the whole catalog. A metric with no <c>metric_last_seen</c> row yet (not
+    /// yet touched by <c>MetricTouchWorker</c>, which runs on its own interval — see that type's
+    /// doc comment) is excluded by the approximate branch until its first touch; documented, not
+    /// worked around, since the alternative (always falling back to the exact EXISTS check) would
+    /// give up the whole point of this table for any metric younger than one flush interval.
+    /// </summary>
+    protected string SeenInRangeClause(DateTime start, DateTime end, DynamicParameters parameters, string metricsAlias = "m", string mlsAlias = "mls")
+    {
+        var startNano = TimeConversion.DateTimeToUnixNano(start);
+        var endNano = TimeConversion.DateTimeToUnixNano(end);
+        parameters.Add("seenStartNano", startNano);
+        parameters.Add("seenEndNano", endNano);
+        parameters.Add("seenEnd", end);
+
+        if (DateTime.UtcNow - end <= TimeSpan.FromHours(1))
+            return $"{mlsAlias}.last_seen_unix_nano >= @seenStartNano AND {metricsAlias}.created_at <= @seenEnd";
+
+        return ExactSeenInRangePredicate(metricsAlias);
+    }
+
+    /// <summary>
+    /// The exact per-candidate check for decision 27's &gt;1-hour-in-the-past fallback: does
+    /// <paramref name="metricsAlias"/>.id have a matching row in any of the five data-point tables
+    /// within <c>@seenStartNano</c>/<c>@seenEndNano</c> (bound by the caller,
+    /// <see cref="SeenInRangeClause"/>)? PostgreSQL/Timescale/SqlServer/MySql use a correlated
+    /// <c>EXISTS</c>, index-served on each table's <c>(metric_id, time_unix_nano)</c>. ClickHouse
+    /// overrides this: it can't resolve a correlated subquery referencing the outer row
+    /// ("Resolve identifier 'm.id' from parent scope only supported for constants and CTE" —
+    /// real error surfaced by the Phase 5 integration tests, the same class of gap as
+    /// <c>SpanLevelMatchPredicate</c>'s ClickHouse override), so it uses an uncorrelated
+    /// <c>m.id IN (SELECT metric_id FROM ...)</c> instead.
+    /// </summary>
+    protected virtual string ExactSeenInRangePredicate(string metricsAlias)
+    {
+        var existsClauses = TelemetryIngestionHelpers.TimePrunedMetricTables.Select(t =>
+            $"EXISTS (SELECT 1 FROM {t} dp WHERE dp.metric_id = {metricsAlias}.id AND dp.time_unix_nano >= @seenStartNano AND dp.time_unix_nano <= @seenEndNano)");
+        return "(" + string.Join(" OR ", existsClauses) + ")";
+    }
+
+    /// <summary>
+    /// Wraps a SQL time expression (a bare column like <c>"m.created_at"</c>, or an aggregate like
+    /// <c>"MAX(m.created_at)"</c>) for use in the catalog's keyset cursor comparison. Identity on
+    /// every relational provider: <c>metrics.created_at</c> is a plain timestamp column there, and
+    /// comparing it directly against a bound <see cref="DateTime"/> parameter
+    /// (<see cref="CatalogCursorKeyParam"/>) works correctly at those providers' native precision.
+    ///
+    /// ClickHouse overrides both this and <see cref="CatalogCursorKeyParam"/> together: a real bug
+    /// found via the Phase 5 integration tests, where a "next" page after a non-empty "first" page
+    /// (whose own <c>NextCursor</c> was correctly non-null) came back with ZERO rows. Root cause:
+    /// <c>created_at</c> is <c>DateTime64(9)</c> there, and ClickHouse.Client's parameter binding
+    /// for a plain .NET <see cref="DateTime"/> does not preserve that precision — the bound
+    /// <c>@cursorK</c> silently lost enough precision to sort BEFORE every row sharing the same
+    /// wall-clock second (all 25 rows in the reproducing test, inserted in one flush), so the
+    /// keyset predicate's <c>created_at &lt;= @cursorK</c> half excluded everything. ClickHouse's
+    /// override compares raw nanoseconds instead: the column via <c>toUnixTimestamp64Nano(...)</c>
+    /// here, and the parameter as the already-nanosecond-precision <see cref="long"/> cursor value
+    /// directly (no DateTime round trip) via <see cref="CatalogCursorKeyParam"/>.
+    /// </summary>
+    protected virtual string CatalogTimeExpr(string timeExpr) => timeExpr;
+
+    /// <summary>The value bound for a decoded cursor's <c>K</c> against <see cref="CatalogTimeExpr"/>'s column expression — see that method's doc comment for why ClickHouse overrides this to the raw nanosecond <see cref="long"/> rather than a converted <see cref="DateTime"/>.</summary>
+    protected virtual object CatalogCursorKeyParam(long nanos) => TimeConversion.UnixNanoToDateTime(nanos);
+
+    public async Task<MetricCatalogPage> GetMetricCatalogPageAsync(MetricCatalogQuery query, CancellationToken cancellationToken = default)
+    {
+        if (query.Start >= query.End)
+            throw new ArgumentException("Start time must be before end time");
+
+        await using var conn = await OpenConnectionAsync(cancellationToken);
+
+        var size = Math.Clamp(query.Size, 1, 500);
+        var groupByName = string.Equals(query.GroupBy, "name", StringComparison.OrdinalIgnoreCase);
+
+        return groupByName
+            ? await GetMetricCatalogByNameAsync(conn, query, size, cancellationToken)
+            : await GetMetricCatalogByInstanceAsync(conn, query, size, cancellationToken);
+    }
+
+    /// <summary>Common WHERE fragment (name/service/type filters) shared by both catalog views, ANDed onto the caller's own tenant/seen-in-range predicate.</summary>
+    private (string Clause, DynamicParameters Parameters) BuildCatalogFilterClauses(MetricCatalogQuery query)
+    {
+        var parameters = new DynamicParameters();
+        var clauses = new List<string>();
+
+        if (!string.IsNullOrWhiteSpace(query.Q))
+        {
+            parameters.Add("nameSearch", $"%{EscapeLike(query.Q)}%");
+            clauses.Add(FreeTextPredicate("m.name", "@nameSearch"));
+        }
+        if (!string.IsNullOrWhiteSpace(query.Service))
+        {
+            parameters.Add("service", query.Service);
+            clauses.Add($"{ResourceServiceNameExpr()} = @service");
+        }
+        if (query.Type.HasValue)
+        {
+            parameters.Add("metricType", query.Type.Value.ToString());
+            clauses.Add("m.type = @metricType");
+        }
+
+        return (clauses.Count == 0 ? "" : " AND " + string.Join(" AND ", clauses), parameters);
+    }
+
+    private async Task<MetricCatalogPage> GetMetricCatalogByInstanceAsync(DbConnection conn, MetricCatalogQuery query, int size, CancellationToken cancellationToken)
+    {
+        var (filterClause, filterParams) = BuildCatalogFilterClauses(query);
+        var parameters = new DynamicParameters();
+        parameters.AddDynamicParams(filterParams);
+        var seenClause = SeenInRangeClause(query.Start, query.End, parameters);
+        parameters.Add("tenantId", TenantId);
+
+        var filterHashText = $"{query.Start:O}|{query.End:O}|{query.Q}|{query.Service}|{query.Type}|instance";
+        var filterHash = KeysetCursor.ComputeFilterHash(filterHashText);
+
+        var nav = (query.Nav ?? "first").ToLowerInvariant();
+        DecodedCursor? cursor = null;
+        if (nav is "next" or "prev")
+        {
+            cursor = KeysetCursor.Decode(query.Cursor);
+            if (cursor == null || !KeysetCursor.MatchesFilterHash(cursor, filterHashText))
+                throw new ArgumentException("Invalid or stale cursor.");
+        }
+
+        var baseWhere = $"r.tenant_id = @tenantId AND {seenClause}{filterClause}";
+
+        List<MetricRow> rows;
+        bool forward;
+        int requestedSize;
+        switch (nav)
+        {
+            case "next":
+                forward = true;
+                requestedSize = size;
+                var mergedNext = new DynamicParameters(parameters);
+                mergedNext.Add("cursorK", CatalogCursorKeyParam(cursor!.K));
+                mergedNext.Add("cursorId", cursor.Id);
+                rows = await FetchCatalogInstancePageAsync(conn, baseWhere,
+                    KeysetCursor.Predicate(CatalogTimeExpr("m.created_at"), "m.id", "cursorK", "cursorId", descending: true),
+                    mergedNext,
+                    requestedSize, descending: true, cancellationToken);
+                break;
+            case "prev":
+                forward = false;
+                requestedSize = size;
+                rows = await FetchCatalogInstancePageAsync(conn, baseWhere,
+                    KeysetCursor.Predicate(CatalogTimeExpr("m.created_at"), "m.id", "cursorK", "cursorId", descending: false),
+                    Merge(parameters, new { cursorK = CatalogCursorKeyParam(cursor!.K), cursorId = cursor.Id }),
+                    requestedSize, descending: false, cancellationToken);
+                break;
+            case "last":
+                forward = false;
+                var lastCount = await TryGetExactCatalogInstanceCountAsync(conn, baseWhere, parameters, cancellationToken);
+                requestedSize = lastCount.HasValue ? KeysetCursor.LastPageRowCount(lastCount.Value, size) : size;
+                rows = await FetchCatalogInstancePageAsync(conn, baseWhere, "", parameters, requestedSize, descending: false, cancellationToken);
+                break;
+            default:
+                forward = true;
+                requestedSize = size;
+                rows = await FetchCatalogInstancePageAsync(conn, baseWhere, "", parameters, requestedSize, descending: true, cancellationToken);
+                break;
+        }
+
+        var hasExtra = rows.Count > requestedSize;
+        if (hasExtra) rows.RemoveAt(rows.Count - 1);
+
+        List<MetricRow> displayRows;
+        string? nextCursor;
+        string? prevCursor;
+        if (forward)
+        {
+            displayRows = rows;
+            nextCursor = hasExtra ? EncodeInstance(displayRows[^1], filterHash) : null;
+            prevCursor = nav == "first" ? null : (displayRows.Count > 0 ? EncodeInstance(displayRows[0], filterHash) : null);
+        }
+        else
+        {
+            displayRows = [.. rows];
+            displayRows.Reverse();
+            if (nav == "last")
+            {
+                nextCursor = null;
+                prevCursor = !hasExtra || displayRows.Count == 0 ? null : EncodeInstance(displayRows[0], filterHash);
+            }
+            else
+            {
+                nextCursor = displayRows.Count > 0 ? EncodeInstance(displayRows[^1], filterHash) : null;
+                prevCursor = hasExtra && displayRows.Count > 0 ? EncodeInstance(displayRows[0], filterHash) : null;
+            }
+        }
+
+        var items = displayRows.Select(m => ToMetricInfo(m, ExtractServiceName(DeserializeAttributes(m.ResourceAttributesJson)))).ToList();
+
+        var (total, timedOut) = await TimedQuery.RunAsync(
+            async (timeoutSeconds, ct) => await conn.ExecuteScalarAsync<long>(new CommandDefinition(
+                $"SELECT COUNT(*) FROM metrics m JOIN resources r ON m.resource_id = r.id LEFT JOIN {MetricLastSeenSql} mls ON mls.metric_id = m.id WHERE {baseWhere}",
+                parameters, commandTimeout: timeoutSeconds, cancellationToken: ct)),
+            _summaryTimeoutSeconds, cancellationToken);
+
+        return new MetricCatalogPage
+        {
+            Items = items,
+            NextCursor = nextCursor,
+            PrevCursor = prevCursor,
+            Total = timedOut ? null : total,
+            TotalIsLowerBound = timedOut
+        };
+    }
+
+    private static string EncodeInstance(MetricRow row, string filterHash)
+        => KeysetCursor.Encode(TimeConversion.DateTimeToUnixNano(row.CreatedAt), row.Id, filterHash);
+
+    private async Task<List<MetricRow>> FetchCatalogInstancePageAsync(
+        DbConnection conn, string baseWhere, string cursorPredicate, object parameters, int size, bool descending, CancellationToken cancellationToken)
+    {
+        var where = string.IsNullOrEmpty(cursorPredicate) ? baseWhere : $"{baseWhere} AND {cursorPredicate}";
+        var order = descending ? "DESC" : "ASC";
+        var sql = $"""
+            SELECT m.id AS Id, m.name AS Name, m.description AS Description, m.unit AS Unit,
+                   m.type AS Type, m.created_at AS CreatedAt, r.attributes_json AS ResourceAttributesJson
+            FROM metrics m
+            JOIN resources r ON m.resource_id = r.id
+            LEFT JOIN {MetricLastSeenSql} mls ON mls.metric_id = m.id
+            WHERE {where}
+            ORDER BY m.created_at {order}, m.id {order}
+            {LiteralPagingClause(size + 1, 0)}{CatalogQuerySettingsClause}
+            """;
+        var rows = await conn.QueryAsync<MetricRow>(new CommandDefinition(sql, parameters, cancellationToken: cancellationToken));
+        return rows.ToList();
+    }
+
+    /// <summary>
+    /// Trailing SQL appended after the catalog's <c>ORDER BY ... LIMIT</c> clause. Empty on every
+    /// relational provider. ClickHouse overrides this to <c>SETTINGS optimize_read_in_order = 0</c>
+    /// as an extra safety margin alongside <see cref="LiteralPagingClause"/> (that override's doc
+    /// comment has the actual bug this catalog query hit and how it was root-caused) — disabling
+    /// this optimizer forces a correct full sort for the multi-way OR'd EXISTS/IN predicate
+    /// (decision 27's exact-seen-in-range fallback) that <c>LiteralPagingClause</c> alone already
+    /// fixes, at a cost that's negligible for a list capped at 500 rows per page.
+    /// </summary>
+    protected virtual string CatalogQuerySettingsClause => "";
+
+    private async Task<long?> TryGetExactCatalogInstanceCountAsync(DbConnection conn, string where, DynamicParameters parameters, CancellationToken cancellationToken)
+    {
+        var (result, timedOut) = await TimedQuery.RunAsync(
+            async (timeoutSeconds, ct) => await conn.ExecuteScalarAsync<long>(new CommandDefinition(
+                $"SELECT COUNT(*) FROM metrics m JOIN resources r ON m.resource_id = r.id LEFT JOIN {MetricLastSeenSql} mls ON mls.metric_id = m.id WHERE {where}",
+                parameters, commandTimeout: timeoutSeconds, cancellationToken: ct)),
+            _summaryTimeoutSeconds, cancellationToken);
+        return timedOut ? null : result;
+    }
+
+    /// <summary>
+    /// <c>groupBy=name</c> view (decision 28): one row per metric name, keyset on
+    /// <c>(MAX(created_at), name)</c>. The GROUP BY/paging query itself stays portable across all
+    /// five providers (plain COUNT/MAX/HAVING); a second, narrow follow-up query fetches the page's
+    /// own rows to compute the per-name type and distinct service list in C#, instead of a
+    /// per-provider ARRAY_AGG/GROUP_CONCAT/groupUniqArray dialect for what is at most `size` names.
+    /// </summary>
+    private async Task<MetricCatalogPage> GetMetricCatalogByNameAsync(DbConnection conn, MetricCatalogQuery query, int size, CancellationToken cancellationToken)
+    {
+        var (filterClause, filterParams) = BuildCatalogFilterClauses(query);
+        var parameters = new DynamicParameters();
+        parameters.AddDynamicParams(filterParams);
+        var seenClause = SeenInRangeClause(query.Start, query.End, parameters);
+        parameters.Add("tenantId", TenantId);
+
+        var filterHashText = $"{query.Start:O}|{query.End:O}|{query.Q}|{query.Service}|{query.Type}|name";
+        var filterHash = KeysetCursor.ComputeFilterHash(filterHashText);
+
+        var nav = (query.Nav ?? "first").ToLowerInvariant();
+        DecodedNameCursor? cursor = null;
+        if (nav is "next" or "prev")
+        {
+            cursor = NameKeysetCursor.Decode(query.Cursor);
+            if (cursor == null || !NameKeysetCursor.MatchesFilterHash(cursor, filterHashText))
+                throw new ArgumentException("Invalid or stale cursor.");
+        }
+
+        var baseWhere = $"r.tenant_id = @tenantId AND {seenClause}{filterClause}";
+
+        List<NameGroupRow> rows;
+        bool forward;
+        int requestedSize;
+        switch (nav)
+        {
+            case "next":
+                forward = true;
+                requestedSize = size;
+                rows = await FetchCatalogNameOfPageAsync(conn, baseWhere,
+                    NameKeysetCursor.Predicate(CatalogTimeExpr("MAX(m.created_at)"), "m.name", "cursorK", "cursorName", descending: true),
+                    Merge(parameters, new { cursorK = CatalogCursorKeyParam(cursor!.K), cursorName = cursor.Name }),
+                    requestedSize, descending: true, cancellationToken);
+                break;
+            case "prev":
+                forward = false;
+                requestedSize = size;
+                rows = await FetchCatalogNameOfPageAsync(conn, baseWhere,
+                    NameKeysetCursor.Predicate(CatalogTimeExpr("MAX(m.created_at)"), "m.name", "cursorK", "cursorName", descending: false),
+                    Merge(parameters, new { cursorK = CatalogCursorKeyParam(cursor!.K), cursorName = cursor.Name }),
+                    requestedSize, descending: false, cancellationToken);
+                break;
+            case "last":
+                forward = false;
+                var lastCount = await TryGetExactCatalogNameCountAsync(conn, baseWhere, parameters, cancellationToken);
+                requestedSize = lastCount.HasValue ? KeysetCursor.LastPageRowCount(lastCount.Value, size) : size;
+                rows = await FetchCatalogNameOfPageAsync(conn, baseWhere, "", parameters, requestedSize, descending: false, cancellationToken);
+                break;
+            default:
+                forward = true;
+                requestedSize = size;
+                rows = await FetchCatalogNameOfPageAsync(conn, baseWhere, "", parameters, requestedSize, descending: true, cancellationToken);
+                break;
+        }
+
+        var hasExtra = rows.Count > requestedSize;
+        if (hasExtra) rows.RemoveAt(rows.Count - 1);
+
+        List<NameGroupRow> displayRows;
+        string? nextCursor;
+        string? prevCursor;
+        if (forward)
+        {
+            displayRows = rows;
+            nextCursor = hasExtra ? EncodeName(displayRows[^1], filterHash) : null;
+            prevCursor = nav == "first" ? null : (displayRows.Count > 0 ? EncodeName(displayRows[0], filterHash) : null);
+        }
+        else
+        {
+            displayRows = [.. rows];
+            displayRows.Reverse();
+            if (nav == "last")
+            {
+                nextCursor = null;
+                prevCursor = !hasExtra || displayRows.Count == 0 ? null : EncodeName(displayRows[0], filterHash);
+            }
+            else
+            {
+                nextCursor = displayRows.Count > 0 ? EncodeName(displayRows[^1], filterHash) : null;
+                prevCursor = hasExtra && displayRows.Count > 0 ? EncodeName(displayRows[0], filterHash) : null;
+            }
+        }
+
+        // Second, narrow follow-up query: the page's own instances only, to derive per-name type
+        // (first-seen wins) and the distinct service list in C# — see this method's doc comment.
+        var names = displayRows.Select(r => r.Name).ToList();
+        var items = new List<UniqueMetricSummary>();
+        if (names.Count > 0)
+        {
+            var nameInParams = new DynamicParameters(parameters);
+            var namesList = string.Join(",", names.Select((_, i) => $"@nameFilter{i}"));
+            for (var i = 0; i < names.Count; i++) nameInParams.Add($"nameFilter{i}", names[i]);
+
+            var detailSql = $"""
+                SELECT m.name AS Name, m.description AS Description, m.unit AS Unit, m.type AS Type,
+                       m.created_at AS CreatedAt, r.attributes_json AS ResourceAttributesJson
+                FROM metrics m
+                JOIN resources r ON m.resource_id = r.id
+                LEFT JOIN {MetricLastSeenSql} mls ON mls.metric_id = m.id
+                WHERE {baseWhere} AND m.name IN ({namesList})
+                """;
+            var detailRows = (await conn.QueryAsync<MetricRow>(new CommandDefinition(detailSql, nameInParams, cancellationToken: cancellationToken))).ToList();
+
+            var byName = detailRows.GroupBy(r => r.Name).ToDictionary(g => g.Key, g => g.OrderBy(r => r.CreatedAt).ToList());
+            foreach (var row in displayRows)
+            {
+                var group = byName.GetValueOrDefault(row.Name) ?? new List<MetricRow>();
+                var services = group
+                    .Select(r => ExtractServiceName(DeserializeAttributes(r.ResourceAttributesJson)))
+                    .Where(s => !string.IsNullOrEmpty(s))
+                    .Distinct()
+                    .OrderBy(s => s)
+                    .Select(s => s!)
+                    .ToList();
+                items.Add(new UniqueMetricSummary
+                {
+                    Name = row.Name,
+                    Type = group.Count > 0 ? Enum.Parse<MetricType>(group[0].Type) : MetricType.GAUGE,
+                    Unit = group.Count > 0 ? group[0].Unit : null,
+                    Description = group.Count > 0 ? group[0].Description : null,
+                    InstanceCount = row.InstanceCount,
+                    Services = services,
+                    LastSeen = row.NewestCreatedAt
+                });
+            }
+        }
+
+        var (total, timedOut) = await TimedQuery.RunAsync(
+            async (timeoutSeconds, ct) => await conn.ExecuteScalarAsync<long>(new CommandDefinition(
+                $"""
+                SELECT COUNT(*) FROM (
+                    SELECT m.name
+                    FROM metrics m
+                    JOIN resources r ON m.resource_id = r.id
+                    LEFT JOIN {MetricLastSeenSql} mls ON mls.metric_id = m.id
+                    WHERE {baseWhere}
+                    GROUP BY m.name
+                ) named
+                """,
+                parameters, commandTimeout: timeoutSeconds, cancellationToken: ct)),
+            _summaryTimeoutSeconds, cancellationToken);
+
+        return new MetricCatalogPage
+        {
+            Names = items,
+            NextCursor = nextCursor,
+            PrevCursor = prevCursor,
+            Total = timedOut ? null : total,
+            TotalIsLowerBound = timedOut
+        };
+    }
+
+    private static string EncodeName(NameGroupRow row, string filterHash)
+        => NameKeysetCursor.Encode(TimeConversion.DateTimeToUnixNano(row.NewestCreatedAt), row.Name, filterHash);
+
+    private async Task<List<NameGroupRow>> FetchCatalogNameOfPageAsync(
+        DbConnection conn, string baseWhere, string cursorPredicate, object parameters, int size, bool descending, CancellationToken cancellationToken)
+    {
+        var having = string.IsNullOrEmpty(cursorPredicate) ? "" : $"HAVING {cursorPredicate}";
+        var order = descending ? "DESC" : "ASC";
+        var sql = $"""
+            SELECT m.name AS Name, MAX(m.created_at) AS NewestCreatedAt, COUNT(*) AS InstanceCount
+            FROM metrics m
+            JOIN resources r ON m.resource_id = r.id
+            LEFT JOIN {MetricLastSeenSql} mls ON mls.metric_id = m.id
+            WHERE {baseWhere}
+            GROUP BY m.name
+            {having}
+            ORDER BY MAX(m.created_at) {order}, m.name {order}
+            {LiteralPagingClause(size + 1, 0)}{CatalogQuerySettingsClause}
+            """;
+        var rows = await conn.QueryAsync<NameGroupRow>(new CommandDefinition(sql, parameters, cancellationToken: cancellationToken));
+        return rows.ToList();
+    }
+
+    /// <summary>
+    /// <c>LIMIT n OFFSET m</c> with the values inlined as literals rather than bound parameters —
+    /// safe because both are C#-computed page-size integers, never user input. Used only by the
+    /// two catalog page fetches above, in place of the shared <see cref="PagingClause"/> (which
+    /// stays parameterized for every other query in this file and the rest of the codebase). Real
+    /// bug found via the Phase 5 integration tests: on ClickHouse specifically, binding `@limit`/
+    /// `@offset` as parameters alongside this query's other bound parameters (the multi-way OR'd
+    /// EXISTS/IN predicate's own parameters) intermittently returned FEWER rows than a literal
+    /// LIMIT of the same value — a plain re-query with a larger LIMIT, or the same query paged via
+    /// keyset `next`, found the missing rows, so this was never a genuine data-visibility race
+    /// (confirmed by re-running the small-LIMIT query after a 500ms delay with no change) but some
+    /// interaction between ClickHouse.Client's parameter binding and this query's shape. Inlining
+    /// sidesteps it entirely rather than chasing the exact mechanism.
+    /// </summary>
+    protected virtual string LiteralPagingClause(int limit, int offset) => $"LIMIT {limit} OFFSET {offset}";
+
+    private async Task<long?> TryGetExactCatalogNameCountAsync(DbConnection conn, string where, DynamicParameters parameters, CancellationToken cancellationToken)
+    {
+        var (result, timedOut) = await TimedQuery.RunAsync(
+            async (timeoutSeconds, ct) => await conn.ExecuteScalarAsync<long>(new CommandDefinition(
+                $"""
+                SELECT COUNT(*) FROM (
+                    SELECT m.name
+                    FROM metrics m
+                    JOIN resources r ON m.resource_id = r.id
+                    LEFT JOIN {MetricLastSeenSql} mls ON mls.metric_id = m.id
+                    WHERE {where}
+                    GROUP BY m.name
+                ) named
+                """,
+                parameters, commandTimeout: timeoutSeconds, cancellationToken: ct)),
+            _summaryTimeoutSeconds, cancellationToken);
+        return timedOut ? null : result;
+    }
+
+    private sealed class NameGroupRow
+    {
+        public string Name { get; set; } = null!;
+        public DateTime NewestCreatedAt { get; set; }
+        public int InstanceCount { get; set; }
     }
 
     // =========================================================================
@@ -1605,29 +2083,6 @@ public abstract class MetricReadRepositoryBase : DapperReadRepository, IMetricRe
     // =========================================================================
     // HELPERS
     // =========================================================================
-
-    private async Task<HashSet<long>?> GetMetricIdsWithDataInRangeAsync(DbConnection conn, DateTime? startTime, DateTime? endTime, CancellationToken ct)
-    {
-        if (!startTime.HasValue && !endTime.HasValue)
-            return null;
-
-        var (timeClause, tp) = TimeRange(startTime, endTime);
-        var ids = new HashSet<long>();
-
-        foreach (var table in new[] { "gauge_data_points", "sum_data_points", "histogram_data_points", "exponential_histogram_data_points", "summary_data_points" })
-        {
-            var tableIds = await conn.QueryAsync<long>(new CommandDefinition($"""
-                SELECT DISTINCT dp.metric_id
-                FROM {table} dp
-                JOIN metrics m   ON dp.metric_id = m.id
-                JOIN resources r ON m.resource_id = r.id
-                WHERE r.tenant_id = @tenantId{timeClause}
-                """, Merge(new { tenantId = TenantId }, tp), cancellationToken: ct));
-            foreach (var id in tableIds) ids.Add(id);
-        }
-
-        return ids;
-    }
 
     private static (string clause, object extraParams) TimeRange(DateTime? startTime, DateTime? endTime)
     {

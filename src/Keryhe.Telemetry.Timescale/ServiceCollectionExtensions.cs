@@ -23,6 +23,9 @@ public static class TimescaleServiceCollectionExtensions
         // provider-agnostic and registered once, in AddKeryheTelemetryCollector.
         services.AddScoped<IApiKeyLookup, TenantResolver>();
         services.AddScoped<IApiKeyTouchStore, TimescaleApiKeyTouchStore>();
+        // metric_last_seen maintenance (list-pages-server-side plan, Phase 5). MetricTouchWorker
+        // is provider-agnostic and registered once, in AddKeryheTelemetryCollector.
+        services.AddScoped<IMetricTouchStore, TimescaleMetricTouchStore>();
         return services;
     }
 

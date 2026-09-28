@@ -39,6 +39,23 @@
 
 .chart-container { min-height: 1px; }
 
+.chart-style-tiles {
+  margin-bottom: 12px;
+
+  ::ng-deep .mat-button-toggle-button { height: auto; }
+
+  ::ng-deep .mat-button-toggle-label-content {
+    display: flex;
+    flex-direction: row;
+    align-items: center;
+    gap: 6px;
+    line-height: 1.15;
+    padding: 4px 14px;
+  }
+
+  mat-icon { margin: 0; }
+}
+
 .sub-chart-title {
   font-size: 13px;
   font-weight: 600;

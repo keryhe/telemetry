@@ -177,6 +177,40 @@ public class ClickHouseMetricReadRepository(IConfiguration configuration, ITenan
     // the base implementation (not the standard-tier newest-500 scan) is what every analytics
     // provider uses, and for the documented simplification versus the plan's literal
     // per-exemplar-ordinal SQL unnesting.
+
+    // Load-bearing for the metrics catalog's service filter (list-pages-server-side plan, Phase
+    // 5): ClickHouseTraceReadRepository/ClickHouseLogReadRepository already override this for the
+    // same reason; MetricReadRepositoryBase's catalog query calls it polymorphically too.
+    protected override string ResourceServiceNameExpr(string resourceAlias = "r") => $"JSONExtractString(coalesce({resourceAlias}.attributes_json, ''), 'service.name')";
+
+    // Decision 27: metric_last_seen is an AggregatingMergeTree holding partial maxState(...)
+    // states on this provider (fed by materialized views, not MetricTouchWorker — see
+    // ClickHouseMetricTouchStore's doc comment), so every read must collapse it with maxMerge
+    // first. The relational default reads the table directly.
+    protected override string MetricLastSeenSql => "(SELECT metric_id, maxMerge(last_seen_state) AS last_seen_unix_nano FROM metric_last_seen GROUP BY metric_id)";
+
+    // Real bug found via the new Phase 5 integration tests: the base class's exact-EXISTS fallback
+    // (decision 27, end more than 1 hour in the past) correlates the subquery to the outer row via
+    // "dp.metric_id = m.id", which ClickHouse rejects ("Resolve identifier 'm.id' from parent scope
+    // only supported for constants and CTE") — the same correlated-subquery limitation
+    // SpanLevelMatchPredicate's own ClickHouse override already documents. Use an uncorrelated
+    // membership test instead, same shape as that override.
+    protected override string ExactSeenInRangePredicate(string metricsAlias)
+    {
+        var inClauses = TelemetryIngestionHelpers.TimePrunedMetricTables.Select(t =>
+            $"{metricsAlias}.id IN (SELECT metric_id FROM {t} WHERE time_unix_nano >= @seenStartNano AND time_unix_nano <= @seenEndNano)");
+        return "(" + string.Join(" OR ", inClauses) + ")";
+    }
+
+    // Real bug found via the Phase 5 integration tests — see CatalogQuerySettingsClause's own doc
+    // comment on MetricReadRepositoryBase for the full symptom and why this is the fix.
+    protected override string CatalogQuerySettingsClause => " SETTINGS optimize_read_in_order = 0";
+
+    // The actual root cause of the Phase 5 "next page comes back empty" bug — see
+    // CatalogTimeExpr's own doc comment on MetricReadRepositoryBase for the full story
+    // (ClickHouse.Client's DateTime parameter binding losing DateTime64(9) precision).
+    protected override string CatalogTimeExpr(string timeExpr) => $"toUnixTimestamp64Nano({timeExpr})";
+    protected override object CatalogCursorKeyParam(long nanos) => nanos;
 }
 
 public class ClickHouseLogReadRepository(IConfiguration configuration, ITenantContext tenantContext)

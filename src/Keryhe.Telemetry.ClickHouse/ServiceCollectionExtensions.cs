@@ -24,6 +24,11 @@ public static class ClickHouseServiceCollectionExtensions
         // ClickHouseApiKeyTouchStore is a deliberate no-op — see that type.
         services.AddScoped<IApiKeyLookup, TenantResolver>();
         services.AddScoped<IApiKeyTouchStore, ClickHouseApiKeyTouchStore>();
+        // metric_last_seen maintenance (list-pages-server-side plan, Phase 5): a deliberate no-op
+        // here (materialized views feed the table instead) — see ClickHouseMetricTouchStore's own
+        // doc comment. MetricTouchWorker is still registered unconditionally in
+        // AddKeryheTelemetryCollector; it will just drain to nothing on this provider.
+        services.AddScoped<IMetricTouchStore, ClickHouseMetricTouchStore>();
         return services;
     }
 

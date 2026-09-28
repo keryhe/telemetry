@@ -323,6 +323,17 @@ CREATE INDEX idx_summary_metric_time ON summary_data_points (metric_id, time_uni
 CREATE INDEX idx_summary_time        ON summary_data_points (time_unix_nano DESC);
 GO
 
+-- metric_last_seen (schema 2.13.2, list-pages-server-side plan Phase 5, decision 27): not a
+-- column on metrics -- see PostgreSQL-Schema.sql's identical table for the full rationale (no
+-- FK, so ingestion's metrics MERGE and this table's touch worker can never deadlock against
+-- each other).
+CREATE TABLE metric_last_seen (
+    metric_id           BIGINT NOT NULL PRIMARY KEY,
+    last_seen_unix_nano BIGINT NOT NULL
+);
+CREATE INDEX idx_metric_last_seen_last_seen ON metric_last_seen (last_seen_unix_nano);
+GO
+
 -- =============================================================================
 -- LOGS TABLES
 -- =============================================================================
@@ -728,7 +739,7 @@ GO
 -- Only reached when every statement above succeeded, so a partial apply cannot
 -- leave a false version marker for the apply-schema.sh gate.
 MERGE schema_version AS target
-USING (VALUES (N'2.13.1')) AS src (version)
+USING (VALUES (N'2.13.2')) AS src (version)
 ON target.version = src.version
 WHEN MATCHED     THEN UPDATE SET applied_at = SYSDATETIME()
 WHEN NOT MATCHED THEN INSERT (version, applied_at) VALUES (src.version, SYSDATETIME());

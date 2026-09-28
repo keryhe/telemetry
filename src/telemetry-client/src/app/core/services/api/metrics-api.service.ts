@@ -3,6 +3,8 @@ import { HttpClient, HttpParams } from '@angular/common/http';
 import { Observable } from 'rxjs';
 import { APP_CONFIG } from '../../config/app-config';
 import {
+  MetricCatalogPage,
+  MetricCatalogQueryParams,
   MetricExemplarPage,
   MetricExemplarQueryParams,
   MetricInfo,
@@ -16,14 +18,22 @@ export class MetricsApiService {
   private readonly http = inject(HttpClient);
   private readonly base = `${inject(APP_CONFIG).apiUrl}/metrics`;
 
-  getAllMetrics(start?: Date, end?: Date, limit = 500): Observable<MetricInfo[]> {
-    let params = new HttpParams().set('limit', limit);
-    if (start) params = params.set('start', start.toISOString());
-    if (end) params = params.set('end', end.toISOString());
-    return this.http.get<MetricInfo[]>(this.base, { params });
+  /** Server-paged metrics catalog (Phase 5): replaces the former unbounded getAllMetrics call. */
+  getCatalog(p: MetricCatalogQueryParams): Observable<MetricCatalogPage> {
+    let params = new HttpParams()
+      .set('start', p.start.toISOString())
+      .set('end', p.end.toISOString())
+      .set('groupBy', p.groupBy);
+    if (p.q) params = params.set('q', p.q);
+    if (p.service) params = params.set('service', p.service);
+    if (p.type != null) params = params.set('type', p.type);
+    if (p.size != null) params = params.set('size', p.size);
+    if (p.cursor) params = params.set('cursor', p.cursor);
+    if (p.nav) params = params.set('nav', p.nav);
+    return this.http.get<MetricCatalogPage>(`${this.base}/catalog`, { params });
   }
 
-  /** True unique-metric-name-per-type counts over the full range, unaffected by getAllMetrics' limit. */
+  /** True unique-metric-name-per-type counts over the full range, unaffected by the catalog's page size. */
   getMetricsSummary(start?: Date, end?: Date): Observable<MetricsSummary> {
     let params = new HttpParams();
     if (start) params = params.set('start', start.toISOString());

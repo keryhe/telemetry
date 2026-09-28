@@ -21,6 +21,9 @@ public static class SqlServerServiceCollectionExtensions
         // provider-agnostic and registered once, in AddKeryheTelemetryCollector.
         services.AddScoped<IApiKeyLookup, TenantResolver>();
         services.AddScoped<IApiKeyTouchStore, SqlServerApiKeyTouchStore>();
+        // metric_last_seen maintenance (list-pages-server-side plan, Phase 5). MetricTouchWorker
+        // is provider-agnostic and registered once, in AddKeryheTelemetryCollector.
+        services.AddScoped<IMetricTouchStore, SqlServerMetricTouchStore>();
         return services;
     }
 

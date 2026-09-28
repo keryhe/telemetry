@@ -136,6 +136,7 @@ public class SqlServerMetricReadRepository(IConfiguration configuration, ITenant
 
     // SqlServer dialect: paging uses OFFSET/FETCH, not LIMIT/OFFSET.
     protected override string PagingClause => "OFFSET @offset ROWS FETCH NEXT @limit ROWS ONLY";
+    protected override string LiteralPagingClause(int limit, int offset) => $"OFFSET {offset} ROWS FETCH NEXT {limit} ROWS ONLY";
 
     // Load-bearing for the metric label-filter fix (list-pages-server-side plan, Phase 1):
     // MetricReadRepositoryBase's data-point getters call AttributePredicate/AttributeKeyParamValue
@@ -143,6 +144,15 @@ public class SqlServerMetricReadRepository(IConfiguration configuration, ITenant
     protected override object AttributeKeyParamValue(string key) => SqlServerJsonAttributeHooks.KeyParamValue(key);
     protected override string AttributePredicate(string column, string keyParam, string valueParam, bool negated)
         => SqlServerJsonAttributeHooks.Predicate(column, keyParam, valueParam, negated);
+
+    // Load-bearing for the metrics catalog's service/name filters (list-pages-server-side plan,
+    // Phase 5): SqlServerTraceReadRepository/SqlServerLogReadRepository already override these for
+    // the same reason (see DapperReadRepository's own doc comments); MetricReadRepositoryBase's
+    // catalog query calls them polymorphically too, so this class needs its own override.
+    protected override string ResourceServiceNameExpr(string resourceAlias = "r") => $"JSON_VALUE({resourceAlias}.attributes_json, '$.\"service.name\"')";
+    protected override string LikeOperator => "LIKE";
+    protected override string EscapeLike(string value)
+        => value.Replace("[", "[[]").Replace("%", "[%]").Replace("_", "[_]");
 
     // Standard tier (decision 26): newest-500, no cursor — not the analytics-tier keyset default.
     public override Task<Keryhe.Telemetry.Core.Models.MetricExemplarPage?> GetMetricExemplarsAsync(
