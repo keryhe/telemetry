@@ -21,21 +21,11 @@ public class TestInfrastructureTests
         [ProviderNames.ClickHouse]
     ];
 
-    private static ProviderContainer Create(string provider) => provider switch
-    {
-        ProviderNames.PostgreSql => new PostgreSqlProviderContainer(),
-        ProviderNames.Timescale => new TimescaleProviderContainer(),
-        ProviderNames.SqlServer => new SqlServerProviderContainer(),
-        ProviderNames.MySql => new MySqlProviderContainer(),
-        ProviderNames.ClickHouse => new ClickHouseProviderContainer(),
-        _ => throw new ArgumentOutOfRangeException(nameof(provider))
-    };
-
     [Theory]
     [MemberData(nameof(Providers))]
     public async Task Diagnostics_limits_and_multi_tenant_seeding_work(string provider)
     {
-        await using var container = Create(provider);
+        await using var container = ProviderContainerFactory.Create(provider);
         var options = new ContainerOptions(Diagnostics: true, CpuLimit: 4, MemoryLimitBytes: 8 * ContainerOptions.Gigabyte);
 
         // Throws if any diagnostic setting did not take effect.

@@ -9,6 +9,12 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <!-- Out-of-process metrics: the same EventPipe mechanism dotnet-counters uses -->
+    <PackageReference Include="Microsoft.Diagnostics.NETCore.Client" Version="0.2.661903" />
+    <PackageReference Include="Microsoft.Diagnostics.Tracing.TraceEvent" Version="3.1.21" />
+  </ItemGroup>
+
+  <ItemGroup>
     <!-- The OTLP client stubs (Grpc.Net.Client arrives transitively via Grpc.AspNetCore) -->
     <ProjectReference Include="../../src/Keryhe.Telemetry.Collector/Keryhe.Telemetry.Collector.csproj" />
     <ProjectReference Include="../Keryhe.Telemetry.TestInfrastructure/Keryhe.Telemetry.TestInfrastructure.csproj" />

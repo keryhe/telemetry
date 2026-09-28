@@ -433,3 +433,4 @@ FodyWeavers.xsd
 # loader has a real directory to construct a PhysicalFileProvider from (see
 # plans/ui-packaging-runtime-config.md).
 src/Keryhe.Telemetry.Ui/wwwroot/
+stress-results/

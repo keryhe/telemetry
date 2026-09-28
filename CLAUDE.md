@@ -62,7 +62,9 @@ live in `tests/Keryhe.Telemetry.TestInfrastructure` (one `ProviderContainer` per
 (see `plans/stress-tests.md`); it also offers opt-in per-provider diagnostics and CPU/memory
 limits via `ContainerOptions`, which the integration fixtures leave off. The OTLP load tool
 (`tests/Keryhe.Telemetry.StressTests/Load`, driven by `dotnet run --project tests/Keryhe.Telemetry.StressTests -- load ...`
-until the full stress CLI lands) reuses the Collector's generated gRPC stubs, which is why the three
+until the full stress CLI lands; `-- host-smoke --provider <p> --topology allinone|split` runs the host
+orchestration end to end: publish, launch as child processes, EventPipe metrics, log scan, graceful
+shutdown; output goes to the gitignored `stress-results/`) reuses the Collector's generated gRPC stubs, which is why the three
 `*_service.proto` entries in the Collector csproj are `GrpcServices="Both"`:
 
 ```bash

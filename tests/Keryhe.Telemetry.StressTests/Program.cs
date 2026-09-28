@@ -7,9 +7,12 @@ using Keryhe.Telemetry.StressTests.Load;
 //   load --target http://localhost:5117 --tenant <id>:<apiKey> [--tenant ...]
 //        [--api http://localhost:5188] [--profile file.json] [--duration 60] [--marker-interval 5] [--out result.json]
 
+if (args.Length > 0 && args[0] == "host-smoke")
+    return await Keryhe.Telemetry.StressTests.Orchestration.HostSmokeCommand.RunAsync(args[1..]);
+
 if (args.Length == 0 || args[0] != "load")
 {
-    Console.Error.WriteLine("usage: load --target <grpc url> --tenant <id>:<apiKey> [--tenant ...] [--api <url>] [--profile <file>] [--duration <s>] [--marker-interval <s>] [--out <file>]");
+    Console.Error.WriteLine("usage: host-smoke [--provider <p>] [--topology allinone|split] [--duration <s>] [--retention-interval <s>] [--out <dir>]\n       load --target <grpc url> --tenant <id>:<apiKey> [--tenant ...] [--api <url>] [--profile <file>] [--duration <s>] [--marker-interval <s>] [--out <file>]");
     return 2;
 }
 
