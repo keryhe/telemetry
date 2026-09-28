@@ -26,6 +26,7 @@
   </ItemGroup>
 
   <ItemGroup>
+    <ProjectReference Include="../Keryhe.Telemetry.StressTests/Keryhe.Telemetry.StressTests.csproj" />
     <ProjectReference Include="../Keryhe.Telemetry.TestInfrastructure/Keryhe.Telemetry.TestInfrastructure.csproj" />
     <ProjectReference Include="../../src/Keryhe.Telemetry.Core/Keryhe.Telemetry.Core.csproj" />
     <ProjectReference Include="../../src/Keryhe.Telemetry.Collector/Keryhe.Telemetry.Collector.csproj" />

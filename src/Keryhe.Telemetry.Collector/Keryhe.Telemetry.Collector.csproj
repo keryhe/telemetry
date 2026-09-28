@@ -27,16 +27,16 @@
   </ItemGroup>
 
   <ItemGroup>
-        <Protobuf Include="opentelemetry\proto\collector\logs\v1\logs_service.proto" GrpcServices="Server">
+        <Protobuf Include="opentelemetry\proto\collector\logs\v1\logs_service.proto" GrpcServices="Both">
             <Generator>MSBuild:Compile</Generator>
         </Protobuf>
-        <Protobuf Include="opentelemetry\proto\collector\metrics\v1\metrics_service.proto" GrpcServices="Server">
+        <Protobuf Include="opentelemetry\proto\collector\metrics\v1\metrics_service.proto" GrpcServices="Both">
             <Generator>MSBuild:Compile</Generator>
         </Protobuf>
         <Protobuf Include="opentelemetry\proto\collector\profiles\v1development\profiles_service.proto" GrpcServices="Server">
             <Generator>MSBuild:Compile</Generator>
         </Protobuf>
-        <Protobuf Include="opentelemetry\proto\collector\trace\v1\trace_service.proto" GrpcServices="Server">
+        <Protobuf Include="opentelemetry\proto\collector\trace\v1\trace_service.proto" GrpcServices="Both">
             <Generator>MSBuild:Compile</Generator>
         </Protobuf>
         <Protobuf Include="opentelemetry\proto\common\v1\common.proto" GrpcServices="Server">

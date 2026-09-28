@@ -1,0 +1,179 @@
+using Keryhe.Telemetry.StressTests.Load;
+using OpenTelemetry.Proto.Collector.Logs.V1;
+using Xunit;
+
+namespace Keryhe.Telemetry.IntegrationTests.Tests;
+
+/// <summary>The OTLP load tool's own logic (stress-test plan, Phase 2): shaping, ledger, scheduler. Needs no server or database.</summary>
+public class OtlpLoadToolTests
+{
+    private static readonly LoadTenant[] Tenants =
+        [new(1, "a", "key-a"), new(2, "b", "key-b")];
+
+    private static LoadProfile Shaped() => new()
+    {
+        Seed = 42,
+        TenantWeights = [3, 1],
+        Transport = new TransportLoad { RecordsPerExport = 200 },
+        Time = new TimeShaping { LateArrivalFraction = 0.2, BackdatedFraction = 0.1, OrphanFraction = 0.3, RedeliveryFraction = 0.5 }
+    };
+
+    private static (TraceShaper T, LogShaper L, MetricShaper M) Shapers(LoadProfile p)
+    {
+        var topology = new Topology(Tenants, p);
+        return (new TraceShaper(p, topology, new Random(1)), new LogShaper(p, topology, new Random(2)), new MetricShaper(p, topology, new Random(3)));
+    }
+
+    [Fact]
+    public void Ledger_entries_match_the_records_actually_in_each_request()
+    {
+        var (traces, logs, metrics) = Shapers(Shaped());
+        for (var i = 0; i < 20; i++)
+        {
+            var t = traces.Next();
+            Assert.Equal(t.Request.ResourceSpans.Sum(r => r.ScopeSpans.Sum(s => s.Spans.Count)), t.Entries.Sum(e => e.Rows));
+            Assert.Equal(t.Records, t.Entries.Sum(e => e.Rows));
+
+            var l = logs.Next();
+            Assert.Equal(l.Request.ResourceLogs.Sum(r => r.ScopeLogs.Sum(s => s.LogRecords.Count)), l.Entries.Sum(e => e.Rows));
+
+            var m = metrics.Next();
+            var points = m.Request.ResourceMetrics.SelectMany(r => r.ScopeMetrics).SelectMany(s => s.Metrics).Sum(x =>
+                x.Gauge?.DataPoints.Count ?? x.Sum?.DataPoints.Count ?? x.Histogram?.DataPoints.Count
+                ?? x.ExponentialHistogram?.DataPoints.Count ?? x.Summary?.DataPoints.Count ?? 0);
+            Assert.Equal(points, m.Entries.Sum(e => e.Rows));
+        }
+    }
+
+    [Fact]
+    public void Metric_points_are_attributed_to_the_table_of_their_type()
+    {
+        var (_, _, metrics) = Shapers(new LoadProfile { Transport = new TransportLoad { RecordsPerExport = 500 } });
+        var tables = metrics.Next().Entries.Select(e => e.Table).ToHashSet();
+        Assert.Contains("gauge_data_points", tables);
+        Assert.Contains("histogram_data_points", tables);
+        Assert.Contains("summary_data_points", tables);
+    }
+
+    [Fact]
+    public void Same_seed_gives_the_same_shape()
+    {
+        static List<(int Tenant, int Records)> Shape(int seed)
+        {
+            var p = Shaped(); p.Seed = seed;
+            var (traces, logs, _) = Shapers(p);
+            return Enumerable.Range(0, 10).Select(_ => traces.Next()).Select(x => (x.TenantIndex, x.Records))
+                .Concat(Enumerable.Range(0, 10).Select(_ => logs.Next()).Select(x => (x.TenantIndex, x.Records))).ToList();
+        }
+        Assert.Equal(Shape(5), Shape(5));
+    }
+
+    [Fact]
+    public void Full_orphan_fraction_never_sends_a_root_span()
+    {
+        var p = new LoadProfile { Time = new TimeShaping { OrphanFraction = 1 }, Traces = new TraceLoad { SpansPerTrace = new IntRange(4, 8) } };
+        var (traces, _, _) = Shapers(p);
+        var spans = Enumerable.Range(0, 10).SelectMany(_ => traces.Next().Request.ResourceSpans)
+            .SelectMany(r => r.ScopeSpans).SelectMany(s => s.Spans).ToList();
+        Assert.All(spans, s => Assert.False(s.ParentSpanId.IsEmpty));
+    }
+
+    [Fact]
+    public void Backdated_records_are_past_every_retention_window()
+    {
+        var p = new LoadProfile { Time = new TimeShaping { BackdatedFraction = 1 } };
+        var (_, logs, _) = Shapers(p);
+        var payload = logs.Next();
+        Assert.All(payload.Entries, e => Assert.Equal(RecordAge.Backdated, e.Age));
+        var cutoff = TimeStamps.NowNanos() - 190L * 86_400_000_000_000L;
+        Assert.All(payload.Request.ResourceLogs.SelectMany(r => r.ScopeLogs).SelectMany(s => s.LogRecords),
+            r => Assert.True((long)r.TimeUnixNano < cutoff));
+    }
+
+    [Fact]
+    public void Tenant_weights_skew_traffic()
+    {
+        var p = Shaped();
+        var topology = new Topology(Tenants, p);
+        var rng = new Random(9);
+        var picks = Enumerable.Range(0, 4000).Select(_ => topology.PickTenant(rng)).ToList();
+        var first = picks.Count(x => x == 0) / 4000.0;
+        Assert.InRange(first, 0.70, 0.80);
+    }
+
+    [Fact]
+    public void Ledger_separates_accepted_duplicates_rejected_and_failed()
+    {
+        var ledger = new SentLedger();
+        var span = new LedgerEntry("spans", RecordAge.Current, 10, false, true);
+        var log = new LedgerEntry("log_records", RecordAge.Current, 5, false, false);
+        ledger.RecordAccepted(1, [span, log]);
+        ledger.RecordAccepted(1, [span with { Redelivery = true }, log with { Redelivery = true }]);
+        ledger.RecordRejected(1, [log]);
+        ledger.RecordFailed(2, [span]);
+
+        var cells = ledger.Snapshot();
+        var spans1 = cells.Single(c => c.TenantId == 1 && c.Table == "spans");
+        Assert.Equal((10, 10, 0, 10), (spans1.Rows, spans1.DuplicateRowsCollapsed, spans1.DuplicateRowsPersisted, spans1.ExpectedRows));
+        var logs1 = cells.Single(c => c.TenantId == 1 && c.Table == "log_records");
+        Assert.Equal((5, 0, 5, 10, 5), (logs1.Rows, logs1.DuplicateRowsCollapsed, logs1.DuplicateRowsPersisted, logs1.ExpectedRows, logs1.RowsRejected));
+        Assert.Equal(10, cells.Single(c => c.TenantId == 2).RowsFailed);
+    }
+
+    [Fact]
+    public async Task Rate_controller_is_open_loop_and_follows_rate_changes()
+    {
+        // Changed mid-run, as the ramp does: 200/s for a second, then 50/s for a second.
+        var controller = new RateController(200);
+        var count = 0;
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(2));
+        var run = controller.RunAsync((_, _) => Interlocked.Increment(ref count), cts.Token);
+
+        await Task.Delay(1000);
+        var firstSecond = Volatile.Read(ref count);
+        controller.Rate = 50;
+        await run;
+        var secondSecond = count - firstSecond;
+
+        Assert.InRange(firstSecond, 170, 230);
+        Assert.InRange(secondSecond, 35, 65);
+    }
+
+    [Fact]
+    public async Task Rate_controller_fires_on_schedule_even_when_the_callback_is_slow()
+    {
+        // The callback blocks 20ms per tick against a 10ms schedule; a closed-loop sender would manage
+        // ~50/s. Open-loop still fires the scheduled count -- it just reports each tick's lateness.
+        var controller = new RateController(100);
+        var count = 0;
+        var maxLag = TimeSpan.Zero;
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(1));
+        await controller.RunAsync((_, lag) => { Interlocked.Increment(ref count); if (lag > maxLag) maxLag = lag; Thread.Sleep(20); }, cts.Token);
+        Assert.True(count + controller.SkippedTicks >= 90, $"fired {count}, skipped {controller.SkippedTicks}");
+        Assert.True(maxLag > TimeSpan.FromMilliseconds(50));
+    }
+
+    [Fact]
+    public void Latency_histogram_percentiles_bracket_the_data()
+    {
+        var h = new LatencyHistogram();
+        for (var i = 1; i <= 1000; i++) h.Record(i);
+        var s = h.Summarize();
+        Assert.Equal(1000, s.Count);
+        Assert.InRange(s.P50Ms, 500, 530);
+        Assert.InRange(s.P99Ms, 990, 1000);
+        Assert.Equal(1000, s.MaxMs);
+    }
+
+    [Fact]
+    public void Profile_json_overrides_only_what_it_names()
+    {
+        var path = Path.GetTempFileName();
+        File.WriteAllText(path, """{ "seed": 9, "traces": { "spansPerSecond": 123 }, "time": { "orphanFraction": 0.5 } }""");
+        var p = LoadProfile.Load(path);
+        Assert.Equal(9, p.Seed);
+        Assert.Equal(123, p.Traces.SpansPerSecond);
+        Assert.Equal(0.5, p.Time.OrphanFraction);
+        Assert.Equal(500, p.Logs.RecordsPerSecond);
+    }
+}
