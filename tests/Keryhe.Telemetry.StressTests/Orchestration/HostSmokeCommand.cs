@@ -1,4 +1,6 @@
+using System.Text.Json;
 using Keryhe.Telemetry.StressTests.Load;
+using Keryhe.Telemetry.StressTests.Observers.Database;
 using Keryhe.Telemetry.TestInfrastructure.Containers;
 using Keryhe.Telemetry.TestInfrastructure.Seeding;
 
@@ -47,6 +49,7 @@ public static class HostSmokeCommand
         await using var db = ProviderContainerFactory.Create(provider);
         await db.StartAsync(new ContainerOptions(Diagnostics: true, CpuLimit: 4, MemoryLimitBytes: 8 * ContainerOptions.Gigabyte));
         var tenants = await TenantSeeder.SeedAsync(db, 2);
+        await using var observers = await DatabaseObserverSession.StartAsync(provider, db);
 
         Console.WriteLine($"Launching {topology}...");
         await using var hosts = await HostLauncher.LaunchAsync(published,
@@ -84,7 +87,30 @@ public static class HostSmokeCommand
         foreach (var r in shutdowns)
             Console.WriteLine($"{r.Role} shutdown: exit {r.ExitCode}, {r.Elapsed.TotalSeconds:F1}s, killed {r.Killed}, drain completed {r.DrainCompleted}, " +
                               $"unpersisted {r.Unpersisted}, records_dropped {r.RecordsDropped}");
+
+        var observation = await observers.StopAsync();
+        PrintObservation(observation);
+        foreach (var (name, content) in observation.Locks.Artifacts)
+            await File.WriteAllTextAsync(Path.Combine(outDir, name), content);
+        await File.WriteAllTextAsync(Path.Combine(outDir, "database-observation.json"),
+            JsonSerializer.Serialize(observation, new JsonSerializerOptions { WriteIndented = true, PropertyNamingPolicy = JsonNamingPolicy.CamelCase }));
         return 0;
+    }
+
+    private static void PrintObservation(DatabaseObservation o)
+    {
+        var waits = o.LockSamples.SelectMany(s => s.Waits).ToList();
+        Console.WriteLine($"Database ({o.Provider}): {o.LockSamples.Count} lock samples ({o.LockSamples.Count(s => s.Error is not null)} failed), " +
+                          $"{waits.Count} lock waits seen, {o.Locks.Deadlocks} deadlocks, {o.ContainerStats.Count} container stat samples");
+        Console.WriteLine("  counter deltas: " + string.Join(", ", o.Locks.CounterDeltas.Select(kv => $"{kv.Key}={kv.Value:F0}")));
+        foreach (var check in o.Locks.Checks)
+            Console.WriteLine($"  check '{check.Name}': {(check.Passed ? "ok" : "FAILED")} — {check.Detail}");
+        if (o.ContainerStats.Count > 0)
+            Console.WriteLine($"  container: peak {o.ContainerStats.Max(c => c.CpuCores):F2} cores, peak memory {o.ContainerStats.Max(c => c.MemoryBytes) / 1048576} MB");
+        Console.WriteLine($"  slowest SQL by total time ({o.Statements.Source}):");
+        foreach (var st in o.Statements.ByTotal.Take(5))
+            Console.WriteLine($"    {st.TotalMs,9:F0} ms / {st.Calls,7} calls (mean {st.MeanMs:F2}, max {st.MaxMs:F1})  {st.Query.ReplaceLineEndings(" ")[..Math.Min(90, st.Query.Length)]}");
+        Console.WriteLine("  tables: " + string.Join(", ", o.Tables.OrderByDescending(t => t.Bytes).Take(4).Select(t => $"{t.Table} {t.Rows}{(t.RowsApproximate ? "~" : "")} rows {t.Bytes / 1048576} MB")));
     }
 
     private static void PrintMetrics(LaunchedHost host)

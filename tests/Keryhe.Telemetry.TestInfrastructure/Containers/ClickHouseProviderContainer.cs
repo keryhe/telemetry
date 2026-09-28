@@ -112,6 +112,11 @@ public sealed class ClickHouseProviderContainer : ProviderContainer
 
     private static string Escape(string value) => value.Replace("\\", "\\\\").Replace("'", "\\'");
 
+    public override string ContainerId => _container!.Id;
+
+    protected override Task<(string Stdout, string Stderr)> ReadLogsAsync(DateTime since, CancellationToken cancellationToken) =>
+        _container!.GetLogsAsync(since, timestampsEnabled: false, ct: cancellationToken);
+
     public override async ValueTask DisposeAsync()
     {
         if (_container is not null)

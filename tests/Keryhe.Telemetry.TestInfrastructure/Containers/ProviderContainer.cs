@@ -15,6 +15,18 @@ public abstract class ProviderContainer : IAsyncDisposable
     /// <summary>Connection string for the <c>telemetry</c> database. Valid once <see cref="StartAsync"/> has completed.</summary>
     public abstract string ConnectionString { get; }
 
+    /// <summary>Docker id of the database container. Valid once <see cref="StartAsync"/> has completed.</summary>
+    public abstract string ContainerId { get; }
+
+    /// <summary>The container's stdout and stderr since <paramref name="since"/>, concatenated (deadlock reports and lock-wait log lines live here).</summary>
+    public async Task<string> GetLogsAsync(DateTime since, CancellationToken cancellationToken = default)
+    {
+        var (stdout, stderr) = await ReadLogsAsync(since, cancellationToken);
+        return stdout + Environment.NewLine + stderr;
+    }
+
+    protected abstract Task<(string Stdout, string Stderr)> ReadLogsAsync(DateTime since, CancellationToken cancellationToken);
+
     public ContainerOptions Options { get; private set; } = ContainerOptions.Default;
 
     /// <summary>Starts the container, creates the database, applies diagnostics (if requested) and the schema.</summary>

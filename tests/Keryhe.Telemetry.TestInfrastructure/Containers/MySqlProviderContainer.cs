@@ -80,6 +80,11 @@ public sealed class MySqlProviderContainer : ProviderContainer
         return tenantId;
     }
 
+    public override string ContainerId => _container!.Id;
+
+    protected override Task<(string Stdout, string Stderr)> ReadLogsAsync(DateTime since, CancellationToken cancellationToken) =>
+        _container!.GetLogsAsync(since, timestampsEnabled: false, ct: cancellationToken);
+
     public override async ValueTask DisposeAsync()
     {
         if (_container is not null)

@@ -64,7 +64,9 @@ limits via `ContainerOptions`, which the integration fixtures leave off. The OTL
 (`tests/Keryhe.Telemetry.StressTests/Load`, driven by `dotnet run --project tests/Keryhe.Telemetry.StressTests -- load ...`
 until the full stress CLI lands; `-- host-smoke --provider <p> --topology allinone|split` runs the host
 orchestration end to end: publish, launch as child processes, EventPipe metrics, log scan, graceful
-shutdown; output goes to the gitignored `stress-results/`) reuses the Collector's generated gRPC stubs, which is why the three
+shutdown, plus the Phase 4 database observers — `Observers/Database`: a 1s lock/pressure sampler, statement-stats
+collector, table sizes and a docker-stats sampler per DB container, written to `database-observation.json`;
+output goes to the gitignored `stress-results/`) reuses the Collector's generated gRPC stubs, which is why the three
 `*_service.proto` entries in the Collector csproj are `GrpcServices="Both"`:
 
 ```bash

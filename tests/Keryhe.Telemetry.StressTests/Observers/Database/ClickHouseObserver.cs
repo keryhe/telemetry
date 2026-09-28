@@ -1,0 +1,120 @@
+using System.Data.Common;
+using System.Globalization;
+using ClickHouse.Client.ADO;
+
+namespace Keryhe.Telemetry.StressTests.Observers.Database;
+
+/// <summary>
+/// ClickHouse observer. There are no row locks, so the "lock" sample is pressure instead: long-running
+/// queries, active parts per table and per partition, the merge backlog, and unfinished mutations
+/// (lightweight <c>DELETE</c> and <c>ALTER ... UPDATE</c>). Where the relational providers count
+/// deadlocks, this counts <c>DelayedInserts</c>/<c>RejectedInserts</c> deltas from <c>system.events</c> and
+/// <c>TOO_MANY_PARTS</c> from <c>system.errors</c>. Slowest SQL is <c>system.query_log</c> grouped by
+/// <c>normalized_query_hash</c>.
+/// </summary>
+public sealed class ClickHouseObserver : DatabaseObserverBase
+{
+    private static readonly string[] PressureEvents = ["DelayedInserts", "RejectedInserts", "DelayedInsertsMilliseconds", "DistributedDelayedInserts"];
+    private const int LongRunningSeconds = 5;
+
+    private readonly string _connectionString;
+    private Dictionary<string, double> _eventsBefore = [];
+    private double _tooManyPartsBefore;
+    private string _since = "";
+
+    public ClickHouseObserver(string connectionString, Func<DateTime, CancellationToken, Task<string>>? readLogs = null) : base(readLogs) =>
+        _connectionString = connectionString;
+
+    public override string Provider => "ClickHouse";
+
+    protected override DbConnection CreateConnection() => new ClickHouseConnection(_connectionString);
+
+    private async Task<Dictionary<string, double>> ReadEventsAsync(CancellationToken cancellationToken) =>
+        (await QueryAsync(
+            $"SELECT event, value FROM system.events WHERE event IN ({string.Join(", ", PressureEvents.Select(e => $"'{e}'"))})", cancellationToken))
+        .ToDictionary(r => Str(r[0])!, r => Num(r[1]));
+
+    private Task<double> TooManyPartsAsync(CancellationToken cancellationToken) =>
+        ScalarAsync("SELECT sum(value) FROM system.errors WHERE name = 'TOO_MANY_PARTS'", cancellationToken);
+
+    protected override async Task BeginCoreAsync(CancellationToken cancellationToken)
+    {
+        _eventsBefore = await ReadEventsAsync(cancellationToken);
+        _tooManyPartsBefore = await TooManyPartsAsync(cancellationToken);
+    }
+
+    public override Task<LockSample> SampleAsync(CancellationToken cancellationToken) => GuardedSampleAsync(async () =>
+    {
+        var gauges = new List<Gauge>();
+
+        var longRunning = (await QueryAsync(
+            $"SELECT left(query, {MaxQueryChars}), elapsed * 1000 FROM system.processes " +
+            $"WHERE elapsed > {LongRunningSeconds} AND query NOT LIKE '%system.processes%' ORDER BY elapsed DESC LIMIT 20", cancellationToken))
+            .Select(r => new LongQuery(Str(r[0]) ?? "", Num(r[1]))).ToList();
+        gauges.Add(new Gauge("long_running_queries", null, longRunning.Count));
+
+        foreach (var r in await QueryAsync(
+            "SELECT table, count(), max(part_count) FROM (SELECT table, partition, count() AS part_count FROM system.parts " +
+            "WHERE database = currentDatabase() AND active GROUP BY table, partition) GROUP BY table", cancellationToken))
+        {
+            // Parts per partition is what trips TOO_MANY_PARTS, so the worst partition is the reading that matters.
+            gauges.Add(new Gauge("partitions", Str(r[0]), Num(r[1])));
+            gauges.Add(new Gauge("parts_max_per_partition", Str(r[0]), Num(r[2])));
+        }
+        foreach (var r in await QueryAsync(
+            "SELECT table, count() FROM system.parts WHERE database = currentDatabase() AND active GROUP BY table", cancellationToken))
+            gauges.Add(new Gauge("parts_active", Str(r[0]), Num(r[1])));
+
+        gauges.Add(new Gauge("merges_running", null, await ScalarAsync("SELECT count() FROM system.merges", cancellationToken)));
+        foreach (var r in await QueryAsync(
+            "SELECT table, count() FROM system.mutations WHERE database = currentDatabase() AND NOT is_done GROUP BY table", cancellationToken))
+            gauges.Add(new Gauge("mutations_pending", Str(r[0]), Num(r[1])));
+
+        return (new List<LockWait>(), gauges, longRunning);
+    });
+
+    public override async Task<LockSummary> EndAsync(CancellationToken cancellationToken)
+    {
+        var events = await ReadEventsAsync(cancellationToken);
+        var deltas = PressureEvents.ToDictionary(e => e, e => events.GetValueOrDefault(e) - _eventsBefore.GetValueOrDefault(e));
+        var tooManyParts = await TooManyPartsAsync(cancellationToken) - _tooManyPartsBefore;
+        var counters = new Dictionary<string, double>(deltas.ToDictionary(kv => kv.Key, kv => kv.Value)) { ["TOO_MANY_PARTS"] = tooManyParts };
+        // No deadlocks exist here; the count is left at zero and the pressure counters carry the signal.
+        return new LockSummary(0, counters, [], [], new Dictionary<string, string>(), []);
+    }
+
+    public override async Task ResetAsync(CancellationToken cancellationToken)
+    {
+        // query_log cannot be reset without dropping it, so the window is a start timestamp taken from the server's own clock.
+        _since = Str((await QueryAsync("SELECT toString(now64(6))", cancellationToken))[0][0])!;
+        await Task.CompletedTask;
+    }
+
+    public override async Task<StatementStatsSnapshot> SnapshotAsync(int top, CancellationToken cancellationToken)
+    {
+        await ExecuteAsync("SYSTEM FLUSH LOGS", cancellationToken);
+        var since = string.IsNullOrEmpty(_since) ? "toDateTime64('1970-01-01 00:00:00', 6)" : $"toDateTime64('{EscapeLiteral(_since)}', 6)";
+        string Sql(string order, string having) => $"""
+            SELECT left(any(query), 500), count(), sum(query_duration_ms), avg(query_duration_ms), max(query_duration_ms), sum(read_rows + written_rows)
+            FROM system.query_log
+            WHERE type = 'QueryFinish' AND event_time_microseconds >= {since} AND current_database = currentDatabase()
+              AND query NOT LIKE '%system.%' AND query NOT LIKE 'SYSTEM %'
+            GROUP BY normalized_query_hash {having}
+            ORDER BY {order} DESC LIMIT {top}
+            """;
+        var byTotal = await QueryAsync(Sql("sum(query_duration_ms)", ""), cancellationToken);
+        var byMean = await QueryAsync(Sql("avg(query_duration_ms)", "HAVING count() >= 5"), cancellationToken);
+        return new StatementStatsSnapshot("system.query_log", byTotal.Select(ToStat).ToList(), byMean.Select(ToStat).ToList());
+    }
+
+    private static StatementStat ToStat(object?[] r) => new(Str(r[0]) ?? "", Long(r[1]), Num(r[2]), Num(r[3]), Num(r[4]), Long(r[5]));
+
+    public override async Task<IReadOnlyList<TableStat>> ReadAsync(CancellationToken cancellationToken)
+    {
+        // Active parts before merges finish still hold ReplacingMergeTree duplicates, so the row counts can run high.
+        var rows = await QueryAsync(
+            "SELECT table, sum(rows), sum(bytes_on_disk) FROM system.parts WHERE database = currentDatabase() AND active GROUP BY table ORDER BY table",
+            cancellationToken);
+        return rows.Select(r => new TableStat(Str(r[0])!, Long(r[1]), true, Long(r[2]))).ToList();
+    }
+}
