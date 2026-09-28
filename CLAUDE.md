@@ -68,7 +68,10 @@ shutdown, plus the Phase 4 database observers — `Observers/Database`: a 1s loc
 collector, table sizes and a docker-stats sampler per DB container, written to `database-observation.json`;
 `--browsers <n>` adds the Phase 5 headless-Chromium page tour (`Browser/`; `--browser-export` adds the per-signal exports; first run
 `dotnet run --project tests/Keryhe.Telemetry.StressTests -- playwright-install` to fetch Chromium) and writes `browser-tour.json`;
-output goes to the gitignored `stress-results/`) reuses the Collector's generated gRPC stubs, which is why the three
+and the Phase 6 scenario CLI, `-- run --provider <p|all> --topology <allinone|split|all> --profile <smoke|standard|soak|ramp|all|file.json>`
+[`--scenario fixed|ramp`, `--browsers n`, `--out dir`], which runs the matrix sequentially: fresh container, warm-up, measured window
+(or a rate ramp with stop criteria), quiesce, shutdown, one `scenario.json` per scenario; profiles live in
+`tests/Keryhe.Telemetry.StressTests/Profiles/`; output goes to the gitignored `stress-results/`) reuses the Collector's generated gRPC stubs, which is why the three
 `*_service.proto` entries in the Collector csproj are `GrpcServices="Both"`:
 
 ```bash

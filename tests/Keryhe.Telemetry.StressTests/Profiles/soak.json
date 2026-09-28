@@ -1,0 +1,15 @@
+// Soak: the standard rate for 4 hours after a 15 minute warm-up, three browsers.
+{
+  "name": "soak",
+  "tenants": 3,
+  "warmupSeconds": 900,
+  "measuredSeconds": 14400,
+  "browsers": { "users": 3 },
+  "load": {
+    "traces": { "spansPerSecond": 5000 },
+    "logs": { "recordsPerSecond": 5000 },
+    "metrics": { "dataPointsPerSecond": 5000 },
+    "transport": { "channels": 4 },
+    "time": { "lateArrivalFraction": 0.05, "orphanFraction": 0.02, "backdatedFraction": 0.02, "redeliveryFraction": 0.02 }
+  }
+}

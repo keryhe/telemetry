@@ -1,0 +1,29 @@
+// Ramp: the load rates below are the "x1" step. Each step adds another x1 (1,000 per signal per second) for 60 seconds until a
+// stop criterion holds for a whole step. The report names the last step that sustained and which criterion tripped.
+{
+  "name": "ramp",
+  "tenants": 3,
+  "warmupSeconds": 60,
+  "browsers": { "users": 3 },
+  "load": {
+    "traces": { "spansPerSecond": 1000 },
+    "logs": { "recordsPerSecond": 1000 },
+    "metrics": { "dataPointsPerSecond": 1000 },
+    "transport": { "channels": 4 },
+    "time": { "lateArrivalFraction": 0.05, "orphanFraction": 0.02, "backdatedFraction": 0.02, "redeliveryFraction": 0.02 }
+  },
+  "ramp": {
+    "startScale": 1,
+    "stepScale": 1,
+    "stepSeconds": 60,
+    "maxSteps": 30,
+    "criteria": {
+      "maxDroppedRecords": 0,
+      "maxGateWaitP95Ms": 250,
+      "maxExportP99Seconds": 5,
+      "maxErrorRatePercent": 1,
+      "lagGrowthFactor": 2,
+      "lagGrowthMinMs": 3000
+    }
+  }
+}

@@ -1,0 +1,11 @@
+// Smoke: a quick end-to-end pass. 500 spans / 500 logs / 500 data points per second, one browser.
+{
+  "name": "smoke",
+  "tenants": 2,
+  "warmupSeconds": 60,
+  "measuredSeconds": 300,
+  "browsers": { "users": 1 },
+  "load": {
+    "time": { "lateArrivalFraction": 0.05, "orphanFraction": 0.02, "backdatedFraction": 0.02, "redeliveryFraction": 0.02 }
+  }
+}

@@ -24,6 +24,10 @@ public sealed class MetricStore
     public IReadOnlyList<MetricSample> Series(string instrument, string? tagKey = null, string? tagValue = null) =>
         _samples.Where(s => s.Instrument == instrument && Matches(s, tagKey, tagValue)).ToList();
 
+    /// <summary>Samples of an instrument (optionally for one tag value) taken in <c>[from, to]</c>.</summary>
+    public IReadOnlyList<MetricSample> Window(string instrument, DateTimeOffset from, DateTimeOffset to, string? tagKey = null, string? tagValue = null) =>
+        _samples.Where(s => s.Instrument == instrument && s.At >= from && s.At <= to && Matches(s, tagKey, tagValue)).ToList();
+
     /// <summary>The most recent sample of the instrument (optionally for one tag value), or null if none arrived.</summary>
     public MetricSample? Latest(string instrument, string? tagKey = null, string? tagValue = null) =>
         _samples.Where(s => s.Instrument == instrument && Matches(s, tagKey, tagValue)).OrderBy(s => s.At).LastOrDefault();

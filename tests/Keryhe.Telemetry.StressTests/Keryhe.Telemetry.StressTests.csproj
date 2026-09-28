@@ -21,4 +21,9 @@
     <ProjectReference Include="../Keryhe.Telemetry.TestInfrastructure/Keryhe.Telemetry.TestInfrastructure.csproj" />
   </ItemGroup>
 
+  <ItemGroup>
+    <!-- Built-in scenario profiles, found beside the executable under Profiles/ -->
+    <Content Include="Profiles/*.json" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
 </Project>

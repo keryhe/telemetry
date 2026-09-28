@@ -130,6 +130,12 @@ public sealed class OtlpLoadGenerator : IAsyncDisposable
         stats.Completed(records, r.LatencyMs, r.Outcome, r.Status);
     }
 
+    /// <summary>Starts a fresh measuring window on every signal (the measured window, or one ramp step).</summary>
+    public void BeginWindow() { _traceStats.BeginWindow(); _logStats.BeginWindow(); _metricStats.BeginWindow(); }
+
+    /// <summary>Ends the window and returns what each signal did in it (traces, logs, metrics).</summary>
+    public IReadOnlyList<WindowSummary> EndWindow() => [_traceStats.EndWindow(), _logStats.EndWindow(), _metricStats.EndWindow()];
+
     public LoadSnapshot Snapshot()
     {
         var perExport = Math.Max(1, _profile.Transport.RecordsPerExport);
