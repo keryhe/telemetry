@@ -49,12 +49,17 @@ public sealed class TelemetryIngestionChannel
     /// <summary>Gate on resident METRICS. See <see cref="TelemetryIngestionOptions.MaxQueuedMetrics"/>.</summary>
     public RecordCountGate MetricGate { get; }
 
-    public TelemetryIngestionChannel(IOptions<TelemetryIngestionOptions> options)
+    public TelemetryIngestionChannel(IOptions<TelemetryIngestionOptions> options, IngestionMetrics metrics)
     {
         var o = options.Value;
-        LogGate = new RecordCountGate(o.MaxQueuedLogRecords);
-        TraceGate = new RecordCountGate(o.MaxQueuedSpans);
-        MetricGate = new RecordCountGate(o.MaxQueuedMetrics);
+        LogGate = new RecordCountGate(o.MaxQueuedLogRecords, metrics, "logs");
+        TraceGate = new RecordCountGate(o.MaxQueuedSpans, metrics, "traces");
+        MetricGate = new RecordCountGate(o.MaxQueuedMetrics, metrics, "metrics");
+
+        // The channel owns the gates, so it hands their resident counts to the gauge.
+        metrics.RegisterResidentRecords("logs", () => LogGate.Resident);
+        metrics.RegisterResidentRecords("traces", () => TraceGate.Resident);
+        metrics.RegisterResidentRecords("metrics", () => MetricGate.Resident);
     }
 
     /// <summary>

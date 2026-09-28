@@ -384,6 +384,15 @@ regardless of outcome. A batch that still fails after retries are exhausted is d
 on `IngestionMetrics`'s `records_dropped` counter — the three gRPC `Export` methods' partial-success
 responses reflect only enqueue success, never this later, asynchronous drop; each documents that
 explicitly. This isolates gRPC latency from DB write latency and provides backpressure.
+
+The write path is instrumented on `IngestionMetrics`'s `Keryhe.Telemetry.Ingestion` meter, every
+instrument tagged by `signal` (`logs`/`traces`/`metrics`): `records_dropped` (counter),
+`gate_wait` (histogram, ms — time `RecordCountGate.AcquireAsync` spent waiting, the backpressure
+signal), `resident_records` (observable gauge — each gate's current count, registered by
+`TelemetryIngestionChannel`, which owns the gates), `flush_duration` (histogram, ms, extra tag
+`outcome` = `ok`/`failed`, one measurement per flush *attempt*), `flush_retries` (counter),
+`records_flushed` (counter) and `flush_batch_size` (histogram, one measurement per merged batch).
+All are readable out-of-process (e.g. `dotnet-counters`) with no exporter configured.
 On host shutdown the worker **drains rather than abandons** the queue (everything in it was already
 acknowledged to clients): `StopAsync` completes the channel writers, so a late export gets gRPC
 `UNAVAILABLE` (retryable, unlike a partial-success rejection), and the loops keep flushing until the
@@ -561,7 +570,8 @@ relied on the application-level `RetentionWorker` from the start). `RetentionWor
 structurally mirroring `AlertEvaluationWorker`, wakes on `Retention:IntervalSeconds` (default
 3600s, config only — not part of the DB row), resolves the scoped `IRetentionSettingsRepository`,
 reads the current windows via `GetSettingsAsync`, then runs `DeleteOldTracesAsync`/
-`DeleteOldMetricDataPointsAsync`/`DeleteOldLogRecordsAsync` against them. `AddRetention()`
+`DeleteOldMetricDataPointsAsync`/`DeleteOldLogRecordsAsync` against them. Each sweep ends with a "Retention sweep complete" log line
+that includes the rows removed and the sweep's elapsed milliseconds. `AddRetention()`
 registers it; called from `Api.Server` and `Server`'s `Program.cs` only, never
 `Collector.Server` — retention is entirely an API-host concern now (see
 `IRetentionSettingsRepository`'s doc comment for why it replaced the former write-side

@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Threading.Channels;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
@@ -221,13 +222,16 @@ public sealed class TelemetryIngestionWorker(
                 }
 
                 Interlocked.Add(ref inFlight.Value, batchSize);
+                metrics.RecordFlushBatchSize(signalName, batchSize);
                 try
                 {
                     var flushed = await FlushWithRetryAsync(flush, batch, signalName, abortToken);
                     // Not in the finally: a flush cut off by the deadline (the only way
                     // FlushWithRetryAsync throws) stays counted for StopAsync to report.
                     Interlocked.Add(ref inFlight.Value, -batchSize);
-                    if (!flushed)
+                    if (flushed)
+                        metrics.RecordFlushed(signalName, batchSize);
+                    else
                         metrics.RecordDropped(signalName, batchSize);
                 }
                 finally
@@ -295,9 +299,11 @@ public sealed class TelemetryIngestionWorker(
         var attempt = 0;
         while (true)
         {
+            var started = Stopwatch.GetTimestamp();
             try
             {
                 await flush(batch, ct);
+                metrics.RecordFlushDuration(signalName, Stopwatch.GetElapsedTime(started).TotalMilliseconds, "ok");
                 return true;
             }
             catch (OperationCanceledException) when (ct.IsCancellationRequested)
@@ -306,6 +312,7 @@ public sealed class TelemetryIngestionWorker(
             }
             catch (Exception ex)
             {
+                metrics.RecordFlushDuration(signalName, Stopwatch.GetElapsedTime(started).TotalMilliseconds, "failed");
                 attempt++;
                 if (attempt > _options.MaxFlushRetries)
                 {
@@ -315,6 +322,7 @@ public sealed class TelemetryIngestionWorker(
                     return false;
                 }
 
+                metrics.RecordFlushRetry(signalName);
                 var backoffMs = Math.Min(
                     _options.RetryBaseDelayMilliseconds * Math.Pow(2, attempt - 1),
                     _options.RetryMaxDelayMilliseconds);
