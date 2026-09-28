@@ -56,7 +56,11 @@ table/column set: `schema/PostgreSQL-Schema.sql` (plain Postgres), `schema/Times
 Testcontainers-managed databases, applying the actual `schema/*.sql` scripts and seeding through
 `ITelemetryBulkWriter` (not `Keryhe.Telemetry.TestDataGenerator`, whose OTLP/gRPC-based data is
 random and time-dependent — see `plans/list-pages-server-side.md`'s Phase 0 section). Requires
-Docker:
+Docker. The container startup, schema application and tenant/API-key seeding these fixtures use
+live in `tests/Keryhe.Telemetry.TestInfrastructure` (one `ProviderContainer` per provider, plus
+`TenantSeeder` for N tenants), which the planned stress harness shares
+(see `plans/stress-tests.md`); it also offers opt-in per-provider diagnostics and CPU/memory
+limits via `ContainerOptions`, which the integration fixtures leave off:
 
 ```bash
 # All five providers (one xUnit collection fixture per provider, containers started once per run)

@@ -1,8 +1,7 @@
-using System.Security.Cryptography;
-using System.Text;
 using Keryhe.Telemetry.Core;
 using Keryhe.Telemetry.Core.Data;
 using Keryhe.Telemetry.Core.Data.Read;
+using Keryhe.Telemetry.TestInfrastructure.Containers;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Xunit;
@@ -34,31 +33,24 @@ public abstract class ProviderFixture : IAsyncLifetime
     public TestTenantContext TenantContext { get; } = new();
     public long TenantId { get; private set; }
 
-    protected abstract Task StartContainerAsync(CancellationToken cancellationToken);
-    protected abstract Task StopContainerAsync();
+    /// <summary>The provider's database container (started, schema applied and diagnostics off, as the integration tests always ran).</summary>
+    protected abstract ProviderContainer Container { get; }
 
     /// <summary>Connection string for the write side (<c>ConnectionStrings:Collector</c>).</summary>
-    protected abstract string CollectorConnectionString { get; }
+    protected string CollectorConnectionString => Container.ConnectionString;
 
     /// <summary>Connection string for the read side (<c>ConnectionStrings:Api</c>). Same database as the collector string — one test database.</summary>
-    protected abstract string ApiConnectionString { get; }
-
-    /// <summary>Applies the raw schema script for this provider, exactly as <c>apply-schema.sh</c> would.</summary>
-    protected abstract Task ApplySchemaAsync(CancellationToken cancellationToken);
+    protected string ApiConnectionString => Container.ConnectionString;
 
     /// <summary>Calls this provider's own <c>Add&lt;Provider&gt;CollectorServices</c>/<c>Add&lt;Provider&gt;ApiServices</c>.</summary>
     protected abstract void AddProviderServices(IServiceCollection services, IConfiguration configuration);
-
-    /// <summary>Inserts a fixed tenant + API key row directly and returns the tenant id.</summary>
-    protected abstract Task<long> SeedTenantAndApiKeyAsync(string keyHash, CancellationToken cancellationToken);
 
     /// <summary>Truncates the signal tables (not the container) so test classes in the same collection start clean.</summary>
     public abstract Task ResetAsync();
 
     public async Task InitializeAsync()
     {
-        await StartContainerAsync(CancellationToken.None);
-        await ApplySchemaAsync(CancellationToken.None);
+        await Container.StartAsync();
 
         var configuration = new ConfigurationBuilder()
             .AddInMemoryCollection(new Dictionary<string, string?>
@@ -96,8 +88,8 @@ public abstract class ProviderFixture : IAsyncLifetime
 
         Services = services.BuildServiceProvider(new ServiceProviderOptions { ValidateScopes = true });
 
-        var keyHash = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(ApiKeyPlainText))).ToLowerInvariant();
-        TenantId = await SeedTenantAndApiKeyAsync(keyHash, CancellationToken.None);
+        var tenant = await Container.SeedTenantAsync("phase0-tenant", "phase0-key", ApiKeyPlainText);
+        TenantId = tenant.Id;
         TenantContext.SetTenantId(TenantId);
     }
 
@@ -105,64 +97,6 @@ public abstract class ProviderFixture : IAsyncLifetime
     {
         if (Services != null)
             await Services.DisposeAsync();
-        await StopContainerAsync();
-    }
-
-    /// <summary>
-    /// Splits a schema script into individually-executable statements for providers whose driver
-    /// can't run a whole multi-statement script through one command (SQL Server's <c>GO</c>
-    /// batches, MySQL, ClickHouse). Statements are ended by a line that, once trimmed, ends with
-    /// <c>;</c> — adequate for these DDL-only scripts, none of which embed a literal semicolon
-    /// inside a string value.
-    /// </summary>
-    protected static List<string> SplitStatements(string script)
-    {
-        var statements = new List<string>();
-        var current = new StringBuilder();
-        foreach (var rawLine in script.Split('\n'))
-        {
-            var line = rawLine.TrimEnd('\r');
-            var trimmed = line.Trim();
-            if (trimmed.StartsWith("--") || trimmed.Length == 0)
-                continue;
-            current.AppendLine(line);
-            if (trimmed.EndsWith(';'))
-            {
-                var statement = current.ToString().Trim();
-                if (statement.Length > 0)
-                    statements.Add(statement);
-                current.Clear();
-            }
-        }
-        var tail = current.ToString().Trim();
-        if (tail.Length > 0)
-            statements.Add(tail);
-        return statements;
-    }
-
-    /// <summary>Splits a SQL Server script on lines that are exactly <c>GO</c> (case-insensitive), the batch separator <c>SqlCommand</c> doesn't understand.</summary>
-    protected static List<string> SplitGoBatches(string script)
-    {
-        var batches = new List<string>();
-        var current = new StringBuilder();
-        foreach (var rawLine in script.Split('\n'))
-        {
-            var line = rawLine.TrimEnd('\r');
-            if (line.Trim().Equals("GO", StringComparison.OrdinalIgnoreCase))
-            {
-                var batch = current.ToString().Trim();
-                if (batch.Length > 0)
-                    batches.Add(batch);
-                current.Clear();
-            }
-            else
-            {
-                current.AppendLine(line);
-            }
-        }
-        var tail = current.ToString().Trim();
-        if (tail.Length > 0)
-            batches.Add(tail);
-        return batches;
+        await Container.DisposeAsync();
     }
 }

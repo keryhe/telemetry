@@ -1,37 +1,17 @@
+using Keryhe.Telemetry.TestInfrastructure.Containers;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using MySqlConnector;
-using Testcontainers.MySql;
 
 namespace Keryhe.Telemetry.IntegrationTests.Fixtures;
 
 public sealed class MySqlFixture : ProviderFixture
 {
-    private readonly MySqlContainer _container = new MySqlBuilder("mysql:8.0")
-        .WithDatabase("telemetry")
-        .Build();
+    private readonly MySqlProviderContainer _container = new();
 
     public override string ProviderName => ProviderNames.MySql;
 
-    protected override Task StartContainerAsync(CancellationToken cancellationToken) => _container.StartAsync(cancellationToken);
-    protected override Task StopContainerAsync() => _container.DisposeAsync().AsTask();
-
-    protected override string CollectorConnectionString => _container.GetConnectionString();
-    protected override string ApiConnectionString => _container.GetConnectionString();
-
-    protected override async Task ApplySchemaAsync(CancellationToken cancellationToken)
-    {
-        var script = await File.ReadAllTextAsync(Path.Combine(AppContext.BaseDirectory, "Schema", "MySQL-Schema.sql"), cancellationToken);
-        var statements = SplitStatements(script);
-
-        await using var conn = new MySqlConnection(_container.GetConnectionString());
-        await conn.OpenAsync(cancellationToken);
-        foreach (var statement in statements)
-        {
-            await using var cmd = new MySqlCommand(statement, conn) { CommandTimeout = 120 };
-            await cmd.ExecuteNonQueryAsync(cancellationToken);
-        }
-    }
+    protected override ProviderContainer Container => _container;
 
     protected override void AddProviderServices(IServiceCollection services, IConfiguration configuration)
     {
@@ -39,33 +19,11 @@ public sealed class MySqlFixture : ProviderFixture
         services.AddMySqlApiServices(configuration);
     }
 
-    protected override async Task<long> SeedTenantAndApiKeyAsync(string keyHash, CancellationToken cancellationToken)
-    {
-        await using var conn = new MySqlConnection(_container.GetConnectionString());
-        await conn.OpenAsync(cancellationToken);
-
-        await using var tenantCmd = new MySqlCommand("INSERT INTO tenants (name) VALUES (@name)", conn);
-        tenantCmd.Parameters.AddWithValue("@name", "phase0-tenant");
-        await tenantCmd.ExecuteNonQueryAsync(cancellationToken);
-
-        await using var idCmd = new MySqlCommand("SELECT LAST_INSERT_ID()", conn);
-        var tenantId = Convert.ToInt64(await idCmd.ExecuteScalarAsync(cancellationToken));
-
-        await using var keyCmd = new MySqlCommand(
-            "INSERT INTO api_keys (tenant_id, key_hash, name) VALUES (@tenantId, @keyHash, @name)", conn);
-        keyCmd.Parameters.AddWithValue("@tenantId", tenantId);
-        keyCmd.Parameters.AddWithValue("@keyHash", keyHash);
-        keyCmd.Parameters.AddWithValue("@name", "phase0-key");
-        await keyCmd.ExecuteNonQueryAsync(cancellationToken);
-
-        return tenantId;
-    }
-
     public override async Task ResetAsync()
     {
         // resources/instrumentation_scopes are deliberately left alone -- see PostgreSqlFixture.
         // ResetAsync's comment on ResourceScopeCache.
-        await using var conn = new MySqlConnection(_container.GetConnectionString());
+        await using var conn = new MySqlConnection(_container.ConnectionString);
         await conn.OpenAsync();
         string[] statements =
         [
