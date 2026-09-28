@@ -7,6 +7,12 @@
       "runtimeArgs": ["start"],
       "port": 4201,
       "cwd": "src/telemetry-client"
+    },
+    {
+      "name": "telemetry-server",
+      "runtimeExecutable": "dotnet",
+      "runtimeArgs": ["run", "--project", "src/Keryhe.Telemetry.Server"],
+      "port": 5188
     }
   ]
 }

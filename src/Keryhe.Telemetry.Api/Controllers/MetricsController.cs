@@ -1,6 +1,8 @@
+using Keryhe.Telemetry.Api.Export;
 using Keryhe.Telemetry.Core;
 using Keryhe.Telemetry.Core.Data.Read;
 using Keryhe.Telemetry.Core.Models;
+using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
 
 namespace Keryhe.Telemetry.Api.Controllers;
@@ -11,11 +13,13 @@ public class MetricsController : ControllerBase
 {
     private readonly IMetricReadRepository _metrics;
     private readonly ProviderCapabilities _capabilities;
+    private readonly ExportConcurrencyGate _exportGate;
 
-    public MetricsController(IMetricReadRepository metrics, ProviderCapabilities capabilities)
+    public MetricsController(IMetricReadRepository metrics, ProviderCapabilities capabilities, ExportConcurrencyGate exportGate)
     {
         _metrics = metrics;
         _capabilities = capabilities;
+        _exportGate = exportGate;
     }
 
     /// <summary>
@@ -170,6 +174,103 @@ public class MetricsController : ControllerBase
         if (page == null)
             return NotFound();
         return Ok(page);
+    }
+
+    /// <summary>
+    /// GET /api/metrics/export?metricName=&start=&end=&metricId=&labelFilter=key:value&q=&points=&format=ndjson|csv
+    /// Phase 8 (list-pages-server-side plan, decision 29): one row per <c>(display series,
+    /// bucket)</c>, reusing <c>/series</c>'s bucketing (<c>points</c>/<c>groupBy</c> behave the
+    /// same) but with every series included — no top-N/"other" split, unlike <see cref="GetMetricSeries"/>.
+    /// Same window/concurrency limits as the logs/traces exports — see
+    /// <see cref="LogsController.GetExport"/>'s doc comment.
+    /// </summary>
+    [HttpGet("export")]
+    public async Task<IActionResult> GetExport(
+        [FromQuery] string metricName,
+        [FromQuery] DateTime start,
+        [FromQuery] DateTime end,
+        [FromQuery] long? metricId,
+        [FromQuery(Name = "labelFilter")] List<string>? labelFilter,
+        [FromQuery] string? q,
+        [FromQuery] int points = 300,
+        [FromQuery] string format = "ndjson",
+        CancellationToken ct = default)
+    {
+        if (string.IsNullOrWhiteSpace(metricName))
+            return BadRequest("metricName query parameter is required.");
+        if (start >= end)
+            return BadRequest("Start time must be before end time.");
+        if (!ExportFormatParser.TryParse(format, out var exportFormat))
+            return BadRequest("format must be 'ndjson' or 'csv'.");
+
+        var windowGuard = ExportWindowGuard.Check(_capabilities, end - start);
+        if (!windowGuard.Allowed)
+            return BadRequest(windowGuard.Message);
+
+        using var slot = _exportGate.TryEnter();
+        if (slot == null)
+            return StatusCode(StatusCodes.Status429TooManyRequests, "Too many exports are already running on this API instance. Try again shortly.");
+
+        var filters = MergeLabelFilters(labelFilter, q);
+        var query = new MetricExportQuery
+        {
+            MetricName = metricName,
+            MetricId = metricId,
+            Start = start,
+            End = end,
+            LabelFilters = filters,
+            Points = Math.Clamp(points, 1, 1000)
+        };
+
+        Response.ContentType = exportFormat.ContentType();
+        Response.Headers.ContentDisposition = $"attachment; filename=\"{SanitizeFileNamePart(metricName)}-export.{exportFormat.FileExtension()}\"";
+
+        var rowCount = 0;
+        if (exportFormat == ExportFormat.Csv)
+        {
+            await using var csv = new CsvRowWriter(Response.Body);
+            await csv.WriteHeaderAsync(["metricName", "seriesName", "serviceName", "labels", "bucketStart", "value", "min", "max", "count", "sum", "bucketCounts", "bucketBounds"]);
+            await foreach (var row in _metrics.ExportMetricSeriesAsync(query, ct))
+            {
+                await csv.WriteRowAsync(MetricCsvCells(row));
+                if (++rowCount % 500 == 0)
+                    await csv.FlushAsync();
+            }
+        }
+        else
+        {
+            await foreach (var row in _metrics.ExportMetricSeriesAsync(query, ct))
+            {
+                await NdjsonRowWriter.WriteLineAsync(Response.Body, row, ct);
+                if (++rowCount % 500 == 0)
+                    await Response.Body.FlushAsync(ct);
+            }
+        }
+
+        await Response.Body.FlushAsync(ct);
+        return new EmptyResult();
+    }
+
+    private static string SanitizeFileNamePart(string value)
+    {
+        var chars = value.Select(c => char.IsLetterOrDigit(c) || c is '-' or '.' ? c : '_').ToArray();
+        return new string(chars);
+    }
+
+    private static IEnumerable<string?> MetricCsvCells(MetricExportRow row)
+    {
+        yield return row.MetricName;
+        yield return row.SeriesName;
+        yield return row.ServiceName;
+        yield return System.Text.Json.JsonSerializer.Serialize(row.Labels);
+        yield return row.BucketStart.ToString("O");
+        yield return row.Value?.ToString("R");
+        yield return row.Min?.ToString("R");
+        yield return row.Max?.ToString("R");
+        yield return row.Count?.ToString();
+        yield return row.Sum?.ToString("R");
+        yield return row.BucketCounts == null ? null : System.Text.Json.JsonSerializer.Serialize(row.BucketCounts);
+        yield return row.BucketBounds == null ? null : System.Text.Json.JsonSerializer.Serialize(row.BucketBounds);
     }
 
     /// <summary>

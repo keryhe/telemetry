@@ -816,6 +816,80 @@ public abstract class TraceReadRepositoryBase : DapperReadRepository, ITraceRead
         return items;
     }
 
+    // =========================================================================
+    // EXPORT (list-pages-server-side plan, Phase 8, decision 17)
+    // =========================================================================
+
+    /// <summary>
+    /// Streams one <see cref="TraceInfo"/> row per matching trace, oldest first, with no row cap.
+    /// Reuses <see cref="BuildAnchorFilterClauses"/> — the same time/mode/service/operation/
+    /// duration/search compilation the summary and page endpoints use — plus the existing
+    /// <see cref="FetchAnchorPageAsync"/>/<see cref="LoadPageTraceInfosAsync"/> pair (unchanged from
+    /// Phase 3) to fetch and shape each chunk.
+    ///
+    /// Deliberately chunked (<see cref="ExportChunkSize"/> anchors per round trip) rather than a
+    /// single Dapper unbuffered query like <see cref="LogReadRepositoryBase.ExportLogsAsync"/>:
+    /// a trace row isn't produced by one flat SELECT — <see cref="LoadPageTraceInfosAsync"/> needs
+    /// each chunk's whole trace-id set up front to run its own batched aggregate query (span count/
+    /// min-start/max-end/has-error across the FULL span set of the matching traces, not just their
+    /// anchors) and its own resource lookup, and that aggregate cannot be pushed into a single
+    /// per-row streaming query without either an un-portable LATERAL/CROSS APPLY join (SqlServer/
+    /// Postgres only) or a correlated subquery per row (which ClickHouse does not reliably support —
+    /// see <see cref="DapperReadRepository.SpanLevelMatchPredicate"/>'s own doc comment on exactly
+    /// that limitation). Chunking keeps memory bounded to one chunk's anchors/aggregates at a time
+    /// (not the whole matching population) while staying correct on every provider; see this
+    /// project's Phase 8 CLAUDE.md notes for the full reasoning behind this deviation from a literal
+    /// unbuffered read.
+    /// </summary>
+    private const int ExportChunkSize = 1000;
+
+    public async IAsyncEnumerable<TraceInfo> ExportTracesAsync(
+        TraceExportQuery query, [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken cancellationToken = default)
+    {
+        if (query.Start >= query.End)
+            throw new ArgumentException("Start time must be before end time");
+
+        var parsed = SearchQueryParser.Parse(query.Search);
+        var startNano = TimeConversion.DateTimeToUnixNano(query.Start);
+        var endNano = TimeConversion.DateTimeToUnixNano(query.End);
+        var (baseClauses, baseParameters) = BuildAnchorFilterClauses(
+            query.Mode, query.Service, query.Operation, query.MinDurationMs, query.MaxDurationMs, parsed, startNano, endNano);
+
+        await using var conn = await OpenConnectionAsync(cancellationToken);
+
+        long? cursorK = null;
+        long? cursorId = null;
+        while (true)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+
+            var clauses = new List<string>(baseClauses);
+            var parameters = new DynamicParameters(baseParameters);
+            if (cursorK.HasValue)
+            {
+                clauses.Add(KeysetCursor.Predicate("a.anchor_start", "a.anchor_span_pk", "cursorK", "cursorId", descending: false));
+                parameters.Add("cursorK", cursorK.Value);
+                parameters.Add("cursorId", cursorId!.Value);
+            }
+
+            var rows = await FetchAnchorPageAsync(conn, clauses, parameters, ExportChunkSize, descending: false, cancellationToken);
+            if (rows.Count == 0) yield break;
+
+            var hasMore = rows.Count > ExportChunkSize;
+            if (hasMore) rows.RemoveAt(rows.Count - 1);
+
+            var infos = await LoadPageTraceInfosAsync(conn, rows, cancellationToken);
+            foreach (var info in infos)
+                yield return info;
+
+            if (!hasMore) yield break;
+
+            var last = rows[^1];
+            cursorK = last.AnchorStart;
+            cursorId = last.AnchorSpanPk;
+        }
+    }
+
     /// <summary>Predicate matching <c>@traceIds</c> against a trace_id column on the given alias. Postgres/Timescale override to <c>= ANY(@traceIds)</c>.</summary>
     protected virtual string TraceIdInPredicate(string alias) => $"{alias}.trace_id IN @traceIds";
 

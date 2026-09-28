@@ -717,6 +717,60 @@ public abstract class MetricReadRepositoryBase : DapperReadRepository, IMetricRe
         return result;
     }
 
+    /// <summary>
+    /// Phase 8 export (decision 29): the exact same aggregation pipeline as
+    /// <see cref="GetMetricSeriesAsync"/>, with <see cref="MetricSeriesQuery.Top"/> set to
+    /// <see cref="int.MaxValue"/> so <c>BuildDisplaySeriesAndOther</c>'s <c>Skip(top)</c> is always
+    /// empty — every display series comes back in <c>Series</c> and <c>Other</c> is always null.
+    /// This is a deliberate reuse rather than a fresh unbuffered-per-row implementation: the
+    /// bucketed query already collapses raw data points down to at most (streams × points) rows
+    /// before this method ever sees them, so the "don't hold the whole resultset in memory" concern
+    /// behind the plan's "unbuffered" wording doesn't apply to data of this shape — see this
+    /// project's Phase 8 CLAUDE.md notes for the full reasoning.
+    /// </summary>
+    public async IAsyncEnumerable<MetricExportRow> ExportMetricSeriesAsync(
+        MetricExportQuery query, [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken cancellationToken = default)
+    {
+        var seriesQuery = new MetricSeriesQuery
+        {
+            MetricName = query.MetricName,
+            MetricId = query.MetricId,
+            Start = query.Start,
+            End = query.End,
+            LabelFilters = query.LabelFilters,
+            Points = query.Points,
+            Top = int.MaxValue
+        };
+
+        var result = await GetMetricSeriesAsync(seriesQuery, cancellationToken);
+        if (result == null) yield break;
+
+        foreach (var series in result.Series.OrderBy(s => s.SeriesName, StringComparer.Ordinal))
+        {
+            foreach (var point in series.Points)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                yield return new MetricExportRow
+                {
+                    MetricName = result.Name,
+                    SeriesName = series.SeriesName,
+                    ServiceName = series.ServiceName,
+                    Labels = series.Labels,
+                    BucketStart = point.Timestamp,
+                    Value = point.Value,
+                    Min = point.Min,
+                    Max = point.Max,
+                    Count = point.Count,
+                    Sum = point.Sum,
+                    BucketCounts = point.BucketCounts,
+                    BucketBounds = point.BucketBounds,
+                    Quantiles = point.Quantiles,
+                    QuantileValues = point.QuantileValues
+                };
+            }
+        }
+    }
+
     private async Task<MetricSeriesResult> RunSeriesQueryAsync(DbConnection conn, MetricType type, List<long> metricIds,
         Dictionary<long, string> serviceNameByMetricId, MetricSeriesQuery query, int points, int top, int timeoutSeconds, CancellationToken ct)
     {

@@ -35,7 +35,7 @@ import { FacetValueType, Facet } from './facet.models';
 import { FacetValuesDialogComponent, FacetValuesDialogData } from './facet-values-dialog/facet-values-dialog.component';
 import { loadPageState, savePageState } from '../../shared/utils/page-state';
 import { UrlStateService } from '../../shared/utils/url-state';
-import { downloadCsv, downloadJson, copyPermalink, fileStamp } from '../../shared/utils/export.utils';
+import { downloadCsv, downloadJson, downloadBlob, copyPermalink, fileStamp } from '../../shared/utils/export.utils';
 
 const BUCKET_COUNT = 60;
 const STATE_KEY = 'state.logs';
@@ -583,6 +583,26 @@ export class LogsComponent implements OnDestroy {
     const rows = this.exportRows();
     if (!rows.length) return;
     downloadJson(`logs_${fileStamp()}.json`, rows);
+  }
+
+  /** Tracks whether a server export is in flight, so the menu can disable itself against a double-click. */
+  protected readonly serverExportPending = signal(false);
+
+  /**
+   * Server-side streaming export (list-pages-server-side plan, Phase 8): every log matching the
+   * current filters, not just the current page — replaces the on-screen-only limitation
+   * {@link exportCsv}/{@link exportJson}'s doc comments call out. Builds the request from the same
+   * {@link currentFilter} every other request on this page uses, so the export always matches what
+   * the list/summary are currently showing.
+   */
+  protected exportServerSide(format: 'ndjson' | 'csv'): void {
+    if (this.serverExportPending()) return;
+    this.serverExportPending.set(true);
+    this.api.getLogExport(this.currentFilter(), format).subscribe({
+      next: (blob) => downloadBlob(`logs-export_${fileStamp()}.${format}`, blob),
+      error: () => this.serverExportPending.set(false),
+      complete: () => this.serverExportPending.set(false),
+    });
   }
 
   /** Copy a shareable link to the current view (filters + range live in the URL). */

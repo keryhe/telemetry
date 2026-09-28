@@ -28,9 +28,10 @@ public sealed class QueryOptions
 }
 
 /// <summary>
-/// Bound from the <c>Telemetry:Export</c> configuration section. Currently holds only the
-/// <see cref="ProviderCapabilities.ExportMaxWindowDays"/> override (decision 40); export itself
-/// ships in Phase 7.
+/// Bound from the <c>Telemetry:Export</c> configuration section (list-pages-server-side plan,
+/// Phase 8). Holds the <see cref="ProviderCapabilities.ExportMaxWindowDays"/> override (decision
+/// 40, wired in Phase 1) plus <see cref="MaxConcurrent"/> (decision 17), which bounds how many
+/// <c>/api/*/export</c> requests may stream at once per API instance.
 /// </summary>
 public sealed class ExportOptions
 {
@@ -39,4 +40,13 @@ public sealed class ExportOptions
 
     /// <summary>Overrides <see cref="ProviderCapabilities.ExportMaxWindowDays"/>'s tier default (7 analytics / 1 standard) when set.</summary>
     public int? MaxWindowDaysOverride { get; set; }
+
+    /// <summary>
+    /// Maximum number of exports (logs, traces or metrics combined) streaming at once per API
+    /// instance (decision 17); a request beyond this gets <c>429</c>. Each export holds a pooled
+    /// database connection for its whole duration (a SQL Server export holds it under
+    /// <c>SNAPSHOT</c>, decision 35), so this is also an effective cap on export connections held
+    /// out of the pool. Default 2.
+    /// </summary>
+    public int MaxConcurrent { get; set; } = 2;
 }

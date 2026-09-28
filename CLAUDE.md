@@ -287,6 +287,18 @@ unchanged):
 - **Control-plane is best-effort.** Alert-rule CRUD uses `ALTER TABLE ... UPDATE` mutations and
   `TryClaimFireAsync` is NON-ATOMIC (read-check-then-update), so under concurrent evaluators a
   rule could double-fire. Acceptable because no host currently drives scheduled evaluation.
+- **Duplicate delivery reads as `LIMIT 1 BY trace_id, span_id`, not `uniqExact`/`argMax` (decision
+  34).** A re-delivered span batch (gRPC retry before a merge collapses the `ReplacingMergeTree`
+  duplicates) would otherwise double-count spans in a trace's aggregate or show a span twice in a
+  detail view. Every span read on the ClickHouse provider — trace detail, anchor/root-span lookup,
+  the trace-summary raw path, the Phase 8 export's per-trace aggregate — wraps its `FROM spans`
+  with `LIMIT 1 BY trace_id, span_id`, ClickHouse's per-group first-row idiom, rather than an
+  aggregate function: it needs the winning row's OTHER columns (name, kind, status, timestamps),
+  not just a count or a single numeric column, which is what `argMax`/`uniqExact` alone would give.
+  `spans.created_at` (evaluated at statement execution, like every other ClickHouse table's
+  `created_at`) is what the `asOf` pin compares against on this provider — combined with `LIMIT 1
+  BY`, a page fetched at a given `asOf` is stable across a later merge even though the underlying
+  rows physically collapse.
 - **Search skip indexes (schema 2.13.3).** `ngrambf_v1` bloom-filter skip indexes on
   `spans.name`/`status_message` and `log_records.body_value` prune granules ahead of
   `FreeTextPredicate`'s unchanged predicate; `tokenbf_v1` does the same for
@@ -381,6 +393,23 @@ return partial-success responses.
 **REST controllers** (`Keryhe.Telemetry.Api/Controllers/`): `Traces`, `Metrics`, `Logs`,
 `Alerts`, `Tenants` — each wraps the corresponding read repository with query/aggregation
 logic.
+
+**Query layer** (list-pages-server-side plan, phases 1-8): the logs/traces list pages and the
+metrics catalog share one shape, all in `Keryhe.Telemetry.Core/Data/Read`. Lists page by
+**keyset, not offset** (`KeysetCursor`/`NameKeysetCursor`) — an opaque, filter-hash-checked cursor
+encoding `(sort key, tiebreak id)`, never a page number, so a page never shifts under concurrent
+inserts. Every summary/page request pins on **`asOf`**: a database-clock value (`ResolveAsOfAsync`,
+`DatabaseClockNowExpr`) resolved once per fresh query and echoed back opaquely thereafter — never
+parsed or recomputed by the caller — so paging through a window stays stable even as new rows keep
+arriving, and the "new since" banner counts exactly what `asOf` excluded. A summary/count query
+that risks running long (an unindexed scan, a `COUNT(*)` over a large filtered set) goes through
+**`TimedQuery.RunAsync`**, which enforces `Telemetry:Query:SummaryTimeoutSeconds` (default 5) and
+returns a lower-bound/"≥ N" result instead of blocking the request indefinitely — `GetLogSummaryAsync`/
+`GetTraceSummaryAsync`/`GetMetricSeriesAsync` (the latter retrying once at a quarter of the
+requested point count, decision 31) all use it. `SqlServer`'s own read repositories additionally
+wrap each call in `ExecuteWithRetryAsync`, retrying once on error 1205 (see the SQL Server deadlock
+notes on `ProviderCapabilities`/`SqlServerReadConnection` below) — every other provider's override
+is a no-op.
 
 **Deduplication of the reference tables**: three entities are deduplicated, by two different
 mechanisms, and the distinction is deliberate.
@@ -489,13 +518,20 @@ resolves tenants by hashing the `Authorization: Bearer <key>` gRPC header agains
 (`ITenantResolver`). The API resolves the tenant in `TenantMiddleware` and carries it via a
 scoped `ITenantContext` (`ApiTenantContext`); read queries filter on `tenant_id`.
 
-**Alerting** (`Keryhe.Telemetry.Alerting`): `AlertService.EvaluateAllAsync` iterates all
+**Alerting** (`Keryhe.Telemetry.Api/Alerting`): `AlertService.EvaluateAllAsync` iterates all
 tenants with enabled rules, dispatching each rule type to a registered `IAlertEvaluator`
-(`MetricThreshold`, `ErrorRate`, `SlowTrace`, `LogSeveritySpike`). An atomic `TryClaimFireAsync`
-(UPDATE with cooldown check) prevents duplicate fires under load balancing. The API's
-`AlertsController` handles rule CRUD via `IAlertRuleRepository`. Note: no host currently
-registers a background worker that drives `EvaluateAllAsync` — evaluation must be invoked
-explicitly if you wire it up.
+(`MetricThreshold`, `ErrorRate`, `SlowTrace`, `LogSeveritySpike`). `ErrorRateEvaluator` and
+`SlowTraceEvaluator` read `ITraceReadRepository.GetTraceSummaryAsync`; `LogSeveritySpikeEvaluator`
+reads `ILogReadRepository.GetLogSummaryAsync` — the same rollup-table-backed summary path the
+traces/logs list pages use (see "Rollups" below), not a bespoke raw scan, so an evaluator gets the
+rollup tables' source when the rule's own filters are rollup-eligible and falls back to the raw
+path exactly like the list page would (`LogSeveritySpikeEvaluator`'s own arbitrary-severity-cutoff
+case is a documented exception that always forces the raw path — the rollup tables' severity
+groups can't reconstruct an arbitrary cutoff, same reasoning as the list page's own MinSeverity
+filter). An atomic `TryClaimFireAsync` (UPDATE with cooldown check) prevents duplicate fires under
+load balancing. The API's `AlertsController` handles rule CRUD via `IAlertRuleRepository`. Note: no
+host currently registers a background worker that drives `EvaluateAllAsync` — evaluation must be
+invoked explicitly if you wire it up.
 
 **Retention** (`Keryhe.Telemetry.Api/Retention/`): the single application-level mechanism for
 telemetry retention, on every provider including Timescale (schema 2.10.0 removed Timescale's
@@ -518,6 +554,79 @@ defaults (traces 90d, logs 90d, metrics 180d); `UpdateSettingsAsync` is always a
 an `INSERT`. ClickHouse follows the same "control-plane is best-effort" pattern as its alert-rule
 CRUD: `UpdateSettingsAsync` is overridden to use `ALTER TABLE ... UPDATE` instead of the shared
 base's plain `UPDATE`.
+
+**Export** (`Keryhe.Telemetry.Api/Controllers/*.cs`'s `GetExport` actions plus
+`Keryhe.Telemetry.Api/Export/ExportWriters.cs`, list-pages-server-side plan, Phase 8, decision 17):
+`GET /api/logs/export`, `/api/traces/export`, `/api/metrics/export` stream every matching row —
+full log records, one `TraceInfo` row per trace, or one `(display series, bucket)` row per metric
+series — as NDJSON or CSV, with no row cap, reusing each signal's existing filter compilation so
+export can never see a different population than the list it's exporting from. Two limits apply
+before any query runs: `ExportWindowGuard` rejects (`400`) a window wider than
+`ProviderCapabilities.ExportMaxWindowDays` (7 analytics / 1 standard, `Telemetry:Export:MaxWindowDaysOverride`)
+regardless of filters — export has no row cap, so the window is the only thing bounding the work —
+and `ExportConcurrencyGate`, a singleton `SemaphoreSlim` shared across all three signals, caps
+concurrent exports per API instance at `Telemetry:Export:MaxConcurrent` (default 2), returning
+`429` rather than queuing. Logs stream via `SqlMapper.ExecuteReaderAsync` +
+`SqlMapper.GetRowParser<T>` (Dapper's own `QueryUnbufferedAsync` has no `CommandDefinition`/
+cancellation-token overload in the pinned Dapper version) so the reader advances one row at a time
+and `CancellationToken` — bound by MVC to `HttpContext.RequestAborted` — reaches the underlying
+database command on client disconnect, not just the enumeration loop; `CommandTimeout = 0` is set
+explicitly since Dapper's 30s default would cut off a large export. Traces export chunks (1,000
+anchors per round trip) rather than issuing one unbuffered query, because a trace row needs a
+batched whole-span-set aggregate (span count/min-start/max-end/has-error) that can't be pushed into
+a single per-row streaming query on every provider — chunking still keeps memory bounded to one
+chunk, not the whole matching population. Metrics export reuses `GetMetricSeriesAsync`'s bucketed
+pipeline with `Top = int.MaxValue`, so `BuildDisplaySeriesAndOther`'s fold-into-"other" step is
+always empty and every series is included (decision 29) — the pipeline already collapses raw data
+points down to (streams × buckets) rows in SQL before this ever runs, so there's no separate raw
+row set to stream unbuffered. Every export runs through the same `SNAPSHOT`-isolated read
+connection as the list/summary endpoints on SQL Server (`SqlServerReadConnection`, decision 35), so
+a slow-downloading client never holds a shared page lock against ingestion. CSV cells get a
+formula-injection guard (`CsvFormulaGuard`): a cell starting with `=`, `+`, `-` or `@` is prefixed
+with `'`.
+
+**Rollups** (`Keryhe.Telemetry.Api/Rollups/`, list-pages-server-side plan, phases 2-3, decisions
+37-38, 41): the application-level mechanism that makes the logs/traces list pages' summary charts
+and cards fast for an unfiltered or lightly-filtered (service/operation/errors) window, backed by
+pre-aggregated **summary tables** (`log_rollup_minute`/`log_rollup_hour`,
+`trace_rollup_minute`/`trace_rollup_hour`) rather than a group-by over raw `log_records`/`spans`.
+`RollupWorker`, a `BackgroundService` structurally mirroring `AlertEvaluationWorker`/
+`RetentionWorker`, wakes on `Telemetry:Rollups:IntervalSeconds` (default 30, section
+`RollupOptions`) and for each signal/granularity (logs minute/hour, traces minute/hour):
+- **Settles**: a minute is rolled once it is `SettleSeconds` old (default 120 — "2 minutes after
+  it closes", decision 38), so a rollup row reflects data that has essentially finished arriving
+  without waiting for a hard cutoff.
+- **Re-rolls**: a minute already rolled is recomputed once it reaches `RepassMinutes` age (default
+  15) to absorb late arrivals; data landing after that re-roll is missing from the summary
+  (documented behavior) even though it's still present in the raw list.
+- **Leases**: a per-granularity claim (`LeaseSeconds`, default 120) so two API instances running
+  the worker never both roll the same minute — the sole writer of the summary tables and, for
+  traces, `orphan_roots`.
+- **Backfills** `BackfillHours` (default 24) of history on first start, not the whole retention
+  period — an explicit, narrower scope than a full historical backfill.
+
+**Orphan traces** (decision 41): a trace whose earliest span's parent id matches no span anywhere
+(the real root never arrived, or never will) has no natural anchor for the trace list's "one row
+per trace" contract. The trace rollup pass detects these immediately before each minute range's
+summary recompute (both the initial roll and the re-roll, so orphans are current whenever the
+summary is) and anchors the trace on its earliest span in `orphan_roots`, read with `NOT EXISTS`
+against a real root at query time — so a late-arriving real root silently supersedes the orphan
+row instead of the trace ever appearing twice. `detected_at` pins the orphan the same way `asOf`
+pins everything else in this plan, so an orphan detected mid-paging session doesn't appear
+mid-page.
+
+**Which filters use the summary tables, and the raw fallback**: `GetLogSummaryAsync`/
+`GetTraceSummaryAsync` try the rollup source only when the request's filters are "rollup-eligible"
+(time range plus service/operation/errors-mode only — decision 37) and the rollup tables report
+coverage of the requested window (`rollup_state.coverage_start_unix_nano`); anything else —
+free-text/attribute search, `mode=slow`'s duration filter, a `MinSeverity` cutoff (the rollup
+tables' severity groups can't reconstruct an arbitrary row-level cutoff), or a window older than
+`coverage_start` — falls back to the raw group-by path every phase before this one already used.
+`Source` on the response (`"rollup"` or `"raw"`) tells the caller which path answered; the window's
+not-yet-rolled tail (the last `SettleSeconds`) is always filled from a raw group-by over that
+narrow slice and merged in, regardless of source. `listTotal`/the paginator's own population always
+comes from the raw anchor-bounded path (decision 13), never the rollup tables — rollups only ever
+answer the chart/card aggregates, never the row-level list itself.
 
 ### Database
 

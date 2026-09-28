@@ -38,7 +38,7 @@ import { TraceSearchHelpDialogComponent } from '../trace-search-help-dialog/trac
 import { loadPageState, savePageState } from '../../../shared/utils/page-state';
 import { UrlStateService } from '../../../shared/utils/url-state';
 import { serviceColor } from '../../../shared/utils/service-colors';
-import { downloadCsv, downloadJson, copyPermalink, fileStamp } from '../../../shared/utils/export.utils';
+import { downloadCsv, downloadJson, downloadBlob, copyPermalink, fileStamp } from '../../../shared/utils/export.utils';
 
 interface GraphNode {
   id: string; label: string;
@@ -716,6 +716,25 @@ export class TraceListComponent implements OnDestroy {
     const rows = this.exportRows();
     if (!rows.length) return;
     downloadJson(`traces_${fileStamp()}.json`, rows);
+  }
+
+  /** Tracks whether a server export is in flight, so the menu can disable itself against a double-click. */
+  protected readonly serverExportPending = signal(false);
+
+  /**
+   * Server-side streaming export (list-pages-server-side plan, Phase 8): one trace-summary row per
+   * trace matching the current filters, not just the current page — replaces the on-screen-only
+   * limitation {@link exportCsv}/{@link exportJson}'s doc comments call out. Builds the request from
+   * the same {@link currentFilter} every other request on this page uses.
+   */
+  protected exportServerSide(format: 'ndjson' | 'csv'): void {
+    if (this.serverExportPending()) return;
+    this.serverExportPending.set(true);
+    this.api.getTraceExport(this.currentFilter(), format).subscribe({
+      next: (blob) => downloadBlob(`traces-export_${fileStamp()}.${format}`, blob),
+      error: () => this.serverExportPending.set(false),
+      complete: () => this.serverExportPending.set(false),
+    });
   }
 
   /** Copy a shareable link to the current view (filters + range live in the URL). */

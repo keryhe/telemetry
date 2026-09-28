@@ -53,6 +53,10 @@ public static class TelemetryApiServiceCollectionExtensions
         services.Configure<QueryOptions>(configuration.GetSection(QueryOptions.SectionName));
         services.Configure<ExportOptions>(configuration.GetSection(ExportOptions.SectionName));
 
+        // Phase 8: caps concurrent /api/*/export streams per API instance (decision 17) — one gate
+        // shared across logs/traces/metrics exports, not per-signal.
+        services.AddSingleton<ExportConcurrencyGate>();
+
         return services;
     }
 }

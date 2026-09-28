@@ -69,6 +69,18 @@ export class MetricsApiService {
     return this.http.get<MetricExemplarPage>(`${this.base}/exemplars`, { params });
   }
 
+  /**
+   * Streaming export (list-pages-server-side plan, Phase 8, decision 29): one row per (display
+   * series, bucket) — every series, no top-N/"other" split, unlike {@link getSeries}. Takes the
+   * same query shape as `/series` (`top` doesn't apply to export, so it's the one field of
+   * {@link MetricSeriesQueryParams} this method ignores). Fetched as a Blob so the `X-Tenant-Id`
+   * interceptor still runs — see `downloadBlob`'s doc comment.
+   */
+  getSeriesExport(p: MetricSeriesQueryParams, format: 'ndjson' | 'csv'): Observable<Blob> {
+    const params = this.filterParams(p).set('points', p.points).set('format', format);
+    return this.http.get(`${this.base}/export`, { params, responseType: 'blob' });
+  }
+
   private filterParams(p: { metricName: string; start: Date; end: Date; metricId?: number; labelFilters?: Record<string, string>; q?: string }): HttpParams {
     let params = new HttpParams()
       .set('metricName', p.metricName)

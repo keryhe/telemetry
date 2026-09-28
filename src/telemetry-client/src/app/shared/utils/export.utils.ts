@@ -22,7 +22,18 @@ export function buildCsv(headers: string[], rows: CsvValue[][]): string {
 
 /** Trigger a client-side download of arbitrary text as a named file. */
 export function downloadText(filename: string, text: string, mime: string): void {
-  const blob = new Blob([text], { type: mime });
+  downloadBlob(filename, new Blob([text], { type: mime }));
+}
+
+/**
+ * Trigger a client-side download of an already-fetched Blob (list-pages-server-side plan, Phase 8:
+ * the server-side streaming `/api/*\/export` endpoints). Used instead of a plain `<a href=url>`
+ * navigation because the export endpoints are tenant-scoped through the `X-Tenant-Id` header
+ * (`tenant.interceptor.ts`), which only `HttpClient` requests carry — a bare navigation would hit
+ * the API with no tenant header at all. Each export API method fetches the response as a Blob
+ * through `HttpClient` (so the interceptor chain runs) and hands it to this helper to save.
+ */
+export function downloadBlob(filename: string, blob: Blob): void {
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
   a.href = url;

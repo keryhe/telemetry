@@ -14,6 +14,7 @@ import { MatChipsModule } from '@angular/material/chips';
 import { MatFormFieldModule } from '@angular/material/form-field';
 import { MatIconModule } from '@angular/material/icon';
 import { MatInputModule } from '@angular/material/input';
+import { MatMenuModule } from '@angular/material/menu';
 import { MatPaginatorModule, PageEvent } from '@angular/material/paginator';
 import { MatProgressBarModule } from '@angular/material/progress-bar';
 import { MatSelectModule } from '@angular/material/select';
@@ -41,7 +42,7 @@ import {
 } from '../../../shared/utils/chart.utils';
 import { loadPageState, savePageState } from '../../../shared/utils/page-state';
 import { UrlStateService } from '../../../shared/utils/url-state';
-import { downloadCsv, fileStamp } from '../../../shared/utils/export.utils';
+import { downloadCsv, downloadBlob, fileStamp } from '../../../shared/utils/export.utils';
 
 const STATE_KEY = 'state.metricDetail';
 
@@ -101,7 +102,7 @@ interface ChartGroup {
     DatePipe, DecimalPipe, KeyValuePipe, SlicePipe, RouterLink, FormsModule,
     MatCardModule, MatButtonModule, MatButtonToggleModule, MatIconModule,
     MatTabsModule, MatTableModule, MatChipsModule, MatFormFieldModule, MatInputModule,
-    MatSelectModule, MatProgressBarModule, MatTooltipModule, MatPaginatorModule, NgApexchartsModule,
+    MatSelectModule, MatProgressBarModule, MatTooltipModule, MatPaginatorModule, MatMenuModule, NgApexchartsModule,
     StatCardComponent, EmptyStateComponent, PageHeaderComponent,
   ],
   templateUrl: './metric-detail.component.html',
@@ -903,5 +904,29 @@ export class MetricDetailComponent implements OnInit, AfterViewInit, OnDestroy {
 
     const data = groups.flatMap((g) => g.points.map((p) => row(g.name, p)));
     downloadCsv(`${this.metricName()}_${fileStamp()}.csv`, headers, data);
+  }
+
+  /** Tracks whether a server export is in flight, so the menu can disable itself against a double-click. */
+  protected readonly serverExportPending = signal(false);
+
+  /**
+   * Server-side streaming export (list-pages-server-side plan, Phase 8, decision 29): one row per
+   * (display series, bucket), EVERY series included — unlike {@link exportCsv}'s chart-based export,
+   * which reflects the chart's own top-8-plus-"other" fold. Builds the request the same way
+   * {@link reloadSeries} does (current metric/window/label filters/search), but with no `top` — the
+   * export endpoint never folds series into "other".
+   */
+  protected exportServerSide(format: 'ndjson' | 'csv'): void {
+    if (this.serverExportPending()) return;
+    const { name, start, end, metricId } = this.currentFilter();
+    const labelFilters = Object.keys(this.selectedLabels()).length > 0 ? this.selectedLabels() : undefined;
+    const q = this.searchText().trim() || undefined;
+
+    this.serverExportPending.set(true);
+    this.api.getSeriesExport({ metricName: name, start, end, metricId, labelFilters, q, points: this.requestedPoints() }, format).subscribe({
+      next: (blob) => downloadBlob(`${this.metricName()}-export_${fileStamp()}.${format}`, blob),
+      error: () => this.serverExportPending.set(false),
+      complete: () => this.serverExportPending.set(false),
+    });
   }
 }

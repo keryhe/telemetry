@@ -35,4 +35,14 @@ public interface ITraceReadRepository
 
     /// <summary>Per-operation RED metrics (rate, error%, p50/p95/p99, avg) for a service over the window.</summary>
     Task<List<OperationStats>> GetOperationStatsAsync(string serviceName, DateTime startTime, DateTime endTime, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Streaming export (list-pages-server-side plan, Phase 8, decision 17): one <see cref="TraceInfo"/>
+    /// row per trace matching the same filters as <see cref="GetTraceSummaryAsync"/>/
+    /// <see cref="GetTracePageAsync"/>, with no row cap. Span-level export is out of scope. Memory
+    /// stays bounded to one internal chunk at a time (see <c>TraceReadRepositoryBase</c>'s own doc
+    /// comment on this method for why it chunks rather than issuing one unbuffered query), not the
+    /// whole matching population.
+    /// </summary>
+    IAsyncEnumerable<TraceInfo> ExportTracesAsync(TraceExportQuery query, CancellationToken cancellationToken = default);
 }

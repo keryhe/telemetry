@@ -95,8 +95,14 @@
       <mat-icon>download</mat-icon>
     </button>
     <mat-menu #exportMenu="matMenu">
-      <button mat-menu-item (click)="exportCsv()"><mat-icon>table_chart</mat-icon> Export CSV</button>
-      <button mat-menu-item (click)="exportJson()"><mat-icon>data_object</mat-icon> Export JSON</button>
+      <button mat-menu-item [disabled]="serverExportPending()" (click)="exportServerSide('ndjson')">
+        <mat-icon>cloud_download</mat-icon> Export all matching (NDJSON)
+      </button>
+      <button mat-menu-item [disabled]="serverExportPending()" (click)="exportServerSide('csv')">
+        <mat-icon>cloud_download</mat-icon> Export all matching (CSV)
+      </button>
+      <button mat-menu-item (click)="exportCsv()"><mat-icon>table_chart</mat-icon> Export current page (CSV)</button>
+      <button mat-menu-item (click)="exportJson()"><mat-icon>data_object</mat-icon> Export current page (JSON)</button>
     </mat-menu>
 
     <button mat-icon-button (click)="copyLink()"

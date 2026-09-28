@@ -164,6 +164,16 @@ export class TracesApiService {
     return this.http.get<OperationStats[]>(`${this.base}/operations/stats`, { params });
   }
 
+  /**
+   * Streaming export (list-pages-server-side plan, Phase 8): one trace-summary row per trace, same
+   * filters as {@link getTraceSummary}/{@link getTracePage}. Fetched as a Blob so the
+   * `X-Tenant-Id` interceptor still runs — see `downloadBlob`'s doc comment.
+   */
+  getTraceExport(query: TraceListFilter, format: 'ndjson' | 'csv'): Observable<Blob> {
+    const params = this.filterParams(query).set('format', format);
+    return this.http.get(`${this.base}/export`, { params, responseType: 'blob' });
+  }
+
   private filterParams(query: TraceListFilter): HttpParams {
     let params = new HttpParams()
       .set('start', query.start.toISOString())

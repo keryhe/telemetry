@@ -34,4 +34,13 @@ public interface ILogReadRepository
 
     /// <summary>Server-side attribute facets (decision 15) over the newest matching rows, sampled and labelled as such.</summary>
     Task<LogFacetsResult> GetLogFacetsAsync(LogFacetsQuery query, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Streaming export (list-pages-server-side plan, Phase 8, decision 17): every log record
+    /// matching the same filters as <see cref="GetLogSummaryAsync"/>/<see cref="GetLogPageAsync"/>,
+    /// with no row cap and no paging — the caller (the export controller) writes each record to the
+    /// HTTP response as it arrives. Implementations read with Dapper's unbuffered async query mode
+    /// so the whole matching set is never materialized in memory at once.
+    /// </summary>
+    IAsyncEnumerable<LogRecordModel> ExportLogsAsync(LogExportQuery query, CancellationToken cancellationToken = default);
 }

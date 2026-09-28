@@ -672,6 +672,52 @@ public abstract class LogReadRepositoryBase : DapperReadRepository, ILogReadRepo
     }
 
     // =========================================================================
+    // EXPORT (list-pages-server-side plan, Phase 8, decision 17)
+    // =========================================================================
+
+    /// <summary>
+    /// Streams every matching log record, oldest first, with no row cap. Reuses
+    /// <see cref="BuildFilterClauses"/> — the exact same time/service/severity/search compilation
+    /// the summary and page endpoints use — so export can never see a different population than the
+    /// list it's exporting from.
+    ///
+    /// Reads via <c>SqlMapper.ExecuteReaderAsync(CommandDefinition)</c> +
+    /// <c>SqlMapper.GetRowParser&lt;T&gt;</c> rather than a buffered <c>QueryAsync</c> (or Dapper's
+    /// own <c>QueryUnbufferedAsync</c>, which has no <c>CommandDefinition</c>/CancellationToken
+    /// overload in this Dapper version — confirmed by reflecting its signature, not assumed): the
+    /// reader is advanced one row at a time as the caller enumerates, so the whole matching set is
+    /// never materialized in memory, and <see cref="CancellationToken"/> flows all the way to
+    /// <c>ExecuteReaderAsync</c>/<c>ReadAsync</c> — which is what actually cancels the underlying
+    /// database command when <c>HttpContext.RequestAborted</c> fires on a client disconnect, not
+    /// just the enumeration loop. <c>CommandTimeout = 0</c> is set explicitly because Dapper's own
+    /// default (30s) would cut off a genuinely large export partway through.
+    /// </summary>
+    public async IAsyncEnumerable<LogRecordModel> ExportLogsAsync(
+        LogExportQuery query, [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken cancellationToken = default)
+    {
+        if (query.Start >= query.End)
+            throw new ArgumentException("Start time must be before end time");
+
+        var parsed = SearchQueryParser.Parse(query.Search);
+        var startNano = TimeConversion.DateTimeToUnixNano(query.Start);
+        var endNano = TimeConversion.DateTimeToUnixNano(query.End);
+        var (clauses, parameters) = BuildFilterClauses(query.Service, query.MinSeverity, parsed, startNano, endNano);
+        var where = string.Join(" AND ", clauses);
+
+        var sql = $"""
+            {BaseSelect} AND {where}
+            ORDER BY lr.time_unix_nano ASC, lr.id ASC
+            """;
+
+        await using var conn = await OpenConnectionAsync(cancellationToken);
+        await using var reader = await conn.ExecuteReaderAsync(new CommandDefinition(
+            sql, parameters, commandTimeout: 0, cancellationToken: cancellationToken));
+        var parse = reader.GetRowParser<LogRow>();
+        while (await reader.ReadAsync(cancellationToken))
+            yield return Map(parse(reader));
+    }
+
+    // =========================================================================
     // SHARED FILTER COMPILATION
     // =========================================================================
 

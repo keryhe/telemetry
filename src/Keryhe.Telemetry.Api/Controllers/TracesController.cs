@@ -1,6 +1,9 @@
+using System.Text.Json;
+using Keryhe.Telemetry.Api.Export;
 using Keryhe.Telemetry.Core;
 using Keryhe.Telemetry.Core.Data.Read;
 using Keryhe.Telemetry.Core.Models;
+using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
 
 namespace Keryhe.Telemetry.Api.Controllers;
@@ -11,11 +14,13 @@ public class TracesController : ControllerBase
 {
     private readonly ITraceReadRepository _traces;
     private readonly ProviderCapabilities _capabilities;
+    private readonly ExportConcurrencyGate _exportGate;
 
-    public TracesController(ITraceReadRepository traces, ProviderCapabilities capabilities)
+    public TracesController(ITraceReadRepository traces, ProviderCapabilities capabilities, ExportConcurrencyGate exportGate)
     {
         _traces = traces;
         _capabilities = capabilities;
+        _exportGate = exportGate;
     }
 
     // GET /api/traces/summary?start=&end=&asOf=&mode=&service=&operation=&minDurationMs=&maxDurationMs=&q=&bucketCount=&latencyDurationRows=
@@ -204,5 +209,91 @@ public class TracesController : ControllerBase
             return BadRequest("service query parameter is required.");
         var latencies = await _traces.GetAverageLatenciesAsync(service, start, end, ct);
         return Ok(latencies);
+    }
+
+    /// <summary>
+    /// GET /api/traces/export?start=&end=&mode=&service=&operation=&minDurationMs=&maxDurationMs=&q=&format=ndjson|csv
+    /// Phase 8 (list-pages-server-side plan, decision 17): one trace-summary row per trace, same
+    /// filters as <see cref="GetSummary"/>/<see cref="GetPage"/>, streamed with no row cap.
+    /// Span-level export is out of scope (Target API/plan text). Same window/concurrency limits as
+    /// the logs export — see <see cref="LogsController.GetExport"/>'s doc comment.
+    /// </summary>
+    [HttpGet("export")]
+    public async Task<IActionResult> GetExport(
+        [FromQuery] DateTime start,
+        [FromQuery] DateTime end,
+        [FromQuery] string mode = "all",
+        [FromQuery] string? service = null,
+        [FromQuery] string? operation = null,
+        [FromQuery] double? minDurationMs = null,
+        [FromQuery] double? maxDurationMs = null,
+        [FromQuery] string? q = null,
+        [FromQuery] string format = "ndjson",
+        CancellationToken ct = default)
+    {
+        if (start >= end)
+            return BadRequest("Start time must be before end time.");
+        if (!ExportFormatParser.TryParse(format, out var exportFormat))
+            return BadRequest("format must be 'ndjson' or 'csv'.");
+
+        var windowGuard = ExportWindowGuard.Check(_capabilities, end - start);
+        if (!windowGuard.Allowed)
+            return BadRequest(windowGuard.Message);
+
+        using var slot = _exportGate.TryEnter();
+        if (slot == null)
+            return StatusCode(StatusCodes.Status429TooManyRequests, "Too many exports are already running on this API instance. Try again shortly.");
+
+        var query = new TraceExportQuery
+        {
+            Start = start,
+            End = end,
+            Mode = mode,
+            Service = service,
+            Operation = operation,
+            MinDurationMs = minDurationMs,
+            MaxDurationMs = maxDurationMs,
+            Search = q
+        };
+
+        Response.ContentType = exportFormat.ContentType();
+        Response.Headers.ContentDisposition = $"attachment; filename=\"traces-export.{exportFormat.FileExtension()}\"";
+
+        var rowCount = 0;
+        if (exportFormat == ExportFormat.Csv)
+        {
+            await using var csv = new CsvRowWriter(Response.Body);
+            await csv.WriteHeaderAsync(["traceId", "spanCount", "startTime", "endTime", "durationMs", "serviceName", "rootOperationName", "hasErrors"]);
+            await foreach (var trace in _traces.ExportTracesAsync(query, ct))
+            {
+                await csv.WriteRowAsync(TraceCsvCells(trace));
+                if (++rowCount % 500 == 0)
+                    await csv.FlushAsync();
+            }
+        }
+        else
+        {
+            await foreach (var trace in _traces.ExportTracesAsync(query, ct))
+            {
+                await NdjsonRowWriter.WriteLineAsync(Response.Body, trace, ct);
+                if (++rowCount % 500 == 0)
+                    await Response.Body.FlushAsync(ct);
+            }
+        }
+
+        await Response.Body.FlushAsync(ct);
+        return new EmptyResult();
+    }
+
+    private static IEnumerable<string?> TraceCsvCells(TraceInfo trace)
+    {
+        yield return trace.TraceIdHex;
+        yield return trace.SpanCount.ToString();
+        yield return trace.TraceStartTime.ToString("O");
+        yield return trace.TraceEndTime.ToString("O");
+        yield return trace.TraceDuration.TotalMilliseconds.ToString("F3");
+        yield return trace.ServiceName;
+        yield return trace.RootOperationName;
+        yield return trace.HasErrors.ToString();
     }
 }

@@ -516,20 +516,30 @@ public static class SeededDataBuilder
         };
     }
 
-    /// <summary>Ten distinct gauge streams (services) for one metric name, with a clear magnitude ranking — for the top-N + "other" fold check (default top = 8).</summary>
-    public static List<MetricModel> ManyStreamsForTopN(long tenantId, DateTime start, int streamCount = 10)
+    /// <summary>
+    /// Ten distinct gauge streams (services) for one metric name, with a clear magnitude ranking —
+    /// for the top-N + "other" fold check (default top = 8). <paramref name="metricName"/> and
+    /// <paramref name="servicePrefix"/> default to the values <c>MetricPhase4TestsBase</c>'s own
+    /// top-N test uses; a caller in a different test class sharing the same provider fixture
+    /// collection (e.g. Phase 8's export tests) should pass distinct values — <c>metrics</c> is
+    /// truncated between test classes but the process-lifetime <c>ResourceScopeCache</c> is not
+    /// (see each fixture's own <c>ResetAsync</c> doc comment), so reusing the exact same metric
+    /// name/service pair across two test classes hands the second flush a cached metric id whose
+    /// row no longer exists, failing its data-point insert on the foreign key.
+    /// </summary>
+    public static List<MetricModel> ManyStreamsForTopN(long tenantId, DateTime start, int streamCount = 10, string metricName = "phase4.topn.gauge", string servicePrefix = "svc")
     {
         var scope = Scope();
         var metrics = new List<MetricModel>(streamCount);
         for (var i = 0; i < streamCount; i++)
         {
-            var serviceName = $"svc-{i:D2}";
-            // Descending magnitude: svc-00 is the largest, svc-09 the smallest — so the two lowest
-            // (indices 8, 9, ranks past top=8) fold into "other".
+            var serviceName = $"{servicePrefix}-{i:D2}";
+            // Descending magnitude: index 0 is the largest, the last index the smallest — so the
+            // two lowest ranks past top=8 fold into "other".
             var value = (streamCount - i) * 100;
             metrics.Add(new MetricModel
             {
-                Name = "phase4.topn.gauge",
+                Name = metricName,
                 Type = MetricType.GAUGE,
                 Unit = "1",
                 GaugeDataPoints =

@@ -1,6 +1,10 @@
+using System.Text.Json;
+using Keryhe.Telemetry.Api.Export;
 using Keryhe.Telemetry.Core;
+using Keryhe.Telemetry.Core.Data;
 using Keryhe.Telemetry.Core.Data.Read;
 using Keryhe.Telemetry.Core.Models;
+using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
 
 namespace Keryhe.Telemetry.Api.Controllers;
@@ -11,11 +15,13 @@ public class LogsController : ControllerBase
 {
     private readonly ILogReadRepository _logs;
     private readonly ProviderCapabilities _capabilities;
+    private readonly ExportConcurrencyGate _exportGate;
 
-    public LogsController(ILogReadRepository logs, ProviderCapabilities capabilities)
+    public LogsController(ILogReadRepository logs, ProviderCapabilities capabilities, ExportConcurrencyGate exportGate)
     {
         _logs = logs;
         _capabilities = capabilities;
+        _exportGate = exportGate;
     }
 
     // GET /api/logs?start=&end=
@@ -171,5 +177,83 @@ public class LogsController : ControllerBase
     {
         var logs = await _logs.GetSurroundingLogRecordsAsync(anchor, service, before, after, ct);
         return Ok(logs);
+    }
+
+    /// <summary>
+    /// GET /api/logs/export?start=&end=&service=&minSeverity=&q=&format=ndjson|csv
+    /// Phase 8 (list-pages-server-side plan, decision 17): full records, same filters as
+    /// <see cref="GetSummary"/>/<see cref="GetPage"/>, streamed with no row cap. Bounded to
+    /// <see cref="ProviderCapabilities.ExportMaxWindowDays"/> (400 beyond it) and
+    /// <see cref="ExportConcurrencyGate"/>'s slot count (429 when exhausted). <c>ct</c> is bound by
+    /// MVC to <c>HttpContext.RequestAborted</c>, which is what propagates a client disconnect down
+    /// into the repository's own cancellation-aware read.
+    /// </summary>
+    [HttpGet("export")]
+    public async Task<IActionResult> GetExport(
+        [FromQuery] DateTime start,
+        [FromQuery] DateTime end,
+        [FromQuery] string? service = null,
+        [FromQuery] int? minSeverity = null,
+        [FromQuery] string? q = null,
+        [FromQuery] string format = "ndjson",
+        CancellationToken ct = default)
+    {
+        if (start >= end)
+            return BadRequest("Start time must be before end time.");
+        if (!ExportFormatParser.TryParse(format, out var exportFormat))
+            return BadRequest("format must be 'ndjson' or 'csv'.");
+
+        var windowGuard = ExportWindowGuard.Check(_capabilities, end - start);
+        if (!windowGuard.Allowed)
+            return BadRequest(windowGuard.Message);
+
+        using var slot = _exportGate.TryEnter();
+        if (slot == null)
+            return StatusCode(StatusCodes.Status429TooManyRequests, "Too many exports are already running on this API instance. Try again shortly.");
+
+        var query = new LogExportQuery { Start = start, End = end, Service = service, MinSeverity = minSeverity, Search = q };
+
+        Response.ContentType = exportFormat.ContentType();
+        Response.Headers.ContentDisposition = $"attachment; filename=\"logs-export.{exportFormat.FileExtension()}\"";
+
+        var rowCount = 0;
+        if (exportFormat == ExportFormat.Csv)
+        {
+            await using var csv = new CsvRowWriter(Response.Body);
+            await csv.WriteHeaderAsync(["timestamp", "severityText", "severityNumber", "serviceName", "traceId", "spanId", "eventName", "body", "attributes"]);
+            await foreach (var log in _logs.ExportLogsAsync(query, ct))
+            {
+                await csv.WriteRowAsync(LogCsvCells(log));
+                if (++rowCount % 500 == 0)
+                    await csv.FlushAsync();
+            }
+        }
+        else
+        {
+            await foreach (var log in _logs.ExportLogsAsync(query, ct))
+            {
+                await NdjsonRowWriter.WriteLineAsync(Response.Body, log, ct);
+                if (++rowCount % 500 == 0)
+                    await Response.Body.FlushAsync(ct);
+            }
+        }
+
+        await Response.Body.FlushAsync(ct);
+        return new EmptyResult();
+    }
+
+    private static IEnumerable<string?> LogCsvCells(LogRecordModel log)
+    {
+        var timestamp = log.TimeUnixNano.HasValue ? TimeConversion.UnixNanoToDateTime(log.TimeUnixNano.Value).ToString("O") : "";
+        var serviceName = log.Resource?.Attributes != null && log.Resource.Attributes.TryGetValue("service.name", out var s) ? s?.ToString() : null;
+        yield return timestamp;
+        yield return log.SeverityText;
+        yield return log.SeverityNumber?.ToString();
+        yield return serviceName;
+        yield return log.TraceIdHex;
+        yield return log.SpanIdHex;
+        yield return log.EventName;
+        yield return log.BodyValue;
+        yield return JsonSerializer.Serialize(log.Attributes);
     }
 }

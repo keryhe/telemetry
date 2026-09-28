@@ -158,6 +158,17 @@ export class LogsApiService {
     return this.http.get<LogRecord[]>(`${this.base}/by-trace/${traceId}`);
   }
 
+  /**
+   * Streaming export (list-pages-server-side plan, Phase 8): the same filters as
+   * {@link getLogSummary}/{@link getLogPage} (minus `asOf`/paging — export has no row cap), fetched
+   * as a Blob so the `X-Tenant-Id` interceptor still runs (see `downloadBlob`'s doc comment). The
+   * caller (logs.component.ts's Export menu) hands the result straight to `downloadBlob`.
+   */
+  getLogExport(query: LogFilter, format: 'ndjson' | 'csv'): Observable<Blob> {
+    const params = this.filterParams(query).set('format', format);
+    return this.http.get(`${this.base}/export`, { params, responseType: 'blob' });
+  }
+
   /** Logs immediately before/after an anchor timestamp for one service, ignoring the active filters. */
   getLogContext(anchorTimeUnixNano: number, service: string | undefined, before = 10, after = 10): Observable<LogRecord[]> {
     let params = new HttpParams()

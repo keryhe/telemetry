@@ -51,4 +51,13 @@ public interface IMetricReadRepository
     /// </summary>
     Task<MetricLabelsResult> GetMetricLabelsAsync(string metricName, DateTime? startTime = null,
         DateTime? endTime = null, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Streaming export (list-pages-server-side plan, Phase 8, decision 29): reuses
+    /// <see cref="GetMetricSeriesAsync"/>'s bucketed-series pipeline with no top-N/"other" split —
+    /// every display series is included — and streams one <see cref="MetricExportRow"/> per
+    /// <c>(series, bucket)</c>, ordered by series then bucket. Returns an empty sequence for an
+    /// unknown metric name (mirrors <see cref="GetMetricSeriesAsync"/> returning null).
+    /// </summary>
+    IAsyncEnumerable<MetricExportRow> ExportMetricSeriesAsync(MetricExportQuery query, CancellationToken cancellationToken = default);
 }
