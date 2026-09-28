@@ -1,4 +1,5 @@
 using System.Text.Json;
+using Keryhe.Telemetry.StressTests.Browser;
 using Keryhe.Telemetry.StressTests.Load;
 using Keryhe.Telemetry.StressTests.Observers.Database;
 using Keryhe.Telemetry.TestInfrastructure.Containers;
@@ -20,6 +21,10 @@ public static class HostSmokeCommand
         var topology = HostTopology.AllInOne;
         var duration = 20;
         var retentionSeconds = 10;
+        var browsers = 0;
+        var warmup = 70;
+        var exports = false;
+        var browserTimeout = 60;
         string? outDir = null, reusePublish = null;
         for (var i = 0; i < args.Length; i++)
         {
@@ -30,6 +35,10 @@ public static class HostSmokeCommand
                 case "--topology": topology = Enum.Parse<HostTopology>(Next(), ignoreCase: true); break;
                 case "--duration": duration = int.Parse(Next()); break;
                 case "--retention-interval": retentionSeconds = int.Parse(Next()); break;
+                case "--browsers": browsers = int.Parse(Next()); break;
+                case "--browser-warmup": warmup = int.Parse(Next()); break;
+                case "--browser-export": exports = true; break;
+                case "--browser-timeout": browserTimeout = int.Parse(Next()); break;
                 case "--out": outDir = Next(); break;
                 case "--reuse-publish": reusePublish = Next(); break;
                 default: Console.Error.WriteLine($"unknown argument {args[i]}"); return 2;
@@ -65,7 +74,9 @@ public static class HostSmokeCommand
 
         Console.WriteLine($"Sending load for {duration}s...");
         using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(duration));
+        var tourTask = browsers > 0 ? RunTourAsync(hosts, tenants, browsers, warmup, exports, browserTimeout, outDir, cts.Token) : Task.FromResult<TourResults?>(null);
         await Task.WhenAll(generator.RunAsync(cts.Token), probe.RunAsync(cts.Token));
+        var tour = await tourTask;
         foreach (var s in generator.Snapshot().Signals)
             Console.WriteLine($"  {s.Signal,-8} offered {s.OfferedPerSecond:F0}/s acked {s.AckedPerSecond:F0}/s failed {s.ExportsFailed} p99 {s.Latency.P99Ms:F0}ms");
 
@@ -88,6 +99,7 @@ public static class HostSmokeCommand
             Console.WriteLine($"{r.Role} shutdown: exit {r.ExitCode}, {r.Elapsed.TotalSeconds:F1}s, killed {r.Killed}, drain completed {r.DrainCompleted}, " +
                               $"unpersisted {r.Unpersisted}, records_dropped {r.RecordsDropped}");
 
+        if (tour is not null) await WriteTourAsync(tour, outDir);
         var observation = await observers.StopAsync();
         PrintObservation(observation);
         foreach (var (name, content) in observation.Locks.Artifacts)
@@ -95,6 +107,35 @@ public static class HostSmokeCommand
         await File.WriteAllTextAsync(Path.Combine(outDir, "database-observation.json"),
             JsonSerializer.Serialize(observation, new JsonSerializerOptions { WriteIndented = true, PropertyNamingPolicy = JsonNamingPolicy.CamelCase }));
         return 0;
+    }
+
+    /// <summary>Waits <paramref name="warmup"/> seconds so data exists, then runs the tour until the load ends.</summary>
+    private static async Task<TourResults?> RunTourAsync(HostSet hosts, IReadOnlyList<SeededTenant> tenants, int users, int warmup, bool exports, int browserTimeout, string outDir, CancellationToken loadEnds)
+    {
+        try { await Task.Delay(TimeSpan.FromSeconds(warmup), loadEnds); } catch (OperationCanceledException) { return null; }
+        Console.WriteLine($"Starting browser tour ({users} user(s))...");
+        await using var tour = await PlaywrightTour.StartAsync(hosts.UiUri, hosts.ApiUri, tenants,
+            new TourOptions { Users = users, Export = exports, ReadyTimeout = TimeSpan.FromSeconds(browserTimeout) }, outDir);
+        tour.Start();
+        try { await Task.Delay(Timeout.Infinite, loadEnds); } catch (OperationCanceledException) { }
+        return await tour.StopAsync();
+    }
+
+    private static async Task WriteTourAsync(TourResults tour, string outDir)
+    {
+        Console.WriteLine($"Browser tour: {tour.Iterations} full loop(s), {tour.Pages.Count} steps, {tour.Pages.Count(p => p.TimedOut)} timeouts, " +
+                          $"{tour.Pages.Count(p => p.Error is not null)} errors, {tour.Pages.Sum(p => p.ConsoleErrors.Count)} console errors");
+        foreach (var (d, i) in tour.Discovery.Select((d, i) => (d, i)))
+            Console.WriteLine($"  user {i} data: service {d.Service ?? "none"}, histogram {d.HistogramMetric ?? "none"}, sum {d.SumMetric ?? "none"}");
+        foreach (var s in TourSummary.Steps(tour.Pages))
+            Console.WriteLine($"  {s.Step,-34} runs {s.Runs,3} p50 {s.P50Ms,7:F0} ms p95 {s.P95Ms,7:F0} ms max {s.MaxMs,7:F0} ms" +
+                              (s.Timeouts + s.Errors > 0 ? $"  timeouts {s.Timeouts} errors {s.Errors}" : ""));
+        Console.WriteLine("  slowest API calls (client-side):");
+        foreach (var r in TourSummary.Requests(tour.Pages).Take(6))
+            Console.WriteLine($"    {r.Template,-30} {r.Calls,4} calls p50 {r.P50Ms,6:F0} p95 {r.P95Ms,6:F0} max {r.MaxMs,6:F0} ms" +
+                              (r.Status400 > 0 ? $" ({r.Status400} x 400)" : "") + (r.Sources is null ? "" : $" [{r.Sources}]"));
+        await File.WriteAllTextAsync(Path.Combine(outDir, "browser-tour.json"),
+            JsonSerializer.Serialize(tour, new JsonSerializerOptions { WriteIndented = true, PropertyNamingPolicy = JsonNamingPolicy.CamelCase }));
     }
 
     private static void PrintObservation(DatabaseObservation o)

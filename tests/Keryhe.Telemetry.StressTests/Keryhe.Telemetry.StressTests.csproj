@@ -12,6 +12,7 @@
     <!-- Out-of-process metrics: the same EventPipe mechanism dotnet-counters uses -->
     <PackageReference Include="Microsoft.Diagnostics.NETCore.Client" Version="0.2.661903" />
     <PackageReference Include="Microsoft.Diagnostics.Tracing.TraceEvent" Version="3.1.21" />
+    <PackageReference Include="Microsoft.Playwright" Version="1.63.0" />
   </ItemGroup>
 
   <ItemGroup>

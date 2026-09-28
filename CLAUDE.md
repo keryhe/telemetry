@@ -66,6 +66,8 @@ until the full stress CLI lands; `-- host-smoke --provider <p> --topology allino
 orchestration end to end: publish, launch as child processes, EventPipe metrics, log scan, graceful
 shutdown, plus the Phase 4 database observers — `Observers/Database`: a 1s lock/pressure sampler, statement-stats
 collector, table sizes and a docker-stats sampler per DB container, written to `database-observation.json`;
+`--browsers <n>` adds the Phase 5 headless-Chromium page tour (`Browser/`; `--browser-export` adds the per-signal exports; first run
+`dotnet run --project tests/Keryhe.Telemetry.StressTests -- playwright-install` to fetch Chromium) and writes `browser-tour.json`;
 output goes to the gitignored `stress-results/`) reuses the Collector's generated gRPC stubs, which is why the three
 `*_service.proto` entries in the Collector csproj are `GrpcServices="Both"`:
 

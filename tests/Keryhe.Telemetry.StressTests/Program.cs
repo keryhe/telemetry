@@ -10,9 +10,15 @@ using Keryhe.Telemetry.StressTests.Load;
 if (args.Length > 0 && args[0] == "host-smoke")
     return await Keryhe.Telemetry.StressTests.Orchestration.HostSmokeCommand.RunAsync(args[1..]);
 
+if (args.Length > 0 && args[0] == "playwright-install")
+{
+    // Playwright's own installer: downloads the Chromium build this Playwright version drives (once per machine).
+    return Microsoft.Playwright.Program.Main(["install", "chromium"]);
+}
+
 if (args.Length == 0 || args[0] != "load")
 {
-    Console.Error.WriteLine("usage: host-smoke [--provider <p>] [--topology allinone|split] [--duration <s>] [--retention-interval <s>] [--out <dir>]\n       load --target <grpc url> --tenant <id>:<apiKey> [--tenant ...] [--api <url>] [--profile <file>] [--duration <s>] [--marker-interval <s>] [--out <file>]");
+    Console.Error.WriteLine("usage: host-smoke [--provider <p>] [--topology allinone|split] [--duration <s>] [--retention-interval <s>] [--browsers <n>] [--browser-warmup <s>] [--browser-export] [--browser-timeout <s>] [--out <dir>]\n       playwright-install\n       load --target <grpc url> --tenant <id>:<apiKey> [--tenant ...] [--api <url>] [--profile <file>] [--duration <s>] [--marker-interval <s>] [--out <file>]");
     return 2;
 }
 
