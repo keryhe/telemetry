@@ -260,9 +260,9 @@ public sealed class MySqlBulkWriter(
         MySqlConnection conn, MySqlTransaction tx, ResourceModel model, string hash, CancellationToken ct)
     {
         const string sql = """
-            INSERT INTO resources (attributes_json, resource_hash, schema_url, tenant_id)
-            VALUES (@attrJson, @hash, @schemaUrl, @tenantId)
-            ON DUPLICATE KEY UPDATE id = LAST_INSERT_ID(id)
+            INSERT INTO resources (attributes_json, resource_hash, schema_url, tenant_id, service_name)
+            VALUES (@attrJson, @hash, @schemaUrl, @tenantId, @serviceName)
+            ON DUPLICATE KEY UPDATE id = LAST_INSERT_ID(id), service_name = VALUES(service_name)
             """;
 
         await using var cmd = new MySqlCommand(sql, conn) { Transaction = tx };
@@ -270,6 +270,9 @@ public sealed class MySqlBulkWriter(
         cmd.Parameters.AddWithValue("@hash",      hash);
         cmd.Parameters.AddWithValue("@schemaUrl", (object?)model.SchemaUrl ?? DBNull.Value);
         cmd.Parameters.AddWithValue("@tenantId",  model.TenantId);
+        // service_name (schema 2.13.3, Phase 7, decision 8) -- see PostgreSqlBulkWriter's
+        // identical comment.
+        cmd.Parameters.AddWithValue("@serviceName", (object?)ExtractServiceName(model.Attributes) ?? DBNull.Value);
         await cmd.ExecuteNonQueryAsync(ct);
         return cmd.LastInsertedId;
     }

@@ -58,11 +58,16 @@ CREATE TABLE resources (
     schema_url      VARCHAR(2048),
     created_at      DATETIME(6)  NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
     attributes_json JSON,
+    -- service_name (schema 2.13.3, list-pages-server-side plan Phase 7): a real column, written
+    -- by the bulk writer's resource upsert, extracted from attributes_json's "service.name" key.
+    -- ResourceServiceNameExpr() is now just "{alias}.service_name" on every provider.
+    service_name    VARCHAR(255),
     CONSTRAINT uk_resource_tenant_hash UNIQUE (tenant_id, resource_hash),
     CONSTRAINT fk_resources_tenants FOREIGN KEY (tenant_id) REFERENCES tenants (id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 CREATE INDEX idx_resources_tenant_id ON resources (tenant_id);
 CREATE INDEX idx_created_at          ON resources (created_at);
+CREATE INDEX idx_resources_service_name ON resources (service_name);
 
 -- Instrumentation scope (library).
 CREATE TABLE instrumentation_scopes (
@@ -609,8 +614,8 @@ GROUP BY s.trace_id, r.id;
 -- The attribute key "service.name" contains a dot, so the JSON path quotes it: $."service.name".
 CREATE VIEW service_map AS
 SELECT
-    parent_res.attributes_json ->> '$."service.name"' AS parent_service,
-    child_res.attributes_json  ->> '$."service.name"' AS child_service,
+    parent_res.service_name AS parent_service,
+    child_res.service_name AS child_service,
     child.kind                                         AS span_kind,
     COUNT(*)                                           AS call_count
 FROM spans child
@@ -620,20 +625,20 @@ INNER JOIN spans parent
 INNER JOIN resources parent_res ON parent.resource_id = parent_res.id
 INNER JOIN resources child_res  ON child.resource_id  = child_res.id
 WHERE
-    parent_res.attributes_json ->> '$."service.name"' IS NOT NULL
-    AND child_res.attributes_json ->> '$."service.name"' IS NOT NULL
-    AND parent_res.attributes_json ->> '$."service.name"' <>
-        child_res.attributes_json  ->> '$."service.name"'
+    parent_res.service_name IS NOT NULL
+    AND child_res.service_name IS NOT NULL
+    AND parent_res.service_name <>
+        child_res.service_name
 GROUP BY
-    parent_res.attributes_json ->> '$."service.name"',
-    child_res.attributes_json  ->> '$."service.name"',
+    parent_res.service_name,
+    child_res.service_name,
     child.kind;
 
 -- Service map with performance metrics.
 CREATE VIEW service_map_detailed AS
 SELECT
-    parent_res.attributes_json ->> '$."service.name"'                              AS parent_service,
-    child_res.attributes_json  ->> '$."service.name"'                              AS child_service,
+    parent_res.service_name                              AS parent_service,
+    child_res.service_name                              AS child_service,
     child.kind                                                                     AS span_kind,
     COUNT(*)                                                                       AS call_count,
     AVG(child.end_time_unix_nano - child.start_time_unix_nano) / 1000000           AS avg_duration_ms,
@@ -648,13 +653,13 @@ INNER JOIN spans parent
 INNER JOIN resources parent_res ON parent.resource_id = parent_res.id
 INNER JOIN resources child_res  ON child.resource_id  = child_res.id
 WHERE
-    parent_res.attributes_json ->> '$."service.name"' IS NOT NULL
-    AND child_res.attributes_json ->> '$."service.name"' IS NOT NULL
-    AND parent_res.attributes_json ->> '$."service.name"' <>
-        child_res.attributes_json  ->> '$."service.name"'
+    parent_res.service_name IS NOT NULL
+    AND child_res.service_name IS NOT NULL
+    AND parent_res.service_name <>
+        child_res.service_name
 GROUP BY
-    parent_res.attributes_json ->> '$."service.name"',
-    child_res.attributes_json  ->> '$."service.name"',
+    parent_res.service_name,
+    child_res.service_name,
     child.kind;
 
 -- Log severity distribution by day.
@@ -684,7 +689,7 @@ GROUP BY severity_text, severity_number, day_bucket;
 -- Only inserted when every statement above succeeded, so a partial apply cannot
 -- leave a false version marker for the apply-schema.sh gate.
 INSERT INTO schema_version (version, applied_at)
-VALUES ('2.13.2', CURRENT_TIMESTAMP(6))
+VALUES ('2.13.3', CURRENT_TIMESTAMP(6))
 ON DUPLICATE KEY UPDATE applied_at = CURRENT_TIMESTAMP(6);
 
 -- =============================================================================

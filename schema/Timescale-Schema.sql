@@ -20,6 +20,11 @@
 -- =============================================================================
 
 CREATE EXTENSION IF NOT EXISTS timescaledb;
+-- pg_trgm backs the free-text search GIN indexes below (schema 2.13.3, list-pages-server-side
+-- plan Phase 7, decision 5/39): see PostgreSQL-Schema.sql's identical comment. Compressed chunks
+-- (>7 days, decision per the compression policy below) don't use GIN/trigram indexes and fall
+-- back to scanning -- see CLAUDE.md.
+CREATE EXTENSION IF NOT EXISTS pg_trgm;
 
 -- =============================================================================
 -- COMMON TABLES (shared across signals)
@@ -52,11 +57,13 @@ CREATE TABLE resources (
     "schema_url"      VARCHAR(2048),
     "created_at"      TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
     "attributes_json" JSONB,
+    -- service_name (schema 2.13.3, Phase 7): see PostgreSQL-Schema.sql's identical comment.
+    "service_name"    VARCHAR(255),
     CONSTRAINT uk_resource_tenant_hash UNIQUE ("tenant_id", "resource_hash")
 );
 CREATE INDEX idx_resources_tenant_id ON resources ("tenant_id");
 CREATE INDEX idx_created_at ON resources ("created_at");
-CREATE INDEX idx_resources_service_name ON resources (("attributes_json" ->> 'service.name'));
+CREATE INDEX idx_resources_service_name ON resources ("service_name");
 
 -- Instrumentation scope (library)
 CREATE TABLE instrumentation_scopes (
@@ -144,6 +151,13 @@ CREATE INDEX idx_spans_error ON spans ("start_time_unix_nano" DESC) WHERE "statu
 -- the index without fetching each row.
 CREATE INDEX idx_spans_root_time ON spans ("start_time_unix_nano" DESC) INCLUDE ("end_time_unix_nano")
     WHERE "parent_span_id" IS NULL;
+
+-- Search indexes (schema 2.13.3, Phase 7, analytics tier only) -- see PostgreSQL-Schema.sql's
+-- identical comment for the jsonb_path_ops/gin_trgm_ops reasoning. Compressed chunks (>7 days)
+-- don't use these and fall back to a scan -- see CLAUDE.md.
+CREATE INDEX idx_spans_attributes_gin ON spans USING GIN ("attributes_json" jsonb_path_ops);
+CREATE INDEX idx_spans_name_trgm ON spans USING GIN ("name" gin_trgm_ops);
+CREATE INDEX idx_spans_status_message_trgm ON spans USING GIN ("status_message" gin_trgm_ops);
 
 -- span_events and span_links were dropped in 2.11.0: neither was ever read or written
 -- independently of its parent span, so both collapsed into spans."events_json"/"links_json",
@@ -374,8 +388,10 @@ CREATE INDEX idx_severity          ON log_records ("severity_number");
 CREATE INDEX idx_log_severity_time ON log_records ("severity_number", "time_unix_nano" DESC);
 CREATE INDEX idx_log_trace_span    ON log_records ("trace_id", "span_id");
 CREATE INDEX idx_log_resource_time ON log_records ("resource_id", "time_unix_nano" DESC);
--- idx_log_attributes_gin dropped in 2.8.0, same reasoning as idx_spans_attributes_gin above:
--- no read-path query does JSONB containment on attributes_json.
+-- Search indexes (schema 2.13.3, Phase 7, analytics tier only) -- see PostgreSQL-Schema.sql's
+-- identical comment; same compressed-chunk caveat as the spans indexes above.
+CREATE INDEX idx_log_attributes_gin ON log_records USING GIN ("attributes_json" jsonb_path_ops);
+CREATE INDEX idx_log_body_trgm ON log_records USING GIN ("body_value" gin_trgm_ops);
 
 -- =============================================================================
 -- ROLLUP TABLES (schema 2.13.0, list-pages-server-side plan decisions 37-38)
@@ -737,8 +753,8 @@ GROUP BY s."trace_id", r."id";
 -- Service map: service-to-service call relationships extracted from span parent-child pairs
 CREATE VIEW service_map AS
 SELECT
-    parent_res."attributes_json" ->> 'service.name'   AS "parent_service",
-    child_res."attributes_json"  ->> 'service.name'   AS "child_service",
+    parent_res."service_name"   AS "parent_service",
+    child_res."service_name"   AS "child_service",
     child."kind"                                     AS "span_kind",
     COUNT(*)                                         AS "call_count"
 FROM spans child
@@ -748,20 +764,20 @@ INNER JOIN spans parent
 INNER JOIN resources parent_res ON parent."resource_id" = parent_res."id"
 INNER JOIN resources child_res  ON child."resource_id"  = child_res."id"
 WHERE
-    parent_res."attributes_json" ->> 'service.name' IS NOT NULL
-    AND child_res."attributes_json"  ->> 'service.name' IS NOT NULL
-    AND parent_res."attributes_json" ->> 'service.name' <>
-        child_res."attributes_json"  ->> 'service.name'
+    parent_res."service_name" IS NOT NULL
+    AND child_res."service_name" IS NOT NULL
+    AND parent_res."service_name" <>
+        child_res."service_name"
 GROUP BY
-    parent_res."attributes_json" ->> 'service.name',
-    child_res."attributes_json"  ->> 'service.name',
+    parent_res."service_name",
+    child_res."service_name",
     child."kind";
 
 -- Service map with performance metrics
 CREATE VIEW service_map_detailed AS
 SELECT
-    parent_res."attributes_json" ->> 'service.name'   AS "parent_service",
-    child_res."attributes_json"  ->> 'service.name'   AS "child_service",
+    parent_res."service_name"   AS "parent_service",
+    child_res."service_name"   AS "child_service",
     child."kind"                                     AS "span_kind",
     COUNT(*)                                         AS "call_count",
     AVG(CAST(child."end_time_unix_nano" - child."start_time_unix_nano" AS DOUBLE PRECISION)) / 1000000 AS "avg_duration_ms",
@@ -777,13 +793,13 @@ INNER JOIN spans parent
 INNER JOIN resources parent_res ON parent."resource_id" = parent_res."id"
 INNER JOIN resources child_res  ON child."resource_id"  = child_res."id"
 WHERE
-    parent_res."attributes_json" ->> 'service.name' IS NOT NULL
-    AND child_res."attributes_json"  ->> 'service.name' IS NOT NULL
-    AND parent_res."attributes_json" ->> 'service.name' <>
-        child_res."attributes_json"  ->> 'service.name'
+    parent_res."service_name" IS NOT NULL
+    AND child_res."service_name" IS NOT NULL
+    AND parent_res."service_name" <>
+        child_res."service_name"
 GROUP BY
-    parent_res."attributes_json" ->> 'service.name',
-    child_res."attributes_json"  ->> 'service.name',
+    parent_res."service_name",
+    child_res."service_name",
     child."kind";
 
 -- Log severity distribution by day (continuous aggregate on log_records hypertable)
@@ -836,7 +852,7 @@ FROM log_severity_stats_daily;
 -- =============================================================================
 -- Only reached when every statement above succeeded, so a partial apply cannot
 -- leave a false version marker for the apply-schema.sh gate.
-INSERT INTO schema_version ("version") VALUES ('2.13.2')
+INSERT INTO schema_version ("version") VALUES ('2.13.3')
 ON CONFLICT ("version") DO UPDATE
 SET "applied_at" = NOW();
 

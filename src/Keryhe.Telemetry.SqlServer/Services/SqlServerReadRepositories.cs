@@ -100,7 +100,6 @@ public class SqlServerTraceReadRepository(IConfiguration configuration, ITenantC
     // filters run in SQL (list-page-scale plan, Phase 4) — see DapperReadRepository's own doc
     // comments for why each hook is shaped the way it is (JSON_VALUE for a known-scalar value,
     // OPENJSON for a value-type-agnostic key existence check).
-    protected override string ResourceServiceNameExpr(string resourceAlias = "r") => $"JSON_VALUE({resourceAlias}.attributes_json, '$.\"service.name\"')";
     protected override string JsonHasKeyExpr(string jsonColumn, string keyParam)
         => $"EXISTS (SELECT 1 FROM OPENJSON(ISNULL({jsonColumn}, '{{}}')) WHERE [key] = {keyParam})";
     protected override string PagingClause => "OFFSET @offset ROWS FETCH NEXT @limit ROWS ONLY";
@@ -149,7 +148,6 @@ public class SqlServerMetricReadRepository(IConfiguration configuration, ITenant
     // Phase 5): SqlServerTraceReadRepository/SqlServerLogReadRepository already override these for
     // the same reason (see DapperReadRepository's own doc comments); MetricReadRepositoryBase's
     // catalog query calls them polymorphically too, so this class needs its own override.
-    protected override string ResourceServiceNameExpr(string resourceAlias = "r") => $"JSON_VALUE({resourceAlias}.attributes_json, '$.\"service.name\"')";
     protected override string LikeOperator => "LIKE";
     protected override string EscapeLike(string value)
         => value.Replace("[", "[[]").Replace("%", "[%]").Replace("_", "[_]");
@@ -176,7 +174,6 @@ public class SqlServerLogReadRepository(IConfiguration configuration, ITenantCon
     // SqlServer dialect: LIKE is case-insensitive under the default collation, JSON is read via
     // JSON_VALUE, paging uses OFFSET/FETCH, and LIKE wildcards escape with square brackets.
     protected override string LikeOperator => "LIKE";
-    protected override string ResourceServiceNameExpr(string resourceAlias = "r") => $"JSON_VALUE({resourceAlias}.attributes_json, '$.\"service.name\"')";
     protected override string PagingClause => "OFFSET @offset ROWS FETCH NEXT @limit ROWS ONLY";
     protected override string EscapeLike(string value)
         => value.Replace("[", "[[]").Replace("%", "[%]").Replace("_", "[_]");

@@ -162,6 +162,29 @@ public static class TelemetryIngestionHelpers
         return JsonSerializer.Serialize(ordered);
     }
 
+    /// <summary>
+    /// Extracts the "service.name" resource attribute, or null when absent (list-pages-server-side
+    /// plan, Phase 7, decision 8). Every bulk writer's resource upsert calls this to populate the
+    /// new <c>resources.service_name</c> column, and every provider's 2.13.2-to-2.13.3 migration
+    /// backfills existing rows with the same logic -- kept in one place so ingestion and the
+    /// migration's one-time backfill can never drift apart. Mirrors
+    /// <c>DapperReadRepository.ExtractServiceName</c> (same logic, kept separate because that one
+    /// operates on an already-deserialized attribute dictionary from the read path, while this one
+    /// runs in the write path against the same raw <see cref="Dictionary{TKey,TValue}"/> shape
+    /// before it is serialized to JSON).
+    /// </summary>
+    public static string? ExtractServiceName(Dictionary<string, object>? attributes)
+    {
+        if (attributes == null || !attributes.TryGetValue("service.name", out var value) || value == null)
+            return null;
+        return value switch
+        {
+            string s => s,
+            System.Text.Json.JsonElement je when je.ValueKind == System.Text.Json.JsonValueKind.String => je.GetString(),
+            _ => value.ToString()
+        };
+    }
+
     public static string? SerializeJsonOrNull(object? value)
         => value == null ? null : JsonSerializer.Serialize(value);
 

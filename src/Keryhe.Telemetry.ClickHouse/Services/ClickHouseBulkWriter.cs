@@ -368,7 +368,7 @@ public sealed class ClickHouseBulkWriter(
                 // key is not.
                 var id = ClickHouseIds.FromKey(key);
                 rows.Add([id, entry.Model.TenantId, entry.Hash, entry.Model.SchemaUrl,
-                          SerializeDeterministicJson(entry.Model.Attributes)]);
+                          SerializeDeterministicJson(entry.Model.Attributes), ExtractServiceName(entry.Model.Attributes)]);
                 cache.SetResource(entry.Model.TenantId, entry.Hash, id);
                 result[key] = id;
             }
@@ -411,8 +411,12 @@ public sealed class ClickHouseBulkWriter(
         return result;
     }
 
+    // service_name (schema 2.13.3, Phase 7, decision 8) -- see PostgreSqlBulkWriter's identical
+    // comment. resources is a ReplacingMergeTree keyed on (tenant_id, resource_hash), so a later
+    // insert for the same key (e.g. a redelivery whose service.name attribute changed) collapses
+    // to the newest row at merge time / under FINAL, same as every other column here.
     private static readonly string[] ResourceColumns =
-        ["id", "tenant_id", "resource_hash", "schema_url", "attributes_json"];
+        ["id", "tenant_id", "resource_hash", "schema_url", "attributes_json", "service_name"];
 
     private static readonly string[] ScopeColumns =
         ["id", "name", "version", "schema_url", "scope_hash", "attributes_json"];

@@ -1,7 +1,8 @@
-import { Component } from '@angular/core';
+import { Component, inject } from '@angular/core';
 import { MatDialogModule } from '@angular/material/dialog';
 import { MatButtonModule } from '@angular/material/button';
 import { MatIconModule } from '@angular/material/icon';
+import { CapabilitiesService } from '../../../core/services/capabilities.service';
 
 @Component({
   selector: 'app-trace-search-help-dialog',
@@ -65,8 +66,23 @@ import { MatIconModule } from '@angular/material/icon';
         <strong>Tip:</strong> Attribute searches look at every span in the trace — its own
         attributes and its resource attributes — not just the root span. A trace matches when
         <em>some</em> span satisfies the condition, so the matching span may be several levels
-        deep. Attribute keys are case-sensitive; values are not.
+        deep. Attribute keys are always case-sensitive; free-text substring matching is
+        case-insensitive on every provider.
+        @if (capabilities().indexedSearch) {
+          A number or boolean attribute value (e.g. <code>http.status_code:500</code>) matches
+          regardless of case; a text attribute value match is case-sensitive on this database.
+          Excluding a term (<code>-key:value</code>) is always case-insensitive.
+        } @else {
+          Attribute value matching is case-insensitive.
+        }
       </div>
+      @if (!capabilities().indexedSearch && capabilities().rawSearchWindowHours) {
+        <div class="note warn">
+          <strong>Search window:</strong> free-text and attribute searches on this database are limited to the
+          last {{ capabilities().rawSearchWindowHours }} hours. A trace ID lookup, <code>mode=errors</code>,
+          or an unfiltered/service-filtered list can still cover a longer range.
+        </div>
+      }
     </mat-dialog-content>
     <mat-dialog-actions align="end">
       <button mat-flat-button color="primary" mat-dialog-close>Got it!</button>
@@ -82,6 +98,10 @@ import { MatIconModule } from '@angular/material/icon';
     .examples li { margin-bottom: 6px; }
     .note { margin-top: 12px; padding: 10px 12px; border-radius: 6px; font-size: 13px; }
     .note.info { background: var(--mat-sys-secondary-container); color: var(--mat-sys-on-secondary-container); }
+    .note.warn { background: var(--mat-sys-error-container); color: var(--mat-sys-on-error-container); }
   `],
 })
-export class TraceSearchHelpDialogComponent {}
+export class TraceSearchHelpDialogComponent {
+  private readonly capabilitiesService = inject(CapabilitiesService);
+  protected readonly capabilities = this.capabilitiesService.capabilities;
+}

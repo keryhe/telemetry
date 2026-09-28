@@ -78,16 +78,18 @@ CREATE TABLE resources (
     schema_url      NVARCHAR(2048),
     created_at      DATETIME2     NOT NULL DEFAULT SYSDATETIME(),
     attributes_json NVARCHAR(MAX),
+    -- service_name (schema 2.13.3, list-pages-server-side plan Phase 7): a real column, not the
+    -- computed-column workaround this comment used to suggest. Written by the bulk writer's
+    -- resource upsert going forward, extracted from attributes_json's "service.name" key.
+    -- ResourceServiceNameExpr() is now just "{alias}.service_name" on every provider, standard
+    -- tier included (decision 39 keeps SQL Server on the unindexed free-text/key:value
+    -- predicates, but the service_name column itself is not part of that tiering).
+    service_name    NVARCHAR(255),
     CONSTRAINT uk_resource_tenant_hash UNIQUE (tenant_id, resource_hash)
 );
 CREATE INDEX idx_resources_tenant_id ON resources (tenant_id);
 CREATE INDEX idx_created_at ON resources (created_at);
-
--- PostgreSQL had a functional index on (attributes_json ->> 'service.name').
--- SQL Server equivalent requires a persisted computed column; omitted here.
--- Add one if filtering by service name at scale becomes a bottleneck:
---   ALTER TABLE resources ADD service_name AS JSON_VALUE(attributes_json, '$."service.name"') PERSISTED;
---   CREATE INDEX idx_resources_service_name ON resources (service_name);
+CREATE INDEX idx_resources_service_name ON resources (service_name);
 GO
 
 -- Instrumentation scope (library).
@@ -659,8 +661,8 @@ GO
 -- JSON_VALUE replaces PostgreSQL's ->> operator.
 CREATE VIEW service_map AS
 SELECT
-    JSON_VALUE(parent_res.attributes_json, '$."service.name"') AS parent_service,
-    JSON_VALUE(child_res.attributes_json,  '$."service.name"') AS child_service,
+    parent_res.service_name AS parent_service,
+    child_res.service_name AS child_service,
     child.kind                                               AS span_kind,
     COUNT(*)                                                 AS call_count
 FROM spans child
@@ -670,21 +672,21 @@ INNER JOIN spans parent
 INNER JOIN resources parent_res ON parent.resource_id = parent_res.id
 INNER JOIN resources child_res  ON child.resource_id  = child_res.id
 WHERE
-    JSON_VALUE(parent_res.attributes_json, '$."service.name"') IS NOT NULL
-    AND JSON_VALUE(child_res.attributes_json,  '$."service.name"') IS NOT NULL
-    AND JSON_VALUE(parent_res.attributes_json, '$."service.name"') <>
-        JSON_VALUE(child_res.attributes_json,  '$."service.name"')
+    parent_res.service_name IS NOT NULL
+    AND child_res.service_name IS NOT NULL
+    AND parent_res.service_name <>
+        child_res.service_name
 GROUP BY
-    JSON_VALUE(parent_res.attributes_json, '$."service.name"'),
-    JSON_VALUE(child_res.attributes_json,  '$."service.name"'),
+    parent_res.service_name,
+    child_res.service_name,
     child.kind;
 GO
 
 -- Service map with performance metrics.
 CREATE VIEW service_map_detailed AS
 SELECT
-    JSON_VALUE(parent_res.attributes_json, '$."service.name"')                               AS parent_service,
-    JSON_VALUE(child_res.attributes_json,  '$."service.name"')                               AS child_service,
+    parent_res.service_name                               AS parent_service,
+    child_res.service_name                               AS child_service,
     child.kind                                                                             AS span_kind,
     COUNT(*)                                                                               AS call_count,
     AVG(CAST(child.end_time_unix_nano - child.start_time_unix_nano AS FLOAT)) / 1000000   AS avg_duration_ms,
@@ -700,13 +702,13 @@ INNER JOIN spans parent
 INNER JOIN resources parent_res ON parent.resource_id = parent_res.id
 INNER JOIN resources child_res  ON child.resource_id  = child_res.id
 WHERE
-    JSON_VALUE(parent_res.attributes_json, '$."service.name"') IS NOT NULL
-    AND JSON_VALUE(child_res.attributes_json,  '$."service.name"') IS NOT NULL
-    AND JSON_VALUE(parent_res.attributes_json, '$."service.name"') <>
-        JSON_VALUE(child_res.attributes_json,  '$."service.name"')
+    parent_res.service_name IS NOT NULL
+    AND child_res.service_name IS NOT NULL
+    AND parent_res.service_name <>
+        child_res.service_name
 GROUP BY
-    JSON_VALUE(parent_res.attributes_json, '$."service.name"'),
-    JSON_VALUE(child_res.attributes_json,  '$."service.name"'),
+    parent_res.service_name,
+    child_res.service_name,
     child.kind;
 GO
 
@@ -739,7 +741,7 @@ GO
 -- Only reached when every statement above succeeded, so a partial apply cannot
 -- leave a false version marker for the apply-schema.sh gate.
 MERGE schema_version AS target
-USING (VALUES (N'2.13.2')) AS src (version)
+USING (VALUES (N'2.13.3')) AS src (version)
 ON target.version = src.version
 WHEN MATCHED     THEN UPDATE SET applied_at = SYSDATETIME()
 WHEN NOT MATCHED THEN INSERT (version, applied_at) VALUES (src.version, SYSDATETIME());

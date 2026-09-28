@@ -62,7 +62,6 @@ public class ClickHouseTraceReadRepository(IConfiguration configuration, ITenant
     // Same dialect hooks as ClickHouseLogReadRepository, needed here too now that the service/tag
     // filters run in SQL (list-page-scale plan, Phase 4). JSONHas tests key presence regardless
     // of the value's type, unlike JSONExtractString which returns '' for a non-scalar value.
-    protected override string ResourceServiceNameExpr(string resourceAlias = "r") => $"JSONExtractString(coalesce({resourceAlias}.attributes_json, ''), 'service.name')";
     protected override string JsonHasKeyExpr(string jsonColumn, string keyParam)
         => $"JSONHas(coalesce({jsonColumn}, ''), {keyParam}) = 1";
 
@@ -181,7 +180,6 @@ public class ClickHouseMetricReadRepository(IConfiguration configuration, ITenan
     // Load-bearing for the metrics catalog's service filter (list-pages-server-side plan, Phase
     // 5): ClickHouseTraceReadRepository/ClickHouseLogReadRepository already override this for the
     // same reason; MetricReadRepositoryBase's catalog query calls it polymorphically too.
-    protected override string ResourceServiceNameExpr(string resourceAlias = "r") => $"JSONExtractString(coalesce({resourceAlias}.attributes_json, ''), 'service.name')";
 
     // Decision 27: metric_last_seen is an AggregatingMergeTree holding partial maxState(...)
     // states on this provider (fed by materialized views, not MetricTouchWorker — see
@@ -227,7 +225,6 @@ public class ClickHouseLogReadRepository(IConfiguration configuration, ITenantCo
     // attributes_json is a Nullable(String) holding JSON text; extract service.name with
     // JSONExtractString (coalesce guards NULL rows). ILIKE, LIMIT/OFFSET paging, and backslash
     // LIKE-escaping all match the Postgres defaults, so those hooks are inherited unchanged.
-    protected override string ResourceServiceNameExpr(string resourceAlias = "r") => $"JSONExtractString(coalesce({resourceAlias}.attributes_json, ''), 'service.name')";
 
     // ClickHouse's `/` on Int64 operands promotes to Float64; intDiv keeps histogram
     // bucket-index math as true integer floor division.

@@ -88,12 +88,23 @@ public abstract class DapperReadRepository
     protected virtual string RollupFinalHint => "";
 
     /// <summary>
-    /// SQL expression extracting <c>service.name</c> from a resource's <c>attributes_json</c>
-    /// column, aliased <paramref name="resourceAlias"/> (default <c>r</c>, the alias every
-    /// existing caller's own resources join uses; trace-side callers pass <c>r2</c> for their
-    /// correlated subqueries — see <c>TraceReadRepositoryBase.ServiceTracePredicate</c>).
+    /// SQL expression referencing a resource's <c>service_name</c> column, aliased
+    /// <paramref name="resourceAlias"/> (default <c>r</c>, the alias every existing caller's own
+    /// resources join uses; trace-side callers pass <c>r2</c> for their correlated subqueries —
+    /// see <c>TraceReadRepositoryBase.ServiceTracePredicate</c>).
+    ///
+    /// A plain column reference on every provider since schema 2.13.3 (list-pages-server-side
+    /// plan, Phase 7, decision 8): before that, this compiled a per-provider JSON extraction
+    /// expression against <c>attributes_json</c> (<c>-&gt;&gt;</c> here, <c>JSON_VALUE</c> on
+    /// SqlServer, <c>JSONExtractString</c> on ClickHouse). <c>resources.service_name</c> is
+    /// written by each provider's bulk writer resource upsert
+    /// (<c>TelemetryIngestionHelpers.ExtractServiceName</c>) and backfilled by the
+    /// 2.13.2-to-2.13.3 migration, so every provider now overrides this the same trivial way —
+    /// kept virtual rather than sealed only because SqlServer/MySql/ClickHouse each declare their
+    /// own override per repository subclass already and there is no shared base among them to
+    /// collapse it into.
     /// </summary>
-    protected virtual string ResourceServiceNameExpr(string resourceAlias = "r") => $"{resourceAlias}.attributes_json ->> 'service.name'";
+    protected virtual string ResourceServiceNameExpr(string resourceAlias = "r") => $"{resourceAlias}.service_name";
 
     /// <summary>
     /// SQL boolean expression: does the JSON column <paramref name="jsonColumn"/> contain the key

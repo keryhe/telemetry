@@ -49,7 +49,6 @@ public class MySqlTraceReadRepository(IConfiguration configuration, ITenantConte
     // filters run in SQL (list-page-scale plan, Phase 4). JSON_KEYS + JSON_CONTAINS lists the
     // JSON object's top-level keys and tests membership — value-type-agnostic, unlike ->> which
     // returns NULL for an object/array value.
-    protected override string ResourceServiceNameExpr(string resourceAlias = "r") => $"{resourceAlias}.attributes_json ->> '$.\"service.name\"'";
     protected override string JsonHasKeyExpr(string jsonColumn, string keyParam)
         => $"JSON_CONTAINS(JSON_KEYS(COALESCE({jsonColumn}, JSON_OBJECT())), JSON_QUOTE({keyParam}))";
     protected override object AttributeKeyParamValue(string key) => MySqlJsonAttributeHooks.KeyParamValue(key);
@@ -98,7 +97,6 @@ public class MySqlMetricReadRepository(IConfiguration configuration, ITenantCont
     // Load-bearing for the metrics catalog's service/name filters (list-pages-server-side plan,
     // Phase 5): MySqlTraceReadRepository/MySqlLogReadRepository already override these for the
     // same reason; MetricReadRepositoryBase's catalog query calls them polymorphically too.
-    protected override string ResourceServiceNameExpr(string resourceAlias = "r") => $"{resourceAlias}.attributes_json ->> '$.\"service.name\"'";
     protected override string LikeOperator => "LIKE";
 
     // Standard tier (decision 26): newest-500, no cursor — not the analytics-tier keyset default.
@@ -123,7 +121,6 @@ public class MySqlLogReadRepository(IConfiguration configuration, ITenantContext
     // the ->> operator (JSON_UNQUOTE(JSON_EXTRACT(...))), and paging uses LIMIT/OFFSET.
     // The attribute key "service.name" contains a dot, so the JSON path quotes it.
     protected override string LikeOperator => "LIKE";
-    protected override string ResourceServiceNameExpr(string resourceAlias = "r") => $"{resourceAlias}.attributes_json ->> '$.\"service.name\"'";
     protected override string PagingClause => "LIMIT @limit OFFSET @offset";
     // MySQL LIKE uses backslash as the default escape character (matches the Postgres base default).
 

@@ -64,7 +64,11 @@ CREATE TABLE IF NOT EXISTS resources
     resource_hash   String,
     schema_url      Nullable(String),
     created_at      DateTime64(9) DEFAULT now64(9),
-    attributes_json Nullable(String)
+    attributes_json Nullable(String),
+    -- service_name (schema 2.13.3, list-pages-server-side plan Phase 7): a real column, written
+    -- by ClickHouseBulkWriter's resource upsert, extracted from attributes_json's
+    -- "service.name" key. ResourceServiceNameExpr() is now just "{alias}.service_name".
+    service_name    Nullable(String)
 )
 ENGINE = ReplacingMergeTree
 ORDER BY (tenant_id, resource_hash);
@@ -110,7 +114,20 @@ CREATE TABLE IF NOT EXISTS spans
     created_at               DateTime64(9) DEFAULT now64(9),
     attributes_json          Nullable(String),
     events_json              Nullable(String),
-    links_json               Nullable(String)
+    links_json               Nullable(String),
+    -- Search skip indexes (schema 2.13.3, list-pages-server-side plan Phase 7, analytics tier --
+    -- decision 39). Unlike the relational providers' GIN indexes, these do not change the query
+    -- that runs: FreeTextPredicate's `name ILIKE '%text%'`-equivalent and AttributePredicate's
+    -- phase-1 JSONExtractRaw predicate stay exactly as they were. A skip index only lets
+    -- ClickHouse skip whole granules that cannot match before evaluating the predicate against
+    -- what's left -- ngrambf_v1 for substring search on name/status_message, tokenbf_v1 for
+    -- attributes_json so a key:value predicate can prune granules that don't contain the
+    -- searched token at all. GRANULARITY 4 groups 4 index blocks (index_granularity rows each,
+    -- default 8192) per skip-index entry -- the library's existing default, matched here rather
+    -- than tuned separately.
+    INDEX idx_spans_name_ngram name TYPE ngrambf_v1(3, 4096, 2, 0) GRANULARITY 4,
+    INDEX idx_spans_status_message_ngram assumeNotNull(status_message) TYPE ngrambf_v1(3, 4096, 2, 0) GRANULARITY 4,
+    INDEX idx_spans_attributes_tokenbf assumeNotNull(attributes_json) TYPE tokenbf_v1(8192, 3, 0) GRANULARITY 4
 )
 ENGINE = ReplacingMergeTree
 PARTITION BY toYYYYMMDD(fromUnixTimestamp64Nano(start_time_unix_nano))
@@ -330,7 +347,11 @@ CREATE TABLE IF NOT EXISTS log_records
     trace_id                 Nullable(String),
     span_id                  Nullable(String),
     created_at               DateTime64(9) DEFAULT now64(9),
-    attributes_json          Nullable(String)
+    attributes_json          Nullable(String),
+    -- Search skip indexes (schema 2.13.3, Phase 7, analytics tier) -- see the identical spans
+    -- comment above for the ngrambf_v1/tokenbf_v1 reasoning; applies unchanged here.
+    INDEX idx_log_body_ngram assumeNotNull(body_value) TYPE ngrambf_v1(3, 4096, 2, 0) GRANULARITY 4,
+    INDEX idx_log_attributes_tokenbf assumeNotNull(attributes_json) TYPE tokenbf_v1(8192, 3, 0) GRANULARITY 4
 )
 ENGINE = MergeTree
 PARTITION BY toYYYYMMDD(fromUnixTimestamp64Nano(time_unix_nano))
@@ -632,8 +653,8 @@ GROUP BY s.trace_id;
 
 CREATE VIEW IF NOT EXISTS service_map AS
 SELECT
-    JSONExtractString(assumeNotNull(parent_res.attributes_json), 'service.name') AS parent_service,
-    JSONExtractString(assumeNotNull(child_res.attributes_json),  'service.name') AS child_service,
+    parent_res.service_name AS parent_service,
+    child_res.service_name AS child_service,
     child.kind                                                                   AS span_kind,
     count()                                                                      AS call_count
 FROM spans child
@@ -646,8 +667,8 @@ GROUP BY parent_service, child_service, child.kind;
 
 CREATE VIEW IF NOT EXISTS service_map_detailed AS
 SELECT
-    JSONExtractString(assumeNotNull(parent_res.attributes_json), 'service.name') AS parent_service,
-    JSONExtractString(assumeNotNull(child_res.attributes_json),  'service.name') AS child_service,
+    parent_res.service_name AS parent_service,
+    child_res.service_name AS child_service,
     child.kind                                                                   AS span_kind,
     count()                                                                      AS call_count,
     avg(child.end_time_unix_nano - child.start_time_unix_nano) / 1000000         AS avg_duration_ms,
@@ -703,4 +724,4 @@ VALUES (1, 90, 90, 180);
 -- spans' ORDER BY (trace_id, span_id) with a daily partition already gave it what the relational
 -- providers got from the four indexes they dropped (see PostgreSQL-Schema.sql), and it has no
 -- GIN-style JSONB index to carry the equivalent write cost of.
-INSERT INTO schema_version (version) VALUES ('2.13.2');
+INSERT INTO schema_version (version) VALUES ('2.13.3');

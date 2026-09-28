@@ -1,7 +1,8 @@
-import { Component } from '@angular/core';
+import { Component, inject } from '@angular/core';
 import { MatDialogModule } from '@angular/material/dialog';
 import { MatButtonModule } from '@angular/material/button';
 import { MatIconModule } from '@angular/material/icon';
+import { CapabilitiesService } from '../../../core/services/capabilities.service';
 
 @Component({
   selector: 'app-log-search-help-dialog',
@@ -57,11 +58,24 @@ import { MatIconModule } from '@angular/material/icon';
 
       <div class="note info">
         <strong>Tip:</strong> Attribute searches look in Log Attributes, Resource Attributes, and Scope Attributes.
+        Substring matching (free text and <code>:</code> "contains") works the same way on every provider.
+        @if (capabilities().indexedSearch) {
+          A number or boolean attribute value (e.g. <code>http.status_code:500</code>) matches
+          case-insensitively; a text attribute value "contains" match is case-sensitive on this
+          database.
+        }
       </div>
       <div class="note success">
         <strong>Trace ID Search:</strong> When searching by trace ID (exactly 32 hex characters),
         the date range is optional and will be ignored. This allows you to find logs across any time period.
       </div>
+      @if (!capabilities().indexedSearch && capabilities().rawSearchWindowHours) {
+        <div class="note warn">
+          <strong>Search window:</strong> free-text and attribute searches on this database are limited to the
+          last {{ capabilities().rawSearchWindowHours }} hours. A plain unfiltered or service-filtered list can
+          still cover a longer range.
+        </div>
+      }
     </mat-dialog-content>
     <mat-dialog-actions align="end">
       <button mat-flat-button color="primary" mat-dialog-close>Got it!</button>
@@ -78,6 +92,10 @@ import { MatIconModule } from '@angular/material/icon';
     .note { margin-top: 12px; padding: 10px 12px; border-radius: 6px; font-size: 13px; }
     .note.info { background: var(--mat-sys-secondary-container); color: var(--mat-sys-on-secondary-container); }
     .note.success { background: var(--mat-sys-tertiary-container); color: var(--mat-sys-on-tertiary-container); }
+    .note.warn { background: var(--mat-sys-error-container); color: var(--mat-sys-on-error-container); }
   `],
 })
-export class LogSearchHelpDialogComponent {}
+export class LogSearchHelpDialogComponent {
+  private readonly capabilitiesService = inject(CapabilitiesService);
+  protected readonly capabilities = this.capabilitiesService.capabilities;
+}

@@ -230,10 +230,10 @@ public sealed class PostgreSqlBulkWriter(
         Dictionary<string, long> result, ResourceScopeCache cache, CancellationToken ct)
     {
         const string sql = """
-            INSERT INTO resources (attributes_json, created_at, resource_hash, schema_url, tenant_id)
-            SELECT unnest($1::jsonb[]), NOW(), unnest($2::text[]), unnest($3::text[]), unnest($4::bigint[])
+            INSERT INTO resources (attributes_json, created_at, resource_hash, schema_url, tenant_id, service_name)
+            SELECT unnest($1::jsonb[]), NOW(), unnest($2::text[]), unnest($3::text[]), unnest($4::bigint[]), unnest($5::text[])
             ON CONFLICT (tenant_id, resource_hash) DO UPDATE
-                SET schema_url = EXCLUDED.schema_url
+                SET schema_url = EXCLUDED.schema_url, service_name = EXCLUDED.service_name
             RETURNING id, tenant_id, resource_hash
             """;
 
@@ -245,12 +245,17 @@ public sealed class PostgreSqlBulkWriter(
         var hashes = new string[n];
         var schemaUrls = new string?[n];
         var tenantIds = new long[n];
+        // service_name (schema 2.13.3, list-pages-server-side plan Phase 7, decision 8): written
+        // on every upsert (insert or conflict-update), not just once on first insert -- a resource
+        // whose service.name attribute changes across redeliveries should not keep the stale value.
+        var serviceNames = new string?[n];
         for (var i = 0; i < n; i++)
         {
             attrs[i] = SerializeDeterministicJson(entries[i].Model.Attributes);
             hashes[i] = entries[i].Hash;
             schemaUrls[i] = entries[i].Model.SchemaUrl;
             tenantIds[i] = entries[i].Model.TenantId;
+            serviceNames[i] = ExtractServiceName(entries[i].Model.Attributes);
         }
 
         await using var cmd = new NpgsqlCommand(sql, conn);
@@ -258,6 +263,7 @@ public sealed class PostgreSqlBulkWriter(
         cmd.Parameters.Add(new NpgsqlParameter { Value = hashes, NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Text });
         cmd.Parameters.Add(new NpgsqlParameter { Value = schemaUrls, NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Text });
         cmd.Parameters.Add(new NpgsqlParameter { Value = tenantIds, NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Bigint });
+        cmd.Parameters.Add(new NpgsqlParameter { Value = serviceNames, NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Text });
 
         await using var reader = await cmd.ExecuteReaderAsync(ct);
         while (await reader.ReadAsync(ct))

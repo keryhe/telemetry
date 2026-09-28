@@ -266,8 +266,8 @@ public sealed class SqlServerBulkWriter(
             USING (SELECT @hash AS resource_hash, @tenantId AS tenant_id) AS s
             ON t.resource_hash = s.resource_hash AND t.tenant_id = s.tenant_id
             WHEN NOT MATCHED THEN
-                INSERT (attributes_json, created_at, resource_hash, schema_url, tenant_id)
-                VALUES (@attrJson, SYSDATETIME(), @hash, @schemaUrl, @tenantId);
+                INSERT (attributes_json, created_at, resource_hash, schema_url, tenant_id, service_name)
+                VALUES (@attrJson, SYSDATETIME(), @hash, @schemaUrl, @tenantId, @serviceName);
             SELECT id FROM resources WHERE resource_hash = @hash AND tenant_id = @tenantId;
             """;
 
@@ -276,6 +276,10 @@ public sealed class SqlServerBulkWriter(
         cmd.Parameters.AddWithValue("@hash",      hash);
         cmd.Parameters.AddWithValue("@schemaUrl", (object?)model.SchemaUrl ?? DBNull.Value);
         cmd.Parameters.AddWithValue("@tenantId",  model.TenantId);
+        // service_name (schema 2.13.3, Phase 7, decision 8) -- see PostgreSqlBulkWriter's
+        // identical comment; written only on first insert here, matching this MERGE's existing
+        // NOT MATCHED-only shape (it never updates an already-existing resource row).
+        cmd.Parameters.AddWithValue("@serviceName", (object?)ExtractServiceName(model.Attributes) ?? DBNull.Value);
         return (long)(await cmd.ExecuteScalarAsync(ct))!;
     }
 

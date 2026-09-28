@@ -280,12 +280,44 @@ unchanged):
   cached per destination table for the life of the process (`ClickHouseBulkWriter`'s singleton
   `TableBulkCopy` cache) rather than a fresh connection + `InitAsync()` schema-probe round trip on
   every flush; reads reuse the shared Dapper bases unchanged (attributes are JSON text
-  deserialized in C#; `service.name` uses `JSONExtractString`).
+  deserialized in C#; `service.name` reads the `resources.service_name` column directly, schema
+  2.13.3 — see "Provider tiers" below).
 - **Deletes** are lightweight `DELETE FROM` with explicit child-row deletes (no FK cascades),
   applied as async mutations.
 - **Control-plane is best-effort.** Alert-rule CRUD uses `ALTER TABLE ... UPDATE` mutations and
   `TryClaimFireAsync` is NON-ATOMIC (read-check-then-update), so under concurrent evaluators a
   rule could double-fire. Acceptable because no host currently drives scheduled evaluation.
+- **Search skip indexes (schema 2.13.3).** `ngrambf_v1` bloom-filter skip indexes on
+  `spans.name`/`status_message` and `log_records.body_value` prune granules ahead of
+  `FreeTextPredicate`'s unchanged predicate; `tokenbf_v1` does the same for
+  `attributes_json` ahead of `AttributePredicate`. Both are defined against
+  `assumeNotNull(column)`, not the raw `Nullable(String)` column — `ngrambf_v1`/`tokenbf_v1`
+  only accept `String`/`FixedString` (and their `LowCardinality`/`Array` forms), and applying one
+  directly to a `Nullable(String)` column fails schema application outright
+  (`INCORRECT_QUERY`, caught by this repo's integration-test suite). Unlike the relational
+  providers, the predicate the skip index prunes ahead of is never rewritten to containment —
+  ClickHouse's `AttributePredicate` stays on its phase 1 `JSONExtractRaw` form; the skip index
+  only lets granules that provably can't match be skipped before it runs.
+
+**Provider tiers (decision 39, schema 2.13.3).** PostgreSQL, Timescale and ClickHouse are the
+**analytics tier**: `key:value`/free-text search is indexed (GIN `jsonb_path_ops`+`pg_trgm` on
+the first two, `tokenbf_v1`/`ngrambf_v1` skip indexes on the third) and unbounded by a search time
+window. SQL Server and MySQL are the **standard tier**: they keep phase 1's unindexed
+`LIKE`/`JSON_VALUE`/`JSON_EXTRACT` predicates (no SQL Server full-text catalog, no MySQL
+`FULLTEXT` index — deliberately out of scope) and a free-text/`key:value` search is rejected
+(`400`) outside a configurable window (`Telemetry:Query:RawSearchWindowHours`, default 24h) —
+see `RawSearchWindowGuard`. Every provider still gets the plain `resources.service_name` column
+(not part of the tiering split) and the other tier differences (exemplar paging, export window —
+see `ProviderCapabilities`). `GET /api/capabilities` reports the active tier plus its limits; the
+Angular client reads it once at startup (`CapabilitiesService`) and reuses it everywhere a page or
+search-help dialog needs to know the tier, rather than each feature querying it separately.
+**A positive (non-negated) `key:value` match on the analytics tier is exact-case for a
+string-valued attribute** (an intentional, documented deviation from phase 1's case-insensitive
+text comparison — see `PostgreSqlJsonAttributeHooks`'s doc comment): a numeric or boolean value
+still matches case-insensitively, negation is unaffected, and the standard tier is unaffected.
+There is no way to keep case-insensitive `@>` containment AND have Postgres actually use the GIN
+index for it (an OR between an indexable clause and a non-indexable `LOWER(...)` fallback forces
+a full scan regardless), so this phase chose the indexed, case-sensitive form.
 
 Core interfaces (in `Keryhe.Telemetry.Core`), each implemented once per provider:
 
@@ -498,20 +530,37 @@ continuous aggregate (refreshes every 5 minutes) with its own, unrelated, still-
 policy that prunes the aggregate, not `log_records` (see `IRetentionSettingsRepository`'s
 "Decision 1" reasoning in `plans/telemetry-retention.md` for why that one stays).
 
-**`spans` index set (schema 2.8.0)**: four indexes were dropped as provably redundant on the
-four relational providers (Postgres, Timescale, SqlServer, MySql) — `idx_trace_id` (a left prefix
-of `uk_trace_span (trace_id, span_id)`), `idx_start_time` (a left prefix of
-`idx_duration (start_time_unix_nano, end_time_unix_nano)`), and `idx_kind`/`idx_status` (6 and 3
-distinct values respectively, too low-cardinality for the planner to ever choose). The GIN indexes
-on `spans.attributes_json` and `log_records.attributes_json` (Postgres/Timescale only) were also
-dropped: no query in the read path does JSONB containment on either column, verified by grepping
-`TraceReadRepositoryBase`/`LogReadRepositoryBase` — every read of those columns is a plain
-`SELECT`. ClickHouse needed no equivalent change; its `ORDER BY (trace_id, span_id)` with a daily
-partition already covers what the dropped B-tree indexes gave the relational providers. Confirmed
-via `EXPLAIN` against a live Postgres container that the trace-detail lookup, the service-map
-query, and the trace-retention sweep (`PostgreSqlRetentionSettingsRepository`/
-`TimescaleRetentionSettingsRepository`) all still resolve to index scans, not sequential scans,
-without the dropped indexes.
+**`spans` index set (schema 2.8.0, GIN note superseded in 2.13.3 — see below)**: four indexes were
+dropped as provably redundant on the four relational providers (Postgres, Timescale, SqlServer,
+MySql) — `idx_trace_id` (a left prefix of `uk_trace_span (trace_id, span_id)`), `idx_start_time`
+(a left prefix of `idx_duration (start_time_unix_nano, end_time_unix_nano)`), and
+`idx_kind`/`idx_status` (6 and 3 distinct values respectively, too low-cardinality for the planner
+to ever choose). The GIN indexes on `spans.attributes_json` and `log_records.attributes_json`
+(Postgres/Timescale only) were also dropped at the time: no query in the read path did JSONB
+containment on either column. Confirmed via `EXPLAIN` against a live Postgres container that the
+trace-detail lookup, the service-map query, and the trace-retention sweep
+(`PostgreSqlRetentionSettingsRepository`/`TimescaleRetentionSettingsRepository`) all still resolve
+to index scans, not sequential scans, without the dropped indexes.
+
+**This GIN-indexes-unused claim no longer holds as of schema 2.13.3** (list-pages-server-side
+plan, Phase 7): `AttributePredicate`'s positive (non-negated) form now compiles to `@>`
+containment on the analytics tier (Postgres, Timescale, ClickHouse — see "Provider tiers" below),
+specifically to serve indexed `key:value` search, so `idx_spans_attributes_gin` and
+`idx_log_attributes_gin` (GIN `jsonb_path_ops`) were added back, alongside `pg_trgm` GIN indexes
+(`idx_spans_name_trgm`, `idx_spans_status_message_trgm`, `idx_log_body_trgm`) backing
+`FreeTextPredicate`'s unchanged `ILIKE '%text%'` text with no SQL change — Postgres's planner
+picks up a `gin_trgm_ops` index under an existing `ILIKE` predicate automatically. Confirmed via
+`EXPLAIN ANALYZE` against a live Postgres 16 container (~100,000 seeded `spans`/`log_records`
+rows) that both the trgm free-text queries and the GIN containment queries use the new indexes
+(a `Bitmap Index Scan`, not a sequential scan) — see `plans/list-pages-server-side.md`'s Phase 7
+section for the recorded numbers. Negated (`-k:v`) attribute predicates stay on the pre-2.13.3
+unindexed text-comparison form regardless of tier (containment can't efficiently express "absent
+or holds a different value"). The five metric data-point tables' `attributes_json` did **not**
+get an equivalent GIN index: `EXPLAIN` showed the existing `(metric_id, time_unix_nano)` index
+already narrows a realistic per-metric query to a small row set before the label filter runs, so
+a GIN index there measured no benefit while still costing write overhead on the highest-volume
+tables — see the same plan section for the measurement. Timescale's compressed chunks (>7 days
+old) don't use GIN/trigram indexes and fall back to scanning them.
 
 Schema 2.12.0 adds `idx_spans_error` back for `mode=errors` — not a reversal of `idx_status`'s
 2.8.0 removal, since it's a different shape: a partial index (`WHERE status_code = 'ERROR'`,

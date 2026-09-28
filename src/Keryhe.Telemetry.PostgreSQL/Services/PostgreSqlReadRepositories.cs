@@ -13,6 +13,69 @@ namespace Keryhe.Telemetry.PostgreSQL.Services;
 // Connection comes from the host-configured NpgsqlDataSource (read connection string).
 // =============================================================================
 
+/// <summary>
+/// Shared body for the <c>AttributePredicate</c> dialect hook on the analytics tier (PostgreSQL,
+/// and Timescale via its unchanged subclass — list-pages-server-side plan, Phase 7, decision 7).
+/// Duplicated as an override on every PostgreSQL read repository class below (there is no mixin,
+/// matching this file's existing convention) but sharing one implementation, same pattern as
+/// <c>SqlServerJsonAttributeHooks</c>/<c>ClickHouseJsonAttributeHooks</c>.
+///
+/// Positive (non-negated) matches use typed <c>@&gt;</c> containment against the GIN
+/// <c>jsonb_path_ops</c> indexes added in schema 2.13.3, instead of the phase 1
+/// <c>LOWER(col -&gt;&gt; key) = LOWER(value)</c> text comparison. <c>@&gt;</c> only matches the
+/// JSON type given, so a value that parses as a JSON number or boolean is ALSO matched in that
+/// native form -- <c>key:500</c> must still match both the stored string <c>"500"</c> and the
+/// stored number <c>500</c>, exactly like phase 1's text-comparison semantics. Value comparison
+/// stays case-sensitive under containment (phase 1 lowercased both sides in SQL because the text
+/// form has no other way to be case-insensitive server-side); values entering this hook already
+/// come from user search text via <c>CompileSearch</c>/label filters, which do not themselves
+/// case-fold, so this is a narrow behavior change only for a value whose case doesn't already
+/// match storage -- accepted because decision 7's own examples (numeric/boolean attributes) are
+/// case-invariant by construction, and free-text values go through <c>FreeTextPredicate</c>, not
+/// this hook.
+///
+/// Negation stays on the phase 1 unindexed text-comparison form unconditionally: containment
+/// cannot efficiently express "key absent or holds a different value" (decision 7).
+///
+/// DEVIATION (documented in plans/list-pages-server-side.md's Phase 7 "Implementation notes"):
+/// a positive string-valued match (the first containment branch) is exact-case, where phase 1
+/// was case-insensitive (`LOWER(col ->> key) = LOWER(value)`) on every provider. There is no way
+/// to keep case-insensitive containment AND have Postgres actually use the GIN index for it: an
+/// OR between an indexable `@>` clause and a non-indexable `LOWER(...) = LOWER(...)` fallback
+/// forces a full sequential scan regardless (Postgres cannot partially trust an index scan when
+/// any OR-branch it can't index might match additional rows), which would defeat the entire
+/// point of this phase. Numeric and boolean matches are unaffected (numbers have no case; the
+/// boolean branch still lowers both sides before casting). This narrows only a same-key
+/// string-valued positive search whose case doesn't already match storage, on the analytics
+/// tier; the standard tier (SqlServer/MySql) and every negated search are unchanged.
+/// </summary>
+internal static class PostgreSqlJsonAttributeHooks
+{
+    public static string Predicate(string column, string keyParam, string valueParam, bool negated)
+    {
+        if (negated)
+        {
+            var expr = $"LOWER({column} ->> {keyParam})";
+            var valueExpr = $"LOWER({valueParam})";
+            return $"{expr} IS DISTINCT FROM {valueExpr}";
+        }
+
+        return $"""
+            (
+                {column} @> jsonb_build_object({keyParam}, {valueParam})
+                OR (
+                    {valueParam} ~ '^-?[0-9]+(\.[0-9]+)?([eE][-+]?[0-9]+)?$'
+                    AND {column} @> jsonb_build_object({keyParam}, ({valueParam})::numeric)
+                )
+                OR (
+                    LOWER({valueParam}) IN ('true', 'false')
+                    AND {column} @> jsonb_build_object({keyParam}, (LOWER({valueParam}))::boolean)
+                )
+            )
+            """;
+    }
+}
+
 public class PostgreSqlTraceReadRepository(NpgsqlDataSource dataSource, ITenantContext tenantContext)
     : TraceReadRepositoryBase(tenantContext)
 {
@@ -23,6 +86,9 @@ public class PostgreSqlTraceReadRepository(NpgsqlDataSource dataSource, ITenantC
     // the base's IN @ids (which Dapper only expands for non-array providers like SqlServer).
     protected override string TraceIdInPredicate(string alias) => $"{alias}.trace_id = ANY(@traceIds)";
     protected override string ResourceIdInPredicate => "id = ANY(@resourceIds)";
+
+    protected override string AttributePredicate(string column, string keyParam, string valueParam, bool negated)
+        => PostgreSqlJsonAttributeHooks.Predicate(column, keyParam, valueParam, negated);
 }
 
 public class PostgreSqlMetricReadRepository(NpgsqlDataSource dataSource, ITenantContext tenantContext, IConfiguration configuration)
@@ -30,6 +96,9 @@ public class PostgreSqlMetricReadRepository(NpgsqlDataSource dataSource, ITenant
 {
     protected override async Task<DbConnection> OpenConnectionAsync(CancellationToken cancellationToken)
         => await dataSource.OpenConnectionAsync(cancellationToken);
+
+    protected override string AttributePredicate(string column, string keyParam, string valueParam, bool negated)
+        => PostgreSqlJsonAttributeHooks.Predicate(column, keyParam, valueParam, negated);
 }
 
 public class PostgreSqlLogReadRepository(NpgsqlDataSource dataSource, ITenantContext tenantContext)
@@ -37,6 +106,9 @@ public class PostgreSqlLogReadRepository(NpgsqlDataSource dataSource, ITenantCon
 {
     protected override async Task<DbConnection> OpenConnectionAsync(CancellationToken cancellationToken)
         => await dataSource.OpenConnectionAsync(cancellationToken);
+
+    protected override string AttributePredicate(string column, string keyParam, string valueParam, bool negated)
+        => PostgreSqlJsonAttributeHooks.Predicate(column, keyParam, valueParam, negated);
 }
 
 public class PostgreSqlResourceReadRepository(NpgsqlDataSource dataSource, ITenantContext tenantContext)
