@@ -58,24 +58,9 @@ Testcontainers-managed databases, applying the actual `schema/*.sql` scripts and
 random and time-dependent — see `plans/list-pages-server-side.md`'s Phase 0 section). Requires
 Docker. The container startup, schema application and tenant/API-key seeding these fixtures use
 live in `tests/Keryhe.Telemetry.TestInfrastructure` (one `ProviderContainer` per provider, plus
-`TenantSeeder` for N tenants), which the planned stress harness shares
-(see `plans/stress-tests.md`); it also offers opt-in per-provider diagnostics and CPU/memory
-limits via `ContainerOptions`, which the integration fixtures leave off. The OTLP load tool
-(`tests/Keryhe.Telemetry.StressTests/Load`, driven by `dotnet run --project tests/Keryhe.Telemetry.StressTests -- load ...`
-until the full stress CLI lands; `-- host-smoke --provider <p> --topology allinone|split` runs the host
-orchestration end to end: publish, launch as child processes, EventPipe metrics, log scan, graceful
-shutdown, plus the Phase 4 database observers — `Observers/Database`: a 1s lock/pressure sampler, statement-stats
-collector, table sizes and a docker-stats sampler per DB container, written to `database-observation.json`;
-`--browsers <n>` adds the Phase 5 headless-Chromium page tour (`Browser/`; `--browser-export` adds the per-signal exports; first run
-`dotnet run --project tests/Keryhe.Telemetry.StressTests -- playwright-install` to fetch Chromium) and writes `browser-tour.json`;
-and the Phase 6 scenario CLI, `-- run --provider <p|all> --topology <allinone|split|all> --profile <smoke|standard|soak|ramp|all|file.json>`
-[`--scenario fixed|ramp`, `--browsers n`, `--out dir`], which runs the matrix sequentially: fresh container, warm-up, measured window
-(or a rate ramp with stop criteria), quiesce, shutdown, one `scenario.json` per scenario; profiles live in
-`tests/Keryhe.Telemetry.StressTests/Profiles/`; after quiesce it runs the Phase 7 correctness check (`Verification/`: sent ledger vs
-per-tenant row counts, expected re-delivery duplicates, `records_dropped`, and backdated rows removed by a retention sweep that started after quiescence); and, when a run finishes, the Phase 8 report (`Reporting/`): `result.json` (versioned `RunResult`), a self-contained `report.html` with inline SVG
-charts on one shared time axis, and `comparison.html` for a matrix; `-- report --in <results dir>` rebuilds them from `scenario.json` and the
-hosts' metric NDJSON without re-running; output goes to the gitignored `stress-results/`) reuses the Collector's generated gRPC stubs, which is why the three
-`*_service.proto` entries in the Collector csproj are `GrpcServices="Both"`:
+`TenantSeeder` for N tenants), which the stress harness (below) shares;
+it also offers opt-in per-provider diagnostics and CPU/memory
+limits via `ContainerOptions`, which the integration fixtures leave off.
 
 ```bash
 # All five providers (one xUnit collection fixture per provider, containers started once per run)
@@ -86,6 +71,30 @@ dotnet test tests/Keryhe.Telemetry.IntegrationTests --filter Provider=SqlServer
 ```
 
 The Angular project has `npm test` (Karma/Jasmine) but no meaningful tests are set up.
+
+### Stress tests
+
+`tests/Keryhe.Telemetry.StressTests` is a manual, Docker-based harness (never part of `dotnet test`) that ingests OTLP load into each provider under both
+host topologies while headless Chromium walks the UI, then reports write/read latency, locking, resource use, slowest SQL and a data correctness check as
+`result.json`, `report.html` and (for a matrix) `comparison.html`. Its README covers prerequisites, profiles, ramp criteria and how to read the report;
+the design is in `plans/stress-tests.md`. It reuses the Collector's generated gRPC stubs, which is why the three `*_service.proto` entries in the
+Collector csproj are `GrpcServices="Both"`.
+
+```bash
+# One-time: fetch Chromium for the browser tour
+dotnet run --project tests/Keryhe.Telemetry.StressTests -- playwright-install
+
+# Run scenarios (provider/topology/profile each take a value or "all"; runs sequentially)
+dotnet run --project tests/Keryhe.Telemetry.StressTests -- run --provider PostgreSQL --topology allinone --profile smoke
+dotnet run --project tests/Keryhe.Telemetry.StressTests -- run --provider all --topology all --profile smoke
+dotnet run --project tests/Keryhe.Telemetry.StressTests -- run --provider SqlServer --scenario ramp
+
+# Rebuild the report from a finished run (output is in the gitignored stress-results/)
+dotnet run --project tests/Keryhe.Telemetry.StressTests -- report --in stress-results/<timestamp>
+```
+
+The write path it measures is instrumented on `IngestionMetrics` (see "Write path decoupling" below); `RetentionWorker`'s "Retention sweep complete" log
+line carries the sweep's elapsed milliseconds for the same reason.
 
 ### Default ports
 
