@@ -52,7 +52,9 @@ public static class RunCommand
         }
 
         var repo = RepoLocator.FindRoot();
-        outDir ??= Path.Combine(repo, "stress-results", DateTime.UtcNow.ToString("yyyyMMdd-HHmmss"));
+        // Absolute, because the hosts are launched from the published folder under it, not from this process's working directory.
+        outDir = Path.GetFullPath(outDir ?? Path.Combine(repo, "stress-results", DateTime.UtcNow.ToString("yyyyMMdd-HHmmss")));
+        if (reusePublish is not null) reusePublish = Path.GetFullPath(reusePublish);
         Directory.CreateDirectory(outDir);
         Console.WriteLine($"Output: {outDir}");
         Console.WriteLine($"Matrix: {specs.Count} scenario(s), run sequentially: {string.Join(", ", specs.Select(s => s.Id))}");
