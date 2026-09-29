@@ -7,6 +7,10 @@ public static partial class ServerLogParsers
 {
     private const int MaxBlocks = 50;
 
+    /// <summary>Lines of the log containing <paramref name="text"/> (for example Postgres's "checkpoints are occurring too frequently" warning).</summary>
+    public static int CountOccurrences(string log, string text) =>
+        log.Split('\n').Count(l => l.Contains(text, StringComparison.Ordinal));
+
     [GeneratedRegex(@"^\s")]
     private static partial Regex Continuation();
 

@@ -15,6 +15,7 @@ public sealed class DatabaseObserverSession : IAsyncDisposable
     private readonly DatabaseObserverBase _observer;
     private readonly LockSampler _locks;
     private readonly ContainerStatsSampler _stats;
+    private IReadOnlyList<ServerSetting> _settings = [];
 
     private DatabaseObserverSession(DatabaseObserverBase observer, string containerId, TimeSpan interval)
     {
@@ -30,6 +31,7 @@ public sealed class DatabaseObserverSession : IAsyncDisposable
     {
         var session = new DatabaseObserverSession(DatabaseObserverFactory.Create(provider, container), container.ContainerId, interval ?? TimeSpan.FromSeconds(1));
         await session._observer.BeginAsync(cancellationToken);
+        session._settings = await session._observer.ReadSettingsAsync(cancellationToken);
         await session._observer.ResetAsync(cancellationToken);
         session._stats.Start();
         session._locks.Start();
@@ -40,7 +42,10 @@ public sealed class DatabaseObserverSession : IAsyncDisposable
     public Task<RowCounts> CountRowsAsync(long backdatedCutoffNanos, CancellationToken cancellationToken = default) =>
         _observer.CountRowsAsync(backdatedCutoffNanos, cancellationToken);
 
-    /// <summary>Restarts the statement statistics window, normally at the start of the measured window.</summary>
+    /// <summary>The effective server settings read when the session started.</summary>
+    public IReadOnlyList<ServerSetting> Settings => _settings;
+
+    /// <summary>Restarts the statement statistics window (and the diagnostics' counter baselines), normally at the start of the measured window.</summary>
     public Task ResetStatementStatsAsync(CancellationToken cancellationToken = default) => _observer.ResetAsync(cancellationToken);
 
     public async Task<DatabaseObservation> StopAsync(int topStatements = 20, CancellationToken cancellationToken = default)
@@ -50,7 +55,8 @@ public sealed class DatabaseObserverSession : IAsyncDisposable
         var summary = await _observer.EndAsync(cancellationToken);
         var statements = await _observer.SnapshotAsync(topStatements, cancellationToken);
         var tables = await _observer.ReadAsync(cancellationToken);
-        return new DatabaseObservation(Provider, samples, summary, statements, tables, containerStats);
+        var diagnostics = await _observer.ReadDiagnosticsAsync(cancellationToken);
+        return new DatabaseObservation(Provider, samples, summary, statements, tables, containerStats, _settings, diagnostics);
     }
 
     public async ValueTask DisposeAsync()

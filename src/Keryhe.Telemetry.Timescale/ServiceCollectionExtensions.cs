@@ -1,6 +1,7 @@
 using Microsoft.Extensions.Configuration;
 using Npgsql;
 using Keryhe.Telemetry.Core;
+using Keryhe.Telemetry.Core.Data.Read;
 using Keryhe.Telemetry.Timescale.Services;
 
 namespace Microsoft.Extensions.DependencyInjection;
@@ -41,7 +42,11 @@ public static class TimescaleServiceCollectionExtensions
         services.AddScoped<ITenantCatalogRepository, TimescaleTenantCatalogRepository>();
         services.AddScoped<IRetentionSettingsRepository, TimescaleRetentionSettingsRepository>();
         services.AddScoped<IRollupRepository, TimescaleLogRollupRepository>();
-        services.AddSingleton(ProviderCapabilities.FromConfiguration(ProviderTier.Analytics, configuration));
+        services.AddSingleton(ProviderCapabilities.FromConfiguration(ProviderTier.Analytics, configuration) with
+        {
+            // The read repositories keep DapperReadRepository's default asOf expression, which backs off this far.
+            AsOfBackoffSeconds = DapperReadRepository.PostgresAsOfBackoffSeconds
+        });
         return services;
     }
 }

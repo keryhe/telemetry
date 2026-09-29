@@ -7,17 +7,18 @@ namespace Keryhe.Telemetry.StressTests.Verification;
 
 public static class CorrectnessStatus
 {
-    public const string Match = "Match", ExplainedByDrops = "ExplainedByDrops", Mismatch = "Mismatch";
+    public const string Match = "Match", ExplainedByDrops = "ExplainedByDrops", ExplainedByAbandonedExports = "ExplainedByAbandonedExports", Mismatch = "Mismatch";
 }
 
 /// <summary>
 /// One current-age (tenant, table) cell. <see cref="Expected"/> is what was accepted plus the re-delivered copies of tables that do not dedup
 /// (log records and data points have no dedup key, so a re-delivery legitimately appears twice); re-deliveries that spans collapse
-/// are counted in <see cref="CollapsedRedeliveries"/> and expected to be absent.
+/// are counted in <see cref="CollapsedRedeliveries"/> and expected to be absent. <see cref="MaybeLanded"/> is the ledger's rows from exports the
+/// client abandoned (deadline, cancel, run stop): a surplus up to that size is <see cref="CorrectnessStatus.ExplainedByAbandonedExports"/>.
 /// </summary>
 public sealed record CorrectnessRow(
     long TenantId, string Table, long Sent, long PersistedRedeliveries, long CollapsedRedeliveries,
-    long Expected, long Actual, long Delta, string Status);
+    long Expected, long Actual, long Delta, string Status, long MaybeLanded = 0);
 
 /// <param name="ActualMinusExpected">Sum of the deltas of the signal's cells. A shortfall no larger than <see cref="RecordsDropped"/> is explained by drops.</param>
 public sealed record SignalDrops(string Signal, double RecordsDropped, long ActualMinusExpected);
@@ -37,7 +38,7 @@ public sealed record CorrectnessResult(
     DateTimeOffset At, long BackdatedCutoffNanos,
     IReadOnlyList<CorrectnessRow> Rows, IReadOnlyList<SignalDrops> Drops,
     int Mismatches, int ExplainedByDrops,
-    long? PendingMergeDuplicates, BackdatedCheck Backdated);
+    long? PendingMergeDuplicates, BackdatedCheck Backdated, int ExplainedByAbandonedExports = 0);
 
 /// <summary>Compares the sent ledger with the database counts. Pure.</summary>
 public static class CorrectnessComparer
@@ -65,11 +66,13 @@ public static class CorrectnessComparer
         {
             var delta = r.Actual - r.Expected;
             var d = dropsBySignal[SignalOf(r.Table)];
+            var maybeLanded = r.Cell?.RowsMaybeLanded ?? 0;
             var status = delta == 0 ? CorrectnessStatus.Match
                 : delta < 0 && d.RecordsDropped > 0 && d.ActualMinusExpected >= -d.RecordsDropped ? CorrectnessStatus.ExplainedByDrops
+                : delta > 0 && delta <= maybeLanded ? CorrectnessStatus.ExplainedByAbandonedExports
                 : CorrectnessStatus.Mismatch;
             return new CorrectnessRow(r.Tenant, r.Table, r.Cell?.Rows ?? 0, r.Cell?.DuplicateRowsPersisted ?? 0, r.Cell?.DuplicateRowsCollapsed ?? 0,
-                r.Expected, r.Actual, delta, status);
+                r.Expected, r.Actual, delta, status, maybeLanded);
         }).ToList();
         return (rows, drops);
     }
@@ -99,7 +102,8 @@ public static class CorrectnessComparer
             : null;
         return new CorrectnessResult(at, cutoffNanos, rows, drops,
             rows.Count(r => r.Status == CorrectnessStatus.Mismatch), rows.Count(r => r.Status == CorrectnessStatus.ExplainedByDrops),
-            pending, CompareBackdated(ledger, counts, sweepStartedAfterQuiesce, waitedSeconds));
+            pending, CompareBackdated(ledger, counts, sweepStartedAfterQuiesce, waitedSeconds),
+            rows.Count(r => r.Status == CorrectnessStatus.ExplainedByAbandonedExports));
     }
 }
 
@@ -120,7 +124,7 @@ public static class CorrectnessRunner
         var hasBackdated = ledger.Any(c => c.Age == RecordAge.Backdated && c.Rows > 0);
         if (hasBackdated)
         {
-            var limit = TimeSpan.FromSeconds(profile.RetentionIntervalSeconds * 2 + 60);
+            var limit = TimeSpan.FromSeconds(Math.Min(profile.RetentionIntervalSeconds * 2 + 60, profile.BackdatedCheckMaxWaitSeconds));
             var began = DateTimeOffset.UtcNow;
             log($"correctness: waiting up to {limit.TotalSeconds:F0}s for a retention sweep that starts after quiescence");
             while (true)

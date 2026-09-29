@@ -109,6 +109,53 @@ public sealed class ClickHouseObserver : DatabaseObserverBase
 
     private static StatementStat ToStat(object?[] r) => new(Str(r[0]) ?? "", Long(r[1]), Num(r[2]), Num(r[3]), Num(r[4]), Long(r[5]));
 
+    public override Task<IReadOnlyList<ServerSetting>> ReadSettingsAsync(CancellationToken cancellationToken) => SettingsAsync(
+        "SELECT 'version', version() " +
+        "UNION ALL SELECT name, value FROM system.server_settings WHERE name IN ('max_server_memory_usage', 'max_server_memory_usage_to_ram_ratio', " +
+        "'max_concurrent_queries', 'background_pool_size', 'background_merges_mutations_concurrency_ratio', 'mark_cache_size', 'uncompressed_cache_size') " +
+        "UNION ALL SELECT name, value FROM system.settings WHERE name IN ('max_threads', 'max_memory_usage', 'max_insert_threads', 'async_insert', 'max_execution_time')",
+        cancellationToken);
+
+    public override async Task<IReadOnlyList<DiagnosticSection>> ReadDiagnosticsAsync(CancellationToken cancellationToken)
+    {
+        try { await ExecuteAsync("SYSTEM FLUSH LOGS", cancellationToken); }
+        catch (Exception ex) when (ex is not OperationCanceledException) { /* the sections below then read whatever was already flushed */ }
+        var since = string.IsNullOrEmpty(_since) ? "toDateTime64('1970-01-01 00:00:00', 6)" : $"toDateTime64('{EscapeLiteral(_since)}', 6)";
+        return
+        [
+            await SectionAsync("Rows and bytes read per query shape", "system.query_log over the measured window, top 20 by rows read.",
+                ["Query", "Calls", "Rows read", "Bytes read", "Rows read / call", "Mean ms", "Max ms", "Rows written"], $"""
+                SELECT left(any(query), 200), count(), sum(read_rows), sum(read_bytes), round(avg(read_rows)), round(avg(query_duration_ms), 1),
+                       max(query_duration_ms), sum(written_rows)
+                FROM system.query_log
+                WHERE type = 'QueryFinish' AND event_time_microseconds >= {since} AND current_database = currentDatabase()
+                  AND query NOT LIKE '%system.%' AND query NOT LIKE 'SYSTEM %'
+                GROUP BY normalized_query_hash ORDER BY sum(read_rows) DESC LIMIT 20
+                """, cancellationToken),
+
+            await SectionAsync("Part events (merges, mutations, inserts)", "system.part_log over the measured window, per table and event type.",
+                ["Table", "Event", "Count", "Rows", "Total s", "Max ms", "Errors"], $"""
+                SELECT table, toString(event_type), count(), sum(rows), round(sum(duration_ms) / 1000, 1), max(duration_ms), countIf(error != 0)
+                FROM system.part_log
+                WHERE database = currentDatabase() AND event_time_microseconds >= {since}
+                GROUP BY table, event_type ORDER BY table, event_type
+                """, cancellationToken),
+
+            await SectionAsync("Mutations", "Every mutation on this database (lightweight DELETE, ALTER ... UPDATE), grouped by table and command.",
+                ["Table", "Command", "Count", "Done", "Max parts to do", "Last failure"], """
+                SELECT table, left(command, 150), count(), countIf(is_done), max(parts_to_do), anyIf(latest_fail_reason, latest_fail_reason != '')
+                FROM system.mutations WHERE database = currentDatabase()
+                GROUP BY table, left(command, 150) ORDER BY count() DESC LIMIT 30
+                """, cancellationToken),
+
+            await SectionAsync("Merges still running at the end", null,
+                ["Table", "Elapsed s", "Progress", "Parts", "Rows read", "Is mutation"], """
+                SELECT table, round(elapsed, 1), round(progress, 2), num_parts, rows_read, is_mutation
+                FROM system.merges WHERE database = currentDatabase() ORDER BY elapsed DESC
+                """, cancellationToken),
+        ];
+    }
+
     /// <summary>
     /// The read side's view: <c>resources</c>/<c>metrics</c> are collapsed to one row per id before joining (a pending merge would otherwise multiply
     /// counts), and spans are read as <c>LIMIT 1 BY trace_id, span_id</c>. The raw span count is returned too, so the report can show pending merge duplicates.

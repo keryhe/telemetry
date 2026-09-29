@@ -98,11 +98,15 @@ public sealed class OtlpExporter : IAsyncDisposable
         catch (RpcException ex)
         {
             _ledger.RecordFailed(tenantId, ledgerEntries);
+            // The client stopped waiting, but the server may already have enqueued the records (and will persist them).
+            if (ex.StatusCode is StatusCode.DeadlineExceeded or StatusCode.Cancelled) _ledger.RecordMaybeLanded(tenantId, ledgerEntries);
             return new ExportResult(ExportOutcome.Failed, ex.StatusCode.ToString(), Stopwatch.GetElapsedTime(started).TotalMilliseconds, 0, ex.Status.Detail);
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested)
         {
-            // Shutting the run down, not a server failure: leave it out of both ledger and latency.
+            // Shutting the run down, not a server failure: left out of the accepted/failed ledger and latency, but the server may
+            // already have enqueued it, so it is ledgered as possibly landed.
+            _ledger.RecordMaybeLanded(tenantId, ledgerEntries);
             return new ExportResult(ExportOutcome.Failed, "CLIENT_CANCELLED", Stopwatch.GetElapsedTime(started).TotalMilliseconds, 0, null);
         }
     }

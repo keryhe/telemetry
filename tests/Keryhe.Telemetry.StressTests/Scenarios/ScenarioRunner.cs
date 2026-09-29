@@ -38,6 +38,7 @@ public static class ScenarioRunner
         string? browserError = null, error = null;
         DatabaseObservation? database = null;
         CorrectnessResult? correctness = null;
+        double? logPinOffsetMs = null;
         var hostResults = new List<HostResult>();
 
         try
@@ -57,6 +58,8 @@ public static class ScenarioRunner
                 tenants.Select(t => new LoadTenant(t.Id, t.Name, t.ApiKey)).ToList(), hosts.GrpcUri);
             generator.SetRateScale(profile.Ramp?.StartScale ?? 1);
             using var http = new HttpClient { BaseAddress = new Uri(hosts.ApiUri.AbsoluteUri.TrimEnd('/') + "/") };
+            logPinOffsetMs = await ReadAsOfBackoffMsAsync(http, tenants[0].Id, ct);
+            log($"[{spec.Id}] asOf pin offset {(logPinOffsetMs is { } pin ? $"{pin:F0} ms" : "not reported (treated as 0)")}");
             var probe = new MarkerProbe(generator.Exporter, generator.Topology, 0, http,
                 TimeSpan.FromSeconds(profile.MarkerIntervalSeconds), TimeSpan.FromMilliseconds(100), TimeSpan.FromSeconds(60));
 
@@ -91,7 +94,7 @@ public static class ScenarioRunner
                 if (profile.Ramp is { } rampProfile)
                 {
                     log($"[{spec.Id}] ramp: {rampProfile.StepSeconds}s steps from x{rampProfile.StartScale} by x{rampProfile.StepScale}, up to {rampProfile.MaxSteps}");
-                    ramp = await RunRampAsync(rampProfile, generator, probe, hosts, spec.Id, log, ct);
+                    ramp = await RunRampAsync(rampProfile, generator, probe, hosts, logPinOffsetMs ?? 0, spec.Id, log, ct);
                 }
                 else
                 {
@@ -153,7 +156,7 @@ public static class ScenarioRunner
 
         var result = new ScenarioResult(ScenarioResult.CurrentSchemaVersion, spec.Provider, spec.Topology.ToString(), profile.Name,
             profile.IsRamp ? "ramp" : "fixed", startedAt, DateTimeOffset.UtcNow, error, profile, phases,
-            load, measured, markers, ramp, quiesce, tourResults, browserError, database, correctness, hostResults);
+            load, measured, markers, ramp, quiesce, tourResults, browserError, database, correctness, hostResults, logPinOffsetMs);
         await File.WriteAllTextAsync(Path.Combine(directory, "scenario.json"), JsonSerializer.Serialize(result, ResultJson.Options), CancellationToken.None);
         return result;
     }
@@ -161,8 +164,29 @@ public static class ScenarioRunner
     private static Task<PlaywrightTour> StartTourAsync(HostSet hosts, IReadOnlyList<SeededTenant> tenants, ScenarioProfile profile, string directory, CancellationToken ct) =>
         PlaywrightTour.StartAsync(hosts.UiUri, hosts.ApiUri, tenants, profile.Browsers.ToTourOptions(), directory, ct);
 
+    /// <summary>
+    /// The provider's declared <c>asOf</c> back-off, in ms, from <c>GET /api/capabilities</c> (read from the provider rather than hard-coded
+    /// per provider here). Null when the endpoint does not answer or predates the field; the criteria then treat it as 0.
+    /// </summary>
+    private static async Task<double?> ReadAsOfBackoffMsAsync(HttpClient api, long tenantId, CancellationToken ct)
+    {
+        try
+        {
+            using var request = new HttpRequestMessage(HttpMethod.Get, "api/capabilities");
+            request.Headers.Add("X-Tenant-Id", tenantId.ToString());
+            using var response = await api.SendAsync(request, ct);
+            if (!response.IsSuccessStatusCode) return null;
+            using var doc = await JsonDocument.ParseAsync(await response.Content.ReadAsStreamAsync(ct), cancellationToken: ct);
+            return doc.RootElement.TryGetProperty("asOfBackoffSeconds", out var seconds) && seconds.TryGetDouble(out var value) ? value * 1000 : null;
+        }
+        catch (Exception ex) when (ex is HttpRequestException or JsonException or TaskCanceledException && !ct.IsCancellationRequested)
+        {
+            return null;
+        }
+    }
+
     private static async Task<RampResult> RunRampAsync(
-        RampProfile ramp, OtlpLoadGenerator generator, MarkerProbe probe, HostSet hosts, string id, Action<string> log, CancellationToken ct)
+        RampProfile ramp, OtlpLoadGenerator generator, MarkerProbe probe, HostSet hosts, double logPinOffsetMs, string id, Action<string> log, CancellationToken ct)
     {
         var steps = new List<RampStepResult>();
         IReadOnlyList<string> tripped = [];
@@ -177,21 +201,49 @@ public static class ScenarioRunner
             var end = DateTimeOffset.UtcNow;
             var windows = generator.EndWindow();
 
-            // Probes sent during the step that had completed by its end (one still polling has no lag yet).
-            var probes = probe.Results.Where(r => r.SentAt >= start && r.SentAt < end).OrderBy(r => r.SentAt).ToList();
+            var (traceLags, logLags) = StepLags(probe.Results, probe.Pending, start, end, ramp.Criteria, logPinOffsetMs);
             var m = new StepMeasurements(windows, HostMetricsQuery.Dropped(hosts, start, end), HostMetricsQuery.GateWaitP95Ms(hosts, start, end),
-                probes.Select(r => r.TraceLagMs).ToList(), probes.Select(r => r.LogLagMs).ToList());
+                traceLags, logLags, logPinOffsetMs);
             tripped = RampEvaluator.Tripped(m, ramp.Criteria);
             steps.Add(new RampStepResult(i, scale, start, end, windows, m.RecordsDropped, m.GateWaitP95Ms, m.TraceLagsMs, m.LogLagsMs, tripped));
 
             log($"[{id}] step {i} x{scale:0.##}: acked {windows.Sum(w => w.AckedPerSecond):F0}/s of {windows.Sum(w => w.OfferedPerSecond):F0}/s offered, " +
-                $"export p99 {windows.Max(w => w.Latency.P99Ms):F0} ms, gate wait p95 {m.GateWaitP95Ms:F0} ms, dropped {m.RecordsDropped:F0}" +
+                $"export p99 {windows.Max(w => w.Latency.P99Ms):F0} ms, gate wait p95 {m.GateWaitP95Ms:F0} ms, dropped {m.RecordsDropped:F0}, " +
+                $"lag log (pin-adjusted) / trace {MeanLag(RampEvaluator.AdjustForPin(m.LogLagsMs, logPinOffsetMs))} / {MeanLag(m.TraceLagsMs)} ms" +
                 (tripped.Count > 0 ? $"  TRIPPED: {string.Join(", ", tripped)}" : ""));
             if (tripped.Count > 0) { trippedStep = i; break; }
         }
         var lastSustained = trippedStep is null ? steps.Count - 1 : trippedStep.Value - 1;
         return new RampResult(steps, lastSustained < 0 ? null : lastSustained, trippedStep, tripped, ReachedMaxSteps: trippedStep is null);
     }
+
+    /// <summary>
+    /// The step's lag series, in send order: every probe sent during the step that completed by its end, plus any still polling whose elapsed time
+    /// (a lower bound on its lag) already exceeds <see cref="RampCriteria.MaxLagSeconds"/> after the pin offset. Leaving those out would blind the
+    /// lag criteria exactly when lag is worst, since a step's slowest probes are the ones still polling when it ends. Younger pending probes
+    /// are left out as before: their lower bound says nothing yet.
+    /// </summary>
+    public static (List<double?> Trace, List<double?> Log) StepLags(
+        IReadOnlyList<MarkerResult> results, IReadOnlyList<PendingMarker> pendingProbes, DateTimeOffset start, DateTimeOffset end, RampCriteria criteria, double logPinOffsetMs)
+    {
+        var completed = results.Where(r => r.SentAt >= start && r.SentAt < end).ToList();
+        var pending = criteria.MaxLagSeconds > 0 ? pendingProbes.Where(p => p.SentAt >= start && p.SentAt < end).ToList() : [];
+        var threshold = criteria.MaxLagSeconds * 1000;
+
+        // Built per signal, so a probe pending on one signal never puts a "never visible" null into the other's series.
+        List<double?> Series(Func<MarkerResult, double?> lag, Func<PendingMarker, bool> isPending, Func<PendingMarker, double?> knownLag, double offsetMs) =>
+            completed.Select(r => (r.SentAt, Lag: lag(r)))
+                .Concat(pending.Select(p => (p.SentAt, Pending: isPending(p), Known: knownLag(p), Elapsed: (end - p.SentAt).TotalMilliseconds))
+                    .Where(p => p.Pending ? p.Elapsed - offsetMs > threshold : true)
+                    .Select(p => (p.SentAt, Lag: p.Pending ? p.Elapsed : p.Known)))
+                .OrderBy(x => x.SentAt).Select(x => x.Lag).ToList();
+
+        return (Series(r => r.TraceLagMs, p => p.TracePending, p => p.TraceLagMs, 0),
+                Series(r => r.LogLagMs, p => p.LogPending, p => p.LogLagMs, logPinOffsetMs));
+    }
+
+    private static string MeanLag(IReadOnlyList<double?> lags) =>
+        lags.Any(l => l is not null) ? lags.Where(l => l is not null).Average(l => l!.Value).ToString("F0") : "n/a";
 
     private static async Task WriteMetricsAsync(string path, LaunchedHost host)
     {

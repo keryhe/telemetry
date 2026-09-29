@@ -47,6 +47,7 @@ dotnet run --project tests/Keryhe.Telemetry.StressTests -- report --in stress-re
 | `--browsers <n>` | Override the profile's browser users (0 to 5; 0 runs none) |
 | `--out <dir>` | Results folder (default `stress-results/<timestamp>/` at the repo root, which is gitignored) |
 | `--reuse-publish <dir>` | Use hosts published by an earlier run instead of publishing again |
+| `--retention-interval <v>` | Override the profile's retention interval: `stress` (30 s, a sweep lands in every window), `realistic` (3600 s, the API default: one sweep at host start, so retention contention does not dominate), or a number of seconds. The scenario name gets a `-ret<seconds>` suffix, so both kinds of run sit side by side in one comparison |
 
 The hosts are published once per run. Ctrl-C stops after cleaning up the current scenario. A scenario that fails part-way still writes its result
 (with the error) and the matrix carries on.
@@ -61,7 +62,7 @@ with optional browsers), and `playwright-install`.
 3. **Warm-up**: ingestion only, so rollup coverage and data volume exist. Recorded, but excluded from the headline numbers.
 4. **Measured window**: ingestion at the profile rate, the browser tour, and every observer together. Backdated records flow and the short retention interval makes sweeps land inside it. A **ramp** replaces this with rate steps and stops at the first step where a stop criterion holds for the whole step.
 5. **Quiesce**: stops the load and waits until nothing is resident in the ingestion queue and nothing has been flushed for 10s (a timeout is recorded, not raised).
-6. **Correctness check**: compares the sent ledger with per-tenant row counts. If backdated records were sent, it first waits for a retention sweep that *started after* quiescence (up to `2 x RetentionIntervalSeconds + 60s`), since only then do leftover backdated rows mean anything.
+6. **Correctness check**: compares the sent ledger with per-tenant row counts. If backdated records were sent, it first waits for a retention sweep that *started after* quiescence (up to `2 x RetentionIntervalSeconds + 60s`, capped at `backdatedCheckMaxWaitSeconds`), since only then do leftover backdated rows mean anything. With a realistic retention interval no such sweep comes, and the backdated outcome is `NotVerifiable`.
 7. Stops the observers, shuts the hosts down gracefully (recording whether the queue drained), saves logs, disposes the container.
 
 ## Built-in profiles
@@ -84,7 +85,8 @@ A profile JSON (comments allowed) lists only what it overrides. Pass its path to
 | `name` | file name | Used in folder names and the report |
 | `tenants` | 2 | Tenants seeded, each with one API key |
 | `warmupSeconds` / `measuredSeconds` | 60 / 300 | `measuredSeconds` is ignored for a ramp |
-| `retentionIntervalSeconds` | 30 | `Retention:IntervalSeconds` for the host, so a sweep lands in the window |
+| `retentionIntervalSeconds` | 30 | `Retention:IntervalSeconds` for the host, so a sweep lands in the window (see `--retention-interval`) |
+| `backdatedCheckMaxWaitSeconds` | 300 | Longest the correctness check waits for a post-quiescence retention sweep |
 | `containerCpus` / `containerMemoryGb` | 4 / 8 | The same cap for every DB container |
 | `markerIntervalSeconds` | 5 | How often a marker log and span are sent to time ingest-to-queryable lag |
 | `quiesceStableSeconds` / `quiesceTimeoutSeconds` | 10 / 180 | |
@@ -107,7 +109,15 @@ Ramp criteria (each applies to a whole step; the rate scale multiplies the profi
 | `maxGateWaitP95Ms` | 250 | The worst signal's gate-wait p95 is higher (the gate is saturated and clients are being held) |
 | `maxExportP99Seconds` | 5 | Any signal's client-side Export p99 is higher |
 | `maxErrorRatePercent` | 1 | More than this percentage of a signal's exports failed with a gRPC error |
-| `lagGrowthFactor` / `lagGrowthMinMs` | 2 / 3000 | Lag in the last third of the step's probes is that many times the first third's and at least that much higher, or a probe never appeared |
+| `lagGrowthFactor` / `lagGrowthMinMs` | 2 / 3000 | `lag_growth`: lag in the last third of the step's probes is that many times the first third's and at least that much higher, or a probe never appeared |
+| `maxLagSeconds` | 10 | `lag_absolute`: lag in the last third of the step's probes averages more than this, growing or not (0 disables) |
+
+Both lag criteria judge the log lag **after subtracting the provider's `asOf` pin offset**. The log probe reads through the pinned list page, and
+PostgreSQL/Timescale pin `asOf` at `NOW() - 5 s` by design, so their log lag has a constant 5 s floor that would otherwise shrink the growth
+ratio and count against the absolute limit. The offset is read at scenario start from `GET /api/capabilities` (`asOfBackoffSeconds`), not
+hard-coded here, and recorded as `logPinOffsetMs` in `scenario.json`. The trace probe (`api/traces/{id}/spans`) is not pinned. A probe still
+polling when its step ends counts as a lower-bound lag once it has already been waiting longer than `maxLagSeconds`, so the criteria are not
+blind exactly when lag is worst.
 
 The report names the last step that sustained and which criterion tripped. That is a stop rule for finding the breaking point, not a verdict.
 
@@ -126,16 +136,16 @@ stress-results/<timestamp>/
   publish/                              the published hosts (unless --reuse-publish)
 ```
 
-`result.json` is the full `RunResult` (`schemaVersion` 1): run metadata (git SHA, machine, .NET, Docker VM size, images) and, per scenario, its
+`result.json` is the full `RunResult` (`schemaVersion` 2; version-1 ramp results used the older lag rule and are not comparable): run metadata (git SHA, machine, .NET, Docker VM size, images) and, per scenario, its
 result, every time series, and the summary tables. Use it to compare runs by hand or with tooling.
 
 ### Reading `report.html`
 
-- **Summary** cards and, for a ramp, the step table and breaking point. **Correctness** lists mismatched cells (table, tenant, expected, actual, delta); `ExplainedByDrops` means the shortfall is no bigger than `records_dropped`, and a backdated outcome of `NotVerifiable` means no sweep started after quiescence so leftover rows prove nothing.
+- **Summary** cards and, for a ramp, the step table and breaking point. **Correctness** lists mismatched cells (table, tenant, expected, actual, delta); `ExplainedByDrops` means the shortfall is no bigger than `records_dropped`; `ExplainedByAbandonedExports` means a surplus no bigger than the rows of exports the client gave up on (deadline exceeded, cancelled, or cut off when the load stopped), which the server may have enqueued anyway; and a backdated outcome of `NotVerifiable` means no sweep started after quiescence so leftover rows prove nothing.
 - **Timelines** share one x-axis (time since warm-up began). Grey lines mark phase boundaries, orange dashed lines retention sweeps, blue dotted lines ramp steps; hover a line for its label. Line up a latency spike with a lock burst or a sweep by eye.
-- **Write side**: client Export latency, server gate wait / flush duration / batch size, retries and drops, ingest-to-queryable lag. Log lag sits near 5s on PostgreSQL and Timescale because list pages pin their query `asOf` to `NOW() - 5s`; trace lag is not pinned.
+- **Write side**: client Export latency, server gate wait / flush duration / batch size, retries and drops, ingest-to-queryable lag. Log lag sits near 5s on PostgreSQL and Timescale because list pages pin their query `asOf` to `NOW() - 5s`; trace lag is not pinned. The ramp step table shows the log lag with that offset removed.
 - **Read side**: per-page time to ready, and per endpoint the browser's timing next to the host's. Server percentiles are the count-weighted mean of per-second quantiles, so they are approximate, and the server count includes every caller of the route (including the marker probe). A `400` on a search is the standard tier's documented answer outside its raw-search window, not an error.
-- **Database**: blocking chains, deadlocks, top statements by total and mean time, table sizes. The "API reads run under SNAPSHOT" check for SQL Server reads `not checked` when no read request happened to be sampled (for example a run without browsers); that is unknown, not a failure.
+- **Database**: blocking chains, deadlocks, top statements by total and mean time, table sizes, then the provider's own diagnostics and the container's **effective server settings** (memory, WAL/redo, durability, isolation), so a comparison between providers can be checked for fairness. Diagnostics: PostgreSQL/Timescale foreign-key `FOR KEY SHARE` checks (`pg_stat_statements.track = all`, so checks fired inside `COPY` count), checkpoint/WAL deltas and "checkpoints are occurring too frequently" warnings, dead tuples and autovacuum per table, and on Timescale every policy job with its failures and errors; SQL Server `spans` index usage and operational stats, autogrowth events for the database and tempdb, file sizes; ClickHouse rows/bytes read per query shape, `part_log` merges and mutations, the mutation list, merges still running; MySQL buffer-pool hit ratio, redo and purge (history list length is also sampled every second), per-index I/O on `spans`, unused indexes. A section that could not be collected shows its error instead of failing the run. The "API reads run under SNAPSHOT" check for SQL Server reads `not checked` when no read request happened to be sampled (for example a run without browsers); that is unknown, not a failure.
 
 ## Things worth knowing
 

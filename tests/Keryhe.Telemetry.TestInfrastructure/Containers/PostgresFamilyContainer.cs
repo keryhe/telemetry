@@ -34,8 +34,11 @@ public abstract class PostgresFamilyContainer : ProviderContainer
         {
             // Passed as server flags (the image's entrypoint forwards them to postgres), which
             // override postgresql.conf — including the Timescale image's own preload setting.
+            // track=all counts statements run inside other statements too: on plain Postgres the
+            // foreign-key checks a COPY fires (SELECT ... FOR KEY SHARE) are only visible that way.
             builder = builder.WithCommand(
                 "-c", $"shared_preload_libraries={DiagnosticPreloadLibraries}",
+                "-c", "pg_stat_statements.track=all",
                 "-c", "log_lock_waits=on",
                 "-c", "deadlock_timeout=1s",
                 "-c", "track_io_timing=on");
@@ -54,7 +57,7 @@ public abstract class PostgresFamilyContainer : ProviderContainer
             await create.ExecuteNonQueryAsync(cancellationToken);
 
         // Fail loudly if a flag did not take effect, so a stress run never silently loses a signal.
-        foreach (var (setting, expected) in new[] { ("log_lock_waits", "on"), ("deadlock_timeout", "1s"), ("track_io_timing", "on") })
+        foreach (var (setting, expected) in new[] { ("log_lock_waits", "on"), ("deadlock_timeout", "1s"), ("track_io_timing", "on"), ("pg_stat_statements.track", "all") })
         {
             await using var show = new NpgsqlCommand($"SHOW {setting}", conn);
             var actual = (string?)await show.ExecuteScalarAsync(cancellationToken);

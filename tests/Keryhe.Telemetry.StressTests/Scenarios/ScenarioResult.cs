@@ -30,6 +30,10 @@ public sealed record RampResult(
     IReadOnlyList<RampStepResult> Steps, int? LastSustainedStep, int? TrippedStep, IReadOnlyList<string> TrippedCriteria, bool ReachedMaxSteps);
 
 /// <summary>Everything one scenario measured (stress-test plan, Phase 6). <see cref="Correctness"/> compares <see cref="Load"/>'s ledger with the database; Phase 8 folds these into the report.</summary>
+/// <param name="LogPinOffsetMs">
+/// The provider's declared <c>asOf</c> back-off, read from <c>GET /api/capabilities</c> at the start of the scenario: the constant part of every
+/// log-marker lag (the log probe reads the pinned list page). Null in results written before schema version 2, or when the API did not report it.
+/// </param>
 public sealed record ScenarioResult(
     int SchemaVersion, string Provider, string Topology, string Profile, string Kind,
     DateTimeOffset StartedAt, DateTimeOffset FinishedAt, string? Error,
@@ -37,7 +41,12 @@ public sealed record ScenarioResult(
     LoadSnapshot? Load, IReadOnlyList<WindowSummary> MeasuredWindow, IReadOnlyList<MarkerResult> Markers,
     RampResult? Ramp, QuiesceResult? Quiesce,
     TourResults? Tour, string? BrowserError,
-    DatabaseObservation? Database, CorrectnessResult? Correctness, IReadOnlyList<HostResult> Hosts)
+    DatabaseObservation? Database, CorrectnessResult? Correctness, IReadOnlyList<HostResult> Hosts,
+    double? LogPinOffsetMs = null)
 {
-    public const int CurrentSchemaVersion = 1;
+    /// <summary>
+    /// 2 (database-performance plan, Phase 0): pin-adjusted lag criteria and <c>lag_absolute</c>, maybe-landed export accounting, provider
+    /// diagnostics and effective server settings. Ramp results from version 1 are not comparable with version 2.
+    /// </summary>
+    public const int CurrentSchemaVersion = 2;
 }

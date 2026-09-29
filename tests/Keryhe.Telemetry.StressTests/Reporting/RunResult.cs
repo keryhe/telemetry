@@ -58,5 +58,6 @@ public sealed record ScenarioReport(
 /// <summary>The whole run: the full <c>result.json</c>. <see cref="SchemaVersion"/> changes when the shape does, so later runs can be compared by tooling.</summary>
 public sealed record RunResult(int SchemaVersion, RunMetadata? Metadata, IReadOnlyList<ScenarioReport> Scenarios)
 {
-    public const int CurrentSchemaVersion = 1;
+    /// <summary>2: scenarios carry the database-performance plan's Phase 0 additions (see <c>ScenarioResult.CurrentSchemaVersion</c>).</summary>
+    public const int CurrentSchemaVersion = 2;
 }

@@ -38,6 +38,64 @@ public abstract partial class DatabaseObserverBase : ILockObserver, IStatementSt
     public abstract Task<StatementStatsSnapshot> SnapshotAsync(int top, CancellationToken cancellationToken);
     public abstract Task<IReadOnlyList<TableStat>> ReadAsync(CancellationToken cancellationToken);
 
+    /// <summary>The server's effective configuration (memory, durability, isolation), read once when the observers start.</summary>
+    public abstract Task<IReadOnlyList<ServerSetting>> ReadSettingsAsync(CancellationToken cancellationToken);
+
+    /// <summary>Provider diagnostics for the measured window (counter baselines are taken in <see cref="ResetAsync"/>). Never throws per section.</summary>
+    public abstract Task<IReadOnlyList<DiagnosticSection>> ReadDiagnosticsAsync(CancellationToken cancellationToken);
+
+    /// <summary>Runs one diagnostic query as a text table; a failure becomes the section's <see cref="DiagnosticSection.Error"/>.</summary>
+    protected async Task<DiagnosticSection> SectionAsync(string name, string? note, string[] columns, string sql, CancellationToken cancellationToken, int commandTimeoutSeconds = 60)
+    {
+        try
+        {
+            var rows = await QueryAsync(sql, cancellationToken, commandTimeoutSeconds);
+            return new DiagnosticSection(name, note, columns, rows.Select(r => (IReadOnlyList<string?>)r.Select(Cell).ToList()).ToList());
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            return new DiagnosticSection(name, note, columns, [], ex.Message);
+        }
+    }
+
+    /// <summary>Builds a section from values computed in code (counter deltas and the like), guarding the computation the same way.</summary>
+    protected static async Task<DiagnosticSection> ComputedSectionAsync(string name, string? note, string[] columns, Func<Task<IEnumerable<object?[]>>> rows)
+    {
+        try
+        {
+            return new DiagnosticSection(name, note, columns, (await rows()).Select(r => (IReadOnlyList<string?>)r.Select(Cell).ToList()).ToList());
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            return new DiagnosticSection(name, note, columns, [], ex.Message);
+        }
+    }
+
+    /// <summary>Reads name/value rows as settings; a failure is recorded as a single <c>(error)</c> setting rather than thrown.</summary>
+    protected async Task<IReadOnlyList<ServerSetting>> SettingsAsync(string sql, CancellationToken cancellationToken)
+    {
+        try
+        {
+            return (await QueryAsync(sql, cancellationToken)).Select(r => new ServerSetting(Str(r[0]) ?? "", Str(r[1]))).ToList();
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            return [new ServerSetting("(error)", ex.Message)];
+        }
+    }
+
+    private static string? Cell(object? value) => value switch
+    {
+        null => null,
+        double d => d.ToString("0.###", CultureInfo.InvariantCulture),
+        float f => f.ToString("0.###", CultureInfo.InvariantCulture),
+        decimal m => m.ToString("0.###", CultureInfo.InvariantCulture),
+        DateTime t => t.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture),
+        DateTimeOffset t => t.UtcDateTime.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture),
+        TimeSpan t => t.TotalMilliseconds.ToString("0.#", CultureInfo.InvariantCulture) + " ms",
+        _ => Str(value)
+    };
+
     /// <summary>Container stdout+stderr since the run began; empty when no log reader was supplied.</summary>
     protected async Task<string> ReadLogSinceBeginAsync(CancellationToken cancellationToken) =>
         _readLogs is null ? "" : await _readLogs(BeganUtc.AddSeconds(-1), cancellationToken);

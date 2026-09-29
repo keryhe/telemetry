@@ -55,11 +55,25 @@ public sealed record ContainerStatsSample(
     DateTimeOffset At, double CpuCores, long MemoryBytes, long MemoryLimitBytes,
     long BlockReadBytes, long BlockWriteBytes, long NetRxBytes, long NetTxBytes);
 
+/// <summary>One effective server setting, read from the running container (database-performance plan, decision 8: checked, not assumed).</summary>
+public sealed record ServerSetting(string Name, string? Value);
+
+/// <summary>
+/// A provider-specific diagnostic table read at the end of a run (database-performance plan, Phase 0): FK-check counts and checkpoints on
+/// Postgres, index usage and autogrowth on SQL Server, rows read and mutations on ClickHouse, buffer pool and per-index I/O on MySQL.
+/// Every cell is text so any provider view fits; a query that fails yields the section with <see cref="Error"/> set, never an exception.
+/// </summary>
+public sealed record DiagnosticSection(string Name, string? Note, IReadOnlyList<string> Columns, IReadOnlyList<IReadOnlyList<string?>> Rows, string? Error = null);
+
 /// <summary>Everything the database observers gathered over one run; serializable as-is into the run's JSON result.</summary>
+/// <param name="Settings">Effective server settings, read when the observers start. Null in results from before schema version 2.</param>
+/// <param name="Diagnostics">Provider diagnostics read at the end of the run. Null in results from before schema version 2.</param>
 public sealed record DatabaseObservation(
     string Provider,
     IReadOnlyList<LockSample> LockSamples,
     LockSummary Locks,
     StatementStatsSnapshot Statements,
     IReadOnlyList<TableStat> Tables,
-    IReadOnlyList<ContainerStatsSample> ContainerStats);
+    IReadOnlyList<ContainerStatsSample> ContainerStats,
+    IReadOnlyList<ServerSetting>? Settings = null,
+    IReadOnlyList<DiagnosticSection>? Diagnostics = null);

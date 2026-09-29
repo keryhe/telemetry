@@ -16,6 +16,8 @@ public sealed class PostgresObserver : DatabaseObserverBase
     private readonly string _connectionString;
     private readonly bool _timescale;
     private double _deadlocksBefore;
+    private Dictionary<string, double> _checkpointsBefore = [];
+    private DateTime _diagnosticsSince = DateTime.UtcNow;
 
     public PostgresObserver(string connectionString, bool timescale, Func<DateTime, CancellationToken, Task<string>>? readLogs = null)
         : base(readLogs)
@@ -98,8 +100,94 @@ public sealed class PostgresObserver : DatabaseObserverBase
             ServerLogParsers.PostgresDeadlocks(log), lockWaitLines, new Dictionary<string, string>(), []);
     }
 
-    public override Task ResetAsync(CancellationToken cancellationToken) =>
-        ExecuteAsync("SELECT pg_stat_statements_reset()", cancellationToken);
+    public override async Task ResetAsync(CancellationToken cancellationToken)
+    {
+        await ExecuteAsync("SELECT pg_stat_statements_reset()", cancellationToken);
+        _diagnosticsSince = DateTime.UtcNow;
+        try { _checkpointsBefore = await ReadCheckpointCountersAsync(cancellationToken); }
+        catch (Exception ex) when (ex is not OperationCanceledException) { _checkpointsBefore = []; }
+    }
+
+    private static readonly string[] SettingNames =
+    [
+        "shared_buffers", "effective_cache_size", "work_mem", "maintenance_work_mem", "max_connections",
+        "max_wal_size", "min_wal_size", "checkpoint_timeout", "checkpoint_completion_target", "wal_compression", "wal_buffers",
+        "synchronous_commit", "fsync", "full_page_writes", "default_transaction_isolation",
+        "autovacuum", "autovacuum_max_workers", "autovacuum_naptime", "autovacuum_vacuum_cost_delay", "autovacuum_vacuum_cost_limit",
+        "autovacuum_vacuum_scale_factor", "autovacuum_vacuum_insert_scale_factor", "gin_pending_list_limit",
+        "max_worker_processes", "shared_preload_libraries", "pg_stat_statements.track", "timescaledb.max_background_workers",
+    ];
+
+    public override Task<IReadOnlyList<ServerSetting>> ReadSettingsAsync(CancellationToken cancellationToken) => SettingsAsync(
+        "SELECT 'server_version', version() UNION ALL " +
+        $"SELECT name, current_setting(name) FROM pg_settings WHERE name IN ({string.Join(", ", SettingNames.Select(n => $"'{n}'"))})",
+        cancellationToken);
+
+    /// <summary>
+    /// Cumulative checkpoint and WAL counters. PostgreSQL 17 moved the checkpoint counters from <c>pg_stat_bgwriter</c> to
+    /// <c>pg_stat_checkpointer</c>; both shapes are read into the same names.
+    /// </summary>
+    private async Task<Dictionary<string, double>> ReadCheckpointCountersAsync(CancellationToken cancellationToken)
+    {
+        var hasCheckpointer = await ScalarAsync("SELECT count(*) FROM pg_catalog.pg_class WHERE relname = 'pg_stat_checkpointer'", cancellationToken) > 0;
+        var sql = hasCheckpointer
+            ? "SELECT num_timed, num_requested, write_time, sync_time, buffers_written FROM pg_stat_checkpointer"
+            : "SELECT checkpoints_timed, checkpoints_req, checkpoint_write_time, checkpoint_sync_time, buffers_checkpoint FROM pg_stat_bgwriter";
+        var c = (await QueryAsync(sql, cancellationToken))[0];
+        var w = (await QueryAsync("SELECT wal_records, wal_bytes, wal_buffers_full FROM pg_stat_wal", cancellationToken))[0];
+        return new Dictionary<string, double>
+        {
+            ["checkpoints_timed"] = Num(c[0]), ["checkpoints_requested"] = Num(c[1]), ["checkpoint_write_ms"] = Num(c[2]),
+            ["checkpoint_sync_ms"] = Num(c[3]), ["checkpoint_buffers_written"] = Num(c[4]),
+            ["wal_records"] = Num(w[0]), ["wal_bytes"] = Num(w[1]), ["wal_buffers_full"] = Num(w[2]),
+        };
+    }
+
+    public override async Task<IReadOnlyList<DiagnosticSection>> ReadDiagnosticsAsync(CancellationToken cancellationToken)
+    {
+        var sections = new List<DiagnosticSection>
+        {
+            await SectionAsync("Foreign-key checks (FOR KEY SHARE)",
+                "pg_stat_statements since the measured window began (track = all, so checks fired inside COPY are included).",
+                ["Statement", "Calls", "Total ms", "Mean ms"],
+                $"SELECT left(query, 200), calls, round(total_exec_time::numeric, 1), round(mean_exec_time::numeric, 4) FROM pg_stat_statements " +
+                $"WHERE dbid = {DatabaseOid} AND query LIKE '%FOR KEY SHARE%' ORDER BY calls DESC LIMIT 20", cancellationToken),
+
+            await ComputedSectionAsync("Checkpoints and WAL", "Deltas over the measured window, except the last row: the server's own 'checkpoints are occurring too frequently' warnings in the container log since the observers started (warm-up included).",
+                ["Counter", "Value"], async () =>
+                {
+                    var now = await ReadCheckpointCountersAsync(cancellationToken);
+                    var rows = now.Select(kv => new object?[] { kv.Key, kv.Value - _checkpointsBefore.GetValueOrDefault(kv.Key) }).ToList();
+                    var seconds = (DateTime.UtcNow - _diagnosticsSince).TotalSeconds;
+                    var count = now["checkpoints_timed"] + now["checkpoints_requested"] - _checkpointsBefore.GetValueOrDefault("checkpoints_timed") - _checkpointsBefore.GetValueOrDefault("checkpoints_requested");
+                    rows.Add(["window_seconds", Math.Round(seconds)]);
+                    rows.Add(["mean_checkpoint_interval_seconds", count > 0 ? Math.Round(seconds / count, 1) : null]);
+                    rows.Add(["wal_mb_per_second", Math.Round((now["wal_bytes"] - _checkpointsBefore.GetValueOrDefault("wal_bytes")) / 1048576.0 / Math.Max(1, seconds), 2)]);
+                    rows.Add(["checkpoints_too_frequent_warnings", ServerLogParsers.CountOccurrences(await ReadLogSinceBeginAsync(cancellationToken), "checkpoints are occurring too frequently")]);
+                    return rows;
+                }),
+
+            await SectionAsync("Vacuum and dead tuples", _timescale ? "Per table, hypertable chunks folded into their hypertable; cumulative since the container started." : "Per table; cumulative since the container started.",
+                ["Table", "Live tuples", "Dead tuples", "Autovacuums", "Autoanalyzes", "Last autovacuum"],
+                (_timescale
+                    ? "SELECT COALESCE(c.hypertable_name, s.relname), sum(s.n_live_tup), sum(s.n_dead_tup), sum(s.autovacuum_count), sum(s.autoanalyze_count), max(s.last_autovacuum) " +
+                      "FROM pg_stat_user_tables s LEFT JOIN timescaledb_information.chunks c ON c.chunk_schema = s.schemaname AND c.chunk_name = s.relname "
+                    : "SELECT s.relname, sum(s.n_live_tup), sum(s.n_dead_tup), sum(s.autovacuum_count), sum(s.autoanalyze_count), max(s.last_autovacuum) FROM pg_stat_user_tables s ") +
+                "GROUP BY 1 ORDER BY 3 DESC LIMIT 20", cancellationToken),
+        };
+
+        if (_timescale)
+        {
+            sections.Add(await SectionAsync("Timescale background jobs", "Every policy job with its cumulative runs and failures.",
+                ["Job", "Procedure", "Hypertable", "Runs", "Failures", "Last status", "Last duration"],
+                "SELECT j.job_id, j.proc_name, j.hypertable_name, s.total_runs, s.total_failures, s.last_run_status, s.last_run_duration " +
+                "FROM timescaledb_information.jobs j LEFT JOIN timescaledb_information.job_stats s ON s.job_id = j.job_id ORDER BY j.job_id", cancellationToken));
+            sections.Add(await SectionAsync("Timescale job errors", "timescaledb_information.job_errors, newest first.",
+                ["Job", "Procedure", "Started", "SQLSTATE", "Message"],
+                "SELECT job_id, proc_name, start_time, sqlerrcode, left(err_message, 300) FROM timescaledb_information.job_errors ORDER BY start_time DESC LIMIT 20", cancellationToken));
+        }
+        return sections;
+    }
 
     public override async Task<StatementStatsSnapshot> SnapshotAsync(int top, CancellationToken cancellationToken)
     {

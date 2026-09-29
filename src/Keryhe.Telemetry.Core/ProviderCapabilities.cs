@@ -32,12 +32,19 @@ public enum ProviderTier
 /// 400 (decision 39). Null means no limit (every analytics-tier provider).
 /// </param>
 /// <param name="ExportMaxWindowDays">Maximum export time window, in days (decision 17): 7 on the analytics tier, 1 on the standard tier by default.</param>
+/// <param name="AsOfBackoffSeconds">
+/// How far behind the database clock a fresh list/summary query pins <c>asOf</c>
+/// (<c>DapperReadRepository.DatabaseClockNowExpr</c>): 5 on PostgreSQL/Timescale, 0 elsewhere. A row
+/// is therefore invisible to a pinned list for at least this long after it is written. Informational
+/// only; nothing in the API enforces it. The stress harness subtracts it from its log-lag probe.
+/// </param>
 public sealed record ProviderCapabilities(
     ProviderTier Tier,
     bool IndexedSearch,
     bool ExemplarPaging,
     int? RawSearchWindowHours,
-    int ExportMaxWindowDays)
+    int ExportMaxWindowDays,
+    int AsOfBackoffSeconds = 0)
 {
     /// <summary>Analytics-tier defaults (decision 39), before any <c>Telemetry:Query</c>/<c>Telemetry:Export</c> override is applied.</summary>
     public static ProviderCapabilities AnalyticsDefault() => new(

@@ -13,10 +13,15 @@ public enum RecordAge { Current, Backdated }
 public readonly record struct LedgerEntry(string Table, RecordAge Age, long Rows, bool Redelivery, bool Dedups);
 
 /// <summary>What one (tenant, table, age) cell of the ledger holds.</summary>
+/// <param name="RowsMaybeLanded">
+/// Rows of exports the client gave up on (deadline exceeded, cancelled, or abandoned when the run stopped) that the server may still have
+/// enqueued and persisted: an abandoned export is not a rejected one. Counts only rows that would add to the table (a re-delivered span collapses).
+/// A surplus in the database no larger than this is explained, not a mismatch.
+/// </param>
 public sealed record LedgerCell(
     long TenantId, string Table, RecordAge Age,
     long Rows, long DuplicateRowsCollapsed, long DuplicateRowsPersisted,
-    long RowsRejected, long RowsFailed)
+    long RowsRejected, long RowsFailed, long RowsMaybeLanded = 0)
 {
     /// <summary>Rows the database should hold for this cell once ingestion is quiet and nothing was dropped.</summary>
     public long ExpectedRows => Rows + DuplicateRowsPersisted;
@@ -32,7 +37,7 @@ public sealed class SentLedger
 {
     private sealed class Cell
     {
-        public long Rows, CollapsedDuplicates, PersistedDuplicates, Rejected, Failed;
+        public long Rows, CollapsedDuplicates, PersistedDuplicates, Rejected, Failed, MaybeLanded;
     }
 
     private readonly ConcurrentDictionary<(long Tenant, string Table, RecordAge Age), Cell> _cells = new();
@@ -58,6 +63,13 @@ public sealed class SentLedger
         foreach (var e in entries) Interlocked.Add(ref CellFor(tenantId, e).Failed, e.Rows);
     }
 
+    /// <summary>Records an export the client abandoned before hearing back, which the server may nevertheless have accepted.</summary>
+    public void RecordMaybeLanded(long tenantId, IEnumerable<LedgerEntry> entries)
+    {
+        foreach (var e in entries.Where(e => !(e.Redelivery && e.Dedups)))
+            Interlocked.Add(ref CellFor(tenantId, e).MaybeLanded, e.Rows);
+    }
+
     private Cell CellFor(long tenantId, LedgerEntry e) => _cells.GetOrAdd((tenantId, e.Table, e.Age), _ => new Cell());
 
     public IReadOnlyList<LedgerCell> Snapshot() =>
@@ -65,6 +77,6 @@ public sealed class SentLedger
             .Select(c => new LedgerCell(c.Key.Tenant, c.Key.Table, c.Key.Age,
                 Volatile.Read(ref c.Value.Rows), Volatile.Read(ref c.Value.CollapsedDuplicates),
                 Volatile.Read(ref c.Value.PersistedDuplicates), Volatile.Read(ref c.Value.Rejected),
-                Volatile.Read(ref c.Value.Failed)))
+                Volatile.Read(ref c.Value.Failed), Volatile.Read(ref c.Value.MaybeLanded)))
             .ToList();
 }

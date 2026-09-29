@@ -17,6 +17,12 @@ namespace Keryhe.Telemetry.StressTests.Load;
 public sealed record MarkerResult(int Sequence, DateTimeOffset SentAt, double? LogLagMs, double? TraceLagMs, string? Error);
 
 /// <summary>
+/// A probe still polling: sent, acknowledged, and not yet visible on at least one signal. A lag already known for the other signal is carried;
+/// a null lag with its pending flag set means that signal is still being polled.
+/// </summary>
+public sealed record PendingMarker(int Sequence, DateTimeOffset SentAt, bool LogPending, double? LogLagMs, bool TracePending, double? TraceLagMs);
+
+/// <summary>
 /// Measures ingest-to-queryable lag (stress-test plan, Phase 2). Every interval it sends a log record
 /// and a span carrying a unique marker for one tenant, then polls the API until each is visible; the
 /// elapsed time from the start of the send is the lag. It goes through the API, not the database, so
@@ -42,11 +48,18 @@ public sealed class MarkerProbe(
     private static readonly Resource MarkerResource = BuildResource();
 
     private readonly List<MarkerResult> _results = [];
+    private readonly Dictionary<int, PendingMarker> _pending = [];
     private int _sequence;
 
     public IReadOnlyList<MarkerResult> Results
     {
         get { lock (_results) return _results.ToList(); }
+    }
+
+    /// <summary>Probes whose export was acknowledged but which have not yet become visible on both signals.</summary>
+    public IReadOnlyList<PendingMarker> Pending
+    {
+        get { lock (_results) return _pending.Values.ToList(); }
     }
 
     private static Resource BuildResource()
@@ -126,12 +139,15 @@ public sealed class MarkerProbe(
                 return;
             }
 
-            var logTask = PollAsync(() => LogVisibleAsync(tenant.Id, marker, sentAt, ct), started, ct);
-            var traceTask = PollAsync(() => TraceVisibleAsync(tenant.Id, traceIdHex, ct), started, ct);
+            lock (_results) _pending[sequence] = new PendingMarker(sequence, sentAt, true, null, true, null);
+            var logTask = PollAsync(() => LogVisibleAsync(tenant.Id, marker, sentAt, ct), started, ct)
+                .ContinueWith(t => { Update(sequence, p => p with { LogPending = false, LogLagMs = t.IsCompletedSuccessfully ? t.Result : null }); return t; }, TaskScheduler.Default).Unwrap();
+            var traceTask = PollAsync(() => TraceVisibleAsync(tenant.Id, traceIdHex, ct), started, ct)
+                .ContinueWith(t => { Update(sequence, p => p with { TracePending = false, TraceLagMs = t.IsCompletedSuccessfully ? t.Result : null }); return t; }, TaskScheduler.Default).Unwrap();
             await Task.WhenAll(logTask, traceTask);
             Add(new MarkerResult(sequence, sentAt, logTask.Result, traceTask.Result, null));
         }
-        catch (OperationCanceledException) { }
+        catch (OperationCanceledException) { lock (_results) _pending.Remove(sequence); }
         catch (Exception ex)
         {
             error = ex.Message;
@@ -141,7 +157,17 @@ public sealed class MarkerProbe(
 
     private void Add(MarkerResult result)
     {
-        lock (_results) _results.Add(result);
+        lock (_results)
+        {
+            _results.Add(result);
+            _pending.Remove(result.Sequence);
+        }
+    }
+
+    private void Update(int sequence, Func<PendingMarker, PendingMarker> change)
+    {
+        lock (_results)
+            if (_pending.TryGetValue(sequence, out var p)) _pending[sequence] = change(p);
     }
 
     /// <summary>Polls until <paramref name="visible"/> is true; returns ms since <paramref name="started"/>, or null on timeout.</summary>

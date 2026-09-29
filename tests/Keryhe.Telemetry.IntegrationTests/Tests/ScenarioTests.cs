@@ -138,7 +138,70 @@ public class ScenarioTests
         Assert.True(RampEvaluator.LagGrows(lost, Criteria));
         Assert.False(RampEvaluator.LagGrows([1000, 9000, 20000], Criteria)); // too few probes to judge
 
-        Assert.Equal([RampEvaluator.LagGrowth], RampEvaluator.Tripped(Step(logLags: climbing), Criteria));
+        // Its last third also averages over MaxLagSeconds (10 s), so the absolute criterion trips alongside.
+        Assert.Equal([RampEvaluator.LagGrowth, RampEvaluator.LagAbsolute], RampEvaluator.Tripped(Step(logLags: climbing), Criteria));
+    }
+
+    [Fact]
+    public void Log_lag_is_judged_after_subtracting_the_providers_asOf_pin()
+    {
+        // PostgreSQL/Timescale: the pinned list page adds a constant 5 s. Steady at ~5.2 s is ~200 ms of real lag.
+        var pinned = new double?[] { 5150, 5200, 5250, 5200, 5300, 5250 };
+        Assert.Empty(RampEvaluator.Tripped(new StepMeasurements([Window()], 0, 0, [], pinned, LogPinOffsetMs: 5000), Criteria));
+        Assert.Equal([5150.0 - 5000, 200, 250, 200, 300, 250], RampEvaluator.AdjustForPin(pinned, 5000).Select(l => l!.Value));
+        Assert.Equal([0.0], RampEvaluator.AdjustForPin([3000], 5000).Select(l => l!.Value)); // never below zero
+        Assert.Equal([null], RampEvaluator.AdjustForPin([null], 5000)); // never visible stays never visible
+
+        // 14-16 s measured is 9-11 s real: the last third averages 10.5 s after the pin, over the 10 s limit, but only once adjusted is it judged fairly.
+        var high = new double?[] { 14000, 14500, 15000, 15000, 15000, 16000 };
+        Assert.Equal([RampEvaluator.LagAbsolute], RampEvaluator.Tripped(new StepMeasurements([Window()], 0, 0, [], high, LogPinOffsetMs: 5000), Criteria));
+        Assert.Empty(RampEvaluator.Tripped(new StepMeasurements([Window()], 0, 0, [], high, LogPinOffsetMs: 6000), Criteria));
+    }
+
+    [Fact]
+    public void Absolute_lag_trips_on_a_high_plateau_and_can_be_disabled()
+    {
+        var plateau = new double?[] { 12000, 12000, 12000, 12000, 12000, 12000 };
+        Assert.False(RampEvaluator.LagGrows(plateau, Criteria));
+        Assert.True(RampEvaluator.LagTooHigh(plateau, Criteria));
+        Assert.Equal([RampEvaluator.LagAbsolute], RampEvaluator.Tripped(Step(traceLags: plateau), Criteria));
+        Assert.False(RampEvaluator.LagTooHigh(plateau, new RampCriteria { MaxLagSeconds = 0 }));
+        Assert.False(RampEvaluator.LagTooHigh([20000, 20000, 20000], Criteria)); // too few probes to judge
+    }
+
+    [Fact]
+    public void Probes_still_polling_at_step_end_count_once_they_are_already_over_the_limit()
+    {
+        var start = new DateTimeOffset(2026, 9, 29, 12, 0, 0, TimeSpan.Zero);
+        var end = start.AddSeconds(60);
+        MarkerResult[] done = [new(1, start.AddSeconds(1), 5200, 150, null), new(2, start.AddSeconds(6), 5300, 160, null)];
+        PendingMarker[] pending =
+        [
+            new(3, start.AddSeconds(40), LogPending: true, null, TracePending: false, 170), // 20 s old: log counted (15 s after the pin)
+            new(4, start.AddSeconds(48), LogPending: true, null, TracePending: true, null), // 12 s old: trace counted, log (7 s after the pin) not yet
+            new(5, start.AddSeconds(58), LogPending: true, null, TracePending: true, null), // 2 s old: says nothing yet
+            new(6, start.AddSeconds(70), LogPending: true, null, TracePending: true, null), // after the step
+        ];
+
+        var (trace, log) = ScenarioRunner.StepLags(done, pending, start, end, Criteria, logPinOffsetMs: 5000);
+
+        Assert.Equal([150.0, 160, 170, 12000], trace.Select(l => l!.Value));
+        Assert.Equal([5200.0, 5300, 20000], log.Select(l => l!.Value)); // no spurious "never visible" null from probe 4
+        var (traceOff, _) = ScenarioRunner.StepLags(done, pending, start, end, new RampCriteria { MaxLagSeconds = 0 }, 5000);
+        Assert.Equal(2, traceOff.Count);
+    }
+
+    [Fact]
+    public void Retention_interval_override_accepts_presets_or_seconds_and_tags_the_scenario()
+    {
+        var realistic = RunCommand.BuildMatrix("PostgreSQL", "allinone", "ramp", "ramp", true, null, "realistic").Single();
+        Assert.Equal(ScenarioProfile.RealisticRetentionIntervalSeconds, realistic.Profile.RetentionIntervalSeconds);
+        Assert.Equal("postgresql-allinone-ramp-ret3600", realistic.Id);
+
+        var seconds = RunCommand.BuildMatrix("PostgreSQL", "allinone", "smoke", "fixed", false, null, "120").Single();
+        Assert.Equal(120, seconds.Profile.RetentionIntervalSeconds);
+        Assert.Equal(30, RunCommand.BuildMatrix("PostgreSQL", "allinone", "smoke", "fixed", false, null).Single().Profile.RetentionIntervalSeconds);
+        Assert.Throws<ArgumentException>(() => RunCommand.BuildMatrix("PostgreSQL", "allinone", "smoke", "fixed", false, null, "hourly"));
     }
 
     [Fact]

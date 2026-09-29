@@ -29,7 +29,8 @@ public class CapabilitiesController(ProviderCapabilities capabilities, IConfigur
             capabilities.IndexedSearch,
             capabilities.ExemplarPaging,
             capabilities.RawSearchWindowHours,
-            capabilities.ExportMaxWindowDays));
+            capabilities.ExportMaxWindowDays,
+            capabilities.AsOfBackoffSeconds));
     }
 }
 
@@ -39,4 +40,5 @@ public sealed record CapabilitiesDto(
     bool IndexedSearch,
     bool ExemplarPaging,
     int? RawSearchWindowHours,
-    int ExportMaxWindowDays);
+    int ExportMaxWindowDays,
+    int AsOfBackoffSeconds);

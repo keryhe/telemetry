@@ -32,6 +32,32 @@ public class CorrectnessTests
     }
 
     [Fact]
+    public void A_surplus_is_explained_only_up_to_the_rows_of_exports_the_client_abandoned()
+    {
+        // PostgreSQL run 20260929-135558: one ~100-record log export timed out on the client and landed anyway (+99 current rows).
+        LedgerCell Abandoned(long rows) => new(3, "log_records", RecordAge.Current, 1000, 0, 0, 0, RowsFailed: 100, RowsMaybeLanded: rows);
+        var explained = Assert.Single(Run([Abandoned(100)], [Db(3, "log_records", 1099)]).Rows);
+        Assert.Equal((CorrectnessStatus.ExplainedByAbandonedExports, 99L, 100L), (explained.Status, explained.Delta, explained.MaybeLanded));
+        Assert.Equal(1, Run([Abandoned(100)], [Db(3, "log_records", 1099)]).ExplainedByAbandonedExports);
+
+        Assert.Equal(CorrectnessStatus.Mismatch, Assert.Single(Run([Abandoned(100)], [Db(3, "log_records", 1101)]).Rows).Status);
+        Assert.Equal(CorrectnessStatus.Mismatch, Assert.Single(Run([Abandoned(0)], [Db(3, "log_records", 1001)]).Rows).Status);
+    }
+
+    [Fact]
+    public void Abandoned_redeliveries_that_a_table_collapses_cannot_add_rows_so_are_not_counted()
+    {
+        var ledger = new SentLedger();
+        ledger.RecordMaybeLanded(1, [new LedgerEntry("spans", RecordAge.Current, 10, Redelivery: true, Dedups: true),
+            new LedgerEntry("spans", RecordAge.Current, 4, Redelivery: false, Dedups: true),
+            new LedgerEntry("log_records", RecordAge.Current, 7, Redelivery: true, Dedups: false)]);
+        var cells = ledger.Snapshot();
+        Assert.Equal(4, cells.Single(c => c.Table == "spans").RowsMaybeLanded);
+        Assert.Equal(7, cells.Single(c => c.Table == "log_records").RowsMaybeLanded);
+        Assert.All(cells, c => Assert.Equal(0, c.Rows)); // possibly landed is never counted as accepted
+    }
+
+    [Fact]
     public void A_collapsed_redelivery_that_persisted_shows_as_a_surplus_mismatch()
     {
         var result = Run([Cell(1, "spans", 50, collapsed: 5)], [Db(1, "spans", 55)]);

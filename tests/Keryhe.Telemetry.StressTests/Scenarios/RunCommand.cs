@@ -16,13 +16,15 @@ public static class RunCommand
     public const string Usage =
         "run [--provider <PostgreSQL|Timescale|SqlServer|MySql|ClickHouse|all>] [--topology <allinone|split|all>]\n" +
         "    [--profile <smoke|standard|soak|ramp|all|path.json>] [--scenario <fixed|ramp>] [--out <dir>] [--reuse-publish <dir>]\n" +
-        "    [--browsers <n>]   override the profile's browser users (0 = none)";
+        "    [--browsers <n>]   override the profile's browser users (0 = none)\n" +
+        "    [--retention-interval <stress|realistic|seconds>]   override the profile's retention interval (stress = 30 s, realistic = 3600 s)";
 
     public static async Task<int> RunAsync(string[] args)
     {
         string provider = "PostgreSQL", topology = "allinone", profile = "", scenario = "fixed";
         string? outDir = null, reusePublish = null;
         int? browsers = null;
+        string? retentionInterval = null;
         var scenarioGiven = false;
         for (var i = 0; i < args.Length; i++)
         {
@@ -36,12 +38,13 @@ public static class RunCommand
                 case "--out": outDir = Next(); break;
                 case "--reuse-publish": reusePublish = Next(); break;
                 case "--browsers": browsers = int.Parse(Next()); break;
+                case "--retention-interval": retentionInterval = Next(); break;
                 default: Console.Error.WriteLine($"unknown argument {args[i]}\n{Usage}"); return 2;
             }
         }
 
         List<ScenarioSpec> specs;
-        try { specs = BuildMatrix(provider, topology, profile, scenario, scenarioGiven, browsers); }
+        try { specs = BuildMatrix(provider, topology, profile, scenario, scenarioGiven, browsers, retentionInterval); }
         catch (Exception ex) when (ex is ArgumentException or FileNotFoundException or InvalidDataException)
         {
             Console.Error.WriteLine(ex.Message);
@@ -83,7 +86,7 @@ public static class RunCommand
     }
 
     /// <summary>Expands the CLI selections into the scenarios to run, provider-major so one container image stays warm across profiles. Pure apart from reading profile files.</summary>
-    public static List<ScenarioSpec> BuildMatrix(string provider, string topology, string profile, string scenario, bool scenarioGiven, int? browsers)
+    public static List<ScenarioSpec> BuildMatrix(string provider, string topology, string profile, string scenario, bool scenarioGiven, int? browsers, string? retentionInterval = null)
     {
         var providers = provider.Equals("all", StringComparison.OrdinalIgnoreCase)
             ? ProviderContainerFactory.ProviderNames.ToList()
@@ -115,6 +118,7 @@ public static class RunCommand
                     // Resolved afresh per scenario, so an override on one never leaks into the next.
                     var p = ScenarioProfile.Resolve(name);
                     if (browsers is { } b) p.Browsers.Users = b;
+                    if (retentionInterval is not null) p.OverrideRetentionInterval(retentionInterval);
                     p.Validate();
                     specs.Add(new ScenarioSpec(prov, top, p));
                 }
@@ -138,7 +142,7 @@ public static class RunCommand
         var lagLog = r.Markers.Where(m => m.LogLagMs is not null).Select(m => m.LogLagMs!.Value).OrderBy(v => v).ToList();
         var lagTrace = r.Markers.Where(m => m.TraceLagMs is not null).Select(m => m.TraceLagMs!.Value).OrderBy(v => v).ToList();
         if (r.Markers.Count > 0)
-            lines.Add($"  ingest-to-queryable lag p50: log {(lagLog.Count == 0 ? "n/a" : $"{TourSummary.Percentile(lagLog, 0.5):F0} ms")}, trace {(lagTrace.Count == 0 ? "n/a" : $"{TourSummary.Percentile(lagTrace, 0.5):F0} ms")}; {r.Markers.Count(m => m.LogLagMs is null || m.TraceLagMs is null)} timed out");
+            lines.Add($"  ingest-to-queryable lag p50: log {(lagLog.Count == 0 ? "n/a" : $"{TourSummary.Percentile(lagLog, 0.5):F0} ms")} (includes a {r.LogPinOffsetMs ?? 0:F0} ms asOf pin), trace {(lagTrace.Count == 0 ? "n/a" : $"{TourSummary.Percentile(lagTrace, 0.5):F0} ms")}; {r.Markers.Count(m => m.LogLagMs is null || m.TraceLagMs is null)} timed out");
 
         if (r.Quiesce is { } q) lines.Add($"  quiesce: {(q.Reached ? "reached" : "TIMED OUT")} after {q.WaitedSeconds:F0}s");
         foreach (var h in r.Hosts)
@@ -149,7 +153,7 @@ public static class RunCommand
                       string.Concat(d.Locks.Checks.Select(c => $"; {c.Name}: {c.Label}")));
         if (r.Correctness is { } c)
         {
-            lines.Add($"  correctness: {c.Rows.Count(x => x.Status == CorrectnessStatus.Match)} of {c.Rows.Count} cells match, {c.ExplainedByDrops} explained by drops, {c.Mismatches} MISMATCHED; " +
+            lines.Add($"  correctness: {c.Rows.Count(x => x.Status == CorrectnessStatus.Match)} of {c.Rows.Count} cells match, {c.ExplainedByDrops} explained by drops, {c.ExplainedByAbandonedExports} by abandoned exports, {c.Mismatches} MISMATCHED; " +
                       $"backdated {c.Backdated.Outcome} ({c.Backdated.RowsRemaining} rows remain)" +
                       (c.PendingMergeDuplicates is { } p ? $"; {p} span rows awaiting merge" : ""));
             foreach (var x in c.Rows.Where(x => x.Status == CorrectnessStatus.Mismatch).Take(8))

@@ -15,6 +15,8 @@ public sealed class MySqlObserver : DatabaseObserverBase
 {
     private readonly string _connectionString;
     private double _rowLockWaitsBefore, _rowLockTimeBefore, _deadlocksBefore;
+    private Dictionary<string, double> _innodbBefore = [];
+    private double _historyLengthMax;
 
     public MySqlObserver(string connectionString, Func<DateTime, CancellationToken, Task<string>>? readLogs = null) : base(readLogs) =>
         _connectionString = connectionString;
@@ -47,8 +49,12 @@ public sealed class MySqlObserver : DatabaseObserverBase
             new LockWait(Str(r[0]), Str(r[1]), Trim(r[2]), Trim(r[3]), Str(r[4]), Str(r[5]), Num(r[6]))).ToList();
 
         var status = await ReadStatusAsync(cancellationToken);
+        // Purge lag: a growing history list means undo is piling up behind long transactions (large retention deletes, for one).
+        var history = await ScalarAsync(HistoryLengthSql, cancellationToken);
+        _historyLengthMax = Math.Max(_historyLengthMax, history);
         var gauges = new List<Gauge>
         {
+            new("history_list_length", null, history),
             new("lock_waits", null, waits.Count),
             new("row_lock_current_waits", null, status.GetValueOrDefault("Innodb_row_lock_current_waits")),
             new("row_lock_waits_total", null, status.GetValueOrDefault("Innodb_row_lock_waits")),
@@ -72,8 +78,59 @@ public sealed class MySqlObserver : DatabaseObserverBase
             ServerLogParsers.MySqlDeadlocks(await ReadLogSinceBeginAsync(cancellationToken)), [], new Dictionary<string, string>(), []);
     }
 
-    public override Task ResetAsync(CancellationToken cancellationToken) =>
-        ExecuteAsync("TRUNCATE TABLE performance_schema.events_statements_summary_by_digest", cancellationToken);
+    private const string HistoryLengthSql = "SELECT `COUNT` FROM information_schema.INNODB_METRICS WHERE NAME = 'trx_rseg_history_len'";
+
+    private static readonly string[] InnodbCounters =
+    [
+        "Innodb_buffer_pool_read_requests", "Innodb_buffer_pool_reads", "Innodb_buffer_pool_wait_free", "Innodb_buffer_pool_pages_flushed",
+        "Innodb_log_waits", "Innodb_os_log_written", "Innodb_data_fsyncs", "Innodb_rows_inserted", "Innodb_rows_deleted",
+    ];
+
+    private async Task<Dictionary<string, double>> ReadInnodbCountersAsync(CancellationToken cancellationToken) =>
+        (await QueryAsync("SELECT VARIABLE_NAME, VARIABLE_VALUE FROM performance_schema.global_status WHERE VARIABLE_NAME IN (" +
+                          string.Join(", ", InnodbCounters.Select(c => $"'{c}'")) + ")", cancellationToken))
+        .ToDictionary(r => Str(r[0])!, r => Num(r[1]), StringComparer.OrdinalIgnoreCase);
+
+    public override async Task ResetAsync(CancellationToken cancellationToken)
+    {
+        await ExecuteAsync("TRUNCATE TABLE performance_schema.events_statements_summary_by_digest", cancellationToken);
+        try { _innodbBefore = await ReadInnodbCountersAsync(cancellationToken); }
+        catch (Exception ex) when (ex is not OperationCanceledException) { _innodbBefore = []; }
+        _historyLengthMax = 0;
+    }
+
+    public override Task<IReadOnlyList<ServerSetting>> ReadSettingsAsync(CancellationToken cancellationToken) => SettingsAsync(
+        "SELECT VARIABLE_NAME, VARIABLE_VALUE FROM performance_schema.global_variables WHERE VARIABLE_NAME IN (" +
+        "'version', 'innodb_buffer_pool_size', 'innodb_buffer_pool_instances', 'log_bin', 'sync_binlog', 'binlog_format', " +
+        "'innodb_flush_log_at_trx_commit', 'innodb_redo_log_capacity', 'innodb_log_file_size', 'innodb_log_files_in_group', 'innodb_doublewrite', " +
+        "'innodb_flush_method', 'innodb_io_capacity', 'transaction_isolation', 'innodb_lock_wait_timeout', 'innodb_deadlock_detect', 'max_connections') " +
+        "ORDER BY VARIABLE_NAME", cancellationToken);
+
+    public override async Task<IReadOnlyList<DiagnosticSection>> ReadDiagnosticsAsync(CancellationToken cancellationToken) =>
+    [
+        await ComputedSectionAsync("InnoDB buffer pool, redo and purge", "Deltas over the measured window; the hit ratio is 1 - disk reads / read requests.",
+            ["Counter", "Value"], async () =>
+            {
+                var now = await ReadInnodbCountersAsync(cancellationToken);
+                double Delta(string name) => now.GetValueOrDefault(name) - _innodbBefore.GetValueOrDefault(name);
+                var rows = InnodbCounters.Select(c => new object?[] { c, Delta(c) }).ToList();
+                var requests = Delta("Innodb_buffer_pool_read_requests");
+                rows.Add(["buffer_pool_hit_ratio", requests > 0 ? Math.Round(1 - Delta("Innodb_buffer_pool_reads") / requests, 5) : null]);
+                rows.Add(["history_list_length_end", await ScalarAsync(HistoryLengthSql, cancellationToken)]);
+                rows.Add(["history_list_length_max_sampled", _historyLengthMax]);
+                return rows;
+            }),
+
+        await SectionAsync("spans index I/O", "performance_schema.table_io_waits_summary_by_index_usage, cumulative since the container started (warm-up included). NULL index = full scans / row access without an index.",
+            ["Index", "Fetches", "Inserts", "Updates", "Deletes", "Wait ms"], """
+            SELECT INDEX_NAME, COUNT_FETCH, COUNT_INSERT, COUNT_UPDATE, COUNT_DELETE, ROUND(SUM_TIMER_WAIT / 1000000000, 1)
+            FROM performance_schema.table_io_waits_summary_by_index_usage
+            WHERE OBJECT_SCHEMA = DATABASE() AND OBJECT_NAME = 'spans' ORDER BY SUM_TIMER_WAIT DESC
+            """, cancellationToken),
+
+        await SectionAsync("Unused indexes", "sys.schema_unused_indexes: indexes with no reads since the container started.",
+            ["Table", "Index"], "SELECT object_name, index_name FROM sys.schema_unused_indexes WHERE object_schema = DATABASE() ORDER BY object_name, index_name", cancellationToken),
+    ];
 
     public override async Task<StatementStatsSnapshot> SnapshotAsync(int top, CancellationToken cancellationToken)
     {

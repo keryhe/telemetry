@@ -186,6 +186,64 @@ public sealed class SqlServerObserver : DatabaseObserverBase
 
     private static StatementStat ToStat(object?[] r) => new(Str(r[0]) ?? "", Long(r[1]), Num(r[2]), Num(r[3]), Num(r[4]), Long(r[5]));
 
+    public override Task<IReadOnlyList<ServerSetting>> ReadSettingsAsync(CancellationToken cancellationToken) => SettingsAsync("""
+        -- The catalog views' collations differ from the database default, which UNION ALL will not reconcile on its own.
+        SELECT 'version', CAST(SERVERPROPERTY('ProductVersion') AS nvarchar(200)) COLLATE DATABASE_DEFAULT + N' ' + CAST(SERVERPROPERTY('Edition') AS nvarchar(200)) COLLATE DATABASE_DEFAULT
+        UNION ALL SELECT name COLLATE DATABASE_DEFAULT, CAST(value_in_use AS nvarchar(200)) COLLATE DATABASE_DEFAULT FROM sys.configurations
+            WHERE name IN (N'max server memory (MB)', N'min server memory (MB)', N'max degree of parallelism', N'cost threshold for parallelism')
+        UNION ALL SELECT 'cpu_count', CAST(cpu_count AS nvarchar(200)) COLLATE DATABASE_DEFAULT FROM sys.dm_os_sys_info
+        UNION ALL SELECT 'physical_memory_mb', CAST(physical_memory_kb / 1024 AS nvarchar(200)) COLLATE DATABASE_DEFAULT FROM sys.dm_os_sys_info
+        UNION ALL SELECT 'committed_target_mb', CAST(committed_target_kb / 1024 AS nvarchar(200)) COLLATE DATABASE_DEFAULT FROM sys.dm_os_sys_info
+        UNION ALL SELECT 'recovery_model', CAST(recovery_model_desc AS nvarchar(200)) COLLATE DATABASE_DEFAULT FROM sys.databases WHERE database_id = DB_ID()
+        UNION ALL SELECT 'read_committed_snapshot', CAST(is_read_committed_snapshot_on AS nvarchar(200)) COLLATE DATABASE_DEFAULT FROM sys.databases WHERE database_id = DB_ID()
+        UNION ALL SELECT 'snapshot_isolation', CAST(snapshot_isolation_state_desc AS nvarchar(200)) COLLATE DATABASE_DEFAULT FROM sys.databases WHERE database_id = DB_ID()
+        UNION ALL SELECT 'delayed_durability', CAST(delayed_durability_desc AS nvarchar(200)) COLLATE DATABASE_DEFAULT FROM sys.databases WHERE database_id = DB_ID()
+        UNION ALL SELECT 'tempdb_data_files', CAST(COUNT(*) AS nvarchar(200)) COLLATE DATABASE_DEFAULT FROM sys.master_files WHERE database_id = 2 AND type = 0
+        """, cancellationToken);
+
+    public override async Task<IReadOnlyList<DiagnosticSection>> ReadDiagnosticsAsync(CancellationToken cancellationToken)
+    {
+        var since = BeganUtc.AddSeconds(-1).ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture);
+        return
+        [
+            await SectionAsync("spans index usage", "sys.dm_db_index_usage_stats, cumulative since the container started (warm-up included).",
+                ["Index", "Seeks", "Scans", "Lookups", "Updates"], """
+                SELECT i.name, ISNULL(u.user_seeks, 0), ISNULL(u.user_scans, 0), ISNULL(u.user_lookups, 0), ISNULL(u.user_updates, 0)
+                FROM sys.indexes i
+                LEFT JOIN sys.dm_db_index_usage_stats u ON u.object_id = i.object_id AND u.index_id = i.index_id AND u.database_id = DB_ID()
+                WHERE i.object_id = OBJECT_ID('spans') AND i.index_id > 0
+                ORDER BY i.index_id
+                """, cancellationToken),
+
+            await SectionAsync("spans index operational stats", "sys.dm_db_index_operational_stats, cumulative since the container started. Wait columns are milliseconds.",
+                ["Index", "Leaf inserts", "Leaf deletes", "Leaf updates", "Row lock waits", "Row lock wait ms", "Page lock waits", "Page lock wait ms", "Page latch wait ms", "Page IO latch wait ms", "Lock promotions"], """
+                SELECT i.name, SUM(o.leaf_insert_count), SUM(o.leaf_delete_count), SUM(o.leaf_update_count), SUM(o.row_lock_wait_count), SUM(o.row_lock_wait_in_ms),
+                       SUM(o.page_lock_wait_count), SUM(o.page_lock_wait_in_ms), SUM(o.page_latch_wait_in_ms), SUM(o.page_io_latch_wait_in_ms), SUM(o.index_lock_promotion_count)
+                FROM sys.dm_db_index_operational_stats(DB_ID(), OBJECT_ID('spans'), NULL, NULL) o
+                JOIN sys.indexes i ON i.object_id = o.object_id AND i.index_id = o.index_id
+                GROUP BY i.index_id, i.name
+                ORDER BY i.index_id
+                """, cancellationToken),
+
+            await SectionAsync("Autogrowth events", "Data/log file growths for this database and tempdb since the observers started, from the default trace.",
+                ["Database", "File", "Kind", "At (UTC)", "Duration ms", "Grew MB"], $"""
+                DECLARE @path nvarchar(260) = (SELECT path FROM sys.traces WHERE is_default = 1);
+                SELECT t.DatabaseName, t.FileName, CASE t.EventClass WHEN 92 THEN 'data' ELSE 'log' END, CONVERT(varchar(23), t.StartTime, 126),
+                       t.Duration / 1000, t.IntegerData * 8 / 1024
+                FROM sys.fn_trace_gettable(@path, DEFAULT) t
+                WHERE t.EventClass IN (92, 93) AND t.StartTime >= '{since}' AND t.DatabaseName IN (DB_NAME(), 'tempdb')
+                ORDER BY t.StartTime
+                """, cancellationToken),
+
+            await SectionAsync("Data and log files", "Size at the end of the run and the growth increment, for this database and tempdb.",
+                ["Database", "File", "Kind", "Size MB", "Growth"], """
+                SELECT DB_NAME(database_id), name, type_desc, size * 8 / 1024,
+                       CASE WHEN is_percent_growth = 1 THEN CAST(growth AS varchar(20)) + '%' ELSE CAST(growth * 8 / 1024 AS varchar(20)) + ' MB' END
+                FROM sys.master_files WHERE database_id IN (DB_ID(), 2) ORDER BY database_id, file_id
+                """, cancellationToken),
+        ];
+    }
+
     public override async Task<IReadOnlyList<TableStat>> ReadAsync(CancellationToken cancellationToken)
     {
         var rows = await QueryAsync("""

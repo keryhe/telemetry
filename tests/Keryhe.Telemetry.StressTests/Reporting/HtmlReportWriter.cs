@@ -3,6 +3,7 @@ using System.Net;
 using System.Text;
 using Keryhe.Telemetry.StressTests.Load;
 using Keryhe.Telemetry.StressTests.Observers.Database;
+using Keryhe.Telemetry.StressTests.Scenarios;
 using Keryhe.Telemetry.StressTests.Verification;
 
 namespace Keryhe.Telemetry.StressTests.Reporting;
@@ -146,7 +147,7 @@ public static class HtmlReportWriter
         if (s.Scenario.Correctness is { } c)
         {
             sb.Append("<p>Correctness: ").Append(c.Rows.Count(x => x.Status == CorrectnessStatus.Match)).Append(" of ").Append(c.Rows.Count).Append(" cells match, ")
-              .Append(c.ExplainedByDrops).Append(" explained by drops, <b class=\"").Append(c.Mismatches > 0 ? "bad" : "").Append("\">").Append(c.Mismatches).Append(" mismatched</b>. Backdated records: ")
+              .Append(c.ExplainedByDrops).Append(" explained by drops, ").Append(c.ExplainedByAbandonedExports).Append(" by abandoned exports, <b class=\"").Append(c.Mismatches > 0 ? "bad" : "").Append("\">").Append(c.Mismatches).Append(" mismatched</b>. Backdated records: ")
               .Append(E(c.Backdated.Outcome)).Append(" (").Append(c.Backdated.RowsRemaining).Append(" rows remain)");
             if (c.PendingMergeDuplicates is { } p) sb.Append("; ").Append(p).Append(" span rows awaiting merge");
             sb.Append(".</p>");
@@ -164,10 +165,15 @@ public static class HtmlReportWriter
             sb.Append("<p>").Append(ramp.TrippedStep is { } t
                 ? $"Ramp: last sustained step {(ramp.LastSustainedStep is { } l ? $"{l} (x{ramp.Steps[l].Scale:0.##})" : "none")}; step {t} (x{ramp.Steps[t].Scale:0.##}) tripped <b>{E(string.Join(", ", ramp.TrippedCriteria))}</b>. This is the breaking point on this machine."
                 : $"Ramp: reached the step limit ({ramp.Steps.Count} steps, up to x{ramp.Steps[^1].Scale:0.##}) with no stop criterion tripped; no breaking point found.").Append("</p>");
-            sb.Append("<table><thead><tr><th>Step</th><th>Scale</th><th>Offered/s</th><th>Acked/s</th><th>Export p99 (ms)</th><th>Gate wait p95 (ms)</th><th>Dropped</th><th class=\"l\">Tripped</th></tr></thead><tbody>");
+            var pin = s.Scenario.LogPinOffsetMs ?? 0;
+            sb.Append("<p class=\"keyline\">Lag columns are the mean over the step's probes; the log lag has the provider's <code>asOf</code> pin offset (")
+              .Append(N(pin)).Append(" ms) subtracted, which is what the lag criteria judge.</p>");
+            sb.Append("<table><thead><tr><th>Step</th><th>Scale</th><th>Offered/s</th><th>Acked/s</th><th>Export p99 (ms)</th><th>Gate wait p95 (ms)</th><th>Dropped</th><th>Log lag, adjusted (ms)</th><th>Trace lag (ms)</th><th class=\"l\">Tripped</th></tr></thead><tbody>");
             foreach (var st in ramp.Steps)
                 sb.Append("<tr><td>").Append(st.Step).Append("</td><td>x").Append(N(st.Scale, "0.##")).Append("</td><td>").Append(N(st.Windows.Sum(w => w.OfferedPerSecond))).Append("</td><td>").Append(N(st.Windows.Sum(w => w.AckedPerSecond)))
-                  .Append("</td><td>").Append(N(st.Windows.Max(w => w.Latency.P99Ms))).Append("</td><td>").Append(N(st.GateWaitP95Ms, "N1")).Append("</td><td>").Append(N(st.RecordsDropped)).Append("</td><td class=\"l\">").Append(E(string.Join(", ", st.Tripped))).Append("</td></tr>");
+                  .Append("</td><td>").Append(N(st.Windows.Max(w => w.Latency.P99Ms))).Append("</td><td>").Append(N(st.GateWaitP95Ms, "N1")).Append("</td><td>").Append(N(st.RecordsDropped))
+                  .Append("</td><td>").Append(MeanLag(RampEvaluator.AdjustForPin(st.LogLagsMs, pin))).Append("</td><td>").Append(MeanLag(st.TraceLagsMs))
+                  .Append("</td><td class=\"l\">").Append(E(string.Join(", ", st.Tripped))).Append("</td></tr>");
             sb.Append("</tbody></table>");
         }
 
@@ -260,11 +266,34 @@ public static class HtmlReportWriter
         Statements(sb, "Top statements by total time", db.Statements.ByTotal, db.Statements.Source);
         Statements(sb, "Top statements by mean time (5 or more calls)", db.Statements.ByMean, db.Statements.Source);
 
+        foreach (var d in db.Diagnostics ?? [])
+        {
+            sb.Append("<h3>").Append(E(d.Name)).Append("</h3>");
+            if (d.Note is not null) sb.Append("<p class=\"keyline\">").Append(E(d.Note)).Append("</p>");
+            if (d.Error is not null) { sb.Append("<p class=\"warn\">Not collected: ").Append(E(d.Error)).Append("</p>"); continue; }
+            if (d.Rows.Count == 0) { sb.Append("<p class=\"nodata\">None.</p>"); continue; }
+            sb.Append("<table><thead><tr>").Append(string.Concat(d.Columns.Select((c, i) => $"<th{(i == 0 ? " class=\"l\"" : "")}>{E(c)}</th>"))).Append("</tr></thead><tbody>");
+            foreach (var row in d.Rows)
+                sb.Append("<tr>").Append(string.Concat(row.Select((c, i) => i == 0 ? $"<td class=\"q\">{E(Short(c))}</td>" : $"<td>{E(c ?? "")}</td>"))).Append("</tr>");
+            sb.Append("</tbody></table>");
+        }
+
+        if (db.Settings is { Count: > 0 } settings)
+        {
+            sb.Append("<h3>Effective server settings</h3><table><thead><tr><th class=\"l\">Setting</th><th class=\"l\">Value</th></tr></thead><tbody>");
+            foreach (var x in settings)
+                sb.Append("<tr><td class=\"l\">").Append(E(x.Name)).Append("</td><td class=\"q\">").Append(E(Short(x.Value))).Append("</td></tr>");
+            sb.Append("</tbody></table>");
+        }
+
         sb.Append("<h3>Tables at the end of the run</h3><table><thead><tr><th class=\"l\">Table</th><th>Rows</th><th>Size (MB)</th></tr></thead><tbody>");
         foreach (var t in db.Tables.OrderByDescending(t => t.Bytes ?? 0))
             sb.Append("<tr><td class=\"l\">").Append(E(t.Table)).Append("</td><td>").Append(t.Rows is null ? "n/a" : (t.RowsApproximate ? "~" : "") + N(t.Rows.Value)).Append("</td><td>").Append(N((t.Bytes ?? 0) / 1048576.0, "N1")).Append("</td></tr>");
         sb.Append("</tbody></table>");
     }
+
+    private static string MeanLag(IReadOnlyList<double?> lags) =>
+        lags.Any(l => l is not null) ? N(lags.Where(l => l is not null).Average(l => l!.Value)) : "n/a";
 
     private static void Statements(StringBuilder sb, string title, IReadOnlyList<StatementStat> stats, string source)
     {

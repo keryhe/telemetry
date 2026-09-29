@@ -23,7 +23,8 @@
       "maxExportP99Seconds": 5,
       "maxErrorRatePercent": 1,
       "lagGrowthFactor": 2,
-      "lagGrowthMinMs": 3000
+      "lagGrowthMinMs": 3000,
+      "maxLagSeconds": 10
     }
   }
 }

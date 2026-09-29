@@ -24,6 +24,13 @@ public sealed class RampCriteria
 
     /// <summary>...and by at least this many milliseconds, so a lag that doubles from 50 ms to 100 ms is not growth. A probe that never became visible always counts.</summary>
     public double LagGrowthMinMs { get; set; } = 3000;
+
+    /// <summary>
+    /// Stop when the last third of a step's probes averaged more than this many seconds of lag, growing or not (0 disables). Both lag
+    /// criteria see the log lag with the provider's <c>asOf</c> pin offset already subtracted, so PostgreSQL/Timescale's constant 5 s
+    /// back-off neither inflates the growth ratio's denominator nor counts against this limit.
+    /// </summary>
+    public double MaxLagSeconds { get; set; } = 10;
 }
 
 /// <summary>
@@ -79,8 +86,40 @@ public sealed class ScenarioProfile
     public double ContainerCpus { get; set; } = 4;
     public double ContainerMemoryGb { get; set; } = 8;
 
-    /// <summary>Short, so at least one retention sweep lands in the measured window (decision 11).</summary>
-    public int RetentionIntervalSeconds { get; set; } = 30;
+    /// <summary>
+    /// Short, so at least one retention sweep lands in the measured window (decision 11). That makes retention contention part of every
+    /// result; <c>run --retention-interval realistic</c> swaps in <see cref="RealisticRetentionIntervalSeconds"/> for runs where it should not dominate.
+    /// </summary>
+    public int RetentionIntervalSeconds { get; set; } = StressRetentionIntervalSeconds;
+
+    /// <summary>The built-in profiles' retention interval: a sweep every 30 s, for retention-focused runs.</summary>
+    public const int StressRetentionIntervalSeconds = 30;
+
+    /// <summary>The API's own default (<c>Retention:IntervalSeconds</c>, <c>RetentionOptions</c>): one sweep at host start, then none inside a normal run.</summary>
+    public const int RealisticRetentionIntervalSeconds = 3600;
+
+    /// <summary>
+    /// Upper bound on how long the correctness check waits for a retention sweep that starts after quiescence. With a realistic interval no such
+    /// sweep comes in any reasonable time, so the backdated check reports <c>NotVerifiable</c> instead of holding the run for two intervals.
+    /// </summary>
+    public int BackdatedCheckMaxWaitSeconds { get; set; } = 300;
+
+    /// <summary>
+    /// Applies a <c>--retention-interval</c> value (<c>stress</c>, <c>realistic</c> or seconds) and tags the profile name with it, so results with
+    /// different intervals land in different folders and read as different scenarios in the comparison.
+    /// </summary>
+    public void OverrideRetentionInterval(string value)
+    {
+        var seconds = value.ToLowerInvariant() switch
+        {
+            "stress" => StressRetentionIntervalSeconds,
+            "realistic" => RealisticRetentionIntervalSeconds,
+            _ => int.TryParse(value, out var s) && s > 0 ? s
+                : throw new ArgumentException($"--retention-interval must be stress, realistic or a positive number of seconds, not '{value}'.")
+        };
+        RetentionIntervalSeconds = seconds;
+        Name = $"{Name}-ret{seconds}";
+    }
 
     public int MarkerIntervalSeconds { get; set; } = 5;
     public int QuiesceStableSeconds { get; set; } = 10;
