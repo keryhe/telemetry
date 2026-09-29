@@ -1,0 +1,15 @@
+// Standard: 5,000 spans / logs / data points per second for 30 minutes after a 5 minute warm-up, three browsers.
+{
+  "name": "standard",
+  "tenants": 3,
+  "warmupSeconds": 300,
+  "measuredSeconds": 1800,
+  "browsers": { "users": 3 },
+  "load": {
+    "traces": { "spansPerSecond": 5000 },
+    "logs": { "recordsPerSecond": 5000 },
+    "metrics": { "dataPointsPerSecond": 5000 },
+    "transport": { "channels": 4 },
+    "time": { "lateArrivalFraction": 0.05, "orphanFraction": 0.02, "backdatedFraction": 0.02, "redeliveryFraction": 0.02 }
+  }
+}

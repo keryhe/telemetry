@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
@@ -36,6 +37,7 @@ public sealed class RetentionWorker(
         {
             try
             {
+                var sweepTimer = Stopwatch.StartNew();
                 await using var scope = scopeFactory.CreateAsyncScope();
                 var repository = scope.ServiceProvider.GetRequiredService<IRetentionSettingsRepository>();
                 var settings = await repository.GetSettingsAsync(stoppingToken);
@@ -48,8 +50,8 @@ public sealed class RetentionWorker(
                     TimeSpan.FromDays(settings.LogRetentionDays), stoppingToken);
 
                 logger.LogInformation(
-                    "Retention sweep complete: {Traces} span rows, {Metrics} data-point rows, {Logs} log rows removed.",
-                    tracesRemoved, metricsRemoved, logsRemoved);
+                    "Retention sweep complete: {Traces} span rows, {Metrics} data-point rows, {Logs} log rows removed in {ElapsedMs} ms.",
+                    tracesRemoved, metricsRemoved, logsRemoved, sweepTimer.ElapsedMilliseconds);
             }
             catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
             {

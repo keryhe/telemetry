@@ -56,7 +56,11 @@ table/column set: `schema/PostgreSQL-Schema.sql` (plain Postgres), `schema/Times
 Testcontainers-managed databases, applying the actual `schema/*.sql` scripts and seeding through
 `ITelemetryBulkWriter` (not `Keryhe.Telemetry.TestDataGenerator`, whose OTLP/gRPC-based data is
 random and time-dependent — see `plans/list-pages-server-side.md`'s Phase 0 section). Requires
-Docker:
+Docker. The container startup, schema application and tenant/API-key seeding these fixtures use
+live in `tests/Keryhe.Telemetry.TestInfrastructure` (one `ProviderContainer` per provider, plus
+`TenantSeeder` for N tenants), which the stress harness (below) shares;
+it also offers opt-in per-provider diagnostics and CPU/memory
+limits via `ContainerOptions`, which the integration fixtures leave off.
 
 ```bash
 # All five providers (one xUnit collection fixture per provider, containers started once per run)
@@ -67,6 +71,30 @@ dotnet test tests/Keryhe.Telemetry.IntegrationTests --filter Provider=SqlServer
 ```
 
 The Angular project has `npm test` (Karma/Jasmine) but no meaningful tests are set up.
+
+### Stress tests
+
+`tests/Keryhe.Telemetry.StressTests` is a manual, Docker-based harness (never part of `dotnet test`) that ingests OTLP load into each provider under both
+host topologies while headless Chromium walks the UI, then reports write/read latency, locking, resource use, slowest SQL and a data correctness check as
+`result.json`, `report.html` and (for a matrix) `comparison.html`. Its README covers prerequisites, profiles, ramp criteria and how to read the report;
+the design is in `plans/stress-tests.md`. It reuses the Collector's generated gRPC stubs, which is why the three `*_service.proto` entries in the
+Collector csproj are `GrpcServices="Both"`.
+
+```bash
+# One-time: fetch Chromium for the browser tour
+dotnet run --project tests/Keryhe.Telemetry.StressTests -- playwright-install
+
+# Run scenarios (provider/topology/profile each take a value or "all"; runs sequentially)
+dotnet run --project tests/Keryhe.Telemetry.StressTests -- run --provider PostgreSQL --topology allinone --profile smoke
+dotnet run --project tests/Keryhe.Telemetry.StressTests -- run --provider all --topology all --profile smoke
+dotnet run --project tests/Keryhe.Telemetry.StressTests -- run --provider SqlServer --scenario ramp
+
+# Rebuild the report from a finished run (output is in the gitignored stress-results/)
+dotnet run --project tests/Keryhe.Telemetry.StressTests -- report --in stress-results/<timestamp>
+```
+
+The write path it measures is instrumented on `IngestionMetrics` (see "Write path decoupling" below); `RetentionWorker`'s "Retention sweep complete" log
+line carries the sweep's elapsed milliseconds for the same reason.
 
 ### Default ports
 
@@ -380,6 +408,15 @@ regardless of outcome. A batch that still fails after retries are exhausted is d
 on `IngestionMetrics`'s `records_dropped` counter — the three gRPC `Export` methods' partial-success
 responses reflect only enqueue success, never this later, asynchronous drop; each documents that
 explicitly. This isolates gRPC latency from DB write latency and provides backpressure.
+
+The write path is instrumented on `IngestionMetrics`'s `Keryhe.Telemetry.Ingestion` meter, every
+instrument tagged by `signal` (`logs`/`traces`/`metrics`): `records_dropped` (counter),
+`gate_wait` (histogram, ms — time `RecordCountGate.AcquireAsync` spent waiting, the backpressure
+signal), `resident_records` (observable gauge — each gate's current count, registered by
+`TelemetryIngestionChannel`, which owns the gates), `flush_duration` (histogram, ms, extra tag
+`outcome` = `ok`/`failed`, one measurement per flush *attempt*), `flush_retries` (counter),
+`records_flushed` (counter) and `flush_batch_size` (histogram, one measurement per merged batch).
+All are readable out-of-process (e.g. `dotnet-counters`) with no exporter configured.
 On host shutdown the worker **drains rather than abandons** the queue (everything in it was already
 acknowledged to clients): `StopAsync` completes the channel writers, so a late export gets gRPC
 `UNAVAILABLE` (retryable, unlike a partial-success rejection), and the loops keep flushing until the
@@ -557,7 +594,8 @@ relied on the application-level `RetentionWorker` from the start). `RetentionWor
 structurally mirroring `AlertEvaluationWorker`, wakes on `Retention:IntervalSeconds` (default
 3600s, config only — not part of the DB row), resolves the scoped `IRetentionSettingsRepository`,
 reads the current windows via `GetSettingsAsync`, then runs `DeleteOldTracesAsync`/
-`DeleteOldMetricDataPointsAsync`/`DeleteOldLogRecordsAsync` against them. `AddRetention()`
+`DeleteOldMetricDataPointsAsync`/`DeleteOldLogRecordsAsync` against them. Each sweep ends with a "Retention sweep complete" log line
+that includes the rows removed and the sweep's elapsed milliseconds. `AddRetention()`
 registers it; called from `Api.Server` and `Server`'s `Program.cs` only, never
 `Collector.Server` — retention is entirely an API-host concern now (see
 `IRetentionSettingsRepository`'s doc comment for why it replaced the former write-side

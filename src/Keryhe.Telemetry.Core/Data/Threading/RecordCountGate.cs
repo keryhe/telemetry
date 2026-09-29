@@ -1,3 +1,5 @@
+using System.Diagnostics;
+
 namespace Keryhe.Telemetry.Core.Data.Threading;
 
 /// <summary>
@@ -24,19 +26,29 @@ public sealed class RecordCountGate
 
     private readonly int _capacity;
     private readonly SemaphoreSlim _signal = new(0);
+    private readonly IngestionMetrics? _metrics;
+    private readonly string _signalTag;
     private int _current;
 
-    public RecordCountGate(int capacity)
+    /// <param name="metrics">When supplied, each <see cref="AcquireAsync"/> records its wait on <c>gate_wait</c>.</param>
+    /// <param name="signal">The <c>signal</c> tag for that measurement.</param>
+    public RecordCountGate(int capacity, IngestionMetrics? metrics = null, string signal = "")
     {
         if (capacity <= 0) throw new ArgumentOutOfRangeException(nameof(capacity));
         _capacity = capacity;
+        _metrics = metrics;
+        _signalTag = signal;
     }
+
+    /// <summary>Records currently reserved (acquired and not yet released).</summary>
+    public int Resident => Volatile.Read(ref _current);
 
     /// <summary>Blocks until <paramref name="count"/> records of headroom are available, then reserves them.</summary>
     public async Task AcquireAsync(int count, CancellationToken cancellationToken)
     {
         if (count <= 0) return;
 
+        var started = _metrics is null ? 0 : Stopwatch.GetTimestamp();
         while (true)
         {
             var current = Volatile.Read(ref _current);
@@ -45,7 +57,10 @@ public sealed class RecordCountGate
             // requesting more than _capacity could never be admitted and would wait forever.
             var admits = current == 0 || current + count <= _capacity;
             if (admits && Interlocked.CompareExchange(ref _current, current + count, current) == current)
+            {
+                _metrics?.RecordGateWait(_signalTag, Stopwatch.GetElapsedTime(started).TotalMilliseconds);
                 return;
+            }
 
             await _signal.WaitAsync(PollInterval, cancellationToken);
         }

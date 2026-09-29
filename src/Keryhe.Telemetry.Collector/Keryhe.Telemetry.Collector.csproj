@@ -5,14 +5,14 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <GeneratePackageOnBuild>true</GeneratePackageOnBuild>
-    <Version>1.2.4</Version>
+    <Version>1.2.5</Version>
     <Authors>Keith Heard</Authors>
     <Product>Telemetry</Product>
     <PackageLicenseExpression>MIT</PackageLicenseExpression>
     <PackageProjectUrl>https://github.com/keryhe/telemetry</PackageProjectUrl>
     <PackageTags>Keryhe Telemetry Collector</PackageTags>
-    <AssemblyVersion>1.2.4.0</AssemblyVersion>
-    <FileVersion>1.2.4.0</FileVersion>
+    <AssemblyVersion>1.2.5.0</AssemblyVersion>
+    <FileVersion>1.2.5.0</FileVersion>
     <Description>Telemetry Collector</Description>
     <Copyright>Copyright 2026</Copyright>
     <PackageReadmeFile>README.md</PackageReadmeFile>
@@ -27,16 +27,16 @@
   </ItemGroup>
 
   <ItemGroup>
-        <Protobuf Include="opentelemetry\proto\collector\logs\v1\logs_service.proto" GrpcServices="Server">
+        <Protobuf Include="opentelemetry\proto\collector\logs\v1\logs_service.proto" GrpcServices="Both">
             <Generator>MSBuild:Compile</Generator>
         </Protobuf>
-        <Protobuf Include="opentelemetry\proto\collector\metrics\v1\metrics_service.proto" GrpcServices="Server">
+        <Protobuf Include="opentelemetry\proto\collector\metrics\v1\metrics_service.proto" GrpcServices="Both">
             <Generator>MSBuild:Compile</Generator>
         </Protobuf>
         <Protobuf Include="opentelemetry\proto\collector\profiles\v1development\profiles_service.proto" GrpcServices="Server">
             <Generator>MSBuild:Compile</Generator>
         </Protobuf>
-        <Protobuf Include="opentelemetry\proto\collector\trace\v1\trace_service.proto" GrpcServices="Server">
+        <Protobuf Include="opentelemetry\proto\collector\trace\v1\trace_service.proto" GrpcServices="Both">
             <Generator>MSBuild:Compile</Generator>
         </Protobuf>
         <Protobuf Include="opentelemetry\proto\common\v1\common.proto" GrpcServices="Server">

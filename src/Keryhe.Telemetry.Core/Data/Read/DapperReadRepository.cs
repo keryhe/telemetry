@@ -40,9 +40,15 @@ public abstract class DapperReadRepository
     /// subtract 5 seconds to cover the transaction-start race documented on
     /// <see cref="ResolveAsOfAsync"/>; SqlServer/MySql/ClickHouse have no equivalent race (their
     /// <c>created_at</c> defaults are evaluated at statement execution, not transaction start) so
-    /// their overrides use the bare clock function.
+    /// their overrides use the bare clock function. A provider that keeps this default must also
+    /// declare <see cref="PostgresAsOfBackoffSeconds"/> as its
+    /// <see cref="ProviderCapabilities.AsOfBackoffSeconds"/>, so callers that measure ingest-to-query
+    /// lag through a pinned list (the stress harness) can subtract it.
     /// </summary>
-    protected virtual string DatabaseClockNowExpr => "NOW() - INTERVAL '5 seconds'";
+    protected virtual string DatabaseClockNowExpr => $"NOW() - INTERVAL '{PostgresAsOfBackoffSeconds} seconds'";
+
+    /// <summary>How far behind the database clock the default <see cref="DatabaseClockNowExpr"/> pins <c>asOf</c>.</summary>
+    public const int PostgresAsOfBackoffSeconds = 5;
 
     /// <summary>
     /// Resolves the <c>asOf</c> pin: the caller's own value when supplied (a later page of the
