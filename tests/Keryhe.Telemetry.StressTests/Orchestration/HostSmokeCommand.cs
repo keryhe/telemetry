@@ -145,7 +145,7 @@ public static class HostSmokeCommand
                           $"{waits.Count} lock waits seen, {o.Locks.Deadlocks} deadlocks, {o.ContainerStats.Count} container stat samples");
         Console.WriteLine("  counter deltas: " + string.Join(", ", o.Locks.CounterDeltas.Select(kv => $"{kv.Key}={kv.Value:F0}")));
         foreach (var check in o.Locks.Checks)
-            Console.WriteLine($"  check '{check.Name}': {(check.Passed ? "ok" : "FAILED")} — {check.Detail}");
+            Console.WriteLine($"  check '{check.Name}': {check.Label} — {check.Detail}");
         if (o.ContainerStats.Count > 0)
             Console.WriteLine($"  container: peak {o.ContainerStats.Max(c => c.CpuCores):F2} cores, peak memory {o.ContainerStats.Max(c => c.MemoryBytes) / 1048576} MB");
         Console.WriteLine($"  slowest SQL by total time ({o.Statements.Source}):");

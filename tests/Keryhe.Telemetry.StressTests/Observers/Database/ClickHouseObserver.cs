@@ -109,6 +109,31 @@ public sealed class ClickHouseObserver : DatabaseObserverBase
 
     private static StatementStat ToStat(object?[] r) => new(Str(r[0]) ?? "", Long(r[1]), Num(r[2]), Num(r[3]), Num(r[4]), Long(r[5]));
 
+    /// <summary>
+    /// The read side's view: <c>resources</c>/<c>metrics</c> are collapsed to one row per id before joining (a pending merge would otherwise multiply
+    /// counts), and spans are read as <c>LIMIT 1 BY trace_id, span_id</c>. The raw span count is returned too, so the report can show pending merge duplicates.
+    /// </summary>
+    public override async Task<RowCounts> CountRowsAsync(long cutoffNanos, CancellationToken cancellationToken)
+    {
+        var cells = new List<RowCountCell>();
+        foreach (var t in CountedTable.All)
+        {
+            var age = $"if(t.{t.TimeColumn} >= {cutoffNanos}, 0, 1)";
+            var source = t.Table == "spans"
+                ? $"(SELECT resource_id, {t.TimeColumn} FROM spans LIMIT 1 BY trace_id, span_id)"
+                : t.Table;
+            var joins = t.ViaMetric
+                ? "JOIN (SELECT id, any(resource_id) AS resource_id FROM metrics GROUP BY id) m ON m.id = t.metric_id " +
+                  "JOIN (SELECT id, any(tenant_id) AS tenant_id FROM resources GROUP BY id) r ON r.id = m.resource_id"
+                : "JOIN (SELECT id, any(tenant_id) AS tenant_id FROM resources GROUP BY id) r ON r.id = t.resource_id";
+            var rows = await QueryAsync($"SELECT r.tenant_id, {age} AS backdated, count() FROM {source} t {joins} GROUP BY r.tenant_id, backdated",
+                cancellationToken, commandTimeoutSeconds: 1800);
+            cells.AddRange(rows.Select(r => new RowCountCell(Long(r[0]), t.Table, Long(r[1]) == 1, Long(r[2]))));
+        }
+        var raw = await ScalarAsync("SELECT count() FROM spans", cancellationToken);
+        return new RowCounts(cells, (long)raw);
+    }
+
     public override async Task<IReadOnlyList<TableStat>> ReadAsync(CancellationToken cancellationToken)
     {
         // Active parts before merges finish still hold ReplacingMergeTree duplicates, so the row counts can run high.

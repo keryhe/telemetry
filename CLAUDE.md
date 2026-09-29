@@ -71,7 +71,8 @@ collector, table sizes and a docker-stats sampler per DB container, written to `
 and the Phase 6 scenario CLI, `-- run --provider <p|all> --topology <allinone|split|all> --profile <smoke|standard|soak|ramp|all|file.json>`
 [`--scenario fixed|ramp`, `--browsers n`, `--out dir`], which runs the matrix sequentially: fresh container, warm-up, measured window
 (or a rate ramp with stop criteria), quiesce, shutdown, one `scenario.json` per scenario; profiles live in
-`tests/Keryhe.Telemetry.StressTests/Profiles/`; output goes to the gitignored `stress-results/`) reuses the Collector's generated gRPC stubs, which is why the three
+`tests/Keryhe.Telemetry.StressTests/Profiles/`; after quiesce it runs the Phase 7 correctness check (`Verification/`: sent ledger vs
+per-tenant row counts, expected re-delivery duplicates, `records_dropped`, and backdated rows removed by a retention sweep that started after quiescence); output goes to the gitignored `stress-results/`) reuses the Collector's generated gRPC stubs, which is why the three
 `*_service.proto` entries in the Collector csproj are `GrpcServices="Both"`:
 
 ```bash

@@ -207,9 +207,9 @@ public class DatabaseObserverTests
         }
 
         var ok = await CheckWithReaderAsync("SNAPSHOT");
-        Assert.True(ok.Passed, ok.Detail);
+        Assert.Equal(CheckOutcome.Passed, ok.Outcome);
         var bad = await CheckWithReaderAsync("READ COMMITTED");
-        Assert.False(bad.Passed, bad.Detail);
+        Assert.Equal(CheckOutcome.Failed, bad.Outcome);
         Assert.Contains("not under SNAPSHOT", bad.Detail);
 
         // An idle pooled session at the default level must not read as a violation.
@@ -217,8 +217,8 @@ public class DatabaseObserverTests
         using var idle = Open(ProviderNames.SqlServer, container.ConnectionString, SqlServerObserver.ReadApplicationName);
         await Task.Delay(1000);
         var none = Assert.Single((await idleSession.StopAsync()).Locks.Checks);
-        Assert.False(none.Passed);
-        Assert.Contains("could not be checked", none.Detail);
+        Assert.Equal(CheckOutcome.NotChecked, none.Outcome); // unknown, not a failure
+        Assert.Contains("not checked", none.Detail);
     }
 
     [Fact]

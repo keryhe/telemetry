@@ -16,8 +16,19 @@ public sealed record LockSample(
     DateTimeOffset At, IReadOnlyList<LockWait> Waits, IReadOnlyList<Gauge> Gauges,
     IReadOnlyList<LongQuery> LongRunning, string? Error = null);
 
-/// <summary>A pass/fail statement about the run that the report lists explicitly (for example "SqlServer API reads run under SNAPSHOT").</summary>
-public sealed record ObserverCheck(string Name, bool Passed, string Detail);
+public enum CheckOutcome { Passed, Failed, NotChecked }
+
+/// <summary>
+/// A statement about the run that the report lists explicitly (for example "SqlServer API reads run under SNAPSHOT").
+/// <see cref="CheckOutcome.NotChecked"/> means the run gave the check nothing to look at (no such reads happened), which is
+/// different from a failure and is reported as its own state.
+/// </summary>
+public sealed record ObserverCheck(string Name, CheckOutcome Outcome, string Detail)
+{
+    public bool Passed => Outcome == CheckOutcome.Passed;
+
+    public string Label => Outcome switch { CheckOutcome.Passed => "ok", CheckOutcome.Failed => "FAILED", _ => "not checked" };
+}
 
 /// <summary>
 /// What the lock observer learned over the whole run: deadlock count, counter deltas since

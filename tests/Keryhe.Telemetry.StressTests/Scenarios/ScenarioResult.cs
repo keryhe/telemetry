@@ -2,6 +2,7 @@ using Keryhe.Telemetry.StressTests.Browser;
 using Keryhe.Telemetry.StressTests.Load;
 using Keryhe.Telemetry.StressTests.Observers.Database;
 using Keryhe.Telemetry.StressTests.Orchestration;
+using Keryhe.Telemetry.StressTests.Verification;
 
 namespace Keryhe.Telemetry.StressTests.Scenarios;
 
@@ -28,7 +29,7 @@ public sealed record RampStepResult(
 public sealed record RampResult(
     IReadOnlyList<RampStepResult> Steps, int? LastSustainedStep, int? TrippedStep, IReadOnlyList<string> TrippedCriteria, bool ReachedMaxSteps);
 
-/// <summary>Everything one scenario measured (stress-test plan, Phase 6). Phase 7 adds the correctness check against <see cref="Load"/>'s ledger; Phase 8 folds these into the report.</summary>
+/// <summary>Everything one scenario measured (stress-test plan, Phase 6). <see cref="Correctness"/> compares <see cref="Load"/>'s ledger with the database; Phase 8 folds these into the report.</summary>
 public sealed record ScenarioResult(
     int SchemaVersion, string Provider, string Topology, string Profile, string Kind,
     DateTimeOffset StartedAt, DateTimeOffset FinishedAt, string? Error,
@@ -36,7 +37,7 @@ public sealed record ScenarioResult(
     LoadSnapshot? Load, IReadOnlyList<WindowSummary> MeasuredWindow, IReadOnlyList<MarkerResult> Markers,
     RampResult? Ramp, QuiesceResult? Quiesce,
     TourResults? Tour, string? BrowserError,
-    DatabaseObservation? Database, IReadOnlyList<HostResult> Hosts)
+    DatabaseObservation? Database, CorrectnessResult? Correctness, IReadOnlyList<HostResult> Hosts)
 {
     public const int CurrentSchemaVersion = 1;
 }

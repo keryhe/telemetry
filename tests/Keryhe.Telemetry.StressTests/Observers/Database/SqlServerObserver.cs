@@ -94,8 +94,8 @@ public sealed class SqlServerObserver : DatabaseObserverBase
         var checks = new List<ObserverCheck>();
         // A reader blocked on ingestion would be a regression, so the report lists the isolation check explicitly.
         checks.Add(_readRequestsSeen == 0
-            ? new ObserverCheck("API reads run under SNAPSHOT", false, "No running API read request was caught by a sample, so the isolation level could not be checked.")
-            : new ObserverCheck("API reads run under SNAPSHOT", _nonSnapshotReadRequestsSeen == 0,
+            ? new ObserverCheck("API reads run under SNAPSHOT", CheckOutcome.NotChecked, "No running API read request was caught by a sample (a run with no browsers or other readers has none), so the isolation level was not checked.")
+            : new ObserverCheck("API reads run under SNAPSHOT", _nonSnapshotReadRequestsSeen == 0 ? CheckOutcome.Passed : CheckOutcome.Failed,
                 $"{_readRequestsSeen} running API read request(s) sampled; {_nonSnapshotReadRequestsSeen} not under SNAPSHOT."));
 
         return new LockSummary(

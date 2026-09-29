@@ -36,6 +36,10 @@ public sealed class DatabaseObserverSession : IAsyncDisposable
         return session;
     }
 
+    /// <summary>Counts the rows in every telemetry table per tenant and age (the correctness check's database side).</summary>
+    public Task<RowCounts> CountRowsAsync(long backdatedCutoffNanos, CancellationToken cancellationToken = default) =>
+        _observer.CountRowsAsync(backdatedCutoffNanos, cancellationToken);
+
     /// <summary>Restarts the statement statistics window, normally at the start of the measured window.</summary>
     public Task ResetStatementStatsAsync(CancellationToken cancellationToken = default) => _observer.ResetAsync(cancellationToken);
 

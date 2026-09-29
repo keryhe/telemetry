@@ -9,7 +9,7 @@ namespace Keryhe.Telemetry.StressTests.Observers.Database;
 /// rows; each subclass supplies only its connection and its provider-specific SQL. Every call
 /// opens a pooled connection of its own, so a sample never queues behind a long-running one.
 /// </summary>
-public abstract class DatabaseObserverBase : ILockObserver, IStatementStatsCollector, ITableStatsReader
+public abstract partial class DatabaseObserverBase : ILockObserver, IStatementStatsCollector, ITableStatsReader
 {
     /// <summary>Longest a query text is kept in a sample (SQL is truncated server-side too, this bounds the JSON).</summary>
     protected const int MaxQueryChars = 400;

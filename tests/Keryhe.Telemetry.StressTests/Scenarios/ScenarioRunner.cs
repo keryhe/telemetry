@@ -4,6 +4,7 @@ using Keryhe.Telemetry.StressTests.Load;
 using Keryhe.Telemetry.StressTests.Observers.Database;
 using Keryhe.Telemetry.StressTests.Orchestration;
 using Keryhe.Telemetry.TestInfrastructure.Containers;
+using Keryhe.Telemetry.StressTests.Verification;
 using Keryhe.Telemetry.TestInfrastructure.Seeding;
 
 namespace Keryhe.Telemetry.StressTests.Scenarios;
@@ -36,6 +37,7 @@ public static class ScenarioRunner
         TourResults? tourResults = null;
         string? browserError = null, error = null;
         DatabaseObservation? database = null;
+        CorrectnessResult? correctness = null;
         var hostResults = new List<HostResult>();
 
         try
@@ -118,6 +120,10 @@ public static class ScenarioRunner
             phases = phases with { QuiesceEnd = DateTimeOffset.UtcNow };
             log($"[{spec.Id}] quiesce {(quiesce.Reached ? "reached" : "TIMED OUT")} after {quiesce.WaitedSeconds:F0}s");
 
+            // Correctness (Phase 7): the sent ledger against the database, while the hosts are still up and the sweep can still run.
+            correctness = await CorrectnessRunner.RunAsync(observers, load.Ledger, hosts, phases.QuiesceEnd!.Value, profile, m => log($"[{spec.Id}] {m}"), ct);
+            log($"[{spec.Id}] correctness: {correctness.Mismatches} mismatched cell(s), backdated {correctness.Backdated.Outcome}");
+
             database = await observers.StopAsync(cancellationToken: ct);
             foreach (var (name, content) in database.Locks.Artifacts)
                 await File.WriteAllTextAsync(Path.Combine(directory, name), content, ct);
@@ -142,7 +148,7 @@ public static class ScenarioRunner
 
         var result = new ScenarioResult(ScenarioResult.CurrentSchemaVersion, spec.Provider, spec.Topology.ToString(), profile.Name,
             profile.IsRamp ? "ramp" : "fixed", startedAt, DateTimeOffset.UtcNow, error, profile, phases,
-            load, measured, markers, ramp, quiesce, tourResults, browserError, database, hostResults);
+            load, measured, markers, ramp, quiesce, tourResults, browserError, database, correctness, hostResults);
         await File.WriteAllTextAsync(Path.Combine(directory, "scenario.json"), JsonSerializer.Serialize(result, ResultJson.Options), CancellationToken.None);
         return result;
     }

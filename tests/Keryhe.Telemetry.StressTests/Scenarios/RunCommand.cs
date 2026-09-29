@@ -1,6 +1,7 @@
 using System.Text.Json;
 using Keryhe.Telemetry.StressTests.Browser;
 using Keryhe.Telemetry.StressTests.Orchestration;
+using Keryhe.Telemetry.StressTests.Verification;
 using Keryhe.Telemetry.TestInfrastructure.Containers;
 
 namespace Keryhe.Telemetry.StressTests.Scenarios;
@@ -139,7 +140,15 @@ public static class RunCommand
                       $"drain {(h.Shutdown.DrainCompleted ? "completed" : "NOT completed")}, records_dropped {h.Shutdown.RecordsDropped:F0}");
         if (r.Database is { } d)
             lines.Add($"  database: {d.Locks.Deadlocks} deadlocks, {d.LockSamples.SelectMany(s => s.Waits).Count()} lock waits sampled" +
-                      string.Concat(d.Locks.Checks.Select(c => $"; {c.Name}: {(c.Passed ? "ok" : "FAILED")}")));
+                      string.Concat(d.Locks.Checks.Select(c => $"; {c.Name}: {c.Label}")));
+        if (r.Correctness is { } c)
+        {
+            lines.Add($"  correctness: {c.Rows.Count(x => x.Status == CorrectnessStatus.Match)} of {c.Rows.Count} cells match, {c.ExplainedByDrops} explained by drops, {c.Mismatches} MISMATCHED; " +
+                      $"backdated {c.Backdated.Outcome} ({c.Backdated.RowsRemaining} rows remain)" +
+                      (c.PendingMergeDuplicates is { } p ? $"; {p} span rows awaiting merge" : ""));
+            foreach (var x in c.Rows.Where(x => x.Status == CorrectnessStatus.Mismatch).Take(8))
+                lines.Add($"    tenant {x.TenantId} {x.Table}: expected {x.Expected} actual {x.Actual} (delta {x.Delta:+#;-#;0})");
+        }
         if (r.Tour is { } t)
             lines.Add($"  browsers: {t.Iterations} loops, {t.Pages.Count} steps, {t.Pages.Count(p => p.TimedOut)} timeouts, {t.Pages.Count(p => p.Error is not null)} errors");
         if (r.BrowserError is not null) lines.Add("  browsers unavailable: " + r.BrowserError);
