@@ -12,6 +12,9 @@ public abstract class ProviderContainer : IAsyncDisposable
 {
     public abstract string ProviderName { get; }
 
+    /// <summary>The Docker image this provider's container runs, recorded in the report's run metadata.</summary>
+    public abstract string ImageName { get; }
+
     /// <summary>Connection string for the <c>telemetry</c> database. Valid once <see cref="StartAsync"/> has completed.</summary>
     public abstract string ConnectionString { get; }
 

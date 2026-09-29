@@ -201,6 +201,7 @@ public static class ResultJson
     public static JsonSerializerOptions Options { get; } = new()
     {
         WriteIndented = true,
+        PropertyNameCaseInsensitive = true,
         PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
         NumberHandling = System.Text.Json.Serialization.JsonNumberHandling.AllowNamedFloatingPointLiterals,
         Converters = { new System.Text.Json.Serialization.JsonStringEnumConverter() },

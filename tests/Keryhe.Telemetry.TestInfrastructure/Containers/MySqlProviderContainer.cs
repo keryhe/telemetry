@@ -9,11 +9,12 @@ public sealed class MySqlProviderContainer : ProviderContainer
     private MySqlContainer? _container;
 
     public override string ProviderName => "MySql";
+    public override string ImageName => "mysql:8.0";
     public override string ConnectionString => _container!.GetConnectionString();
 
     protected override async Task StartContainerAsync(CancellationToken cancellationToken)
     {
-        var builder = new MySqlBuilder("mysql:8.0")
+        var builder = new MySqlBuilder(ImageName)
             .WithDatabase("telemetry")
             .WithCreateParameterModifier(ApplyResourceLimits);
 

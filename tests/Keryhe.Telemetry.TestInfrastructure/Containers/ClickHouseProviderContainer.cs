@@ -21,11 +21,12 @@ public sealed class ClickHouseProviderContainer : ProviderContainer
     private long _nextId;
 
     public override string ProviderName => "ClickHouse";
+    public override string ImageName => "clickhouse/clickhouse-server:24.8";
     public override string ConnectionString => _connectionString!;
 
     protected override async Task StartContainerAsync(CancellationToken cancellationToken)
     {
-        _container = new ContainerBuilder("clickhouse/clickhouse-server:24.8")
+        _container = new ContainerBuilder(ImageName)
             .WithPortBinding(HttpPort, true)
             .WithEnvironment("CLICKHOUSE_SKIP_USER_SETUP", "1")
             .WithWaitStrategy(Wait.ForUnixContainer().UntilHttpRequestIsSucceeded(r => r.ForPort(HttpPort).ForPath("/ping")))

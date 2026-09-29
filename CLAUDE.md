@@ -72,7 +72,9 @@ and the Phase 6 scenario CLI, `-- run --provider <p|all> --topology <allinone|sp
 [`--scenario fixed|ramp`, `--browsers n`, `--out dir`], which runs the matrix sequentially: fresh container, warm-up, measured window
 (or a rate ramp with stop criteria), quiesce, shutdown, one `scenario.json` per scenario; profiles live in
 `tests/Keryhe.Telemetry.StressTests/Profiles/`; after quiesce it runs the Phase 7 correctness check (`Verification/`: sent ledger vs
-per-tenant row counts, expected re-delivery duplicates, `records_dropped`, and backdated rows removed by a retention sweep that started after quiescence); output goes to the gitignored `stress-results/`) reuses the Collector's generated gRPC stubs, which is why the three
+per-tenant row counts, expected re-delivery duplicates, `records_dropped`, and backdated rows removed by a retention sweep that started after quiescence); and, when a run finishes, the Phase 8 report (`Reporting/`): `result.json` (versioned `RunResult`), a self-contained `report.html` with inline SVG
+charts on one shared time axis, and `comparison.html` for a matrix; `-- report --in <results dir>` rebuilds them from `scenario.json` and the
+hosts' metric NDJSON without re-running; output goes to the gitignored `stress-results/`) reuses the Collector's generated gRPC stubs, which is why the three
 `*_service.proto` entries in the Collector csproj are `GrpcServices="Both"`:
 
 ```bash

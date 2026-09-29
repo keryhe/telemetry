@@ -1,6 +1,7 @@
 using System.Text.Json;
 using Keryhe.Telemetry.StressTests.Browser;
 using Keryhe.Telemetry.StressTests.Orchestration;
+using Keryhe.Telemetry.StressTests.Reporting;
 using Keryhe.Telemetry.StressTests.Verification;
 using Keryhe.Telemetry.TestInfrastructure.Containers;
 
@@ -59,6 +60,9 @@ public static class RunCommand
         Console.WriteLine(reusePublish is null ? "Publishing hosts (Release)..." : $"Reusing published hosts in {reusePublish}");
         var published = await HostPublisher.PublishAsync(repo, reusePublish ?? Path.Combine(outDir, "publish"), roles, skipIfPresent: reusePublish is not null);
 
+        await File.WriteAllTextAsync(Path.Combine(outDir, ReportBuilder.RunMetadataFile), JsonSerializer.Serialize(
+            await RunMetadataCollector.CollectAsync(repo, specs.Select(s => s.Provider), "run " + string.Join(' ', args)), ResultJson.Options));
+
         using var cts = new CancellationTokenSource();
         Console.CancelKeyPress += (_, e) => { e.Cancel = true; cts.Cancel(); };
 
@@ -73,6 +77,8 @@ public static class RunCommand
 
         await File.WriteAllTextAsync(Path.Combine(outDir, "matrix.json"),
             JsonSerializer.Serialize(results.Select(r => new { id = $"{r.Provider}-{r.Topology}-{r.Profile}".ToLowerInvariant(), r.Provider, r.Topology, r.Profile, r.Kind, r.Error, folder = $"{r.Provider}-{r.Topology}-{r.Profile}".ToLowerInvariant() }), ResultJson.Options));
+        foreach (var path in await ReportBuilder.BuildAsync(outDir))
+            Console.WriteLine($"Wrote {path}");
         return results.Count == specs.Count && results.All(r => r.Error is null) ? 0 : 1;
     }
 

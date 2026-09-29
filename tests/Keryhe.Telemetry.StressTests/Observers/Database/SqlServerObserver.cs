@@ -89,7 +89,7 @@ public sealed class SqlServerObserver : DatabaseObserverBase
         var artifacts = new Dictionary<string, string>();
         var graphs = await ReadDeadlockGraphsAsync(cancellationToken);
         for (var i = 0; i < graphs.Count; i++)
-            artifacts[$"sqlserver-deadlock-{i + 1}.xml"] = graphs[i];
+            artifacts[$"sqlserver-deadlock-{i + 1}.xdl"] = graphs[i];
 
         var checks = new List<ObserverCheck>();
         // A reader blocked on ingestion would be a regression, so the report lists the isolation check explicitly.

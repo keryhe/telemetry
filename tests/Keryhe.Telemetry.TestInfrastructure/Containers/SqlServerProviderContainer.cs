@@ -10,11 +10,12 @@ public sealed class SqlServerProviderContainer : ProviderContainer
     private string? _connectionString;
 
     public override string ProviderName => "SqlServer";
+    public override string ImageName => "mcr.microsoft.com/mssql/server:2022-latest";
     public override string ConnectionString => _connectionString!;
 
     protected override async Task StartContainerAsync(CancellationToken cancellationToken)
     {
-        _container = new MsSqlBuilder("mcr.microsoft.com/mssql/server:2022-latest")
+        _container = new MsSqlBuilder(ImageName)
             .WithCreateParameterModifier(ApplyResourceLimits)
             .Build();
         await _container.StartAsync(cancellationToken);

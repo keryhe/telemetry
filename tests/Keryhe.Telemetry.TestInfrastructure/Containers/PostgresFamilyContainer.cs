@@ -13,6 +13,8 @@ public abstract class PostgresFamilyContainer : ProviderContainer
     private PostgreSqlContainer? _container;
 
     protected abstract string Image { get; }
+
+    public override string ImageName => Image;
     protected abstract string SchemaFileName { get; }
 
     /// <summary>Value of <c>shared_preload_libraries</c> when diagnostics are on. Timescale must keep <c>timescaledb</c> first.</summary>
