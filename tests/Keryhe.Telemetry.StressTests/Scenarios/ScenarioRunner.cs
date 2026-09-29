@@ -104,7 +104,12 @@ public static class ScenarioRunner
             finally
             {
                 phases = phases with { MeasuredEnd = DateTimeOffset.UtcNow };
-                if (tour is not null) tourResults = await tour.StopAsync();
+                if (tour is not null)
+                {
+                    // The browser tour is a bystander: losing it must not cost the database, correctness and host results.
+                    try { tourResults = await tour.StopAsync(); }
+                    catch (Exception ex) { browserError = $"Tour stop failed: {ex.Message}"; log($"[{spec.Id}] {browserError}"); }
+                }
             }
 
             // Quiesce: stop the load, then wait for the ingestion queue to drain and flushing to stop.

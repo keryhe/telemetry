@@ -67,8 +67,15 @@ public sealed class PlaywrightTour : IAsyncDisposable
     public async Task<TourResults> StopAsync()
     {
         _stop.Cancel();
-        await Task.WhenAll(_loops);
+        await WaitForLoopsAsync();
         return new TourResults(_results.ToArray(), _iterations, _users.Select(u => u.Data).ToList());
+    }
+
+    /// <summary>Waits for the user loops to finish their current step, without letting a faulted or stuck loop fail or stall the scenario.</summary>
+    private async Task WaitForLoopsAsync()
+    {
+        try { await Task.WhenAll(_loops).WaitAsync(_options.ReadyTimeout + TimeSpan.FromSeconds(30)); }
+        catch (Exception) { }
     }
 
     private async Task RunUserAsync(UserSession user, CancellationToken ct)
@@ -88,7 +95,14 @@ public sealed class PlaywrightTour : IAsyncDisposable
             foreach (var step in TourPlan.Build(window, _options, user.Data))
             {
                 if (ct.IsCancellationRequested) break;
-                _results.Enqueue(await RunStepAsync(user, page, watcher, step, window));
+                try { _results.Enqueue(await RunStepAsync(user, page, watcher, step, window)); }
+                catch (Exception ex) when (!ct.IsCancellationRequested)
+                {
+                    // RunStepAsync handles Playwright errors itself; anything else is recorded so the loop (and the run) carries on.
+                    _results.Enqueue(new PageResult(user.Index, user.Tenant.Id, step.Name, step.Page, window, DateTimeOffset.UtcNow, null,
+                        TimedOut: false, ex.Message, null, [], []));
+                }
+                catch (Exception) when (ct.IsCancellationRequested) { break; }
                 try { await Task.Delay(_options.ThinkTime, ct); } catch (OperationCanceledException) { }
             }
             Interlocked.Increment(ref _iterations);
@@ -132,17 +146,18 @@ public sealed class PlaywrightTour : IAsyncDisposable
         {
             Directory.CreateDirectory(_screenshotDir);
             var path = Path.Combine(_screenshotDir, $"u{user.Index}-{step.Name.Replace(':', '_')}-{DateTime.UtcNow:HHmmss}.png");
-            await page.ScreenshotAsync(new PageScreenshotOptions { Path = path });
+            // A page that is already too wedged to become ready can also wedge the screenshot; a diagnostic must never fail the run.
+            await page.ScreenshotAsync(new PageScreenshotOptions { Path = path, Timeout = 15_000 });
             return path;
         }
-        catch (PlaywrightException) { return null; }
+        catch (Exception ex) when (ex is PlaywrightException or TimeoutException) { return null; }
     }
 
     public async ValueTask DisposeAsync()
     {
         _stop.Cancel();
-        try { await Task.WhenAll(_loops); } catch (Exception) { }
-        if (_browser is not null) await _browser.CloseAsync();
+        await WaitForLoopsAsync();
+        try { if (_browser is not null) await _browser.CloseAsync(); } catch (Exception) { }
         _playwright?.Dispose();
         _stop.Dispose();
     }
