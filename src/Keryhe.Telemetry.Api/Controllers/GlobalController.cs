@@ -68,8 +68,8 @@ public class GlobalController : ControllerBase
         var query = new TraceSummaryQuery { Start = start, End = end, BucketCount = bucketCount };
 
         // One bucket, because the card wants window totals rather than a log time series.
-        // Unfiltered (time only), so GetLogSummaryAsync reads the rollup tables when coverage
-        // allows — a few small queries per tenant instead of GetLogHistogramAsync's raw GROUP BY.
+        // Unfiltered (time only): one bucket, so the group-by over the tenant's log window returns a
+        // single row.
         var logQuery = new LogSummaryQuery { Start = start, End = end, BucketCount = 1 };
 
         var results = new List<GlobalTenantStatsDto>(tenants.Count);

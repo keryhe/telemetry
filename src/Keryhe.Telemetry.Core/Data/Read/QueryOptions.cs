@@ -20,11 +20,22 @@ public sealed class QueryOptions
     public int SummaryTimeoutSeconds { get; set; } = 5;
 
     /// <summary>
-    /// Overrides <see cref="ProviderCapabilities.RawSearchWindowHours"/>'s tier default (decision
-    /// 40) when set. Null (the default) leaves the tier default in place — analytics-tier
-    /// unlimited, standard-tier 24 hours.
+    /// Overrides the default search window (<see cref="ProviderCapabilities.DefaultRawSearchWindowHours"/>,
+    /// 24 hours on every provider) when set. Search is unindexed everywhere since schema 3.0.0, so it
+    /// is time-window bounded everywhere.
     /// </summary>
     public int? RawSearchWindowHoursOverride { get; set; }
+
+    /// <summary>The default for <see cref="AnchorLookbackMinutes"/>.</summary>
+    public const int DefaultAnchorLookbackMinutes = 5;
+
+    /// <summary>
+    /// How far before a trace-list window's start the trace anchor derivation looks (schema-simplification
+    /// decision 17): a trace anchors on its earliest span in scope, so without this margin a trace that
+    /// began just before the window would be anchored on a later span and listed. A trace that started
+    /// before the margin is not listed in the window (it belongs to an earlier one). Default 5.
+    /// </summary>
+    public int AnchorLookbackMinutes { get; set; } = DefaultAnchorLookbackMinutes;
 }
 
 /// <summary>
@@ -38,7 +49,7 @@ public sealed class ExportOptions
     /// <summary>Configuration section name these options bind from.</summary>
     public const string SectionName = "Telemetry:Export";
 
-    /// <summary>Overrides <see cref="ProviderCapabilities.ExportMaxWindowDays"/>'s tier default (7 analytics / 1 standard) when set.</summary>
+    /// <summary>Overrides <see cref="ProviderCapabilities.ExportMaxWindowDays"/>'s tier default (7 days on PostgreSQL/Timescale/ClickHouse, 1 on SQL Server/MySQL) when set.</summary>
     public int? MaxWindowDaysOverride { get; set; }
 
     /// <summary>

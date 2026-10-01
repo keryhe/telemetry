@@ -43,10 +43,15 @@ public static class ScenarioRunner
 
         try
         {
+            // Spans collapse a re-delivery only on a 2.x schema; the ledger must expect what the schema under test does.
+            var schemaVersion = LedgerSemantics.TargetSchemaVersion(RepoLocator.FindRoot());
+            profile.Load.Traces.RedeliveryCollapses = LedgerSemantics.SpansCollapseRedelivery(schemaVersion);
+            log($"[{spec.Id}] schema {schemaVersion ?? "unknown"}: re-delivered spans {(profile.Load.Traces.RedeliveryCollapses ? "collapse" : "are stored again")}");
+
             log($"[{spec.Id}] starting {spec.Provider} container");
             await using var db = ProviderContainerFactory.Create(spec.Provider);
             await db.StartAsync(new ContainerOptions(Diagnostics: true, CpuLimit: profile.ContainerCpus,
-                MemoryLimitBytes: (long)(profile.ContainerMemoryGb * ContainerOptions.Gigabyte)), ct);
+                MemoryLimitBytes: (long)(profile.ContainerMemoryGb * ContainerOptions.Gigabyte), CpusetCpus: profile.DatabaseCpuset), ct);
             var tenants = await TenantSeeder.SeedAsync(db, profile.Tenants);
 
             await using var observers = await DatabaseObserverSession.StartAsync(spec.Provider, db, cancellationToken: ct);
@@ -62,10 +67,12 @@ public static class ScenarioRunner
             log($"[{spec.Id}] asOf pin offset {(logPinOffsetMs is { } pin ? $"{pin:F0} ms" : "not reported (treated as 0)")}");
             var probe = new MarkerProbe(generator.Exporter, generator.Topology, 0, http,
                 TimeSpan.FromSeconds(profile.MarkerIntervalSeconds), TimeSpan.FromMilliseconds(100), TimeSpan.FromSeconds(60));
+            // A write-only run reads nothing: no marker probe (its polling is a read) and, via Validate, no browsers.
+            if (profile.WriteOnly) log($"[{spec.Id}] write-only: no browsers, no marker probes");
 
             using var runCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
             var loadTask = generator.RunAsync(runCts.Token);
-            var probeTask = probe.RunAsync(runCts.Token);
+            var probeTask = profile.WriteOnly ? Task.CompletedTask : probe.RunAsync(runCts.Token);
 
             // Warm-up: ingestion only. The tour's discovery and browser launch run alongside it, so the browsers can start the moment it ends.
             phases = phases with { WarmupStart = DateTimeOffset.UtcNow };
@@ -94,7 +101,7 @@ public static class ScenarioRunner
                 if (profile.Ramp is { } rampProfile)
                 {
                     log($"[{spec.Id}] ramp: {rampProfile.StepSeconds}s steps from x{rampProfile.StartScale} by x{rampProfile.StepScale}, up to {rampProfile.MaxSteps}");
-                    ramp = await RunRampAsync(rampProfile, generator, probe, hosts, logPinOffsetMs ?? 0, spec.Id, log, ct);
+                    ramp = await RunRampAsync(rampProfile, generator, probe, hosts, logPinOffsetMs ?? 0, profile.WriteOnly, spec.Id, log, ct);
                 }
                 else
                 {
@@ -186,7 +193,7 @@ public static class ScenarioRunner
     }
 
     private static async Task<RampResult> RunRampAsync(
-        RampProfile ramp, OtlpLoadGenerator generator, MarkerProbe probe, HostSet hosts, double logPinOffsetMs, string id, Action<string> log, CancellationToken ct)
+        RampProfile ramp, OtlpLoadGenerator generator, MarkerProbe probe, HostSet hosts, double logPinOffsetMs, bool writeOnly, string id, Action<string> log, CancellationToken ct)
     {
         var steps = new List<RampStepResult>();
         IReadOnlyList<string> tripped = [];
@@ -203,13 +210,13 @@ public static class ScenarioRunner
 
             var (traceLags, logLags) = StepLags(probe.Results, probe.Pending, start, end, ramp.Criteria, logPinOffsetMs);
             var m = new StepMeasurements(windows, HostMetricsQuery.Dropped(hosts, start, end), HostMetricsQuery.GateWaitP95Ms(hosts, start, end),
-                traceLags, logLags, logPinOffsetMs);
+                traceLags, logLags, logPinOffsetMs, HostMetricsQuery.CommitLagP95Ms(hosts, start, end));
             tripped = RampEvaluator.Tripped(m, ramp.Criteria);
-            steps.Add(new RampStepResult(i, scale, start, end, windows, m.RecordsDropped, m.GateWaitP95Ms, m.TraceLagsMs, m.LogLagsMs, tripped));
+            steps.Add(new RampStepResult(i, scale, start, end, windows, m.RecordsDropped, m.GateWaitP95Ms, m.TraceLagsMs, m.LogLagsMs, tripped, m.CommitLagP95Ms));
 
             log($"[{id}] step {i} x{scale:0.##}: acked {windows.Sum(w => w.AckedPerSecond):F0}/s of {windows.Sum(w => w.OfferedPerSecond):F0}/s offered, " +
-                $"export p99 {windows.Max(w => w.Latency.P99Ms):F0} ms, gate wait p95 {m.GateWaitP95Ms:F0} ms, dropped {m.RecordsDropped:F0}, " +
-                $"lag log (pin-adjusted) / trace {MeanLag(RampEvaluator.AdjustForPin(m.LogLagsMs, logPinOffsetMs))} / {MeanLag(m.TraceLagsMs)} ms" +
+                $"export p99 {windows.Max(w => w.Latency.P99Ms):F0} ms, gate wait p95 {m.GateWaitP95Ms:F0} ms, commit lag p95 {m.CommitLagP95Ms:F0} ms, dropped {m.RecordsDropped:F0}, " +
+                (writeOnly ? "" : $"lag log (pin-adjusted) / trace {MeanLag(RampEvaluator.AdjustForPin(m.LogLagsMs, logPinOffsetMs))} / {MeanLag(m.TraceLagsMs)} ms") +
                 (tripped.Count > 0 ? $"  TRIPPED: {string.Join(", ", tripped)}" : ""));
             if (tripped.Count > 0) { trippedStep = i; break; }
         }

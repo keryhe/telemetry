@@ -34,6 +34,9 @@ public sealed record EndpointStat(
     double? ServerP50Ms, double? ServerP95Ms, double? ServerP99Ms, long ServerCalls,
     int Rollup, int Raw);
 
+/// <summary>One API route as the host measured it over the window (server-side durations in ms), independent of who called it. See <c>ScenarioAnalyzer.ApiRoutes</c>.</summary>
+public sealed record ApiRouteStat(string Route, long Calls, long Errors5xx, double P50Ms, double P95Ms, double P99Ms);
+
 public sealed record SlowPageLoad(string Step, string Window, int User, double? ReadyMs, bool TimedOut, string? Error, string? Screenshot);
 
 /// <summary>A pair of statements seen blocking each other, aggregated over the run's 1s samples.</summary>
@@ -47,17 +50,19 @@ public sealed record Headline(
     int? RampLastSustainedStep, double? RampLastSustainedScale, IReadOnlyList<string> RampTripped, bool RampReachedMax,
     double? LogLagP50Ms, double? TraceLagP50Ms, int MarkersTimedOut,
     double GateWaitP95Ms, double? PageReadyP95Ms, int BrowserTimeouts,
-    double DbPeakCpuCores, double DbPeakMemoryMb, bool QuiesceReached, bool DrainCompleted);
+    double DbPeakCpuCores, double DbPeakMemoryMb, bool QuiesceReached, bool DrainCompleted,
+    double CommitLagP95Ms = 0, bool WriteOnly = false, double? RampSustainedCommitLagP95Ms = null);
 
 public sealed record ScenarioReport(
     string Id, ScenarioResult Scenario, Headline Headline,
     IReadOnlyList<HistogramStat> WriteSide, IReadOnlyList<PageStat> Pages, IReadOnlyList<EndpointStat> Endpoints,
     IReadOnlyList<SlowPageLoad> SlowestLoads, IReadOnlyList<BlockingChain> BlockingChains,
-    IReadOnlyList<NamedSeries> Series, IReadOnlyList<TimelineMarker> Markers, double TimelineSeconds);
+    IReadOnlyList<NamedSeries> Series, IReadOnlyList<TimelineMarker> Markers, double TimelineSeconds,
+    IReadOnlyList<ApiRouteStat>? ApiRoutes = null);
 
 /// <summary>The whole run: the full <c>result.json</c>. <see cref="SchemaVersion"/> changes when the shape does, so later runs can be compared by tooling.</summary>
 public sealed record RunResult(int SchemaVersion, RunMetadata? Metadata, IReadOnlyList<ScenarioReport> Scenarios)
 {
-    /// <summary>2: scenarios carry the database-performance plan's Phase 0 additions (see <c>ScenarioResult.CurrentSchemaVersion</c>).</summary>
-    public const int CurrentSchemaVersion = 2;
+    /// <summary>3: scenarios carry the schema-simplification plan's Phase 1 additions (see <c>ScenarioResult.CurrentSchemaVersion</c>).</summary>
+    public const int CurrentSchemaVersion = 3;
 }

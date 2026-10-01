@@ -47,6 +47,7 @@ public class LogWriteRepository : ILogWriteRepository
         await _channel.LogGate.AcquireAsync(records.Count, cancellationToken);
         try
         {
+            _channel.MarkEnqueued(records);
             await _channel.Logs.Writer.WriteAsync(records, cancellationToken);
         }
         catch

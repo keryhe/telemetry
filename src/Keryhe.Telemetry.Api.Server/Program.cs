@@ -63,10 +63,6 @@ builder.Services.AddAlerting(builder.Configuration);
 // registered above by AddKeryheTelemetryApi.
 builder.Services.AddRetention(builder.Configuration);
 
-// Periodic log summary rollups (list-pages-server-side plan, Phase 2). Depends on
-// IRollupRepository, registered above by AddKeryheTelemetryApi's provider registration.
-builder.Services.AddRollups(builder.Configuration);
-
 var app = builder.Build();
 
 // ── MIDDLEWARE ────────────────────────────────────────────────────────────────

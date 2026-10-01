@@ -20,6 +20,7 @@ public static class ComparisonWriter
         new("Offered ingest rate", "records/s, all signals", s => Sum(s, x => x.OfferedPerSecond)),
         new("Export latency p99 (worst signal)", "ms", s => Worst(s, x => x.ExportP99Ms)),
         new("Gate wait p95", "ms", s => N(s.Headline.GateWaitP95Ms, "N1")),
+        new("Commit lag p95 (enqueue to commit)", "ms", s => N(s.Headline.CommitLagP95Ms, "N1")),
         new("Ingest-to-queryable lag p50, log", "ms", s => N(s.Headline.LogLagP50Ms)),
         new("Ingest-to-queryable lag p50, trace", "ms", s => N(s.Headline.TraceLagP50Ms)),
         new("Page ready p95", "ms", s => N(s.Headline.PageReadyP95Ms)),
@@ -35,6 +36,31 @@ public static class ComparisonWriter
             s.Scenario.Ramp is null ? "" :
             $"{(s.Headline.RampLastSustainedScale is { } x ? "x" + N(x, "0.##") : "none")}" + (s.Headline.RampReachedMax ? " (step limit, none tripped)" : $" ({string.Join(", ", s.Headline.RampTripped)})")),
     ];
+
+    /// <summary>
+    /// "Reads do not slow writes" as a number (schema-simplification plan, Phase 1 item 4): for each provider and topology, the write-only ramp's
+    /// last sustained scale and commit lag beside the full ramp's (browsers and marker probes reading throughout). Shown only when both ran.
+    /// </summary>
+    public static void Isolation(StringBuilder sb, RunResult run)
+    {
+        var ramps = run.Scenarios.Where(s => s.Scenario.Ramp is not null).ToList();
+        var pairs = ramps.Where(s => s.Headline.WriteOnly)
+            .SelectMany(w => ramps.Where(f => !f.Headline.WriteOnly && f.Scenario.Provider == w.Scenario.Provider && f.Scenario.Topology == w.Scenario.Topology)
+                .Select(f => (WriteOnly: w, Full: f)))
+            .OrderBy(p => p.WriteOnly.Scenario.Provider).ThenBy(p => p.WriteOnly.Scenario.Topology).ToList();
+        if (pairs.Count == 0) return;
+
+        sb.Append("<h2>Read/write isolation</h2><p class=\"sub\">The write-only ramp (nothing reads) against the full ramp (browsers and probes read throughout). ")
+          .Append("A full-ramp ceiling or commit lag worse than the write-only one is what reads cost the write path.</p>")
+          .Append("<table><thead><tr><th class=\"l\">Provider</th><th class=\"l\">Topology</th><th>Write-only ceiling</th><th>Full ceiling</th><th>Write-only commit lag p95 (ms)</th><th>Full commit lag p95 (ms)</th></tr></thead><tbody>");
+        foreach (var (w, f) in pairs)
+        {
+            string Ceiling(ScenarioReport s) => s.Headline.RampLastSustainedScale is { } x ? "x" + N(x, "0.##") + (s.Headline.RampReachedMax ? " (step limit)" : "") : "none";
+            sb.Append("<tr><td class=\"l\">").Append(E(w.Scenario.Provider)).Append("</td><td class=\"l\">").Append(E(w.Scenario.Topology)).Append("</td><td><a href=\"report.html#").Append(E(w.Id)).Append("\">").Append(E(Ceiling(w)))
+              .Append("</a></td><td><a href=\"report.html#").Append(E(f.Id)).Append("\">").Append(E(Ceiling(f))).Append("</a></td><td>").Append(N(w.Headline.RampSustainedCommitLagP95Ms, "N1")).Append("</td><td>").Append(N(f.Headline.RampSustainedCommitLagP95Ms, "N1")).Append("</td></tr>");
+        }
+        sb.Append("</tbody></table><p class=\"muted\">Commit lag is read at the last sustained step of each ramp.</p>");
+    }
 
     public static string Write(RunResult run)
     {
@@ -68,6 +94,7 @@ public static class ComparisonWriter
                 sb.Append("</tbody></table>");
             }
         }
+        Isolation(sb, run);
         return Page("Cross-provider comparison", sb.ToString());
     }
 }

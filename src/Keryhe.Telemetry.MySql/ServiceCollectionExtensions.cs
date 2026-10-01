@@ -38,8 +38,7 @@ public static class MySqlServiceCollectionExtensions
         services.AddScoped<IAlertRuleRepository, MySqlAlertRuleRepository>();
         services.AddScoped<ITenantCatalogRepository, MySqlTenantCatalogRepository>();
         services.AddScoped<IRetentionSettingsRepository, MySqlRetentionSettingsRepository>();
-        services.AddScoped<IRollupRepository, MySqlLogRollupRepository>();
-        services.AddSingleton(ProviderCapabilities.FromConfiguration(ProviderTier.Standard, configuration));
+        services.AddSingleton(ProviderCapabilities.FromConfiguration(ProviderCapabilities.Constrained(), configuration));
         return services;
     }
 }

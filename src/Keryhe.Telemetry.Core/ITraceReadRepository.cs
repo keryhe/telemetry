@@ -16,13 +16,13 @@ public interface ITraceReadRepository
     /// <summary>
     /// Chart/stat-card summary for the traces list page (list-pages-server-side plan, Phase 3):
     /// volume/error/duration-percentile buckets, per-service RED stats, the latency heatmap and
-    /// <c>listTotal</c>/<c>requestCount</c> (decision 13). Reads the trace rollup tables when
-    /// eligible (decision 37), the anchor-bounded raw path otherwise. <c>listTotal</c> always
-    /// comes from the raw path.
+    /// <c>listTotal</c>/<c>requestCount</c>, all derived from each trace's anchor -- its earliest
+    /// span in scope (schema-simplification decision 10). Always the raw path: there are no rollup
+    /// tables since schema 3.0.0, so a 3d/7d window on a busy tenant may come back as a lower bound.
     /// </summary>
     Task<TraceSummaryResult> GetTraceSummaryAsync(TraceSummaryQuery query, CancellationToken cancellationToken = default);
 
-    /// <summary>Keyset-paged trace rows for the traces list page (decision 1), anchored on roots plus <c>orphan_roots</c> (decision 41), pinned on <see cref="TraceQuery.AsOf"/> (decision 3).</summary>
+    /// <summary>Keyset-paged trace rows for the traces list page (decision 1), anchored on each trace's earliest span in scope (decision 10), pinned on <see cref="TraceQuery.AsOf"/> (decision 3).</summary>
     Task<TracePageResult> GetTracePageAsync(TraceQuery query, CancellationToken cancellationToken = default);
 
     /// <summary>The dashboard's Recent Errors/Slowest Traces widgets — newest errors or the slowest anchors, over the unfiltered population.</summary>

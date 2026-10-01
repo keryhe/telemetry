@@ -52,8 +52,11 @@ internal static class ClickHouseJsonAttributeHooks
 }
 
 public class ClickHouseTraceReadRepository(IConfiguration configuration, ITenantContext tenantContext)
-    : TraceReadRepositoryBase(tenantContext)
+    : TraceReadRepositoryBase(tenantContext, configuration)
 {
+    protected override string ResourcesTable => "(SELECT * FROM resources LIMIT 1 BY id)";
+    protected override string ScopesTable => "(SELECT * FROM instrumentation_scopes LIMIT 1 BY id)";
+
     private readonly string _connectionString = configuration.GetConnectionString("Api")!;
 
     protected override Task<DbConnection> OpenConnectionAsync(CancellationToken cancellationToken)
@@ -85,34 +88,76 @@ public class ClickHouseTraceReadRepository(IConfiguration configuration, ITenant
     protected override string SpanLevelMatchPredicateWithResource(string traceIdColumn, string innerTimeClause, string innerPredicate)
         => $"{traceIdColumn} IN (SELECT s2.trace_id FROM spans s2 JOIN resources rs2 ON rs2.id = s2.resource_id WHERE 1=1{innerTimeClause} AND {innerPredicate})";
 
-    protected override string TraceIdInPredicate(string alias) => $"{alias}.trace_id IN @traceIds";
-    protected override string ResourceIdInPredicate => "id IN @resourceIds";
+    /// <summary>
+    /// The trace's start-time bounds from <c>trace_index</c> (fed by a materialized view from
+    /// <c>spans</c>): <c>spans</c> is sorted by <c>(tenant_id, service_name, start_time_unix_nano)</c> and
+    /// has no trace-id seek, so a by-trace read is narrowed with tenant and time bounds taken from this
+    /// small index first. Null when the index has no row for the traces (nothing to narrow with).
+    /// </summary>
+    protected override async Task<(long Min, long Max)?> ResolveTraceTimeBoundsAsync(
+        DbConnection conn, IReadOnlyList<string> traceIds, CancellationToken ct)
+    {
+        var parameters = new DynamicParameters();
+        parameters.Add("tenantId", TenantId);
+        var inList = IdInPredicate("trace_id", "bt", traceIds, 32, parameters);
+        var row = await conn.QuerySingleAsync<TraceBoundsRow>(new CommandDefinition($"""
+            SELECT count() AS Cnt, minMerge(min_start) AS MinStart, maxMerge(max_start) AS MaxStart
+            FROM trace_index
+            WHERE tenant_id = @tenantId AND {inList}
+            """, parameters, cancellationToken: ct));
+        return row.Cnt == 0 ? null : (row.MinStart, row.MaxStart);
+    }
 
-    // Decision 34: spans is a ReplacingMergeTree, so a page's anchor rows are deduped with
-    // LIMIT 1 BY trace_id, span_id; orphan_roots is read through FINAL. Decision 9's uncorrelated
-    // NOT EXISTS equivalent for the late-root re-check.
-    protected override string AnchorsSql => """
-        (
-            SELECT trace_id, id AS anchor_span_pk, span_id AS anchor_span_id, resource_id, name AS root_name, kind AS anchor_kind,
-                   start_time_unix_nano AS anchor_start, end_time_unix_nano AS anchor_end, created_at AS anchor_created_at
-            FROM (
-                SELECT trace_id, id, span_id, resource_id, name, kind, parent_span_id, start_time_unix_nano, end_time_unix_nano, created_at
-                FROM spans
-                LIMIT 1 BY trace_id, span_id
+    private sealed class TraceBoundsRow
+    {
+        public long Cnt { get; set; }
+        public long MinStart { get; set; }
+        public long MaxStart { get; set; }
+    }
+
+    /// <summary>
+    /// The anchors derived table as a <c>GROUP BY trace_id</c> over the tenant's spans in
+    /// <c>[@anchorFrom, @end]</c>: <c>argMin</c> over <c>(start, id)</c> picks the earliest span's
+    /// columns, <c>max(status_code = 'ERROR')</c> is the in-scope error flag, and <c>HAVING</c> drops
+    /// anchors that start before <c>@start</c> (the look-back margin). The tenant-and-service-led sort key
+    /// and the daily partitions prune the scan. No <c>LIMIT 1 BY</c> dedup: a re-delivered span is
+    /// stored twice and reads tolerate it (decision 7) -- a duplicate has the same start, duration
+    /// and error flag, so it cannot change an anchor. The aggregates are computed in an inner query
+    /// under non-colliding aliases and renamed outside it: ClickHouse resolves a SELECT alias over a
+    /// same-named column in WHERE, so aliasing <c>argMin(service_name, ...)</c> as <c>service_name</c>
+    /// would turn the service filter into an aggregate.
+    /// </summary>
+    protected override string AnchorsSql(bool hasService, bool pinAsOf, bool includeFirstCreated = false)
+    {
+        var service = hasService ? " AND service_name = @service" : "";
+        var pin = pinAsOf ? " AND created_at <= @asOf" : "";
+        var firstCreated = includeFirstCreated ? ", min(created_at) AS first_created_at" : "";
+        var outerFirstCreated = includeFirstCreated ? ", first_created_at" : "";
+        const string earliest = "tuple(start_time_unix_nano, id)";
+        return $"""
+            (
+                SELECT trace_id, anchor_span_pk, anchor_span_id, anchor_service AS service_name, root_name, anchor_kind,
+                       anchor_start, anchor_end, anchor_created_at, has_error{outerFirstCreated}
+                FROM (
+                    SELECT trace_id,
+                           argMin(id, {earliest}) AS anchor_span_pk,
+                           argMin(span_id, {earliest}) AS anchor_span_id,
+                           argMin(service_name, {earliest}) AS anchor_service,
+                           argMin(name, {earliest}) AS root_name,
+                           argMin(kind, {earliest}) AS anchor_kind,
+                           min(start_time_unix_nano) AS anchor_start,
+                           argMin(end_time_unix_nano, {earliest}) AS anchor_end,
+                           argMin(created_at, {earliest}) AS anchor_created_at,
+                           max(status_code = 'ERROR') AS has_error{firstCreated}
+                    FROM spans
+                    WHERE tenant_id = @tenantId
+                      AND start_time_unix_nano >= @anchorFrom AND start_time_unix_nano <= @end{service}{pin}
+                    GROUP BY trace_id
+                    HAVING anchor_start >= @start
+                )
             )
-            WHERE parent_span_id IS NULL
-            UNION ALL
-            SELECT o.trace_id, sp.id, sp.span_id, o.resource_id, sp.name, sp.kind, o.start_time_unix_nano, o.end_time_unix_nano, o.detected_at
-            FROM (SELECT * FROM orphan_roots FINAL) o
-            JOIN (
-                SELECT trace_id, span_id, id, name, kind FROM spans LIMIT 1 BY trace_id, span_id
-            ) sp ON sp.trace_id = o.trace_id AND sp.span_id = o.span_id
-            WHERE o.trace_id NOT IN (
-                SELECT trace_id FROM (SELECT trace_id, parent_span_id FROM spans LIMIT 1 BY trace_id, span_id)
-                WHERE parent_span_id IS NULL
-            )
-        )
-        """;
+            """;
+    }
 }
 
 public class ClickHouseMetricReadRepository(IConfiguration configuration, ITenantContext tenantContext)
@@ -212,8 +257,11 @@ public class ClickHouseMetricReadRepository(IConfiguration configuration, ITenan
 }
 
 public class ClickHouseLogReadRepository(IConfiguration configuration, ITenantContext tenantContext)
-    : LogReadRepositoryBase(tenantContext)
+    : LogReadRepositoryBase(tenantContext, configuration)
 {
+    protected override string ResourcesTable => "(SELECT * FROM resources LIMIT 1 BY id)";
+    protected override string ScopesTable => "(SELECT * FROM instrumentation_scopes LIMIT 1 BY id)";
+
     private readonly string _connectionString = configuration.GetConnectionString("Api")!;
 
     protected override Task<DbConnection> OpenConnectionAsync(CancellationToken cancellationToken)
@@ -233,10 +281,6 @@ public class ClickHouseLogReadRepository(IConfiguration configuration, ITenantCo
     // Decision 3/Phase 2 pin helper: ClickHouse's created_at default is evaluated at statement
     // execution, so no 5-second back-off is needed here.
     protected override string DatabaseClockNowExpr => "now64(9)";
-
-    // Rollup tables are ReplacingMergeTree(rolled_at); FINAL collapses a minute rolled twice to
-    // its newest row without waiting for a background merge (decisions 37-38).
-    protected override string RollupFinalHint => " FINAL";
 }
 
 public class ClickHouseResourceReadRepository(IConfiguration configuration, ITenantContext tenantContext)
@@ -252,6 +296,13 @@ public class ClickHouseTenantCatalogRepository(IConfiguration configuration)
     : TenantCatalogRepositoryBase
 {
     private readonly string _connectionString = configuration.GetConnectionString("Api")!;
+
+    protected override string TenantActivitySql => """
+        SELECT tenant_id AS TenantId, max(start_time_unix_nano) AS LastSeenUnixNano
+        FROM spans
+        WHERE start_time_unix_nano >= @since
+        GROUP BY tenant_id
+        """;
 
     protected override Task<DbConnection> OpenConnectionAsync(CancellationToken cancellationToken)
         => ClickHouseConnectionFactory.OpenReadAsync(_connectionString, cancellationToken);
@@ -412,19 +463,13 @@ public class ClickHouseAlertRuleRepository(IConfiguration configuration, ITenant
 }
 
 /// <summary>
-/// ClickHouse implementation of the <see cref="IRetentionSettingsRepository"/> sweeps. Two
-/// things differ from the relational providers, matching the same "control-plane is
-/// best-effort" pattern already used for alert-rule CRUD:
-///
-/// <see cref="UpdateSettingsAsync"/> overrides the base's plain <c>UPDATE</c> with an
-/// <c>ALTER TABLE ... UPDATE</c> mutation, since ClickHouse has no in-place row update.
-///
-/// There are no foreign keys and so no cascades, so any child rows must be deleted explicitly.
-/// The trace sweep has none left to delete: since schema 2.11.0 a span's events and links are JSON
-/// columns on the span row, so deleting the span takes them with it.
-/// A lightweight <c>DELETE</c> is an asynchronous mutation that reports no row count, so every
-/// sweep pre-counts what it is about to remove. That count is the return value; it is taken before
-/// the mutation is issued and is therefore a snapshot, not a receipt.
+/// ClickHouse retention (schema 3.0.0): <c>ALTER TABLE ... DROP PARTITION</c> for every fully expired
+/// day, no row deletes and no mutations. Spans, log records and the data-point tables are
+/// partitioned by day, so retention granularity is the day: a partition is dropped once the whole
+/// day is older than the cutoff, and rows in the cutoff's own day survive until it ends. The count
+/// returned is the rows in the dropped partitions, read from <c>system.parts</c> just before the drop.
+/// The settings row is updated with an <c>ALTER TABLE ... UPDATE</c> mutation -- the same
+/// "control-plane is best-effort" pattern as alert-rule CRUD.
 /// </summary>
 public class ClickHouseRetentionSettingsRepository(IConfiguration configuration)
     : RetentionSettingsRepositoryBase
@@ -460,351 +505,53 @@ public class ClickHouseRetentionSettingsRepository(IConfiguration configuration)
         settings.UpdatedAt = updatedAt;
     }
 
-    public override async Task<int> DeleteOldTracesAsync(TimeSpan retentionPeriod, CancellationToken cancellationToken = default)
+    // trace_index is partitioned by the same days as spans and holds only the trace time bounds,
+    // so its expired partitions go with spans' (not counted in the returned rows).
+    public override Task<int> DeleteOldTracesAsync(TimeSpan retentionPeriod, CancellationToken cancellationToken = default)
+        => DropExpiredPartitionsAsync(["spans"], ["trace_index"], retentionPeriod, cancellationToken);
+
+    public override Task<int> DeleteOldLogRecordsAsync(TimeSpan retentionPeriod, CancellationToken cancellationToken = default)
+        => DropExpiredPartitionsAsync(["log_records"], [], retentionPeriod, cancellationToken);
+
+    public override Task<int> DeleteOldMetricDataPointsAsync(TimeSpan retentionPeriod, CancellationToken cancellationToken = default)
+        => DropExpiredPartitionsAsync(TelemetryIngestionHelpers.TimePrunedMetricTables, [], retentionPeriod, cancellationToken);
+
+    private async Task<int> DropExpiredPartitionsAsync(
+        IReadOnlyList<string> countedTables, IReadOnlyList<string> uncountedTables, TimeSpan retentionPeriod, CancellationToken ct)
     {
-        var args = new { cutoff = CutoffNano(retentionPeriod) };
+        // CutoffNano guards a negative period (a cutoff in the future would drop everything).
+        var cutoff = TimeConversion.UnixNanoToDateTime(CutoffNano(retentionPeriod));
+        // A day partition (yyyymmdd) is fully expired once its whole day is before the cutoff's day.
+        var cutoffDay = uint.Parse(cutoff.ToString("yyyyMMdd"));
 
-        await using var conn = await OpenConnectionAsync(cancellationToken);
+        await using var conn = await OpenConnectionAsync(ct);
 
-        var count = await conn.ExecuteScalarAsync<int>(new CommandDefinition(
-            "SELECT count() FROM spans WHERE start_time_unix_nano < @cutoff",
-            args, cancellationToken: cancellationToken));
-
-        await conn.ExecuteAsync(new CommandDefinition(
-            "DELETE FROM spans WHERE start_time_unix_nano < @cutoff",
-            args, cancellationToken: cancellationToken));
-
-        return count;
-    }
-
-    public override async Task<int> DeleteOldMetricDataPointsAsync(TimeSpan retentionPeriod, CancellationToken cancellationToken = default)
-    {
-        var args = new { cutoff = CutoffNano(retentionPeriod) };
-
-        await using var conn = await OpenConnectionAsync(cancellationToken);
-
-        var count = 0;
-        foreach (var table in TelemetryIngestionHelpers.TimePrunedMetricTables)
+        long removed = 0;
+        foreach (var table in countedTables.Concat(uncountedTables))
         {
-            count += await conn.ExecuteScalarAsync<int>(new CommandDefinition(
-                $"SELECT count() FROM {table} WHERE time_unix_nano < @cutoff",
-                args, cancellationToken: cancellationToken));
+            var partitions = (await conn.QueryAsync<PartitionRow>(new CommandDefinition(
+                """
+                SELECT partition AS Partition, sum(rows) AS Rows
+                FROM system.parts
+                WHERE database = currentDatabase() AND table = @table AND active AND toUInt32OrZero(partition) < @cutoffDay
+                GROUP BY partition
+                """,
+                new { table, cutoffDay }, cancellationToken: ct))).ToList();
+
+            foreach (var partition in partitions)
+            {
+                // The partition id comes from system.parts (digits only), not from a caller.
+                await conn.ExecuteAsync(new CommandDefinition(
+                    $"ALTER TABLE {table} DROP PARTITION ID '{partition.Partition}'", cancellationToken: ct));
+                if (countedTables.Contains(table)) removed += partition.Rows;
+            }
         }
-
-        foreach (var table in TelemetryIngestionHelpers.TimePrunedMetricTables)
-        {
-            await conn.ExecuteAsync(new CommandDefinition(
-                $"DELETE FROM {table} WHERE time_unix_nano < @cutoff",
-                args, cancellationToken: cancellationToken));
-        }
-
-        return count;
+        return (int)Math.Min(removed, int.MaxValue);
     }
 
-    public override async Task<int> DeleteOldLogRecordsAsync(TimeSpan retentionPeriod, CancellationToken cancellationToken = default)
+    private sealed class PartitionRow
     {
-        var args = new { cutoff = CutoffNano(retentionPeriod) };
-
-        await using var conn = await OpenConnectionAsync(cancellationToken);
-
-        var count = await conn.ExecuteScalarAsync<int>(new CommandDefinition(
-            "SELECT count() FROM log_records WHERE time_unix_nano < @cutoff",
-            args, cancellationToken: cancellationToken));
-
-        await conn.ExecuteAsync(new CommandDefinition(
-            "DELETE FROM log_records WHERE time_unix_nano < @cutoff",
-            args, cancellationToken: cancellationToken));
-
-        await conn.ExecuteAsync(new CommandDefinition(
-            "DELETE FROM log_rollup_minute WHERE bucket_unix_nano < @cutoff", args, cancellationToken: cancellationToken));
-        await conn.ExecuteAsync(new CommandDefinition(
-            "DELETE FROM log_rollup_hour WHERE bucket_unix_nano < @cutoff", args, cancellationToken: cancellationToken));
-
-        return count;
-    }
-}
-
-/// <summary>
-/// ClickHouse implementation of <see cref="IRollupRepository"/>. Does not extend
-/// <see cref="LogRollupRepositoryBase"/> — that base's delete-then-insert-in-one-transaction shape
-/// doesn't fit ClickHouse (no transactions, mutations are asynchronous). Instead:
-/// <list type="bullet">
-/// <item>The lease claim is best-effort, read-check-then-update, the same "control-plane is
-/// best-effort" pattern as <c>ClickHouseAlertRuleRepository.TryClaimFireAsync</c> — acceptable
-/// because a double-rolled minute is harmless (see the next point), unlike a double-fired alert.</item>
-/// <item>A roll is a plain INSERT with a fresh <c>rolled_at</c>, never a DELETE: log_rollup_minute/
-/// _hour are <c>ReplacingMergeTree(rolled_at)</c>, so a minute rolled twice by two racing API
-/// instances collapses to the newest row at merge time, and every read goes through FINAL
-/// (<see cref="ClickHouseLogReadRepository.RollupFinalHint"/>) so it never depends on that merge
-/// having already happened.</item>
-/// </list>
-/// </summary>
-public class ClickHouseLogRollupRepository(IConfiguration configuration) : IRollupRepository
-{
-    private readonly string _connectionString = configuration.GetConnectionString("Api")!;
-
-    private Task<DbConnection> OpenConnectionAsync(CancellationToken ct) => ClickHouseConnectionFactory.OpenReadAsync(_connectionString, ct);
-
-    public async Task<bool> TryClaimLeaseAsync(string signal, string granularity, string owner, TimeSpan leaseDuration, CancellationToken ct = default)
-    {
-        await using var conn = await OpenConnectionAsync(ct);
-
-        var leaseExpiresAt = await conn.ExecuteScalarAsync<DateTime?>(new CommandDefinition(
-            "SELECT lease_expires_at FROM rollup_state WHERE signal_name = @signal AND granularity = @granularity LIMIT 1",
-            new { signal, granularity }, cancellationToken: ct));
-
-        if (leaseExpiresAt is { } expires && expires >= DateTime.UtcNow)
-            return false;
-
-        await conn.ExecuteAsync(new CommandDefinition(
-            """
-            ALTER TABLE rollup_state UPDATE lease_owner = @owner, lease_expires_at = @newExpiry
-            WHERE signal_name = @signal AND granularity = @granularity
-            """,
-            new { owner, newExpiry = DateTime.UtcNow + leaseDuration, signal, granularity }, cancellationToken: ct));
-        return true;
-    }
-
-    public async Task<RollupStateInfo?> GetStateAsync(string signal, string granularity, CancellationToken ct = default)
-    {
-        await using var conn = await OpenConnectionAsync(ct);
-        return await conn.QuerySingleOrDefaultAsync<RollupStateInfo>(new CommandDefinition(
-            """
-            SELECT coverage_start_unix_nano AS CoverageStartUnixNano,
-                   rolled_until_unix_nano   AS RolledUntilUnixNano,
-                   repassed_until_unix_nano AS RepassedUntilUnixNano
-            FROM rollup_state FINAL WHERE signal_name = @signal AND granularity = @granularity
-            """,
-            new { signal, granularity }, cancellationToken: ct));
-    }
-
-    public async Task SetCoverageStartAsync(string signal, string granularity, long coverageStartUnixNano, CancellationToken ct = default)
-    {
-        await using var conn = await OpenConnectionAsync(ct);
-        await conn.ExecuteAsync(new CommandDefinition(
-            """
-            ALTER TABLE rollup_state UPDATE coverage_start_unix_nano = @coverageStartUnixNano
-            WHERE signal_name = @signal AND granularity = @granularity AND coverage_start_unix_nano IS NULL
-            """,
-            new { coverageStartUnixNano, signal, granularity }, cancellationToken: ct));
-    }
-
-    public async Task AdvanceRolledUntilAsync(string signal, string granularity, long rolledUntilUnixNano, CancellationToken ct = default)
-    {
-        await using var conn = await OpenConnectionAsync(ct);
-        await conn.ExecuteAsync(new CommandDefinition(
-            "ALTER TABLE rollup_state UPDATE rolled_until_unix_nano = @v WHERE signal_name = @signal AND granularity = @granularity",
-            new { v = rolledUntilUnixNano, signal, granularity }, cancellationToken: ct));
-    }
-
-    public async Task AdvanceRepassedUntilAsync(string signal, string granularity, long repassedUntilUnixNano, CancellationToken ct = default)
-    {
-        await using var conn = await OpenConnectionAsync(ct);
-        await conn.ExecuteAsync(new CommandDefinition(
-            "ALTER TABLE rollup_state UPDATE repassed_until_unix_nano = @v WHERE signal_name = @signal AND granularity = @granularity",
-            new { v = repassedUntilUnixNano, signal, granularity }, cancellationToken: ct));
-    }
-
-    public async Task RollLogMinutesAsync(long fromInclusive, long toExclusive, CancellationToken ct = default)
-    {
-        const long nanosPerMinute = 60_000_000_000L;
-        var sql = $"""
-            INSERT INTO log_rollup_minute (bucket_unix_nano, resource_id, trace_count, debug_count, info_count, warn_count, error_count, fatal_count, rolled_at)
-            SELECT intDiv(lr.time_unix_nano, {nanosPerMinute}) * {nanosPerMinute}, lr.resource_id,
-                   {LogSeverityGroupSql.SumCaseColumns("lr.severity_number")}, now64(9)
-            FROM log_records lr
-            WHERE lr.time_unix_nano >= @from AND lr.time_unix_nano < @to
-            GROUP BY intDiv(lr.time_unix_nano, {nanosPerMinute}) * {nanosPerMinute}, lr.resource_id
-            """;
-        await using var conn = await OpenConnectionAsync(ct);
-        await conn.ExecuteAsync(new CommandDefinition(sql, new { from = fromInclusive, to = toExclusive }, cancellationToken: ct));
-    }
-
-    public async Task RollLogHoursAsync(long fromInclusive, long toExclusive, CancellationToken ct = default)
-    {
-        const long nanosPerHour = 3_600_000_000_000L;
-        var sql = $"""
-            INSERT INTO log_rollup_hour (bucket_unix_nano, resource_id, trace_count, debug_count, info_count, warn_count, error_count, fatal_count, rolled_at)
-            SELECT intDiv(lrm.bucket_unix_nano, {nanosPerHour}) * {nanosPerHour}, lrm.resource_id,
-                   SUM(lrm.trace_count), SUM(lrm.debug_count), SUM(lrm.info_count),
-                   SUM(lrm.warn_count), SUM(lrm.error_count), SUM(lrm.fatal_count), now64(9)
-            FROM log_rollup_minute AS lrm FINAL
-            WHERE lrm.bucket_unix_nano >= @from AND lrm.bucket_unix_nano < @to
-            GROUP BY intDiv(lrm.bucket_unix_nano, {nanosPerHour}) * {nanosPerHour}, lrm.resource_id
-            """;
-        await using var conn = await OpenConnectionAsync(ct);
-        await conn.ExecuteAsync(new CommandDefinition(sql, new { from = fromInclusive, to = toExclusive }, cancellationToken: ct));
-    }
-
-    // =========================================================================
-    // TRACE ROLLUPS (list-pages-server-side plan, Phase 3, decisions 37-38, 41)
-    // =========================================================================
-
-    /// <summary>
-    /// Orphan detection, ClickHouse dialect: an uncorrelated <c>NOT IN</c> in place of the
-    /// relational providers' correlated <c>NOT EXISTS</c> (ClickHouse can't reliably correlate a
-    /// subquery to the outer row — decision 9's same reasoning), and spans deduped with
-    /// <c>LIMIT 1 BY trace_id, span_id</c> (decision 34) since <c>spans</c> is a
-    /// <c>ReplacingMergeTree</c> that may still hold un-merged duplicates. A lightweight
-    /// <c>DELETE FROM</c> (the same mutation this codebase's retention sweeps already use against
-    /// <c>spans</c>) replaces the range before re-inserting, mirroring the relational providers'
-    /// delete-then-insert shape even though <c>orphan_roots</c> is itself a
-    /// <c>ReplacingMergeTree</c> — a plain re-insert with a fresh <c>detected_at</c> would leave a
-    /// trace whose real root has since arrived sitting in the table forever.
-    /// </summary>
-    public async Task RollOrphanRootsAsync(long fromInclusive, long toExclusive, CancellationToken ct = default)
-    {
-        await using var conn = await OpenConnectionAsync(ct);
-
-        await conn.ExecuteAsync(new CommandDefinition(
-            "DELETE FROM orphan_roots WHERE start_time_unix_nano >= @from AND start_time_unix_nano < @to",
-            new { from = fromInclusive, to = toExclusive }, cancellationToken: ct));
-
-        const string insertSql = """
-            INSERT INTO orphan_roots (trace_id, span_id, resource_id, start_time_unix_nano, end_time_unix_nano)
-            SELECT e2.trace_id, e2.span_id, e2.resource_id, e2.start_time_unix_nano, e2.end_time_unix_nano
-            FROM (
-                SELECT ea.trace_id, ea.span_id
-                FROM (
-                    SELECT e.trace_id AS trace_id, MIN(e.span_id) AS span_id
-                    FROM (
-                        SELECT trace_id, span_id, start_time_unix_nano
-                        FROM spans
-                        LIMIT 1 BY trace_id, span_id
-                    ) e
-                    JOIN (
-                        SELECT trace_id,
-                               MIN(start_time_unix_nano) AS min_start,
-                               SUM(CASE WHEN parent_span_id IS NULL THEN 1 ELSE 0 END) AS null_parent_count
-                        FROM (
-                            SELECT trace_id, parent_span_id, start_time_unix_nano
-                            FROM spans
-                            LIMIT 1 BY trace_id, span_id
-                        )
-                        WHERE trace_id IN (
-                            SELECT DISTINCT trace_id FROM spans
-                            WHERE start_time_unix_nano >= @from AND start_time_unix_nano < @to
-                        )
-                        GROUP BY trace_id
-                    ) c ON c.trace_id = e.trace_id AND c.min_start = e.start_time_unix_nano
-                    WHERE c.null_parent_count = 0
-                    GROUP BY e.trace_id
-                ) ea
-            ) earliest
-            JOIN (
-                SELECT trace_id, span_id, parent_span_id, resource_id, start_time_unix_nano, end_time_unix_nano
-                FROM spans
-                LIMIT 1 BY trace_id, span_id
-            ) e2 ON e2.trace_id = earliest.trace_id AND e2.span_id = earliest.span_id
-            WHERE e2.parent_span_id NOT IN (SELECT span_id FROM spans)
-               OR e2.parent_span_id IS NULL
-            """;
-        await conn.ExecuteAsync(new CommandDefinition(insertSql, new { from = fromInclusive, to = toExclusive }, cancellationToken: ct));
-    }
-
-    /// <summary>
-    /// Trace summary recompute, ClickHouse dialect — same anchors-plus-full-trace-aggregation
-    /// shape as <see cref="LogRollupRepositoryBase.RollTraceMinutesAsync"/>, using nested
-    /// subqueries instead of a <c>WITH</c> clause (sidesteps any doubt about ClickHouse's
-    /// <c>WITH ... INSERT</c> clause placement) and deduping every <c>spans</c> read with
-    /// <c>LIMIT 1 BY trace_id, span_id</c> (decision 34).
-    /// </summary>
-    public async Task RollTraceMinutesAsync(long fromInclusive, long toExclusive, CancellationToken ct = default)
-    {
-        const long nanosPerMinute = 60_000_000_000L;
-        var lbColumns = string.Join(", ", LatencyBucketSql.ColumnNames());
-        var lbSelect = LatencyBucketSql.SumCaseColumns("f.duration_nano");
-
-        var anchorsSql = $"""
-            (
-                SELECT trace_id, resource_id, name AS root_name, kind AS anchor_kind, start_time_unix_nano AS anchor_start
-                FROM (
-                    SELECT trace_id, resource_id, name, kind, parent_span_id, start_time_unix_nano
-                    FROM spans
-                    LIMIT 1 BY trace_id, span_id
-                )
-                WHERE parent_span_id IS NULL AND start_time_unix_nano >= @from AND start_time_unix_nano < @to
-                UNION ALL
-                SELECT o.trace_id, o.resource_id, sp.name, sp.kind, o.start_time_unix_nano
-                FROM orphan_roots AS o FINAL
-                JOIN (
-                    SELECT trace_id, span_id, name, kind FROM spans LIMIT 1 BY trace_id, span_id
-                ) sp ON sp.trace_id = o.trace_id AND sp.span_id = o.span_id
-                WHERE o.start_time_unix_nano >= @from AND o.start_time_unix_nano < @to
-                  AND o.trace_id NOT IN (
-                      SELECT trace_id FROM (
-                          SELECT trace_id, parent_span_id FROM spans LIMIT 1 BY trace_id, span_id
-                      )
-                      WHERE parent_span_id IS NULL
-                  )
-            )
-            """;
-
-        var sql = $"""
-            INSERT INTO trace_rollup_minute (bucket_unix_nano, resource_id, root_name, inbound, trace_count, error_count, duration_sum_ms, duration_max_ms, {lbColumns})
-            SELECT f.bucket, f.resource_id, f.root_name, f.inbound,
-                   COUNT(*), SUM(f.has_error),
-                   SUM(f.duration_nano) / 1000000.0, MAX(f.duration_nano) / 1000000.0,
-                   {lbSelect}
-            FROM (
-                SELECT tl.bucket AS bucket, tl.resource_id AS resource_id,
-                       if(rn.rn <= 200, tl.root_name, '__other__') AS root_name,
-                       tl.inbound AS inbound, tl.has_error AS has_error, tl.duration_nano AS duration_nano
-                FROM (
-                    SELECT a.trace_id AS trace_id, a.resource_id AS resource_id, a.root_name AS root_name,
-                           if(a.anchor_kind IN ('SERVER', 'CONSUMER'), 1, 0) AS inbound,
-                           (intDiv(a.anchor_start, {nanosPerMinute}) * {nanosPerMinute}) AS bucket,
-                           MAX(if(fs.status_code = 'ERROR', 1, 0)) AS has_error,
-                           (MAX(fs.end_time_unix_nano) - MIN(fs.start_time_unix_nano)) AS duration_nano
-                    FROM {anchorsSql} a
-                    JOIN (
-                        SELECT trace_id, status_code, start_time_unix_nano, end_time_unix_nano
-                        FROM spans
-                        LIMIT 1 BY trace_id, span_id
-                    ) fs ON fs.trace_id = a.trace_id
-                    GROUP BY a.trace_id, a.resource_id, a.root_name, a.anchor_kind, a.anchor_start
-                ) tl
-                JOIN (
-                    SELECT bucket, resource_id, root_name,
-                           row_number() OVER (PARTITION BY bucket, resource_id ORDER BY cnt DESC, root_name) AS rn
-                    FROM (
-                        SELECT bucket, resource_id, root_name, COUNT(*) AS cnt
-                        FROM (
-                            SELECT a.trace_id AS trace_id, a.resource_id AS resource_id, a.root_name AS root_name,
-                                   (intDiv(a.anchor_start, {nanosPerMinute}) * {nanosPerMinute}) AS bucket
-                            FROM {anchorsSql} a
-                        ) t2
-                        GROUP BY bucket, resource_id, root_name
-                    ) nc
-                ) rn ON rn.bucket = tl.bucket AND rn.resource_id = tl.resource_id AND rn.root_name = tl.root_name
-            ) f
-            GROUP BY f.bucket, f.resource_id, f.root_name, f.inbound
-            """;
-
-        await using var conn = await OpenConnectionAsync(ct);
-        await conn.ExecuteAsync(new CommandDefinition(
-            "DELETE FROM trace_rollup_minute WHERE bucket_unix_nano >= @from AND bucket_unix_nano < @to",
-            new { from = fromInclusive, to = toExclusive }, cancellationToken: ct));
-        await conn.ExecuteAsync(new CommandDefinition(sql, new { from = fromInclusive, to = toExclusive }, cancellationToken: ct));
-    }
-
-    public async Task RollTraceHoursAsync(long fromInclusive, long toExclusive, CancellationToken ct = default)
-    {
-        const long nanosPerHour = 3_600_000_000_000L;
-        var lbColumns = string.Join(", ", LatencyBucketSql.ColumnNames());
-        var lbSums = string.Join(", ", LatencyBucketSql.ColumnNames().Select(c => $"SUM(trm.{c})"));
-
-        var sql = $"""
-            INSERT INTO trace_rollup_hour (bucket_unix_nano, resource_id, root_name, inbound, trace_count, error_count, duration_sum_ms, duration_max_ms, {lbColumns})
-            SELECT intDiv(trm.bucket_unix_nano, {nanosPerHour}) * {nanosPerHour}, trm.resource_id, trm.root_name, trm.inbound,
-                   SUM(trm.trace_count), SUM(trm.error_count),
-                   SUM(trm.duration_sum_ms), MAX(trm.duration_max_ms),
-                   {lbSums}
-            FROM trace_rollup_minute AS trm FINAL
-            WHERE trm.bucket_unix_nano >= @from AND trm.bucket_unix_nano < @to
-            GROUP BY intDiv(trm.bucket_unix_nano, {nanosPerHour}) * {nanosPerHour}, trm.resource_id, trm.root_name, trm.inbound
-            """;
-        await using var conn = await OpenConnectionAsync(ct);
-        await conn.ExecuteAsync(new CommandDefinition(sql, new { from = fromInclusive, to = toExclusive }, cancellationToken: ct));
+        public string Partition { get; set; } = null!;
+        public long Rows { get; set; }
     }
 }

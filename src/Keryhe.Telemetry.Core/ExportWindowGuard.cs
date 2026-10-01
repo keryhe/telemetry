@@ -22,6 +22,6 @@ public static class ExportWindowGuard
             return Result.Ok;
 
         return new Result(false,
-            $"Export is limited to a {maxDays}-day window on {capabilities.Tier} tier. Narrow the time range.");
+            $"Export is limited to a {maxDays}-day window. Narrow the time range.");
     }
 }

@@ -3,11 +3,12 @@ import { Injectable, inject, signal } from '@angular/core';
 import { firstValueFrom } from 'rxjs';
 import { APP_CONFIG } from '../config/app-config';
 
-/** `GET /api/capabilities` response shape (list-pages-server-side plan, decision 40). */
+/**
+ * `GET /api/capabilities` response shape. Schema 3.0.0 removed the provider tier and the
+ * indexed-search flag (search is unindexed and window-bounded on every provider).
+ */
 export interface Capabilities {
   provider: string;
-  tier: 'Analytics' | 'Standard';
-  indexedSearch: boolean;
   exemplarPaging: boolean;
   rawSearchWindowHours: number | null;
   exportMaxWindowDays: number;
@@ -15,8 +16,6 @@ export interface Capabilities {
 
 const DEFAULT_CAPABILITIES: Capabilities = {
   provider: 'Unknown',
-  tier: 'Analytics',
-  indexedSearch: true,
   exemplarPaging: true,
   rawSearchWindowHours: null,
   exportMaxWindowDays: 7,
@@ -25,8 +24,8 @@ const DEFAULT_CAPABILITIES: Capabilities = {
 /**
  * Fetches the active provider's capabilities once at startup and caches them for the rest of the
  * session (list-pages-server-side plan, Phase 2) — every later phase's UI reads this instead of
- * calling `/api/capabilities` itself. Falls back to the analytics-tier defaults (no limit shown)
- * on any failure, since guessing "unlimited" is safer for the UI than guessing "restricted".
+ * calling `/api/capabilities` itself. Falls back to defaults (no search limit shown) on any
+ * failure, since guessing "unlimited" is safer for the UI than guessing "restricted".
  */
 @Injectable({ providedIn: 'root' })
 export class CapabilitiesService {
@@ -44,7 +43,7 @@ export class CapabilitiesService {
       .catch((err) => console.warn('[capabilities] Failed to load /api/capabilities; using defaults.', err));
   }
 
-  /** Resolves once the initial fetch has settled (success or fallback) — await before reading a limit that must reflect the real tier. */
+  /** Resolves once the initial fetch has settled (success or fallback) — await before reading a limit that must reflect the real provider. */
   whenReady(): Promise<void> {
     return this.ready;
   }

@@ -158,15 +158,19 @@ public sealed class ClickHouseObserver : DatabaseObserverBase
 
     /// <summary>
     /// The read side's view: <c>resources</c>/<c>metrics</c> are collapsed to one row per id before joining (a pending merge would otherwise multiply
-    /// counts), and spans are read as <c>LIMIT 1 BY trace_id, span_id</c>. The raw span count is returned too, so the report can show pending merge duplicates.
+    /// counts). On a 2.x schema spans are a <c>ReplacingMergeTree</c> and are read as <c>LIMIT 1 BY trace_id, span_id</c>, with the raw span count returned too so the
+    /// report can show pending merge duplicates. On 3.0.0 (recognised by <c>trace_index</c>) spans are a plain <c>MergeTree</c> that stores a re-delivered span again, so
+    /// they are counted as they are and there is no merge-pending number.
     /// </summary>
     public override async Task<RowCounts> CountRowsAsync(long cutoffNanos, CancellationToken cancellationToken)
     {
         var cells = new List<RowCountCell>();
+        var replacingSpans = (long)await ScalarAsync(
+            "SELECT count() FROM system.tables WHERE database = currentDatabase() AND name = 'trace_index'", cancellationToken) == 0;
         foreach (var t in CountedTable.All)
         {
             var age = $"if(t.{t.TimeColumn} >= {cutoffNanos}, 0, 1)";
-            var source = t.Table == "spans"
+            var source = t.Table == "spans" && replacingSpans
                 ? $"(SELECT resource_id, {t.TimeColumn} FROM spans LIMIT 1 BY trace_id, span_id)"
                 : t.Table;
             var joins = t.ViaMetric
@@ -177,6 +181,7 @@ public sealed class ClickHouseObserver : DatabaseObserverBase
                 cancellationToken, commandTimeoutSeconds: 1800);
             cells.AddRange(rows.Select(r => new RowCountCell(Long(r[0]), t.Table, Long(r[1]) == 1, Long(r[2]))));
         }
+        if (!replacingSpans) return new RowCounts(cells, null);
         var raw = await ScalarAsync("SELECT count() FROM spans", cancellationToken);
         return new RowCounts(cells, (long)raw);
     }

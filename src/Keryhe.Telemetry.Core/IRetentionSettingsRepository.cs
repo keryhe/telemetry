@@ -18,12 +18,12 @@ namespace Keryhe.Telemetry.Core;
 /// log record -- a targeted delete on an audit record is a liability, not a feature. The three
 /// sweeps below prune by age and nothing else.
 ///
-/// None of the sweeps is tenant-scoped, and that is deliberate rather than an oversight.
-/// Retention is an operator concern; only <c>resources</c> carries a <c>tenant_id</c>, so
-/// scoping would force a subquery on <c>resources</c> into every predicate and displace the
-/// access paths these sweeps depend on -- the <c>time_unix_nano</c> indexes, Timescale's
-/// <c>drop_chunks</c>, ClickHouse's partition drops. The settings row itself is likewise a
-/// single global row, not per-tenant, for the same reason.
+/// The retention WINDOWS are global (one settings row, set by the operator), but since schema 3.0.0
+/// spans and log records carry their own <c>tenant_id</c>, so the relational sweeps delete tenant by
+/// tenant through the <c>(tenant_id, time)</c> access path those tables lead with. Timescale
+/// (<c>drop_chunks</c>) and ClickHouse (<c>DROP PARTITION</c>) drop whole chunks/partitions instead,
+/// so on those two retention granularity is the chunk interval / the day, and the returned counts
+/// are rows in the dropped chunks/partitions (an estimate on Timescale).
 /// </summary>
 public interface IRetentionSettingsRepository
 {
@@ -38,9 +38,8 @@ public interface IRetentionSettingsRepository
     Task UpdateSettingsAsync(RetentionSettings settings, CancellationToken ct = default);
 
     /// <summary>
-    /// Removes spans that started before <c>UtcNow - retentionPeriod</c>. Span events and links
-    /// go with them via <c>ON DELETE CASCADE</c> on the relational providers, and by explicit
-    /// child deletes on ClickHouse.
+    /// Removes spans that started before <c>UtcNow - retentionPeriod</c>; a span's events and links
+    /// are columns on its row, so they go with it.
     ///
     /// Returns the number of SPAN rows removed, not the number of distinct traces -- counting
     /// traces would cost a second scan of the largest table in the schema for a number retention

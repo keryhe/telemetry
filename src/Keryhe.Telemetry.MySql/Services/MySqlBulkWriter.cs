@@ -12,10 +12,11 @@ namespace Keryhe.Telemetry.MySql.Services;
 /// <summary>
 /// MySQL implementation of <see cref="ITelemetryBulkWriter"/>. Owns only the
 /// dialect-specific flush logic — batched multi-row <c>INSERT</c> for the high-volume
-/// tables, <c>INSERT IGNORE</c> + a natural-key <c>SELECT</c> to resolve span ids, and
-/// <c>INSERT ... ON DUPLICATE KEY UPDATE id = LAST_INSERT_ID(id)</c> upserts for
-/// resource/scope dedup. The channel-draining loop and the normalization/hashing helpers
-/// live in <c>Keryhe.Telemetry.Core.Data</c>. Targets MySQL 8.0+.
+/// tables (spans included: since schema 3.0.0 a span is a plain append with no unique key, so no
+/// <c>INSERT IGNORE</c>), and <c>INSERT ... ON DUPLICATE KEY UPDATE id = LAST_INSERT_ID(id)</c>
+/// upserts for resource/scope/metric dedup. The channel-draining loop and the
+/// normalization/hashing helpers live in <c>Keryhe.Telemetry.Core.Data</c>. Targets MySQL 8.0.19+
+/// (the <c>AS new</c> upsert alias); MariaDB is not supported.
 ///
 /// Each <c>Flush*Async</c> runs inside a single transaction, so a failure partway through
 /// leaves zero rows from that batch rather than a partially-applied flush. Every command
@@ -261,8 +262,8 @@ public sealed class MySqlBulkWriter(
     {
         const string sql = """
             INSERT INTO resources (attributes_json, resource_hash, schema_url, tenant_id, service_name)
-            VALUES (@attrJson, @hash, @schemaUrl, @tenantId, @serviceName)
-            ON DUPLICATE KEY UPDATE id = LAST_INSERT_ID(id), service_name = VALUES(service_name)
+            VALUES (@attrJson, @hash, @schemaUrl, @tenantId, @serviceName) AS new
+            ON DUPLICATE KEY UPDATE id = LAST_INSERT_ID(id), service_name = new.service_name
             """;
 
         await using var cmd = new MySqlCommand(sql, conn) { Transaction = tx };
@@ -312,12 +313,17 @@ public sealed class MySqlBulkWriter(
         {
             "resource_id", "scope_id", "time_unix_nano", "observed_time_unix_nano",
             "severity_number", "severity_text", "body_type", "body_value",
-            "dropped_attributes_count", "flags", "trace_id", "span_id", "attributes_json", "event_name"
+            "dropped_attributes_count", "flags", "trace_id", "span_id", "attributes_json", "event_name",
+            "tenant_id", "service_name"
         };
 
-        var rows = new List<object?[]>(records.Count);
-        foreach (var r in records)
+        // Ordered by time (the primary key's second column) so concurrent multi-row inserts take their
+        // secondary-index locks in a consistent order -- unordered inserts deadlock on secondary indexes.
+        var ordered = records.OrderBy(r => r.TimeUnixNano ?? 0L).ToList();
+        var rows = new List<object?[]>(ordered.Count);
+        foreach (var r in ordered)
         {
+            var (tenantId, serviceName) = TenantAndService(r.Resource);
             rows.Add(new object?[]
             {
                 resourceIds[ResourceKey(r.Resource)],
@@ -333,7 +339,9 @@ public sealed class MySqlBulkWriter(
                 (object?)r.TraceIdHex           ?? DBNull.Value,
                 (object?)r.SpanIdHex            ?? DBNull.Value,
                 (object?)SerializeJsonOrNull(r.Attributes) ?? DBNull.Value,
-                (object?)r.EventName            ?? DBNull.Value
+                (object?)r.EventName            ?? DBNull.Value,
+                tenantId,
+                (object?)serviceName            ?? DBNull.Value
             });
         }
 
@@ -350,13 +358,13 @@ public sealed class MySqlBulkWriter(
         "name", "kind", "start_time_unix_nano", "end_time_unix_nano",
         "dropped_attributes_count", "dropped_events_count", "dropped_links_count",
         "trace_state", "status_code", "status_message", "attributes_json", "flags",
-        "events_json", "links_json"
+        "events_json", "links_json", "tenant_id", "service_name"
     ];
 
-    // INSERT IGNORE, chunked. Since schema 2.11.0 a span's events and links are JSON columns on
-    // the span row itself, so nothing downstream needs each inserted span's generated id -- the
-    // affected-row accounting and the LAST_INSERT_ID()/SELECT id-recovery fallback this method
-    // used to carry existed only to attach child span_events/span_links rows, and both are gone.
+    // A plain multi-row INSERT, chunked: spans has no unique key (a re-delivered span is stored
+    // again and reads tolerate it). Rows are ordered by (trace_id, span_id) so concurrent flushes
+    // take their idx_spans_trace_span locks in a consistent order -- unordered multi-row inserts
+    // deadlock on secondary indexes (the earlier plan's finding).
     private static async Task BulkInsertSpansAsync(
         MySqlConnection conn,
         MySqlTransaction tx,
@@ -365,13 +373,10 @@ public sealed class MySqlBulkWriter(
         Dictionary<string, long> scopeIds,
         CancellationToken ct)
     {
-        // Dedup within the batch on the natural key, so a chunk never carries the same
-        // (trace_id, span_id) twice.
-        var rows = new List<object?[]>();
-        var added = new HashSet<(string, string)>();
-        foreach (var span in spans)
+        var rows = new List<object?[]>(spans.Count);
+        foreach (var span in spans.OrderBy(s => s.TraceIdHex, StringComparer.Ordinal).ThenBy(s => s.SpanIdHex, StringComparer.Ordinal))
         {
-            if (!added.Add((span.TraceIdHex, span.SpanIdHex))) continue;
+            var (tenantId, serviceName) = TenantAndService(span.Resource);
             rows.Add(new object?[]
             {
                 span.TraceIdHex,
@@ -392,7 +397,9 @@ public sealed class MySqlBulkWriter(
                 (object?)SerializeJsonOrNull(span.Attributes) ?? DBNull.Value,
                 span.Flags,
                 (object?)SerializeListOrNull(span.Events) ?? DBNull.Value,
-                (object?)SerializeListOrNull(span.Links)  ?? DBNull.Value
+                (object?)SerializeListOrNull(span.Links)  ?? DBNull.Value,
+                tenantId,
+                (object?)serviceName ?? DBNull.Value
             });
         }
 
@@ -403,7 +410,7 @@ public sealed class MySqlBulkWriter(
         for (var offset = 0; offset < rows.Count; offset += ChunkSize)
         {
             var count = Math.Min(ChunkSize, rows.Count - offset);
-            var sb = new StringBuilder("INSERT IGNORE INTO spans (").Append(colList).Append(") VALUES ");
+            var sb = new StringBuilder("INSERT INTO spans (").Append(colList).Append(") VALUES ");
             await using var cmd = new MySqlCommand { Connection = conn, Transaction = tx };
             for (var r = 0; r < count; r++)
             {
@@ -446,14 +453,15 @@ public sealed class MySqlBulkWriter(
         // makes cmd.LastInsertedId yield the EXISTING row's id on a duplicate key. It fires even
         // when the row is byte-identical and affected_rows is 0.
         //
-        // VALUES(col) is deprecated in MySQL 8.0.20+ in favour of the "AS new" alias form, but the
-        // alias form needs 8.0.19+ and is not supported by MariaDB, so keep VALUES() here.
+        // The "AS new" alias form (MySQL 8.0.19+) replaces the deprecated VALUES(col). tenant_id and
+        // service_name are inserted but never refreshed on conflict: they cannot go stale, because the
+        // resource hash includes service.name.
         const string sql = """
-            INSERT INTO metrics (resource_id, scope_id, name, description, unit, type)
-            VALUES (@resourceId, @scopeId, @name, @description, @unit, @type)
+            INSERT INTO metrics (resource_id, scope_id, name, description, unit, type, tenant_id, service_name)
+            VALUES (@resourceId, @scopeId, @name, @description, @unit, @type, @tenantId, @serviceName) AS new
             ON DUPLICATE KEY UPDATE
-                description = VALUES(description),
-                unit        = VALUES(unit),
+                description = new.description,
+                unit        = new.unit,
                 id          = LAST_INSERT_ID(id)
             """;
 
@@ -491,6 +499,9 @@ public sealed class MySqlBulkWriter(
             cmd.Parameters.AddWithValue("@description", (object?)m.Description ?? DBNull.Value);
             cmd.Parameters.AddWithValue("@unit",        (object?)m.Unit        ?? DBNull.Value);
             cmd.Parameters.AddWithValue("@type",        m.Type.ToString());
+            var (tenantId, serviceName) = TenantAndService(m.Resource);
+            cmd.Parameters.AddWithValue("@tenantId",    tenantId);
+            cmd.Parameters.AddWithValue("@serviceName", (object?)serviceName ?? DBNull.Value);
             await cmd.ExecuteNonQueryAsync(ct);
 
             var id = cmd.LastInsertedId;

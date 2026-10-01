@@ -23,53 +23,10 @@
 #   CLICKHOUSE_HOST=localhost schema/apply-schema.sh clickhouse
 #   MYSQL_HOST=localhost MYSQL_USER=root MYSQL_PWD=secret schema/apply-schema.sh mysql
 #
-# This runner is for FRESH installs only -- the full schema scripts are not written to be
-# re-applied on top of an older schema version. An EXISTING database on an older version must be
-# upgraded with the matching script under schema/migrations/ instead, run directly with the
-# provider's own client -- for PostgreSQL (plain), that is the single, idempotent
-# schema/migrations/PostgreSQL-Migrate.sql, which brings ANY existing version (2.6.0 or later, or
-# no schema_version row at all) up to current and is safe to re-run any number of times, e.g.:
-#   psql -d telemetry -v ON_ERROR_STOP=1 -f schema/migrations/PostgreSQL-Migrate.sql
-# (Other providers still use their own per-version migration scripts under schema/migrations/.)
-#
-# Timescale: upgrade an existing installation with schema/migrations/Timescale-Migrate.sql
-# instead of a chain of per-version files -- it is idempotent (every statement is guarded with
-# IF NOT EXISTS / catalog checks, including the TimescaleDB-specific hypertable/compression/
-# continuous-aggregate calls) and safe to run, and re-run, against a database at ANY prior schema
-# version (2.10.0 through 2.13.3) or a completely fresh, unversioned database:
-#   PGUSER=postgres PGPASSWORD=secret psql -d telemetry -v ON_ERROR_STOP=1 \
-#       -f schema/migrations/Timescale-Migrate.sql
-# The former per-version chain (Timescale-2.10.0-to-2.11.0.sql, -2.11.0-to-2.12.0.sql, ...,
-# -2.13.2-to-2.13.3.sql) has been removed now that this single script supersedes it.
-#
-# SQL Server: upgrade an existing installation with schema/migrations/SqlServer-Migrate.sql
-# instead of a chain of per-version files -- every step is guarded (sys.columns/sys.indexes/
-# sys.key_constraints/OBJECT_ID existence checks, or a data predicate for the two backfills) and
-# it is safe to run, and re-run, against a database at ANY prior schema version (2.6.0 through
-# 2.13.3) or a database with no schema_version row at all:
-#   sqlcmd -d telemetry -b -I -i schema/migrations/SqlServer-Migrate.sql
-# The former per-version chain (SqlServer-2.6.0-to-2.10.0.sql, -2.10.0-to-2.11.0.sql, ...,
-# -2.13.2-to-2.13.3.sql) has been removed now that this single script supersedes it.
-#
-# ClickHouse: upgrade an existing installation with schema/migrations/ClickHouse-Migrate.sql
-# instead of a chain of per-version files -- every statement is natively idempotent (IF NOT
-# EXISTS / IF EXISTS DDL, ReplacingMergeTree/AggregatingMergeTree-safe backfills) and it is safe
-# to run, and re-run, against a database at ANY prior schema version (2.11.0 through 2.13.3) or a
-# database that already has the pre-2.11.0 base schema but no schema_version row:
-#   CLICKHOUSE_HOST=localhost clickhouse-client --database telemetry --multiquery \
-#       < schema/migrations/ClickHouse-Migrate.sql
-# The former per-version chain (ClickHouse-2.11.0-to-2.12.0.sql, -2.12.0-to-2.13.0.sql, ...,
-# -2.13.2-to-2.13.3.sql) has been removed now that this single script supersedes it.
-#
-# MySQL: upgrade an existing installation with schema/migrations/MySQL-Migrate.sql instead of a
-# chain of per-version files -- every guarded structural change (ADD COLUMN / ADD INDEX / DROP
-# INDEX) runs inside a one-off stored procedure that probes information_schema.columns/.statistics
-# first (MySQL, unlike MariaDB, has no native IF [NOT] EXISTS on those ALTER TABLE clauses), and it
-# is safe to run, and re-run, against a database at ANY prior schema version (2.11.0 through
-# 2.13.3) or a completely fresh, unversioned database:
-#   mysql -u root telemetry < schema/migrations/MySQL-Migrate.sql
-# The former per-version chain (MySQL-2.11.0-to-2.12.0.sql, -2.12.0-to-2.13.0.sql, ...,
-# -2.13.2-to-2.13.3.sql) has been removed now that this single script supersedes it.
+# Schema 3.0.0 is a FRESH-INSTALL schema: there is no migration from 2.x (schema-simplification
+# plan, decision 4). An existing 2.x database must be recreated; the full schema scripts are not
+# written to be re-applied on top of another version. This runner skips the apply only when the
+# 3.0.0 version row is already recorded.
 
 set -euo pipefail
 
@@ -79,7 +36,7 @@ PROVIDER="${1:-}"
 DATABASE="${2:-telemetry}"
 
 # Target version must match the value written by the schema scripts.
-TARGET_VERSION="2.13.3"
+TARGET_VERSION="3.0.0"
 
 if [[ -z "$PROVIDER" ]]; then
     echo "usage: $0 <postgresql|timescale|sqlserver|clickhouse|mysql> [database]" >&2

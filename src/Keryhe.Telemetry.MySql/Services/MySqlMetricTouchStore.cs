@@ -30,8 +30,8 @@ public class MySqlMetricTouchStore(IConfiguration configuration) : IMetricTouchS
             var values = string.Join(",", Enumerable.Range(0, count).Select(i => $"(@id{i}, @ts{i})"));
             var sql = $"""
                 INSERT INTO metric_last_seen (metric_id, last_seen_unix_nano)
-                VALUES {values}
-                ON DUPLICATE KEY UPDATE last_seen_unix_nano = GREATEST(last_seen_unix_nano, VALUES(last_seen_unix_nano));
+                VALUES {values} AS new
+                ON DUPLICATE KEY UPDATE last_seen_unix_nano = GREATEST(metric_last_seen.last_seen_unix_nano, new.last_seen_unix_nano);
                 """;
 
             await using var cmd = new MySqlCommand(sql, conn);

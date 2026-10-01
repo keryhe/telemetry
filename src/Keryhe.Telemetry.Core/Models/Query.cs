@@ -48,11 +48,11 @@ public sealed class LogSummaryQuery
     public string? Search { get; init; }
     public DateTime? AsOf { get; init; }
 
-    /// <summary>Target bucket count for the raw-path fallback; the rollup path aligns to whole minutes/hours instead (Target API's "Summary source" note).</summary>
+    /// <summary>Target bucket count for the chart.</summary>
     public int BucketCount { get; init; } = 60;
 }
 
-/// <summary>One chart bucket of a log summary (list-pages-server-side plan, Phase 2), whether sourced from the rollup tables or computed raw.</summary>
+/// <summary>One chart bucket of a log summary (list-pages-server-side plan, Phase 2).</summary>
 public sealed class LogSummaryBucket
 {
     public DateTime Timestamp { get; init; }
@@ -67,7 +67,7 @@ public sealed class LogSummaryBucket
 /// <summary><c>GET /api/logs/summary</c>'s response (Target API): <c>{ source, buckets[], total, totalIsLowerBound, newSinceAsOf }</c>.</summary>
 public sealed class LogSummaryResult
 {
-    /// <summary><c>"rollup"</c> or <c>"raw"</c> (Target API's "Summary source" note).</summary>
+    /// <summary>Always <c>"raw"</c> since schema 3.0.0 (there are no rollup tables); kept so the client contract is unchanged.</summary>
     public string Source { get; init; } = "raw";
     public List<LogSummaryBucket> Buckets { get; init; } = [];
     public long Total { get; init; }
@@ -139,16 +139,16 @@ public sealed class TraceQuery
     /// <summary>Exact <c>service.name</c> match, when set.</summary>
     public string? Service { get; init; }
 
-    /// <summary>Only traces containing a span with this operation (span name), when set.</summary>
+    /// <summary>Only traces whose anchor span has this name (the operation shown on the row), when set (decision 15).</summary>
     public string? Operation { get; init; }
 
-    /// <summary>Minimum trace duration in milliseconds, applied to the anchor span's own duration (decision 4). Only meaningful for <c>slow</c> mode.</summary>
+    /// <summary>Minimum trace duration in milliseconds, applied to the anchor span's own duration (decision 11). Only meaningful for <c>slow</c> mode.</summary>
     public double? MinDurationMs { get; init; }
 
     /// <summary>Maximum trace duration in milliseconds, applied to the anchor span's own duration. Only meaningful for <c>slow</c> mode.</summary>
     public double? MaxDurationMs { get; init; }
 
-    /// <summary>Raw search text (decision 10): free text, <c>key:value</c>/<c>key=value</c>, negation, trace id — parsed server-side, matched against any span in the trace (decision 9).</summary>
+    /// <summary>Raw search text: free text, <c>key:value</c>/<c>key=value</c>, negation, trace id — parsed server-side, matched against any span in the whole trace regardless of the service filter (decision 16).</summary>
     public string? Search { get; init; }
 
     /// <summary>Page size, clamped 1-500 by the repository.</summary>
@@ -179,7 +179,7 @@ public sealed class TraceSummaryQuery
     public string? Search { get; init; }
     public DateTime? AsOf { get; init; }
 
-    /// <summary>Target bucket count for the raw-path fallback; the rollup path aligns to whole minutes/hours instead (Target API's "Summary source" note).</summary>
+    /// <summary>Target bucket count for the chart.</summary>
     public int BucketCount { get; init; } = 60;
 
     /// <summary>Latency heatmap row count (time columns come from <see cref="BucketCount"/>).</summary>
@@ -189,19 +189,19 @@ public sealed class TraceSummaryQuery
 /// <summary><c>GET /api/traces/summary</c>'s response (Target API).</summary>
 public sealed class TraceSummaryResult
 {
-    /// <summary><c>"rollup"</c> or <c>"raw"</c> (Target API's "Summary source" note).</summary>
+    /// <summary>Always <c>"raw"</c> since schema 3.0.0 (there are no rollup tables); kept so the client contract is unchanged.</summary>
     public string Source { get; init; } = "raw";
     public List<TraceVolumeBucket> Buckets { get; init; } = [];
 
-    /// <summary>Window-wide totals/percentiles over inbound-request roots (decision 13), including <see cref="TraceWindowSummary.LastTraceStartTime"/>.</summary>
+    /// <summary>Window-wide totals/percentiles over inbound-request anchors (decision 12), including <see cref="TraceWindowSummary.LastTraceStartTime"/>.</summary>
     public TraceWindowSummary Summary { get; init; } = new();
     public List<ServiceStats> Services { get; init; } = [];
     public List<TraceLatencyBucket> LatencyBuckets { get; init; } = [];
 
-    /// <summary>The paginator's population: every trace (roots plus <see cref="Models.TraceWindowSummary"/>'s orphan anchors), always computed on the raw path (decision 13/Target API).</summary>
+    /// <summary>The paginator's population: every trace's anchor, of any kind (schema-simplification decisions 10 and 12).</summary>
     public long ListTotal { get; init; }
 
-    /// <summary>The cards' population: inbound-request anchors only (decision 13).</summary>
+    /// <summary>The cards' population: inbound-request anchors only -- kind SERVER/CONSUMER (decision 12).</summary>
     public long RequestCount { get; init; }
     public bool TotalIsLowerBound { get; init; }
     public long NewSinceAsOf { get; init; }

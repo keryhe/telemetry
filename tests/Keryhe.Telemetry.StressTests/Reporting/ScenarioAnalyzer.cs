@@ -29,10 +29,11 @@ public static class ScenarioAnalyzer
         var write = WriteSide(hostSamples, from, to);
         var pages = PageStats(r.Tour);
         var endpoints = Endpoints(r.Tour, hostSamples, from, to);
+        var apiRoutes = ApiRoutes(hostSamples, from, to);
         var chains = BlockingChains(r.Database);
 
         var headline = BuildHeadline(r, hostSamples, from, to, write, pages);
-        return new ScenarioReport(id, r, headline, write, pages, endpoints, SlowestLoads(r.Tour), chains, series, markers, timelineSeconds);
+        return new ScenarioReport(id, r, headline, write, pages, endpoints, SlowestLoads(r.Tour), chains, series, markers, timelineSeconds, apiRoutes);
     }
 
     // ---- headline -------------------------------------------------------------------------------------------------
@@ -68,7 +69,9 @@ public static class ScenarioAnalyzer
             ready.Count == 0 ? null : Percentile(ready, 0.95), r.Tour?.Pages.Count(p => p.TimedOut) ?? 0,
             r.Database?.ContainerStats.Select(c => c.CpuCores).DefaultIfEmpty(0).Max() ?? 0,
             (r.Database?.ContainerStats.Select(c => c.MemoryBytes).DefaultIfEmpty(0).Max() ?? 0) / 1048576.0,
-            r.Quiesce?.Reached ?? false, r.Hosts.Count > 0 && r.Hosts.All(h => h.Shutdown.DrainCompleted));
+            r.Quiesce?.Reached ?? false, r.Hosts.Count > 0 && r.Hosts.All(h => h.Shutdown.DrainCompleted),
+            write.Where(w => w.Name == "commit_lag").Select(w => w.P95Ms).DefaultIfEmpty(0).Max(), r.ProfileUsed.WriteOnly,
+            r.Ramp?.LastSustainedStep is { } sustained ? r.Ramp.Steps[sustained].CommitLagP95Ms : null);
     }
 
     public static double? Percentile(IEnumerable<double> values, double p)
@@ -85,7 +88,7 @@ public static class ScenarioAnalyzer
     public static IReadOnlyList<HistogramStat> WriteSide(IReadOnlyDictionary<HostRole, IReadOnlyList<MetricSample>> hosts, DateTimeOffset from, DateTimeOffset to)
     {
         var stats = new List<HistogramStat>();
-        foreach (var name in new[] { "gate_wait", "flush_duration", "flush_batch_size" })
+        foreach (var name in new[] { "gate_wait", "flush_duration", "flush_batch_size", "commit_lag" })
             foreach (var signal in Signals)
             {
                 var samples = InWindow(hosts, Ingestion + name, from, to)
@@ -146,6 +149,23 @@ public static class ScenarioAnalyzer
                 g.Count(q => q.Source == "rollup"), g.Count(q => q.Source == "raw"));
         }).OrderByDescending(e => e.ClientP95Ms).ToList();
     }
+
+    /// <summary>
+    /// Every API route the host served in the window, from the host's own <c>http.server.request.duration</c>, whoever called it (the browser tour,
+    /// the marker probes, anything else). Kept apart from the write-side instruments so read cost is never mistaken for write cost. Percentiles are
+    /// the count-weighted mean of per-second quantiles, so approximate.
+    /// </summary>
+    public static IReadOnlyList<ApiRouteStat> ApiRoutes(IReadOnlyDictionary<HostRole, IReadOnlyList<MetricSample>> hosts, DateTimeOffset from, DateTimeOffset to) =>
+        InWindow(hosts, "http.server.request.duration", from, to)
+            .Where(s => s.Count is > 0 && s.P95 is not null && s.Tags.GetValueOrDefault("http.route") is { } route && route.StartsWith("api/", StringComparison.OrdinalIgnoreCase))
+            .GroupBy(s => EndpointKey(s.Tags["http.route"]))
+            .Select(g =>
+            {
+                var w = Weighted("server", "", g.ToList());
+                var errors = g.Where(s => int.TryParse(s.Tags.GetValueOrDefault("http.response.status_code"), out var code) && code >= 500).Sum(s => s.Count!.Value);
+                return new ApiRouteStat(g.Key, w.Count, (long)errors, w.P50Ms * 1000, w.P95Ms * 1000, w.P99Ms * 1000);
+            })
+            .OrderByDescending(r => r.P95Ms).ToList();
 
     public static IReadOnlyList<SlowPageLoad> SlowestLoads(TourResults? tour, int take = 20) =>
         tour?.Pages.OrderByDescending(p => p.ReadyMs is null ? double.MaxValue : p.ReadyMs.Value).Take(take)
@@ -209,6 +229,7 @@ public static class ScenarioAnalyzer
                 var sig = samples.Where(s => s.Tags.GetValueOrDefault("signal") == signal).ToList();
                 Add(all, "write.gate_wait", $"{signal}", "ms", sig.Where(s => s.Instrument == Ingestion + "gate_wait" && s.P95 is not null && s.Count is > 0).Select(s => new SeriesPoint(t(s.At), s.P95!.Value)));
                 Add(all, "write.flush_duration", $"{signal}", "ms", sig.Where(s => s.Instrument == Ingestion + "flush_duration" && s.Tags.GetValueOrDefault("outcome") == "ok" && s.P95 is not null && s.Count is > 0).Select(s => new SeriesPoint(t(s.At), s.P95!.Value)));
+                Add(all, "write.commit_lag", $"{signal}", "ms", sig.Where(s => s.Instrument == Ingestion + "commit_lag" && s.P95 is not null && s.Count is > 0).Select(s => new SeriesPoint(t(s.At), s.P95!.Value)));
                 Add(all, "write.batch_size", $"{signal}", "records", sig.Where(s => s.Instrument == Ingestion + "flush_batch_size" && s.P95 is not null && s.Count is > 0).Select(s => new SeriesPoint(t(s.At), s.P95!.Value)));
                 Add(all, "write.resident", $"{signal}", "records", sig.Where(s => s.Instrument == Ingestion + "resident_records" && Finite(s.Value)).Select(s => new SeriesPoint(t(s.At), s.Value)));
             }

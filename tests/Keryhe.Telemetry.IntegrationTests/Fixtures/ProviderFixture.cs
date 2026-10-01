@@ -36,6 +36,9 @@ public abstract class ProviderFixture : IAsyncLifetime
     /// <summary>The provider's database container (started, schema applied and diagnostics off, as the integration tests always ran).</summary>
     protected abstract ProviderContainer Container { get; }
 
+    /// <summary>The test database's connection string, for tests that issue raw SQL (counting rows, reading plans).</summary>
+    public string DatabaseConnectionString => Container.ConnectionString;
+
     /// <summary>Connection string for the write side (<c>ConnectionStrings:Collector</c>).</summary>
     protected string CollectorConnectionString => Container.ConnectionString;
 

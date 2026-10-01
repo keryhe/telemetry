@@ -27,7 +27,7 @@ import { CapabilitiesService } from '../../../core/services/capabilities.service
           <tr>
             <td><strong>Free Text</strong></td>
             <td><code>"database query"</code></td>
-            <td>Searches the operation name and service name</td>
+            <td>Searches span names and status messages across the whole trace</td>
           </tr>
           <tr>
             <td><strong>Exact Match</strong></td>
@@ -55,7 +55,7 @@ import { CapabilitiesService } from '../../../core/services/capabilities.service
       <h3 class="section">Examples</h3>
       <ul class="examples">
         <li><code>a1b2c3d4e5f6...</code> — Jump to a specific trace ID</li>
-        <li><code>checkout</code> — Find traces whose operation or service contains "checkout"</li>
+        <li><code>checkout</code> — Find traces containing a span whose name or status message contains "checkout"</li>
         <li><code>http.status_code=500</code> — Traces containing a span with status code exactly 500</li>
         <li><code>http.method:POST</code> — Traces containing a span whose method contains "POST"</li>
         <li><code>-http.method:GET</code> — Traces with no GET span at all</li>
@@ -63,23 +63,17 @@ import { CapabilitiesService } from '../../../core/services/capabilities.service
       </ul>
 
       <div class="note info">
-        <strong>Tip:</strong> Attribute searches look at every span in the trace — its own
-        attributes and its resource attributes — not just the root span. A trace matches when
-        <em>some</em> span satisfies the condition, so the matching span may be several levels
-        deep. Attribute keys are always case-sensitive; free-text substring matching is
-        case-insensitive on every provider.
-        @if (capabilities().indexedSearch) {
-          A number or boolean attribute value (e.g. <code>http.status_code:500</code>) matches
-          regardless of case; a text attribute value match is case-sensitive on this database.
-          Excluding a term (<code>-key:value</code>) is always case-insensitive.
-        } @else {
-          Attribute value matching is case-insensitive.
-        }
+        <strong>Tip:</strong> Search finds <em>traces containing a matching span</em>. It looks at every
+        span in the trace — its own attributes and its resource attributes — whichever service it
+        belongs to, so the matching span may be several levels deep and in a service other than the
+        one selected. The row shown is still the trace's entry span (see the Operation and Duration
+        columns). Attribute keys are always case-sensitive; free-text substring matching is
+        case-insensitive, and so is attribute value matching.
       </div>
-      @if (!capabilities().indexedSearch && capabilities().rawSearchWindowHours) {
+      @if (capabilities().rawSearchWindowHours) {
         <div class="note warn">
-          <strong>Search window:</strong> free-text and attribute searches on this database are limited to the
-          last {{ capabilities().rawSearchWindowHours }} hours. A trace ID lookup, <code>mode=errors</code>,
+          <strong>Search window:</strong> free-text and attribute searches are limited to a
+          {{ capabilities().rawSearchWindowHours }}-hour time range. A trace ID lookup, <code>mode=errors</code>,
           or an unfiltered/service-filtered list can still cover a longer range.
         </div>
       }

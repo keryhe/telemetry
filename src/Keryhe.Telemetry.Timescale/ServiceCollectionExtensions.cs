@@ -41,8 +41,7 @@ public static class TimescaleServiceCollectionExtensions
         services.AddScoped<IAlertRuleRepository, TimescaleAlertRuleRepository>();
         services.AddScoped<ITenantCatalogRepository, TimescaleTenantCatalogRepository>();
         services.AddScoped<IRetentionSettingsRepository, TimescaleRetentionSettingsRepository>();
-        services.AddScoped<IRollupRepository, TimescaleLogRollupRepository>();
-        services.AddSingleton(ProviderCapabilities.FromConfiguration(ProviderTier.Analytics, configuration) with
+        services.AddSingleton(ProviderCapabilities.FromConfiguration(ProviderCapabilities.Default(), configuration) with
         {
             // The read repositories keep DapperReadRepository's default asOf expression, which backs off this far.
             AsOfBackoffSeconds = DapperReadRepository.PostgresAsOfBackoffSeconds

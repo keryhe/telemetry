@@ -1,0 +1,31 @@
+// Write-only ramp: the same load as "ramp" but nothing reads the database (no browsers, no marker probes), so the step that trips is the
+// provider's write ceiling. The ramp stops on drops, gate wait, client export latency/errors and commit lag (enqueue to commit p95).
+// Run it next to "ramp" on the same commit: the difference between the two ceilings is what reads cost the write path.
+{
+  "name": "ramp-write-only",
+  "tenants": 3,
+  "warmupSeconds": 60,
+  "writeOnly": true,
+  "load": {
+    "traces": { "spansPerSecond": 1000 },
+    "logs": { "recordsPerSecond": 1000 },
+    "metrics": { "dataPointsPerSecond": 1000 },
+    "transport": { "channels": 4 },
+    "time": { "lateArrivalFraction": 0.05, "orphanFraction": 0.02, "backdatedFraction": 0.02, "redeliveryFraction": 0.02 }
+  },
+  "ramp": {
+    "startScale": 1,
+    "stepScale": 1,
+    "stepSeconds": 60,
+    "maxSteps": 30,
+    "criteria": {
+      "maxDroppedRecords": 0,
+      "maxGateWaitP95Ms": 250,
+      "maxExportP99Seconds": 5,
+      "maxErrorRatePercent": 1,
+      "maxLagSeconds": 0,
+      "lagGrowthFactor": 1000000,
+      "maxCommitLagP95Ms": 5000
+    }
+  }
+}

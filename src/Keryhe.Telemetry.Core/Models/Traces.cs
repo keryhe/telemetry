@@ -68,25 +68,31 @@ public class TraceInfo
     public DateTime TraceEndTime { get; set; }
 
     /// <summary>
-    /// Whole-trace duration, unless a service filter produced this row — then it's that
-    /// service's own duration (the span of time between its earliest and latest span in this
-    /// trace), not the whole trace's. Same conditional applies to <see cref="ServiceName"/>,
-    /// <see cref="RootOperationName"/>, <see cref="HasErrors"/>, and <see cref="RootSpanAttributes"/>:
-    /// each reflects the filtered service's own spans when a service filter matched this trace,
-    /// and the trace's true root otherwise.
+    /// The ANCHOR span's own duration (end - start). The anchor is the trace's earliest span in
+    /// scope: the selected service's own earliest span when a service filter produced this row, the
+    /// whole trace's earliest span otherwise (schema-simplification decisions 10-11). The row's
+    /// <see cref="ServiceName"/>, <see cref="RootOperationName"/>, <see cref="AnchorKind"/> and
+    /// <see cref="DisplaySpanIdHex"/> are the anchor's too; <see cref="HasErrors"/> is whether any span
+    /// in scope has status ERROR; <see cref="SpanCount"/> counts the spans in scope. The slow filter
+    /// and the summary charts use the same duration. <see cref="TraceStartTime"/>/<see cref="TraceEndTime"/>
+    /// span the WHOLE trace, for the trace-detail link.
     /// </summary>
     public TimeSpan TraceDuration { get; set; }
     public string? ServiceName { get; set; }
+
+    /// <summary>The anchor span's name -- what the operation filter matches (decision 15).</summary>
     public string? RootOperationName { get; set; }
+
+    /// <summary>The anchor span's kind (<c>SERVER</c>, <c>CLIENT</c>, ...): the list shows every kind, the summary's request-count card counts only inbound ones (decision 12).</summary>
+    public string? AnchorKind { get; set; }
     public bool HasErrors { get; set; }
     public List<string> Services { get; set; } = new();
     public Dictionary<string, object>? RootSpanAttributes { get; set; }
 
     /// <summary>
-    /// The span id backing this row's displayed info — the trace's true root span when no
-    /// service filter is active, or the filtered service's own earliest-started span
-    /// (its entry point into this trace) otherwise. Always populated; the client uses it to
-    /// deep-link into the trace-detail page with that span expanded.
+    /// The anchor span's id -- the trace's earliest span, or the filtered service's own
+    /// earliest-started span (its entry point into this trace). Always populated; the client uses it
+    /// to deep-link into the trace-detail page with that span expanded.
     /// </summary>
     public string? DisplaySpanIdHex { get; set; }
 }
@@ -111,8 +117,8 @@ public class OperationStats
 }
 
 /// <summary>
-/// Per-service RED metrics for the dashboard's service health table, grouped by each trace's
-/// root-span service — see <see cref="TraceOverview"/> for how this is produced.
+/// Per-service RED metrics for the dashboard's service health table, grouped by each trace
+/// anchor's service.
 /// </summary>
 public class ServiceStats
 {

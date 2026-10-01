@@ -68,6 +68,8 @@ public abstract class ProviderContainer : IAsyncDisposable
         parameters.HostConfig ??= new HostConfig();
         if (Options.CpuLimit is { } cpus)
             parameters.HostConfig.NanoCPUs = (long)(cpus * 1_000_000_000);
+        if (Options.CpusetCpus is { Length: > 0 } cpuset)
+            parameters.HostConfig.CpusetCpus = cpuset;
         if (Options.MemoryLimitBytes is { } memory)
         {
             parameters.HostConfig.Memory = memory;

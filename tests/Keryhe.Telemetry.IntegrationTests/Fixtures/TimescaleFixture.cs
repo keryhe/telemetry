@@ -31,17 +31,9 @@ public sealed class TimescaleFixture : ProviderFixture
             """
             TRUNCATE TABLE log_records, spans, metrics, metric_last_seen,
                 gauge_data_points, sum_data_points, histogram_data_points,
-                exponential_histogram_data_points, summary_data_points,
-                log_rollup_minute, log_rollup_hour, orphan_roots, trace_rollup_minute, trace_rollup_hour
+                exponential_histogram_data_points, summary_data_points
             RESTART IDENTITY CASCADE
             """, conn);
         await cmd.ExecuteNonQueryAsync();
-
-        // See PostgreSqlFixture.ResetAsync's comment: rollup coverage is process-run state, reset
-        // between test classes the same way signal data is cleared.
-        await using var resetRollupState = new NpgsqlCommand(
-            "UPDATE rollup_state SET coverage_start_unix_nano = NULL, rolled_until_unix_nano = 0, repassed_until_unix_nano = 0, lease_owner = NULL, lease_expires_at = 'epoch'",
-            conn);
-        await resetRollupState.ExecuteNonQueryAsync();
     }
 }

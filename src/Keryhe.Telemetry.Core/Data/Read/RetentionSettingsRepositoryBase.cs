@@ -9,10 +9,16 @@ namespace Keryhe.Telemetry.Core.Data.Read;
 /// Dapper implementation of <see cref="IRetentionSettingsRepository"/>'s settings read/write.
 /// The <c>retention_settings</c> row is a fixed singleton (<c>id = 1</c>) with plain int
 /// columns, so unlike <see cref="AlertRuleRepositoryBase"/> there is no dialect-specific SQL to
-/// abstract here — every provider reads/writes it with the same statements. The three
-/// <c>Delete*</c> sweeps stay abstract: their DML differs per provider (batching strategy,
-/// cascade vs. explicit child deletes) the same way it did on the former
-/// <c>ITelemetryWriteStore</c> implementations.
+/// abstract here — every provider reads/writes it with the same statements.
+///
+/// The three <c>Delete*</c> sweeps (schema 3.0.0) are one shared shape for the three relational
+/// providers whose tables are not partitioned -- PostgreSQL, SQL Server and MySQL: spans and log
+/// records are deleted in bounded batches per tenant, through the <c>(tenant_id, time)</c> access
+/// path every one of those tables leads with, and the metric data-point tables in bounded batches
+/// through their time index. A provider supplies only its batched-DELETE dialect
+/// (<see cref="BatchedDeleteSql"/>). Timescale (<c>drop_chunks</c>) and ClickHouse
+/// (<c>DROP PARTITION</c>) override the sweeps outright: they drop whole chunks/partitions, so their
+/// retention granularity is the chunk interval / the day, not the row.
 /// </summary>
 public abstract class RetentionSettingsRepositoryBase : IRetentionSettingsRepository
 {
@@ -67,9 +73,76 @@ public abstract class RetentionSettingsRepositoryBase : IRetentionSettingsReposi
         settings.UpdatedAt = updatedAt;
     }
 
-    public abstract Task<int> DeleteOldTracesAsync(TimeSpan retentionPeriod, CancellationToken cancellationToken = default);
-    public abstract Task<int> DeleteOldMetricDataPointsAsync(TimeSpan retentionPeriod, CancellationToken cancellationToken = default);
-    public abstract Task<int> DeleteOldLogRecordsAsync(TimeSpan retentionPeriod, CancellationToken cancellationToken = default);
+    /// <summary>Rows removed per DELETE statement by the batched sweeps. Bounded so a large first sweep never runs as one long transaction or escalates its locks.</summary>
+    protected virtual int DeleteBatchSize => 5_000;
+
+    /// <summary>How long a sweep pauses after a full batch, so ingestion's own writes interleave with it.</summary>
+    protected virtual TimeSpan PauseBetweenBatches => TimeSpan.FromMilliseconds(25);
+
+    /// <summary>
+    /// One batched DELETE statement against <paramref name="table"/>, removing at most
+    /// <see cref="DeleteBatchSize"/> rows matching <paramref name="predicate"/> (which references the
+    /// <c>@cutoff</c> parameter, and <c>@tenantId</c> when the sweep is per tenant). Postgres has
+    /// neither <c>DELETE TOP</c> nor <c>DELETE ... LIMIT</c>; SQL Server and MySQL do, each in its own form.
+    /// </summary>
+    protected virtual string BatchedDeleteSql(string table, string predicate)
+        => throw new NotSupportedException($"{GetType().Name} does not implement batched deletes; it overrides the sweeps.");
+
+    /// <summary>Session setup for a sweep connection (SQL Server: <c>DEADLOCK_PRIORITY LOW</c>, so a sweep is the deadlock victim rather than an ingest flush).</summary>
+    protected virtual Task PrepareSweepConnectionAsync(DbConnection conn, CancellationToken ct) => Task.CompletedTask;
+
+    public virtual async Task<int> DeleteOldTracesAsync(TimeSpan retentionPeriod, CancellationToken cancellationToken = default)
+        => await SweepPerTenantAsync("spans", "start_time_unix_nano", retentionPeriod, cancellationToken);
+
+    public virtual async Task<int> DeleteOldLogRecordsAsync(TimeSpan retentionPeriod, CancellationToken cancellationToken = default)
+        => await SweepPerTenantAsync("log_records", "time_unix_nano", retentionPeriod, cancellationToken);
+
+    public virtual async Task<int> DeleteOldMetricDataPointsAsync(TimeSpan retentionPeriod, CancellationToken cancellationToken = default)
+    {
+        var cutoff = CutoffNano(retentionPeriod);
+        await using var conn = await OpenConnectionAsync(cancellationToken);
+        await PrepareSweepConnectionAsync(conn, cancellationToken);
+
+        var total = 0;
+        foreach (var table in TelemetryIngestionHelpers.TimePrunedMetricTables)
+            total += await BatchedDeleteAsync(conn, BatchedDeleteSql(table, "time_unix_nano < @cutoff"), new { cutoff }, cancellationToken);
+        return total;
+    }
+
+    /// <summary>Deletes <paramref name="table"/>'s expired rows tenant by tenant, through its <c>(tenant_id, time)</c> access path.</summary>
+    private async Task<int> SweepPerTenantAsync(string table, string timeColumn, TimeSpan retentionPeriod, CancellationToken ct)
+    {
+        var cutoff = CutoffNano(retentionPeriod);
+        await using var conn = await OpenConnectionAsync(ct);
+        await PrepareSweepConnectionAsync(conn, ct);
+
+        var tenantIds = (await conn.QueryAsync<long>(new CommandDefinition("SELECT id FROM tenants", cancellationToken: ct))).ToList();
+        var sql = BatchedDeleteSql(table, $"tenant_id = @tenantId AND {timeColumn} < @cutoff");
+
+        var total = 0;
+        foreach (var tenantId in tenantIds)
+            total += await BatchedDeleteAsync(conn, sql, new { cutoff, tenantId }, ct);
+        return total;
+    }
+
+    /// <summary>
+    /// Runs <paramref name="sql"/> until a batch comes back short. Each statement commits on its own --
+    /// do NOT wrap the loop in a transaction, which would reproduce the long-running transaction the
+    /// batching exists to avoid. It terminates because the cutoff is computed once, so rows arriving
+    /// during the sweep are never older than it.
+    /// </summary>
+    private async Task<int> BatchedDeleteAsync(DbConnection conn, string sql, object parameters, CancellationToken ct)
+    {
+        var total = 0;
+        int batch;
+        do
+        {
+            batch = await conn.ExecuteAsync(new CommandDefinition(sql, parameters, cancellationToken: ct));
+            total += batch;
+            if (batch == DeleteBatchSize) await Task.Delay(PauseBetweenBatches, ct);
+        } while (batch == DeleteBatchSize);
+        return total;
+    }
 
     /// <summary>
     /// The retention cutoff as unix nanoseconds.
@@ -86,24 +159,6 @@ public abstract class RetentionSettingsRepositoryBase : IRetentionSettingsReposi
                 "Retention period cannot be negative; that would delete all telemetry.");
 
         return TimeConversion.DateTimeToUnixNano(DateTime.UtcNow - retentionPeriod);
-    }
-
-    /// <summary>
-    /// Prunes <c>log_rollup_minute</c>/<c>log_rollup_hour</c> with the same cutoff as the raw log
-    /// sweep (list-pages-server-side plan, Phase 2) — summary rows for data that no longer exists
-    /// as raw <c>log_records</c> would otherwise accumulate forever. Called by every provider's
-    /// <see cref="DeleteOldLogRecordsAsync"/> override on the connection it already has open.
-    /// Deliberately not reflected in that method's returned count, which stays "log record rows
-    /// removed" — the contract existing callers/logging already depend on.
-    /// </summary>
-    protected static async Task SweepLogRollupTablesAsync(DbConnection conn, long cutoffNano, CancellationToken ct)
-    {
-        await conn.ExecuteAsync(new CommandDefinition(
-            "DELETE FROM log_rollup_minute WHERE bucket_unix_nano < @cutoff",
-            new { cutoff = cutoffNano }, cancellationToken: ct));
-        await conn.ExecuteAsync(new CommandDefinition(
-            "DELETE FROM log_rollup_hour WHERE bucket_unix_nano < @cutoff",
-            new { cutoff = cutoffNano }, cancellationToken: ct));
     }
 
     private sealed class RetentionSettingsRow

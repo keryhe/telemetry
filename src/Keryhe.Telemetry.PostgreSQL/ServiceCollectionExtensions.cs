@@ -40,8 +40,7 @@ public static class PostgreSqlServiceCollectionExtensions
         services.AddScoped<IAlertRuleRepository, PostgreSqlAlertRuleRepository>();
         services.AddScoped<ITenantCatalogRepository, PostgreSqlTenantCatalogRepository>();
         services.AddScoped<IRetentionSettingsRepository, PostgreSqlRetentionSettingsRepository>();
-        services.AddScoped<IRollupRepository, PostgreSqlLogRollupRepository>();
-        services.AddSingleton(ProviderCapabilities.FromConfiguration(ProviderTier.Analytics, configuration) with
+        services.AddSingleton(ProviderCapabilities.FromConfiguration(ProviderCapabilities.Default(), configuration) with
         {
             // The read repositories keep DapperReadRepository's default asOf expression, which backs off this far.
             AsOfBackoffSeconds = DapperReadRepository.PostgresAsOfBackoffSeconds

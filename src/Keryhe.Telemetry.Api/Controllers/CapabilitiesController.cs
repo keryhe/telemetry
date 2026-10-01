@@ -20,13 +20,11 @@ public class CapabilitiesController(ProviderCapabilities capabilities, IConfigur
     {
         // Database:Provider is the same config key every host switches on to select a provider
         // (see CLAUDE.md's "Provider abstraction" section); ProviderCapabilities itself carries no
-        // provider name, only its Tier, so this is read straight from configuration rather than
-        // threading a name through the registration call in all five providers.
+        // provider name, so this is read straight from configuration rather than threading a name
+        // through the registration call in all five providers.
         var provider = configuration["Database:Provider"] ?? "Unknown";
         return Ok(new CapabilitiesDto(
             provider,
-            capabilities.Tier.ToString(),
-            capabilities.IndexedSearch,
             capabilities.ExemplarPaging,
             capabilities.RawSearchWindowHours,
             capabilities.ExportMaxWindowDays,
@@ -36,8 +34,6 @@ public class CapabilitiesController(ProviderCapabilities capabilities, IConfigur
 
 public sealed record CapabilitiesDto(
     string Provider,
-    string Tier,
-    bool IndexedSearch,
     bool ExemplarPaging,
     int? RawSearchWindowHours,
     int ExportMaxWindowDays,

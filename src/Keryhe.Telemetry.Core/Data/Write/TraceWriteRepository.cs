@@ -101,6 +101,7 @@ public class TraceWriteRepository : ITraceWriteRepository
         await _channel.TraceGate.AcquireAsync(spanCount, cancellationToken);
         try
         {
+            _channel.MarkEnqueued(spans);
             await _channel.Traces.Writer.WriteAsync(spans, cancellationToken);
         }
         catch

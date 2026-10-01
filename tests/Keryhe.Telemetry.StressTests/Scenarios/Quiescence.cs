@@ -63,6 +63,20 @@ public static class HostMetricsQuery
         return worst;
     }
 
+    /// <summary>The worst signal's commit-lag p95 (enqueue to commit) over the window, weighted like <see cref="GateWaitP95Ms"/>.</summary>
+    public static double CommitLagP95Ms(HostSet hosts, DateTimeOffset from, DateTimeOffset to)
+    {
+        var worst = 0.0;
+        foreach (var store in Stores(hosts))
+            foreach (var signal in Signals)
+            {
+                var intervals = store.Window(Prefix + "commit_lag", from, to, "signal", signal).Where(s => s.P95 is not null && s.Count is > 0).ToList();
+                var count = intervals.Sum(s => s.Count!.Value);
+                if (count > 0) worst = Math.Max(worst, intervals.Sum(s => s.P95!.Value * s.Count!.Value) / count);
+            }
+        return worst;
+    }
+
     /// <summary>Polls once a second until quiet or <paramref name="timeout"/> passes; a timeout is recorded, not thrown.</summary>
     public static async Task<QuiesceResult> WaitForQuiescenceAsync(HostSet hosts, TimeSpan stableFor, TimeSpan timeout, CancellationToken ct)
     {

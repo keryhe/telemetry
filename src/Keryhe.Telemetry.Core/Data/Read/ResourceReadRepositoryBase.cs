@@ -14,16 +14,16 @@ public abstract class ResourceReadRepositoryBase : DapperReadRepository, IResour
 
     public async Task<List<string>> GetDistinctServicesAsync(CancellationToken cancellationToken = default)
     {
-        const string sql = "SELECT DISTINCT attributes_json FROM resources WHERE tenant_id = @tenantId";
+        // service_name is a column on resources (extracted from service.name at upsert), indexed with
+        // the tenant, so this is a tenant-prefix scan of idx_resources_tenant_service.
+        const string sql = "SELECT DISTINCT service_name FROM resources WHERE tenant_id = @tenantId AND service_name IS NOT NULL";
 
         await using var conn = await OpenConnectionAsync(cancellationToken);
         var rows = await conn.QueryAsync<string>(new CommandDefinition(
             sql, new { tenantId = TenantId }, cancellationToken: cancellationToken));
 
         return rows
-            .Select(json => ExtractServiceName(DeserializeAttributes(json)))
             .Where(s => !string.IsNullOrEmpty(s))
-            .Select(s => s!)
             .Distinct()
             .OrderBy(s => s)
             .ToList();

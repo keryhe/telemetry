@@ -11,9 +11,10 @@ namespace Keryhe.Telemetry.SqlServer.Services;
 
 /// <summary>
 /// SqlServer implementation of <see cref="ITelemetryBulkWriter"/>. Owns only the
-/// dialect-specific flush logic — <see cref="SqlBulkCopy"/> for the high-volume tables,
-/// staging-table <c>INSERT ... WHERE NOT EXISTS</c> for spans, and <c>MERGE ... WITH (HOLDLOCK)</c>
-/// upserts for resource/scope dedup. The channel-draining loop and the
+/// dialect-specific flush logic — <see cref="SqlBulkCopy"/> straight into every high-volume table
+/// (spans included: since schema 3.0.0 a span is a plain append with no unique key, so there is no
+/// staging table and no <c>WHERE NOT EXISTS</c>), and <c>MERGE ... WITH (HOLDLOCK)</c> upserts for
+/// resource/scope/metric dedup. The channel-draining loop and the
 /// normalization/hashing helpers live in <c>Keryhe.Telemetry.Core.Data</c>.
 ///
 /// Every <see cref="SqlBulkCopy"/> call site streams rows through <see cref="ArrayDataReader"/>
@@ -21,13 +22,9 @@ namespace Keryhe.Telemetry.SqlServer.Services;
 /// building a <see cref="DataTable"/> first -- no DataRow/DataColumn change-tracking overhead for
 /// data that is only ever written once, streamed straight through. Every call site also goes
 /// through <see cref="CreateBulkCopy"/>, which sets <c>BatchSize</c> and a <c>BulkCopyTimeout</c>
-/// above the 30s default, instead of each of the seven call sites constructing its own bare
-/// <see cref="SqlBulkCopy"/> with server defaults. <c>TableLock</c> is applied to the
-/// session-private <c>#spans_stage</c> only, never to a shared table -- see
-/// <see cref="CreateBulkCopy"/> for why. <c>#spans_stage</c>
-/// additionally declares <c>PRIMARY KEY CLUSTERED (trace_id, span_id)</c> matching the insert's own
-/// join predicate, so the insert gets a pre-sorted source instead of sorting or hashing a heap (plus
-/// a plan recompile) on every flush.
+/// above the 30s default, instead of each call site constructing its own bare
+/// <see cref="SqlBulkCopy"/> with server defaults. <c>TableLock</c> is never applied -- see
+/// <see cref="CreateBulkCopy"/> for why.
 ///
 /// <b>Resource/scope/metric upserts run BEFORE the data transaction opens</b>, each as its own
 /// auto-committed statement on the same connection -- the same shape as
@@ -45,14 +42,12 @@ namespace Keryhe.Telemetry.SqlServer.Services;
 /// <see cref="ResourceScopeCache"/> is populated immediately: there is no longer a same-flush
 /// rollback that could leave the cache pointing at an id that was never persisted.
 ///
-/// The data transaction wraps only the bulk inserts (and the spans staging insert), so a failure
+/// The data transaction wraps only the bulk inserts, so a failure
 /// partway through still leaves zero data rows from that batch. Unlike Npgsql,
 /// <c>SqlClient</c> requires every command -- and every <see cref="SqlBulkCopy"/> -- to be
 /// explicitly enlisted in the transaction, or it throws at execution time; every
 /// data-path <c>SqlCommand</c> below sets <c>Transaction = tx</c>, and every <c>SqlBulkCopy</c> is
-/// constructed with the transaction passed in directly, including the bulk copy into
-/// <c>#spans_stage</c>, a temp table that must live in the same transaction as the
-/// insert that reads it. The transaction is never explicitly rolled back:
+/// constructed with the transaction passed in directly. The transaction is never explicitly rolled back:
 /// <c>await using</c> disposes it without a matching <c>CommitAsync</c> whenever an
 /// exception propagates out of the block, and disposing an uncommitted
 /// <see cref="SqlTransaction"/> rolls it back. The upsert commands, running before the
@@ -313,7 +308,8 @@ public sealed class SqlServerBulkWriter(
     [
         "resource_id", "scope_id", "time_unix_nano", "observed_time_unix_nano",
         "severity_number", "severity_text", "body_type", "body_value",
-        "dropped_attributes_count", "flags", "trace_id", "span_id", "attributes_json", "event_name"
+        "dropped_attributes_count", "flags", "trace_id", "span_id", "attributes_json", "event_name",
+        "tenant_id", "service_name"
     ];
 
     private static async Task BulkInsertLogsAsync(
@@ -326,6 +322,8 @@ public sealed class SqlServerBulkWriter(
     {
         var rows = new List<object?[]>(records.Count);
         foreach (var r in records)
+        {
+            var (tenantId, serviceName) = TenantAndService(r.Resource);
             rows.Add(
             [
                 resourceIds[ResourceKey(r.Resource)],
@@ -341,8 +339,11 @@ public sealed class SqlServerBulkWriter(
                 r.TraceIdHex,
                 r.SpanIdHex,
                 SerializeJsonOrNull(r.Attributes),
-                r.EventName
+                r.EventName,
+                tenantId,
+                serviceName
             ]);
+        }
 
         using var bulk = CreateBulkCopy(conn, tx, "log_records");
         for (var i = 0; i < LogColumns.Length; i++)
@@ -355,15 +356,19 @@ public sealed class SqlServerBulkWriter(
     // BULK INSERT: SPANS
     // =========================================================================
 
-    private static readonly string[] SpanStageColumns =
+    private static readonly string[] SpanColumns =
     [
         "trace_id", "span_id", "parent_span_id", "resource_id", "scope_id",
         "name", "kind", "start_time_unix_nano", "end_time_unix_nano",
         "dropped_attributes_count", "dropped_events_count", "dropped_links_count",
         "trace_state", "status_code", "status_message", "attributes_json", "flags",
-        "events_json", "links_json"
+        "events_json", "links_json", "tenant_id", "service_name"
     ];
 
+    // A plain bulk copy into spans: no unique key to violate (a re-delivered span is stored again
+    // and reads tolerate it), no foreign keys, and created_at/id come from the column defaults.
+    // Rows are ordered by the clustered key (tenant_id, start_time_unix_nano) so the load appends
+    // within each tenant's tail instead of scattering inserts through the index.
     private static async Task BulkInsertSpansAsync(
         SqlConnection conn,
         SqlTransaction tx,
@@ -372,49 +377,11 @@ public sealed class SqlServerBulkWriter(
         Dictionary<string, long> scopeIds,
         CancellationToken ct)
     {
-        // Stage spans into a temp table, then insert from it so an already-stored span is left
-        // alone (matching ON CONFLICT DO NOTHING on the Postgres providers).
-        // The temp table lives only for the lifetime of this connection's session, so its
-        // creation, the bulk copy into it, and the insert that reads it must all run inside
-        // the same transaction as everything else in this flush.
-        //
-        // PRIMARY KEY CLUSTERED (trace_id, span_id) matches the insert's own join predicate: without
-        // it, #spans_stage is a heap and the insert has to sort or hash it every flush (plus a plan
-        // recompile) to match it against spans.uk_trace_span. Declaring the clustered key up front
-        // gives the insert a pre-sorted source, at the cost of the bulk copy now inserting in key
-        // order rather than append order -- a fine trade for a temp table that only ever exists to
-        // be joined once and then dropped.
-        await using (var createCmd = new SqlCommand("""
-            CREATE TABLE #spans_stage (
-                trace_id                 CHAR(32)      NOT NULL,
-                span_id                  CHAR(16)      NOT NULL,
-                parent_span_id           CHAR(16),
-                resource_id              BIGINT        NOT NULL,
-                scope_id                 BIGINT        NOT NULL,
-                name                     NVARCHAR(255) NOT NULL,
-                kind                     NVARCHAR(20)  NOT NULL,
-                start_time_unix_nano     BIGINT        NOT NULL,
-                end_time_unix_nano       BIGINT        NOT NULL,
-                dropped_attributes_count INT           NOT NULL,
-                dropped_events_count     INT           NOT NULL,
-                dropped_links_count      INT           NOT NULL,
-                trace_state              NVARCHAR(MAX),
-                status_code              NVARCHAR(20)  NOT NULL,
-                status_message           NVARCHAR(MAX),
-                attributes_json          NVARCHAR(MAX),
-                flags                    INT           NOT NULL,
-                events_json              NVARCHAR(MAX),
-                links_json               NVARCHAR(MAX),
-                PRIMARY KEY CLUSTERED (trace_id, span_id) WITH (IGNORE_DUP_KEY = ON)
-            )
-            """, conn, tx))
-        {
-            await createCmd.ExecuteNonQueryAsync(ct);
-        }
-
-        var stageRows = new List<object?[]>(spans.Count);
+        var rows = new List<(long TenantId, long Start, object?[] Row)>(spans.Count);
         foreach (var span in spans)
-            stageRows.Add(
+        {
+            var (tenantId, serviceName) = TenantAndService(span.Resource);
+            rows.Add((tenantId, span.StartTimeUnixNano,
             [
                 span.TraceIdHex,
                 span.SpanIdHex,
@@ -434,49 +401,18 @@ public sealed class SqlServerBulkWriter(
                 SerializeJsonOrNull(span.Attributes),
                 span.Flags,
                 SerializeListOrNull(span.Events),
-                SerializeListOrNull(span.Links)
-            ]);
-
-        using (var bulk = CreateBulkCopy(conn, tx, "#spans_stage", tableLock: true))
-        {
-            for (var i = 0; i < SpanStageColumns.Length; i++)
-                bulk.ColumnMappings.Add(i, SpanStageColumns[i]);
-            using var stageReader = new ArrayDataReader(stageRows);
-            await bulk.WriteToServerAsync(stageReader, ct);
+                SerializeListOrNull(span.Links),
+                tenantId,
+                serviceName
+            ]));
         }
+        rows.Sort(static (a, b) => a.TenantId != b.TenantId ? a.TenantId.CompareTo(b.TenantId) : a.Start.CompareTo(b.Start));
 
-        // INSERT ... WHERE NOT EXISTS with FORCESEEK on uk_trace_span, not MERGE. MERGE read the
-        // target through the clustered primary key, taking U locks on every row it scanned --
-        // including rows a concurrent flush had inserted but not yet committed, while that flush's
-        // own MERGE did the same to this one's: a cycle that load-testing showed was the dominant
-        // remaining SqlServer deadlock. Seeking uk_trace_span touches only the keys this batch is
-        // actually inserting, so two flushes of different spans never meet.
-        //
-        // The cost: two in-flight flushes carrying the SAME span (a client re-delivery landing in
-        // two drain loops, or on two collectors, before either commits) both pass NOT EXISTS, and
-        // one fails uk_trace_span. That flush rolls back and TelemetryIngestionWorker retries it,
-        // at which point NOT EXISTS skips the now-stored span -- nothing is lost.
-        const string insertSql = """
-            INSERT INTO spans (trace_id, span_id, parent_span_id, resource_id, scope_id,
-                    name, kind, start_time_unix_nano, end_time_unix_nano,
-                    dropped_attributes_count, dropped_events_count, dropped_links_count,
-                    trace_state, status_code, status_message, created_at, attributes_json, flags,
-                    events_json, links_json)
-            SELECT source.trace_id, source.span_id, source.parent_span_id,
-                   source.resource_id, source.scope_id,
-                   source.name, source.kind, source.start_time_unix_nano, source.end_time_unix_nano,
-                   source.dropped_attributes_count, source.dropped_events_count, source.dropped_links_count,
-                   source.trace_state, source.status_code, source.status_message,
-                   SYSDATETIME(), source.attributes_json, source.flags,
-                   source.events_json, source.links_json
-            FROM #spans_stage AS source
-            WHERE NOT EXISTS (
-                SELECT 1 FROM spans AS target WITH (FORCESEEK(uk_trace_span(trace_id, span_id)))
-                 WHERE target.trace_id = source.trace_id AND target.span_id = source.span_id);
-            """;
-
-        await using var insertCmd = new SqlCommand(insertSql, conn, tx);
-        await insertCmd.ExecuteNonQueryAsync(ct);
+        using var bulk = CreateBulkCopy(conn, tx, "spans");
+        for (var i = 0; i < SpanColumns.Length; i++)
+            bulk.ColumnMappings.Add(i, SpanColumns[i]);
+        using var reader = new ArrayDataReader(rows.Select(r => r.Row).ToList());
+        await bulk.WriteToServerAsync(reader, ct);
     }
 
     // =========================================================================
@@ -514,8 +450,8 @@ public sealed class SqlServerBulkWriter(
             WHEN MATCHED AND EXISTS (SELECT t.description, t.unit EXCEPT SELECT @description, @unit) THEN
                 UPDATE SET description = @description, unit = @unit
             WHEN NOT MATCHED THEN
-                INSERT (resource_id, scope_id, name, description, unit, [type], created_at)
-                VALUES (@resourceId, @scopeId, @name, @description, @unit, @type, SYSDATETIME());
+                INSERT (resource_id, scope_id, name, description, unit, [type], created_at, tenant_id, service_name)
+                VALUES (@resourceId, @scopeId, @name, @description, @unit, @type, SYSDATETIME(), @tenantId, @serviceName);
             SELECT id FROM metrics
              WHERE resource_id = @resourceId AND scope_id = @scopeId
                AND name = @name AND [type] = @type;
@@ -557,6 +493,11 @@ public sealed class SqlServerBulkWriter(
             cmd.Parameters.Add("@description", SqlDbType.NVarChar, -1).Value  = (object?)m.Description ?? DBNull.Value;
             cmd.Parameters.Add("@unit",        SqlDbType.NVarChar, 63).Value  = (object?)m.Unit ?? DBNull.Value;
             cmd.Parameters.Add("@type",        SqlDbType.NVarChar, 30).Value  = m.Type.ToString();
+            // Written on the insert only (a cache miss); they cannot go stale -- the resource hash
+            // includes service.name, so a rename produces a new resource and new metrics rows.
+            var (tenantId, serviceName) = TenantAndService(m.Resource);
+            cmd.Parameters.Add("@tenantId",    SqlDbType.BigInt).Value = tenantId;
+            cmd.Parameters.Add("@serviceName", SqlDbType.NVarChar, 255).Value = (object?)serviceName ?? DBNull.Value;
 
             var id = (long)(await cmd.ExecuteScalarAsync(ct))!;
             result[key] = id;
@@ -714,13 +655,10 @@ public sealed class SqlServerBulkWriter(
     // very table lock avoided below); and the default 30s BulkCopyTimeout is too tight for a large
     // batch on a loaded server.
     //
-    // tableLock must stay false for every shared table (log_records, the *_data_points tables).
-    // Those have a clustered IDENTITY primary key, and TableLock on a clustered table is an
-    // exclusive table lock held until this flush's transaction commits -- serializing every flush
-    // of that table across all of this process's flush loops AND every other collector instance
-    // behind the same load balancer, and blocking API reads of it for the whole flush (the schema
-    // does not enable READ_COMMITTED_SNAPSHOT). Only #spans_stage, a temp table private to this
-    // session, takes it: there it contends with nothing and still buys a minimally-logged load.
+    // tableLock must stay false for every shared table (spans, log_records, the *_data_points
+    // tables). TableLock on a clustered table is an exclusive table lock held until this flush's
+    // transaction commits -- serializing every flush of that table across all of this process's
+    // flush loops AND every other collector instance behind the same load balancer.
     private const int BulkCopyBatchSize = 2_000;
     private const int BulkCopyTimeoutSeconds = 120;
 

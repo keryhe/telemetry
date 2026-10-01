@@ -20,7 +20,7 @@ public sealed record HostResult(
 public sealed record RampStepResult(
     int Step, double Scale, DateTimeOffset Start, DateTimeOffset End,
     IReadOnlyList<WindowSummary> Windows, double RecordsDropped, double GateWaitP95Ms,
-    IReadOnlyList<double?> TraceLagsMs, IReadOnlyList<double?> LogLagsMs, IReadOnlyList<string> Tripped);
+    IReadOnlyList<double?> TraceLagsMs, IReadOnlyList<double?> LogLagsMs, IReadOnlyList<string> Tripped, double CommitLagP95Ms = 0);
 
 /// <summary>
 /// <see cref="LastSustainedStep"/> is the last step that held with no criterion tripped: the provider's breaking point on this machine is the step after it.
@@ -48,5 +48,9 @@ public sealed record ScenarioResult(
     /// 2 (database-performance plan, Phase 0): pin-adjusted lag criteria and <c>lag_absolute</c>, maybe-landed export accounting, provider
     /// diagnostics and effective server settings. Ramp results from version 1 are not comparable with version 2.
     /// </summary>
-    public const int CurrentSchemaVersion = 2;
+    /// <summary>
+    /// 3 (schema-simplification plan, Phase 1): ramp steps carry <c>commitLagP95Ms</c>, the profile carries <c>writeOnly</c>/<c>databaseCpuset</c>,
+    /// and the span re-delivery ledger depends on the schema version under test.
+    /// </summary>
+    public const int CurrentSchemaVersion = 3;
 }

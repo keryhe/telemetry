@@ -55,6 +55,14 @@ public sealed class TraceLoad
     public int AttributeCardinality { get; set; } = 50;
     public IntRange EventsPerSpan { get; set; } = new(0, 2);
     public IntRange LinksPerSpan { get; set; } = new(0, 1);
+
+    /// <summary>
+    /// Whether a re-delivered span batch collapses into one row, which is a property of the schema under test: true on 2.x (spans are unique
+    /// on (trace_id, span_id)), false on 3.0.0 (no unique key, decision 7 of the schema-simplification plan). Not read from a profile: the
+    /// runner sets it from <c>schema/apply-schema.sh</c>'s target version (<see cref="LedgerSemantics"/>).
+    /// </summary>
+    [System.Text.Json.Serialization.JsonIgnore]
+    public bool RedeliveryCollapses { get; set; }
 }
 
 public sealed class LogLoad

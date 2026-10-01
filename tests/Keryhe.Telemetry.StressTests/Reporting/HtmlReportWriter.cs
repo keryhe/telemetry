@@ -55,7 +55,7 @@ public static class HtmlReportWriter
         foreach (var s in run.Scenarios) sb.Append("<a href=\"#").Append(E(s.Id)).Append("\">").Append(E(s.Id)).Append("</a>");
         sb.Append("</nav>");
 
-        foreach (var s in run.Scenarios) Scenario(sb, s);
+        foreach (var s in run.Scenarios) Scenario(sb, s, run);
         return Page("Stress test report", sb.ToString());
     }
 
@@ -73,13 +73,15 @@ public static class HtmlReportWriter
         sb.Append("</tbody></table><p class=\"muted\">One machine runs the database container, the hosts, the load tool and Chromium, so absolute numbers are specific to it; compare providers on the same machine.</p>");
     }
 
-    private static void Scenario(StringBuilder sb, ScenarioReport s)
+    private static void Scenario(StringBuilder sb, ScenarioReport s, RunResult run)
     {
         var r = s.Scenario;
         var h = s.Headline;
         sb.Append("<h2 id=\"").Append(E(s.Id)).Append("\">").Append(E(r.Provider)).Append(" / ").Append(E(r.Topology)).Append(" / ").Append(E(r.Profile)).Append(" <span class=\"muted\">(").Append(E(r.Kind)).Append(")</span></h2>");
         if (r.Error is not null) sb.Append("<p class=\"bad\">Scenario failed: ").Append(E(r.Error.Split('\n')[0])).Append("</p>");
 
+        if (r.ProfileUsed.WriteOnly) sb.Append("<p class=\"keyline\">Write-only run: no browsers and no marker probes, so nothing read the database. The ramp judged drops, gate wait, client export latency/errors and commit lag only.</p>");
+        CpuSeparation(sb, s, run);
         Summary(sb, s);
 
         sb.Append("<h3>Timelines</h3><p class=\"keyline\">All charts share one x-axis (time since warm-up began). Vertical lines: grey = phase boundary, orange dashed = retention sweep, blue dotted = ramp step. Hover a line for its label.</p>");
@@ -89,6 +91,7 @@ public static class HtmlReportWriter
             ("lag", "Ingest-to-queryable lag", true),
             ("write.gate_wait", "Ingestion gate wait p95", true),
             ("write.flush_duration", "Flush duration p95 (successful)", true),
+            ("write.commit_lag", "Commit lag p95 (enqueue to commit)", true),
             ("write.batch_size", "Flush batch size p95", false),
             ("write.resident", "Records resident in the ingestion queue", true),
             ("write.retries", "Flush retries and dropped records", true)]);
@@ -110,6 +113,17 @@ public static class HtmlReportWriter
         ReadSide(sb, s);
         DatabaseSection(sb, s);
         Artifacts(sb, s);
+    }
+
+    /// <summary>What the database shared CPUs with (schema-simplification plan, Phase 1 item 6): the numbers past about x6-x8 mean nothing without it.</summary>
+    private static void CpuSeparation(StringBuilder sb, ScenarioReport s, RunResult run)
+    {
+        var p = s.Scenario.ProfileUsed;
+        var vm = run.Metadata?.DockerCpus is { } cpus ? $"the Docker VM's {cpus} CPUs" : "the Docker VM's CPUs";
+        sb.Append("<p class=\"keyline\">CPU sharing: the database container is capped at ").Append(N(p.ContainerCpus, "0.##")).Append(" CPUs and ")
+          .Append(p.DatabaseCpuset is { Length: > 0 } set ? $"pinned to cpuset <code>{E(set)}</code> of {vm} (the VM still shares the host's cores with the hosts, load tool and browsers, unless the database runs on another machine)"
+                                                          : $"not pinned, so it competes for {vm} with whatever else runs there; the hosts, load tool and Chromium run on the host machine itself")
+          .Append(".</p>");
     }
 
     private static void Charts(StringBuilder sb, ScenarioReport s, string heading, (string Group, string Title, bool Peak)[] charts)
@@ -135,6 +149,7 @@ public static class HtmlReportWriter
         Card(sb, "deadlocks", N(h.Deadlocks), h.Deadlocks > 0 ? "bad" : null);
         Card(sb, "lock-wait seconds (sampled)", N(h.LockWaitSeconds));
         Card(sb, "gate wait p95 (ms)", N(h.GateWaitP95Ms, "N1"));
+        Card(sb, "commit lag p95 (ms)", N(h.CommitLagP95Ms, "N1"));
         Card(sb, "lag p50 log / trace (ms)", $"{N(h.LogLagP50Ms)} / {N(h.TraceLagP50Ms)}");
         Card(sb, "page ready p95 (ms)", N(h.PageReadyP95Ms));
         Card(sb, "browser timeouts", N(h.BrowserTimeouts), h.BrowserTimeouts > 0 ? "warn" : null);
@@ -168,10 +183,10 @@ public static class HtmlReportWriter
             var pin = s.Scenario.LogPinOffsetMs ?? 0;
             sb.Append("<p class=\"keyline\">Lag columns are the mean over the step's probes; the log lag has the provider's <code>asOf</code> pin offset (")
               .Append(N(pin)).Append(" ms) subtracted, which is what the lag criteria judge.</p>");
-            sb.Append("<table><thead><tr><th>Step</th><th>Scale</th><th>Offered/s</th><th>Acked/s</th><th>Export p99 (ms)</th><th>Gate wait p95 (ms)</th><th>Dropped</th><th>Log lag, adjusted (ms)</th><th>Trace lag (ms)</th><th class=\"l\">Tripped</th></tr></thead><tbody>");
+            sb.Append("<table><thead><tr><th>Step</th><th>Scale</th><th>Offered/s</th><th>Acked/s</th><th>Export p99 (ms)</th><th>Gate wait p95 (ms)</th><th>Commit lag p95 (ms)</th><th>Dropped</th><th>Log lag, adjusted (ms)</th><th>Trace lag (ms)</th><th class=\"l\">Tripped</th></tr></thead><tbody>");
             foreach (var st in ramp.Steps)
                 sb.Append("<tr><td>").Append(st.Step).Append("</td><td>x").Append(N(st.Scale, "0.##")).Append("</td><td>").Append(N(st.Windows.Sum(w => w.OfferedPerSecond))).Append("</td><td>").Append(N(st.Windows.Sum(w => w.AckedPerSecond)))
-                  .Append("</td><td>").Append(N(st.Windows.Max(w => w.Latency.P99Ms))).Append("</td><td>").Append(N(st.GateWaitP95Ms, "N1")).Append("</td><td>").Append(N(st.RecordsDropped))
+                  .Append("</td><td>").Append(N(st.Windows.Max(w => w.Latency.P99Ms))).Append("</td><td>").Append(N(st.GateWaitP95Ms, "N1")).Append("</td><td>").Append(N(st.CommitLagP95Ms, "N1")).Append("</td><td>").Append(N(st.RecordsDropped))
                   .Append("</td><td>").Append(MeanLag(RampEvaluator.AdjustForPin(st.LogLagsMs, pin))).Append("</td><td>").Append(MeanLag(st.TraceLagsMs))
                   .Append("</td><td class=\"l\">").Append(E(string.Join(", ", st.Tripped))).Append("</td></tr>");
             sb.Append("</tbody></table>");
@@ -202,9 +217,22 @@ public static class HtmlReportWriter
         sb.Append("<p class=\"keyline\">Flush retries logged: ").Append(lost).Append("; dropped batches logged: ").Append(s.Scenario.Hosts.SelectMany(x => x.Log.BatchesDropped).Count()).Append(".</p>");
     }
 
+    /// <summary>Every API route's server-side duration, from the host's own measurement, apart from the write instruments above.</summary>
+    private static void ApiRoutes(StringBuilder sb, ScenarioReport s)
+    {
+        if (s.ApiRoutes is not { Count: > 0 } routes) return;
+        sb.Append("<p class=\"keyline\">API routes, server-side (<code>http.server.request.duration</code>, measured window; approximate percentiles, in ms). Every caller counts: the browser tour and the marker probes.</p>");
+        sb.Append("<table><thead><tr><th class=\"l\">Route</th><th>Calls</th><th>5xx</th><th>p50</th><th>p95</th><th>p99</th></tr></thead><tbody>");
+        foreach (var r in routes)
+            sb.Append("<tr><td class=\"l\">").Append(E(r.Route)).Append("</td><td>").Append(N(r.Calls)).Append("</td><td>").Append(N(r.Errors5xx)).Append("</td><td>").Append(N(r.P50Ms, "N1"))
+              .Append("</td><td>").Append(N(r.P95Ms, "N1")).Append("</td><td>").Append(N(r.P99Ms, "N1")).Append("</td></tr>");
+        sb.Append("</tbody></table>");
+    }
+
     private static void ReadSide(StringBuilder sb, ScenarioReport s)
     {
         sb.Append("<h3>Read side</h3>");
+        ApiRoutes(sb, s);
         if (s.Pages.Count == 0) { sb.Append("<p class=\"nodata\">No browser tour ran.</p>"); return; }
         sb.Append("<table><thead><tr><th class=\"l\">Page step</th><th>Runs</th><th>Timeouts</th><th>Errors</th><th>Ready p50 (ms)</th><th>p95</th><th>p99</th><th>max</th></tr></thead><tbody>");
         foreach (var p in s.Pages)

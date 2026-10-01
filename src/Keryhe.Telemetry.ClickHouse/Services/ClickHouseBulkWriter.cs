@@ -14,9 +14,10 @@ namespace Keryhe.Telemetry.ClickHouse.Services;
 /// <summary>
 /// ClickHouse implementation of <see cref="ITelemetryBulkWriter"/>. Unlike the relational
 /// providers there is no <c>RETURNING</c>/<c>OUTPUT</c> to recover generated ids and no
-/// <c>ON CONFLICT</c>/<c>MERGE</c> for dedup: surrogate ids are computed in-process
-/// (<see cref="ClickHouseIds"/>), dedup is delegated to the tables' <c>ReplacingMergeTree</c>
-/// engine plus the shared <see cref="ResourceScopeCache"/>, and every table is written with
+/// <c>ON CONFLICT</c>/<c>MERGE</c> for dedup: reference-table surrogate ids are computed in-process
+/// (<see cref="ClickHouseIds"/>), reference-table dedup is delegated to those tables'
+/// <c>ReplacingMergeTree</c> engine plus the shared <see cref="ResourceScopeCache"/> (spans and
+/// log records are plain <c>MergeTree</c> appends), and every table is written with
 /// ClickHouse's native async bulk-copy path (<see cref="ClickHouseBulkCopy"/>). The
 /// channel-draining loop and the normalization/hashing helpers live in
 /// <c>Keryhe.Telemetry.Core.Data</c>.
@@ -30,11 +31,10 @@ namespace Keryhe.Telemetry.ClickHouse.Services;
 /// through is therefore possible here and only here: some tables end up with rows from this
 /// batch, others do not. Retry logic added on top of this writer (ingestion-performance.md
 /// Phase 5) MUST tolerate that partial application for ClickHouse specifically. Re-flushing is
-/// safe for the dedup-keyed tables, which <c>ReplacingMergeTree</c> collapses on the repeat --
-/// and since schema 2.11.0 that covers the whole trace path, because a span's events and links
-/// are JSON columns on the deduped spans row rather than the un-keyed <c>span_events</c>/
-/// <c>span_links</c> tables a retry used to be able to double-insert. The append-only metric
-/// data-point tables still have no dedup key.
+/// safe for the dedup-keyed reference tables, which <c>ReplacingMergeTree</c> collapses on the
+/// repeat. The append-only tables -- spans (since schema 3.0.0), log records and the metric
+/// data-point tables -- have no dedup key, so a retry after a partial flush can store a row twice;
+/// reads tolerate that (schema-simplification decision 7).
 ///
 /// <c>ClickHouseBulkCopy.InitAsync()</c> is a real round trip (it fetches column type metadata
 /// to serialize RowBinary correctly -- confirmed live, ~3.5ms) and the library exposes no way to
@@ -69,9 +69,14 @@ public sealed class ClickHouseBulkWriter(
         var resourceIds = await ResolveResourcesAsync(records.Select(r => r.Resource), ct);
         var scopeIds    = await ResolveScopesAsync(records.Select(r => r.InstrumentationScope), ct);
 
-        var rows = records.Select(r => new object?[]
+        var rows = records.Select(r =>
+        {
+            var (tenantId, serviceName) = TenantAndService(r.Resource);
+            return new object?[]
         {
             RowId.Next(),
+            tenantId,
+            serviceName ?? "",
             resourceIds[ResourceKey(r.Resource)],
             scopeIds[HashScope(NormalizeScope(r.InstrumentationScope))],
             r.TimeUnixNano ?? 0L,
@@ -82,10 +87,11 @@ public sealed class ClickHouseBulkWriter(
             r.BodyValue,
             r.DroppedAttributesCount,
             r.Flags,
-            r.TraceIdHex,
-            r.SpanIdHex,
+            r.TraceIdHex ?? "",
+            r.SpanIdHex ?? "",
             SerializeJsonOrNull(r.Attributes),
-            r.EventName
+            r.EventName ?? ""
+        };
         });
 
         await BulkInsertAsync("log_records", LogColumns, rows, ct);
@@ -94,7 +100,7 @@ public sealed class ClickHouseBulkWriter(
 
     private static readonly string[] LogColumns =
     [
-        "id", "resource_id", "scope_id", "time_unix_nano", "observed_time_unix_nano",
+        "id", "tenant_id", "service_name", "resource_id", "scope_id", "time_unix_nano", "observed_time_unix_nano",
         "severity_number", "severity_text", "body_type", "body_value",
         "dropped_attributes_count", "flags", "trace_id", "span_id", "attributes_json", "event_name"
     ];
@@ -110,38 +116,40 @@ public sealed class ClickHouseBulkWriter(
         var resourceIds = await ResolveResourcesAsync(spans.Select(s => s.Resource), ct);
         var scopeIds    = await ResolveScopesAsync(spans.Select(s => s.InstrumentationScope), ct);
 
-        var dbIds = spans.Select(s => ClickHouseIds.FromKey($"{s.TraceIdHex}__{s.SpanIdHex}")).ToArray();
-
-        // Span db-id is deterministic from (trace_id, span_id); no RETURNING needed. Dedup
-        // is handled by the spans table's ReplacingMergeTree ORDER BY (trace_id, span_id).
-        var spanRows = spans.Select((span, i) => new object?[]
+        // id is only the keyset-paging tiebreak, so it comes from the monotonic in-process generator;
+        // nothing dedups spans (schema 3.0.0), and a re-delivered span is stored again.
+        var spanRows = spans.Select(span =>
         {
-            dbIds[i],
-            span.TraceIdHex,
-            span.SpanIdHex,
-            span.ParentSpanIdHex,
-            resourceIds[ResourceKey(span.Resource)],
-            scopeIds[HashScope(NormalizeScope(span.InstrumentationScope))],
-            span.Name,
-            span.Kind.ToString(),
-            span.StartTimeUnixNano,
-            span.EndTimeUnixNano,
-            span.DroppedAttributesCount,
-            span.DroppedEventsCount,
-            span.DroppedLinksCount,
-            span.TraceState,
-            span.StatusCode.ToString(),
-            span.StatusMessage,
-            SerializeJsonOrNull(span.Attributes),
-            span.Flags,
-            SerializeListOrNull(span.Events),
-            SerializeListOrNull(span.Links)
+            var (tenantId, serviceName) = TenantAndService(span.Resource);
+            return new object?[]
+            {
+                RowId.Next(),
+                tenantId,
+                serviceName ?? "",
+                span.TraceIdHex,
+                span.SpanIdHex,
+                span.ParentSpanIdHex ?? "",
+                resourceIds[ResourceKey(span.Resource)],
+                scopeIds[HashScope(NormalizeScope(span.InstrumentationScope))],
+                span.Name,
+                span.Kind.ToString(),
+                span.StartTimeUnixNano,
+                span.EndTimeUnixNano,
+                span.DroppedAttributesCount,
+                span.DroppedEventsCount,
+                span.DroppedLinksCount,
+                span.TraceState ?? "",
+                span.StatusCode.ToString(),
+                span.StatusMessage ?? "",
+                SerializeJsonOrNull(span.Attributes),
+                span.Flags,
+                SerializeListOrNull(span.Events),
+                SerializeListOrNull(span.Links)
+            };
         });
 
-        // One insert, into a ReplacingMergeTree keyed on (trace_id, span_id). Since schema 2.11.0
-        // events and links ride along as JSON columns on this same row, so a retried flush can no
-        // longer double-insert them the way the separate span_events/span_links MergeTree tables
-        // could -- there is nothing left to insert separately.
+        // One insert into a plain MergeTree; the trace_index materialized view is fed by it. Events
+        // and links ride along as JSON columns on this same row.
         await BulkInsertAsync("spans", SpanColumns, spanRows, ct);
 
         logger.LogDebug("Flushed {SpanCount} spans", spans.Count);
@@ -149,7 +157,7 @@ public sealed class ClickHouseBulkWriter(
 
     private static readonly string[] SpanColumns =
     [
-        "id", "trace_id", "span_id", "parent_span_id", "resource_id", "scope_id",
+        "id", "tenant_id", "service_name", "trace_id", "span_id", "parent_span_id", "resource_id", "scope_id",
         "name", "kind", "start_time_unix_nano", "end_time_unix_nano",
         "dropped_attributes_count", "dropped_events_count", "dropped_links_count",
         "trace_state", "status_code", "status_message", "attributes_json", "flags",
@@ -270,6 +278,7 @@ public sealed class ClickHouseBulkWriter(
         if (pending.Count > 0)
         {
             var rows = new List<object?[]>(pending.Count);
+            var toCache = new List<(string Key, long Id)>(pending.Count);
             foreach (var (key, resId, scoId, m) in pending)
             {
                 // FromKey, not FromHash: FromHash expects a 64-char hex SHA-256 string, and metrics
@@ -278,12 +287,17 @@ public sealed class ClickHouseBulkWriter(
                 // parses leading hex chars big-endian, FromKey takes the digest's first 8 bytes via
                 // BitConverter -- so never assume they agree on the same input.
                 var id = ClickHouseIds.FromKey(key);
-                rows.Add([id, resId, scoId, m.Name, m.Description, m.Unit, m.Type.ToString()]);
-                cache.SetMetric(key, id);
+                var (tenantId, serviceName) = TenantAndService(m.Resource);
+                rows.Add([id, tenantId, serviceName ?? "", resId, scoId, m.Name, m.Description, m.Unit, m.Type.ToString()]);
+                toCache.Add((key, id));
                 result[key] = id;
             }
 
             await BulkInsertAsync("metrics", MetricColumns, rows, ct);
+            // Cached only once the row is stored: caching first would leave a failed insert (e.g. the
+            // server's memory limit under overload) cached forever, and every later flush would skip
+            // re-inserting a catalog row that does not exist.
+            foreach (var (key, id) in toCache) cache.SetMetric(key, id);
         }
 
         var ids = new long[n];
@@ -292,7 +306,7 @@ public sealed class ClickHouseBulkWriter(
     }
 
     private static readonly string[] MetricColumns =
-        ["id", "resource_id", "scope_id", "name", "description", "unit", "type"];
+        ["id", "tenant_id", "service_name", "resource_id", "scope_id", "name", "description", "unit", "type"];
 
     private static readonly string[] GaugeColumns =
     [
@@ -358,6 +372,7 @@ public sealed class ClickHouseBulkWriter(
         if (pending.Count > 0)
         {
             var rows = new List<object?[]>(pending.Count);
+            var toCache = new List<(long TenantId, string Hash, long Id)>(pending.Count);
             foreach (var (key, entry) in pending)
             {
                 // FromKey over the tenant-qualified key, NOT FromHash over the bare hash. The table is
@@ -369,10 +384,12 @@ public sealed class ClickHouseBulkWriter(
                 var id = ClickHouseIds.FromKey(key);
                 rows.Add([id, entry.Model.TenantId, entry.Hash, entry.Model.SchemaUrl,
                           SerializeDeterministicJson(entry.Model.Attributes), ExtractServiceName(entry.Model.Attributes)]);
-                cache.SetResource(entry.Model.TenantId, entry.Hash, id);
+                toCache.Add((entry.Model.TenantId, entry.Hash, id));
                 result[key] = id;
             }
             await BulkInsertAsync("resources", ResourceColumns, rows, ct);
+            // Cached only once the row is stored -- see ResolveMetricIdsAsync.
+            foreach (var (tenantId, hash, id) in toCache) cache.SetResource(tenantId, hash, id);
         }
 
         return result;
@@ -398,14 +415,17 @@ public sealed class ClickHouseBulkWriter(
         if (pending.Count > 0)
         {
             var rows = new List<object?[]>(pending.Count);
+            var toCache = new List<(string Hash, long Id)>(pending.Count);
             foreach (var (hash, model) in pending)
             {
                 var id = ClickHouseIds.FromHash(hash);
                 rows.Add([id, model.Name, model.Version, model.SchemaUrl, hash, SerializeDeterministicJson(model.Attributes)]);
-                cache.SetScope(hash, id);
+                toCache.Add((hash, id));
                 result[hash] = id;
             }
             await BulkInsertAsync("instrumentation_scopes", ScopeColumns, rows, ct);
+            // Cached only once the row is stored -- see ResolveMetricIdsAsync.
+            foreach (var (hash, id) in toCache) cache.SetScope(hash, id);
         }
 
         return result;

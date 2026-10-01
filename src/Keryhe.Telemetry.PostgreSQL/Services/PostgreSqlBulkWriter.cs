@@ -17,17 +17,19 @@ namespace Keryhe.Telemetry.PostgreSQL.Services;
 ///
 /// Two insert shapes, chosen per table by whether it needs conflict handling:
 /// - <b>Binary <c>COPY</c></b> (<c>NpgsqlBinaryImporter</c>, via <c>BeginBinaryImportAsync</c>) for
-///   every table that is a pure append with no dedup key to violate: <c>log_records</c> and the
-///   five metric data-point tables. This is
-///   Npgsql's fastest bulk-load path, and safe here specifically because none of these tables
-///   can raise a conflict -- COPY has no <c>ON CONFLICT</c> equivalent, so it is NOT used for
-///   <c>spans</c>, where a re-delivered span hitting <c>uk_trace_span</c> must be silently
-///   skipped, not thrown.
-/// - <b><c>unnest()</c> array expansion with <c>ON CONFLICT</c></b> for every table
-///   that dedups: <c>spans</c> (DO NOTHING, re-delivery is expected and must not error),
-///   <c>resources</c>/<c>instrumentation_scopes</c>/<c>metrics</c> (DO UPDATE, so RETURNING fires
-///   for both the newly-inserted AND the already-existing half of the batch in one round trip
+///   every table that is a pure append with no key to violate: <c>spans</c> (schema 3.0.0: no
+///   unique key, so a re-delivered span is simply stored again and reads tolerate it),
+///   <c>log_records</c> and the five metric data-point tables. This is Npgsql's fastest bulk-load
+///   path, and safe here because none of these tables can raise a conflict -- COPY has no
+///   <c>ON CONFLICT</c> equivalent.
+/// - <b><c>unnest()</c> array expansion with <c>ON CONFLICT</c></b> for the reference tables that
+///   dedup: <c>resources</c>/<c>instrumentation_scopes</c>/<c>metrics</c> (DO UPDATE, so RETURNING
+///   fires for both the newly-inserted AND the already-existing half of the batch in one round trip
 ///   -- avoiding a DO-NOTHING-then-separate-SELECT fallback for the conflicting rows).
+///
+/// Spans, log records and metrics carry their own <c>tenant_id</c> and <c>service_name</c>, copied
+/// from the resolved resource at ingest, so hot reads filter on a column instead of joining
+/// <c>resources</c>.
 ///
 /// Both shapes run inside the connection's ambient transaction without explicit enlistment
 /// (confirmed live for COPY specifically, not just ordinary commands: a COPY that runs inside a
@@ -55,7 +57,7 @@ namespace Keryhe.Telemetry.PostgreSQL.Services;
 /// populated immediately rather than deferred -- there is no longer a same-flush rollback that
 /// could invalidate it.
 ///
-/// The data transaction itself is unaffected: it still wraps only the bulk insert into
+/// The data transaction wraps only the bulk insert into
 /// <c>log_records</c>/<c>spans</c>/the data-point tables, so a failure there still leaves zero
 /// data rows for that batch. It is never explicitly rolled back: <c>await using</c> disposes it
 /// without a matching <c>CommitAsync</c> whenever an exception propagates out of the block, and
@@ -361,7 +363,8 @@ public sealed class PostgreSqlBulkWriter(
         COPY log_records (
             resource_id, scope_id, time_unix_nano, observed_time_unix_nano,
             severity_number, severity_text, body_type, body_value,
-            dropped_attributes_count, flags, trace_id, span_id, attributes_json, event_name)
+            dropped_attributes_count, flags, trace_id, span_id, attributes_json, event_name,
+            tenant_id, service_name)
         FROM STDIN (FORMAT BINARY)
         """;
 
@@ -397,6 +400,9 @@ public sealed class PostgreSqlBulkWriter(
             await WriteNullableAsync(writer, r.SpanIdHex, NpgsqlDbType.Text, ct);
             await WriteNullableAsync(writer, r.Attributes.Count > 0 ? JsonSerializer.Serialize(r.Attributes) : null, NpgsqlDbType.Jsonb, ct);
             await WriteNullableAsync(writer, r.EventName, NpgsqlDbType.Text, ct);
+            var (tenantId, serviceName) = TenantAndService(r.Resource);
+            await writer.WriteAsync(tenantId, NpgsqlDbType.Bigint, ct);
+            await WriteNullableAsync(writer, serviceName, NpgsqlDbType.Text, ct);
         }
         await writer.CompleteAsync(ct);
     }
@@ -405,6 +411,19 @@ public sealed class PostgreSqlBulkWriter(
     // BULK INSERT: SPANS
     // =========================================================================
 
+    private const string SpansCopySql = """
+        COPY spans (
+            trace_id, span_id, parent_span_id, resource_id, scope_id,
+            name, kind, start_time_unix_nano, end_time_unix_nano,
+            dropped_attributes_count, dropped_events_count, dropped_links_count,
+            trace_state, status_code, status_message, attributes_json, flags,
+            events_json, links_json, tenant_id, service_name)
+        FROM STDIN (FORMAT BINARY)
+        """;
+
+    // A plain binary COPY append, like logs: spans has no unique key to violate (a re-delivered
+    // span is stored again and reads tolerate it) and no foreign keys, so there is no ON CONFLICT
+    // to need and no per-row lookup against an index on the insert path.
     private static async Task BulkInsertSpansAsync(
         NpgsqlConnection conn,
         NpgsqlTransaction tx,
@@ -413,92 +432,34 @@ public sealed class PostgreSqlBulkWriter(
         Dictionary<string, long> scopeIds,
         CancellationToken ct)
     {
-        const string sql = """
-            INSERT INTO spans (
-                trace_id, span_id, parent_span_id, resource_id, scope_id,
-                name, kind, start_time_unix_nano, end_time_unix_nano,
-                dropped_attributes_count, dropped_events_count, dropped_links_count,
-                trace_state, status_code, status_message, attributes_json, flags,
-                events_json, links_json)
-            SELECT
-                unnest($1::text[]),   unnest($2::text[]),   unnest($3::text[]),
-                unnest($4::bigint[]), unnest($5::bigint[]),
-                unnest($6::text[]),   unnest($7::text[]),
-                unnest($8::bigint[]), unnest($9::bigint[]),
-                unnest($10::int[]),   unnest($11::int[]),   unnest($12::int[]),
-                unnest($13::text[]),  unnest($14::text[]),  unnest($15::text[]),
-                unnest($16::jsonb[]), unnest($17::int[]),
-                unnest($18::jsonb[]), unnest($19::jsonb[])
-            ON CONFLICT (trace_id, span_id) DO NOTHING
-            """;
-
-        var n = spans.Count;
-        var traceIds = new string[n];
-        var spanIds = new string[n];
-        var parentIds = new string?[n];
-        var resIds = new long[n];
-        var scoIds = new long[n];
-        var names = new string[n];
-        var kinds = new string[n];
-        var startTimes = new long[n];
-        var endTimes = new long[n];
-        var droppedAttrs = new int[n];
-        var droppedEvents = new int[n];
-        var droppedLinks = new int[n];
-        var traceStates = new string?[n];
-        var statusCodes = new string[n];
-        var statusMsgs = new string?[n];
-        var attrs = new string?[n];
-        var flags = new int[n];
-        var eventsJson = new string?[n];
-        var linksJson = new string?[n];
-
-        for (var i = 0; i < n; i++)
+        await using var writer = await conn.BeginBinaryImportAsync(SpansCopySql, ct);
+        foreach (var span in spans)
         {
-            var span = spans[i];
-            resIds[i] = resourceIds[ResourceKey(span.Resource)];
-            scoIds[i] = scopeIds[HashScope(NormalizeScope(span.InstrumentationScope))];
-            traceIds[i] = span.TraceIdHex;
-            spanIds[i] = span.SpanIdHex;
-            parentIds[i] = span.ParentSpanIdHex;
-            names[i] = span.Name;
-            kinds[i] = span.Kind.ToString();
-            startTimes[i] = span.StartTimeUnixNano;
-            endTimes[i] = span.EndTimeUnixNano;
-            droppedAttrs[i] = span.DroppedAttributesCount;
-            droppedEvents[i] = span.DroppedEventsCount;
-            droppedLinks[i] = span.DroppedLinksCount;
-            traceStates[i] = span.TraceState;
-            statusCodes[i] = span.StatusCode.ToString();
-            statusMsgs[i] = span.StatusMessage;
-            attrs[i] = span.Attributes?.Count > 0 ? JsonSerializer.Serialize(span.Attributes) : null;
-            flags[i] = span.Flags;
-            eventsJson[i] = SerializeListOrNull(span.Events);
-            linksJson[i] = SerializeListOrNull(span.Links);
+            await writer.StartRowAsync(ct);
+            await writer.WriteAsync(span.TraceIdHex, NpgsqlDbType.Text, ct);
+            await writer.WriteAsync(span.SpanIdHex, NpgsqlDbType.Text, ct);
+            await WriteNullableAsync(writer, span.ParentSpanIdHex, NpgsqlDbType.Text, ct);
+            await writer.WriteAsync(resourceIds[ResourceKey(span.Resource)], NpgsqlDbType.Bigint, ct);
+            await writer.WriteAsync(scopeIds[HashScope(NormalizeScope(span.InstrumentationScope))], NpgsqlDbType.Bigint, ct);
+            await writer.WriteAsync(span.Name, NpgsqlDbType.Text, ct);
+            await writer.WriteAsync(span.Kind.ToString(), NpgsqlDbType.Text, ct);
+            await writer.WriteAsync(span.StartTimeUnixNano, NpgsqlDbType.Bigint, ct);
+            await writer.WriteAsync(span.EndTimeUnixNano, NpgsqlDbType.Bigint, ct);
+            await writer.WriteAsync(span.DroppedAttributesCount, NpgsqlDbType.Integer, ct);
+            await writer.WriteAsync(span.DroppedEventsCount, NpgsqlDbType.Integer, ct);
+            await writer.WriteAsync(span.DroppedLinksCount, NpgsqlDbType.Integer, ct);
+            await WriteNullableAsync(writer, span.TraceState, NpgsqlDbType.Text, ct);
+            await writer.WriteAsync(span.StatusCode.ToString(), NpgsqlDbType.Text, ct);
+            await WriteNullableAsync(writer, span.StatusMessage, NpgsqlDbType.Text, ct);
+            await WriteNullableAsync(writer, span.Attributes?.Count > 0 ? JsonSerializer.Serialize(span.Attributes) : null, NpgsqlDbType.Jsonb, ct);
+            await writer.WriteAsync(span.Flags, NpgsqlDbType.Integer, ct);
+            await WriteNullableAsync(writer, SerializeListOrNull(span.Events), NpgsqlDbType.Jsonb, ct);
+            await WriteNullableAsync(writer, SerializeListOrNull(span.Links), NpgsqlDbType.Jsonb, ct);
+            var (tenantId, serviceName) = TenantAndService(span.Resource);
+            await writer.WriteAsync(tenantId, NpgsqlDbType.Bigint, ct);
+            await WriteNullableAsync(writer, serviceName, NpgsqlDbType.Text, ct);
         }
-
-        await using var cmd = new NpgsqlCommand(sql, conn) { Transaction = tx };
-        cmd.Parameters.Add(new NpgsqlParameter { Value = traceIds, NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Text });
-        cmd.Parameters.Add(new NpgsqlParameter { Value = spanIds, NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Text });
-        cmd.Parameters.Add(new NpgsqlParameter { Value = parentIds, NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Text });
-        cmd.Parameters.Add(new NpgsqlParameter { Value = resIds, NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Bigint });
-        cmd.Parameters.Add(new NpgsqlParameter { Value = scoIds, NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Bigint });
-        cmd.Parameters.Add(new NpgsqlParameter { Value = names, NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Text });
-        cmd.Parameters.Add(new NpgsqlParameter { Value = kinds, NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Text });
-        cmd.Parameters.Add(new NpgsqlParameter { Value = startTimes, NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Bigint });
-        cmd.Parameters.Add(new NpgsqlParameter { Value = endTimes, NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Bigint });
-        cmd.Parameters.Add(new NpgsqlParameter { Value = droppedAttrs, NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Integer });
-        cmd.Parameters.Add(new NpgsqlParameter { Value = droppedEvents, NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Integer });
-        cmd.Parameters.Add(new NpgsqlParameter { Value = droppedLinks, NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Integer });
-        cmd.Parameters.Add(new NpgsqlParameter { Value = traceStates, NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Text });
-        cmd.Parameters.Add(new NpgsqlParameter { Value = statusCodes, NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Text });
-        cmd.Parameters.Add(new NpgsqlParameter { Value = statusMsgs, NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Text });
-        cmd.Parameters.Add(new NpgsqlParameter { Value = attrs, NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Jsonb });
-        cmd.Parameters.Add(new NpgsqlParameter { Value = flags, NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Integer });
-        cmd.Parameters.Add(new NpgsqlParameter { Value = eventsJson, NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Jsonb });
-        cmd.Parameters.Add(new NpgsqlParameter { Value = linksJson, NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Jsonb });
-
-        await cmd.ExecuteNonQueryAsync(ct);
+        await writer.CompleteAsync(ct);
     }
 
     // =========================================================================
@@ -531,9 +492,10 @@ public sealed class PostgreSqlBulkWriter(
         // The key columns come back rather than relying on RETURNING row order, which PostgreSQL
         // does not actually guarantee.
         const string sql = """
-            INSERT INTO metrics (resource_id, scope_id, name, description, unit, type, created_at)
+            INSERT INTO metrics (resource_id, scope_id, name, description, unit, type, created_at, tenant_id, service_name)
             SELECT unnest($1::bigint[]), unnest($2::bigint[]), unnest($3::text[]),
-                   unnest($4::text[]),   unnest($5::text[]),   unnest($6::text[]), NOW()
+                   unnest($4::text[]),   unnest($5::text[]),   unnest($6::text[]), NOW(),
+                   unnest($7::bigint[]), unnest($8::text[])
             ON CONFLICT (resource_id, name, type, scope_id) DO UPDATE
                 SET description = EXCLUDED.description,
                     unit        = EXCLUDED.unit
@@ -577,6 +539,10 @@ public sealed class PostgreSqlBulkWriter(
             var descs = new string?[c];
             var units = new string?[c];
             var types = new string[c];
+            // tenant_id/service_name are written on the insert only (a cache miss), not refreshed on
+            // conflict: they cannot go stale, because the resource hash includes service.name.
+            var tenantIds = new long[c];
+            var serviceNames = new string?[c];
 
             for (var i = 0; i < c; i++)
             {
@@ -587,6 +553,7 @@ public sealed class PostgreSqlBulkWriter(
                 descs[i] = m.Description;
                 units[i] = m.Unit;
                 types[i] = m.Type.ToString();
+                (tenantIds[i], serviceNames[i]) = TenantAndService(m.Resource);
             }
 
             await using var cmd = new NpgsqlCommand(sql, conn);
@@ -596,6 +563,8 @@ public sealed class PostgreSqlBulkWriter(
             cmd.Parameters.Add(new NpgsqlParameter { Value = descs, NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Text });
             cmd.Parameters.Add(new NpgsqlParameter { Value = units, NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Text });
             cmd.Parameters.Add(new NpgsqlParameter { Value = types, NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Text });
+            cmd.Parameters.Add(new NpgsqlParameter { Value = tenantIds, NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Bigint });
+            cmd.Parameters.Add(new NpgsqlParameter { Value = serviceNames, NpgsqlDbType = NpgsqlDbType.Array | NpgsqlDbType.Text });
 
             await using var reader = await cmd.ExecuteReaderAsync(ct);
             while (await reader.ReadAsync(ct))

@@ -216,8 +216,8 @@ export class LogsComponent implements OnDestroy {
   protected newSinceCount = computed(() => this.traceFilterActive() ? 0 : (this.summary()?.newSinceAsOf ?? 0));
 
   /**
-   * Standard-tier search window limit, explained inline next to the search box (decision 39):
-   * shown only when a raw search filter is present and the window exceeds the limit. Fetched via
+   * Search window limit, explained inline next to the search box (search is unindexed on every
+   * provider): shown only when a raw search filter is present and the window exceeds the limit. Fetched via
    * CapabilitiesService, not derived from a failed request, so it shows up front rather than
    * after a 400.
    */
@@ -228,7 +228,7 @@ export class LogsComponent implements OnDestroy {
     const { start, end } = this.timeRange.range();
     const hours = (end.getTime() - start.getTime()) / 3_600_000;
     if (hours <= caps.rawSearchWindowHours) return null;
-    return `Search is limited to a ${caps.rawSearchWindowHours}-hour window on ${caps.tier} tier. Narrow the time range or remove the search.`;
+    return `Search is limited to a ${caps.rawSearchWindowHours}-hour window. Narrow the time range or remove the search.`;
   });
 
   /** Facets adapted from the server's already-counted sample into the sidebar's `Facet` shape. */

@@ -1,3 +1,5 @@
+using System.Diagnostics;
+using System.Runtime.CompilerServices;
 using System.Threading.Channels;
 using Keryhe.Telemetry.Core.Data.Threading;
 using Keryhe.Telemetry.Core.Models;
@@ -48,6 +50,33 @@ public sealed class TelemetryIngestionChannel
 
     /// <summary>Gate on resident METRICS. See <see cref="TelemetryIngestionOptions.MaxQueuedMetrics"/>.</summary>
     public RecordCountGate MetricGate { get; }
+
+    // Enqueue timestamp per queued export, keyed by the export's list instance. A side table rather
+    // than a wrapper type so the channels keep carrying plain lists; an export written without a
+    // stamp (a test writing straight to a channel) simply records no commit lag.
+    private readonly ConditionalWeakTable<object, EnqueueStamp> _enqueued = new();
+
+    private sealed class EnqueueStamp(long timestamp) { public readonly long Timestamp = timestamp; }
+
+    /// <summary>
+    /// Stamps <paramref name="export"/> as enqueued now. Write repositories call this immediately
+    /// before writing to a channel; <see cref="TelemetryIngestionWorker"/> reads the stamp back with
+    /// <see cref="TryTakeEnqueued"/> to measure commit lag.
+    /// </summary>
+    public void MarkEnqueued(object export) => _enqueued.AddOrUpdate(export, new EnqueueStamp(Stopwatch.GetTimestamp()));
+
+    /// <summary>The stamp's <see cref="Stopwatch"/> timestamp, removing it. False if the export was never stamped.</summary>
+    public bool TryTakeEnqueued(object export, out long timestamp)
+    {
+        if (_enqueued.TryGetValue(export, out var stamp))
+        {
+            _enqueued.Remove(export);
+            timestamp = stamp.Timestamp;
+            return true;
+        }
+        timestamp = 0;
+        return false;
+    }
 
     public TelemetryIngestionChannel(IOptions<TelemetryIngestionOptions> options, IngestionMetrics metrics)
     {

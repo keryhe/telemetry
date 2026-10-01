@@ -2,36 +2,22 @@ using Microsoft.Extensions.Configuration;
 
 namespace Keryhe.Telemetry.Core;
 
-/// <summary>Provider tier (decision 39): analytics providers get everything in the plan; standard providers get a bounded subset.</summary>
-public enum ProviderTier
-{
-    Analytics,
-    Standard
-}
-
 /// <summary>
 /// What a provider supports, declared once per provider and exposed to the UI through
-/// <c>GET /api/capabilities</c> (list-pages-server-side plan, Phase 1, decision 40). The API
-/// enforces the limits from it (via <see cref="RawSearchWindowGuard"/>); the UI reads it to explain
-/// a limit up front instead of the request just being slower or erroring unexplained.
+/// <c>GET /api/capabilities</c>. The API enforces the limits from it (via
+/// <see cref="RawSearchWindowGuard"/> and <see cref="ExportWindowGuard"/>); the UI reads it to
+/// explain a limit up front instead of the request just being slower or erroring unexplained.
+///
+/// Schema 3.0.0 removed the provider tiers and the indexed-search capability: search is unindexed and
+/// time-window bounded on every provider, so there is no longer a tier to report.
 /// </summary>
-/// <param name="Tier">Analytics: PostgreSQL, Timescale, ClickHouse. Standard: SQL Server, MySQL (decision 39).</param>
-/// <param name="IndexedSearch">
-/// Whether search (free-text/attribute) runs against dedicated indexes rather than an unindexed
-/// scan. True for every analytics-tier provider even though Phase 1 hasn't built those indexes yet
-/// (phase 6 does) — this field describes what the TIER supports, not what has shipped so far,
-/// which is the more stable meaning for a UI that reads it once at startup and a client that might
-/// cache it; the alternative (flip it only once phase 6 lands) would make this same field mean two
-/// different things depending on which phase deployed it, for the same provider. Noted here as a
-/// deliberate judgment call rather than an unstated assumption.
-/// </param>
-/// <param name="ExemplarPaging">True when a metric's exemplars page server-side with a real keyset cursor (decision 26); false means the newest-500 fallback.</param>
+/// <param name="ExemplarPaging">True when a metric's exemplars page server-side with a real keyset cursor; false means the newest-500 fallback.</param>
 /// <param name="RawSearchWindowHours">
 /// Maximum window, in hours, for a logs/traces request carrying a free-text/attribute search or
-/// <c>mode=slow</c>, before the standard tier's <see cref="RawSearchWindowGuard"/> rejects it with
-/// 400 (decision 39). Null means no limit (every analytics-tier provider).
+/// <c>mode=slow</c>, before <see cref="RawSearchWindowGuard"/> rejects it with 400. Null means no limit.
+/// 24 on every provider by default (<see cref="DefaultRawSearchWindowHours"/>).
 /// </param>
-/// <param name="ExportMaxWindowDays">Maximum export time window, in days (decision 17): 7 on the analytics tier, 1 on the standard tier by default.</param>
+/// <param name="ExportMaxWindowDays">Maximum export time window, in days: 7 on PostgreSQL/Timescale/ClickHouse and 1 on SQL Server/MySQL by default.</param>
 /// <param name="AsOfBackoffSeconds">
 /// How far behind the database clock a fresh list/summary query pins <c>asOf</c>
 /// (<c>DapperReadRepository.DatabaseClockNowExpr</c>): 5 on PostgreSQL/Timescale, 0 elsewhere. A row
@@ -39,42 +25,35 @@ public enum ProviderTier
 /// only; nothing in the API enforces it. The stress harness subtracts it from its log-lag probe.
 /// </param>
 public sealed record ProviderCapabilities(
-    ProviderTier Tier,
-    bool IndexedSearch,
     bool ExemplarPaging,
     int? RawSearchWindowHours,
     int ExportMaxWindowDays,
     int AsOfBackoffSeconds = 0)
 {
-    /// <summary>Analytics-tier defaults (decision 39), before any <c>Telemetry:Query</c>/<c>Telemetry:Export</c> override is applied.</summary>
-    public static ProviderCapabilities AnalyticsDefault() => new(
-        Tier: ProviderTier.Analytics,
-        IndexedSearch: true,
+    /// <summary>Search is limited to this many hours on every provider unless <c>Telemetry:Query:RawSearchWindowHoursOverride</c> says otherwise.</summary>
+    public const int DefaultRawSearchWindowHours = 24;
+
+    /// <summary>Defaults for a provider with keyset exemplar paging and a 7-day export window (PostgreSQL, Timescale, ClickHouse).</summary>
+    public static ProviderCapabilities Default() => new(
         ExemplarPaging: true,
-        RawSearchWindowHours: null,
+        RawSearchWindowHours: DefaultRawSearchWindowHours,
         ExportMaxWindowDays: 7);
 
-    /// <summary>Standard-tier defaults (decision 39), before any <c>Telemetry:Query</c>/<c>Telemetry:Export</c> override is applied.</summary>
-    public static ProviderCapabilities StandardDefault() => new(
-        Tier: ProviderTier.Standard,
-        IndexedSearch: false,
+    /// <summary>Defaults for a provider with the newest-500 exemplar fallback and a 1-day export window (SQL Server, MySQL).</summary>
+    public static ProviderCapabilities Constrained() => new(
         ExemplarPaging: false,
-        RawSearchWindowHours: 24,
+        RawSearchWindowHours: DefaultRawSearchWindowHours,
         ExportMaxWindowDays: 1);
 
     /// <summary>
-    /// Tier defaults, overridden by <c>Telemetry:Query:RawSearchWindowHoursOverride</c> /
-    /// <c>Telemetry:Export:MaxWindowDaysOverride</c> when present — called once per provider from
-    /// its own <c>Add&lt;Provider&gt;ApiServices</c>. Reads <see cref="IConfiguration"/> directly
-    /// (rather than through a bound <see cref="QueryOptions"/>/<c>ExportOptions</c>) since it runs
-    /// during service registration, before the options infrastructure it would otherwise depend on
-    /// is available to resolve — matching the existing <c>configuration["..."]</c> + <c>TryParse</c>
-    /// idiom this codebase already uses at registration time.
+    /// The provider's defaults, overridden by <c>Telemetry:Query:RawSearchWindowHoursOverride</c> /
+    /// <c>Telemetry:Export:MaxWindowDaysOverride</c> when present -- called once per provider from its
+    /// own <c>Add&lt;Provider&gt;ApiServices</c>. Reads <see cref="IConfiguration"/> directly (rather than
+    /// through a bound <see cref="Data.Read.QueryOptions"/>/<c>ExportOptions</c>) since it runs during
+    /// service registration, before the options infrastructure is available to resolve.
     /// </summary>
-    public static ProviderCapabilities FromConfiguration(ProviderTier tier, IConfiguration configuration)
+    public static ProviderCapabilities FromConfiguration(ProviderCapabilities defaults, IConfiguration configuration)
     {
-        var baseline = tier == ProviderTier.Analytics ? AnalyticsDefault() : StandardDefault();
-
         var rawSearchOverride = int.TryParse(configuration[$"{Data.Read.QueryOptions.SectionName}:RawSearchWindowHoursOverride"], out var rawSearchHours)
             ? rawSearchHours
             : (int?)null;
@@ -82,10 +61,10 @@ public sealed record ProviderCapabilities(
             ? exportDays
             : (int?)null;
 
-        return baseline with
+        return defaults with
         {
-            RawSearchWindowHours = rawSearchOverride ?? baseline.RawSearchWindowHours,
-            ExportMaxWindowDays = exportOverride ?? baseline.ExportMaxWindowDays
+            RawSearchWindowHours = rawSearchOverride ?? defaults.RawSearchWindowHours,
+            ExportMaxWindowDays = exportOverride ?? defaults.ExportMaxWindowDays
         };
     }
 }

@@ -47,6 +47,7 @@ public class MetricWriteRepository : IMetricWriteRepository
         await _channel.MetricGate.AcquireAsync(metrics.Count, cancellationToken);
         try
         {
+            _channel.MarkEnqueued(metrics);
             await _channel.Metrics.Writer.WriteAsync(metrics, cancellationToken);
         }
         catch

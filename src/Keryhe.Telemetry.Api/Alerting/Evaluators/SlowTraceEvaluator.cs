@@ -34,10 +34,10 @@ public class SlowTraceEvaluator : IAlertEvaluator
 
         var windowStart = now.AddMinutes(-condition.WindowMinutes);
 
-        // Counts anchors (roots plus orphan_roots) whose OWN duration is >= threshold (decision 4:
-        // mode=slow filters on the anchor span's duration, not whole-trace) -- always the raw path,
-        // through the covering idx_spans_root_time, instead of reading a capped 100-row list
-        // (decision 32).
+        // Counts inbound trace anchors (a trace's earliest span in scope, kind SERVER/CONSUMER) whose
+        // OWN duration is >= threshold: mode=slow filters on the anchor span's duration, not the
+        // whole trace's -- the same duration the trace list shows (schema-simplification decision
+        // 11). Always the raw path; one summary query instead of reading a capped row list.
         var summary = await _traces.GetTraceSummaryAsync(new TraceSummaryQuery
         {
             Start = windowStart,

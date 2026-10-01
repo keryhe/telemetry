@@ -17,6 +17,7 @@ public static class RunCommand
         "run [--provider <PostgreSQL|Timescale|SqlServer|MySql|ClickHouse|all>] [--topology <allinone|split|all>]\n" +
         "    [--profile <smoke|standard|soak|ramp|all|path.json>] [--scenario <fixed|ramp>] [--out <dir>] [--reuse-publish <dir>]\n" +
         "    [--browsers <n>]   override the profile's browser users (0 = none)\n" +
+        "    [--db-cpuset <cpus>]   pin the database container to these CPUs of the Docker VM (e.g. 0-3); recorded in the report\n" +
         "    [--retention-interval <stress|realistic|seconds>]   override the profile's retention interval (stress = 30 s, realistic = 3600 s)";
 
     public static async Task<int> RunAsync(string[] args)
@@ -24,7 +25,7 @@ public static class RunCommand
         string provider = "PostgreSQL", topology = "allinone", profile = "", scenario = "fixed";
         string? outDir = null, reusePublish = null;
         int? browsers = null;
-        string? retentionInterval = null;
+        string? retentionInterval = null, dbCpuset = null;
         var scenarioGiven = false;
         for (var i = 0; i < args.Length; i++)
         {
@@ -39,12 +40,13 @@ public static class RunCommand
                 case "--reuse-publish": reusePublish = Next(); break;
                 case "--browsers": browsers = int.Parse(Next()); break;
                 case "--retention-interval": retentionInterval = Next(); break;
+                case "--db-cpuset": dbCpuset = Next(); break;
                 default: Console.Error.WriteLine($"unknown argument {args[i]}\n{Usage}"); return 2;
             }
         }
 
         List<ScenarioSpec> specs;
-        try { specs = BuildMatrix(provider, topology, profile, scenario, scenarioGiven, browsers, retentionInterval); }
+        try { specs = BuildMatrix(provider, topology, profile, scenario, scenarioGiven, browsers, retentionInterval, dbCpuset); }
         catch (Exception ex) when (ex is ArgumentException or FileNotFoundException or InvalidDataException)
         {
             Console.Error.WriteLine(ex.Message);
@@ -88,7 +90,7 @@ public static class RunCommand
     }
 
     /// <summary>Expands the CLI selections into the scenarios to run, provider-major so one container image stays warm across profiles. Pure apart from reading profile files.</summary>
-    public static List<ScenarioSpec> BuildMatrix(string provider, string topology, string profile, string scenario, bool scenarioGiven, int? browsers, string? retentionInterval = null)
+    public static List<ScenarioSpec> BuildMatrix(string provider, string topology, string profile, string scenario, bool scenarioGiven, int? browsers, string? retentionInterval = null, string? databaseCpuset = null)
     {
         var providers = provider.Equals("all", StringComparison.OrdinalIgnoreCase)
             ? ProviderContainerFactory.ProviderNames.ToList()
@@ -106,7 +108,7 @@ public static class RunCommand
 
         // With no --profile, --scenario picks the default: smoke for fixed, ramp for ramp.
         if (profile.Length == 0) profile = wantsRamp ? "ramp" : "smoke";
-        var profileNames = profile.Equals("all", StringComparison.OrdinalIgnoreCase) ? ScenarioProfile.Builtin.Where(p => wantsRamp == (p == "ramp") || !scenarioGiven).ToList() : [profile];
+        var profileNames = profile.Equals("all", StringComparison.OrdinalIgnoreCase) ? ScenarioProfile.Builtin.Where(p => wantsRamp == ScenarioProfile.Resolve(p).IsRamp || !scenarioGiven).ToList() : [profile];
 
         foreach (var name in profileNames)
             if (scenarioGiven && ScenarioProfile.Resolve(name).IsRamp != wantsRamp)
@@ -121,6 +123,7 @@ public static class RunCommand
                     var p = ScenarioProfile.Resolve(name);
                     if (browsers is { } b) p.Browsers.Users = b;
                     if (retentionInterval is not null) p.OverrideRetentionInterval(retentionInterval);
+                    if (databaseCpuset is not null) p.DatabaseCpuset = databaseCpuset;
                     p.Validate();
                     specs.Add(new ScenarioSpec(prov, top, p));
                 }

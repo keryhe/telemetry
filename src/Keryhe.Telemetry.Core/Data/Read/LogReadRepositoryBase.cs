@@ -7,10 +7,11 @@ using Keryhe.Telemetry.Core.Models;
 namespace Keryhe.Telemetry.Core.Data.Read;
 
 /// <summary>
-/// Dapper implementation of <see cref="ILogReadRepository"/>. Joins to
-/// <c>resources</c>/<c>instrumentation_scopes</c>, applies the tenant + severity/time
-/// filters in SQL, and shapes rows into <see cref="LogRecordModel"/> exactly as the
-/// former EF repository did.
+/// Dapper implementation of <see cref="ILogReadRepository"/>. Since schema 3.0.0 a log record
+/// carries its own <c>tenant_id</c> and <c>service_name</c>, so the tenant, service, severity and
+/// time filters are plain predicates on <c>log_records</c>; <c>resources</c>/<c>instrumentation_scopes</c>
+/// are joined only where their columns are selected (record detail). Shapes rows into
+/// <see cref="LogRecordModel"/>.
 /// </summary>
 public abstract class LogReadRepositoryBase : DapperReadRepository, ILogReadRepository
 {
@@ -27,9 +28,6 @@ public abstract class LogReadRepositoryBase : DapperReadRepository, ILogReadRepo
     /// <summary>Sample size for <see cref="GetLogFacetsAsync"/> (decision 15): the newest N matching rows, not the whole filtered set.</summary>
     private const int FacetSampleSize = 10_000;
 
-    private const long NanosPerMinute = 60_000_000_000L;
-    private const long NanosPerHour = 3_600_000_000_000L;
-
     protected LogReadRepositoryBase(ITenantContext tenantContext) : base(tenantContext) { }
 
     protected LogReadRepositoryBase(ITenantContext tenantContext, IConfiguration configuration) : base(tenantContext)
@@ -39,7 +37,7 @@ public abstract class LogReadRepositoryBase : DapperReadRepository, ILogReadRepo
             : 5;
     }
 
-    private const string BaseSelect = """
+    private string BaseSelect => $"""
         SELECT
             lr.time_unix_nano            AS TimeUnixNano,
             lr.observed_time_unix_nano   AS ObservedTimeUnixNano,
@@ -60,9 +58,9 @@ public abstract class LogReadRepositoryBase : DapperReadRepository, ILogReadRepo
             sc.schema_url                AS ScopeSchemaUrl,
             sc.attributes_json           AS ScopeAttributesJson
         FROM log_records lr
-        JOIN resources r               ON lr.resource_id = r.id
-        JOIN instrumentation_scopes sc ON lr.scope_id = sc.id
-        WHERE r.tenant_id = @tenantId
+        JOIN {ResourcesTable} r               ON lr.resource_id = r.id
+        JOIN {ScopesTable} sc ON lr.scope_id = sc.id
+        WHERE lr.tenant_id = @tenantId
         """;
 
     public async Task<LogRecordModel?> GetLogRecordByIdAsync(long id, CancellationToken cancellationToken = default)
@@ -82,7 +80,7 @@ public abstract class LogReadRepositoryBase : DapperReadRepository, ILogReadRepo
         await using var conn = await OpenConnectionAsync(cancellationToken);
         var rows = await conn.QueryAsync<LogRow>(new CommandDefinition(
             BaseSelect + " AND lr.trace_id = @traceId ORDER BY lr.time_unix_nano DESC",
-            new { tenantId = TenantId, traceId = traceIdHex }, cancellationToken: cancellationToken));
+            new { tenantId = TenantId, traceId = IdParam(traceIdHex, 32) }, cancellationToken: cancellationToken));
         return rows.Select(Map).ToList();
     }
 
@@ -107,7 +105,7 @@ public abstract class LogReadRepositoryBase : DapperReadRepository, ILogReadRepo
         before = Math.Clamp(before, 0, 500);
         after = Math.Clamp(after, 0, 500);
 
-        var serviceClause = string.IsNullOrEmpty(service) ? "" : $" AND {ResourceServiceNameExpr()} = @service";
+        var serviceClause = string.IsNullOrEmpty(service) ? "" : " AND lr.service_name = @service";
 
         await using var conn = await OpenConnectionAsync(cancellationToken);
 
@@ -142,7 +140,6 @@ public abstract class LogReadRepositoryBase : DapperReadRepository, ILogReadRepo
     private async Task<LogSummaryResult> GetLogSummaryCoreAsync(LogSummaryQuery query, CancellationToken cancellationToken)
     {
         var parsed = SearchQueryParser.Parse(query.Search);
-        var hasRawSearchFilter = parsed.IsTraceIdSearch || parsed.Terms.Count > 0;
 
         await using var conn = await OpenConnectionAsync(cancellationToken);
         var asOf = await ResolveAsOfAsync(conn, query.AsOf, cancellationToken);
@@ -150,168 +147,9 @@ public abstract class LogReadRepositoryBase : DapperReadRepository, ILogReadRepo
         var startNano = TimeConversion.DateTimeToUnixNano(query.Start);
         var endNano = TimeConversion.DateTimeToUnixNano(query.End);
 
-        // Rollup eligibility (decision 37): time/service filters only. MinSeverity is deliberately
-        // excluded even though decision 37 nominally allows it — the pre-aggregated severity-group
-        // columns can't safely reconstruct an arbitrary row-level `severity_number >= X` cutoff
-        // (the Info group bundles NULL severities with 9-12, and a cutoff that doesn't land exactly
-        // on a group boundary would need sub-group counts the rollup tables don't keep), so a
-        // MinSeverity filter always falls back to the raw path. Documented as a deliberate,
-        // correctness-preserving scope narrowing rather than an oversight.
-        var rollupEligible = !hasRawSearchFilter && query.MinSeverity is null;
-
-        if (rollupEligible)
-        {
-            var rollupResult = await TryGetRollupSummaryAsync(conn, query, startNano, endNano, cancellationToken);
-            if (rollupResult != null)
-            {
-                var newSince = await CountNewSinceAsOfAsync(conn, query.Start, query.End, query.Service, query.MinSeverity, parsed, asOf, cancellationToken);
-                return new LogSummaryResult
-                {
-                    Source = rollupResult.Source,
-                    Buckets = rollupResult.Buckets,
-                    Total = rollupResult.Total,
-                    TotalIsLowerBound = rollupResult.TotalIsLowerBound,
-                    NewSinceAsOf = newSince,
-                    AsOf = asOf
-                };
-            }
-        }
-
+        // Always the raw path: there are no rollup tables since schema 3.0.0. A window that is too
+        // wide to group within the statement timeout comes back as a lower bound ("≥ N").
         return await GetRawSummaryAsync(conn, query, parsed, startNano, endNano, asOf, cancellationToken);
-    }
-
-    /// <summary>
-    /// Attempts the rollup-table source (decisions 37-38): minute rows for a window under 24h,
-    /// hour rows otherwise, plus a raw tail for the not-yet-rolled portion of the window. Returns
-    /// null when <c>rollup_state</c> reports no coverage of this window at all, so the caller falls
-    /// back to the raw path — this is NOT the same as "no data": a covered-but-empty window still
-    /// returns a (zeroed) result here.
-    /// </summary>
-    private async Task<LogSummaryResult?> TryGetRollupSummaryAsync(
-        System.Data.Common.DbConnection conn, LogSummaryQuery query, long startNano, long endNano, CancellationToken cancellationToken)
-    {
-        var granularity = (endNano - startNano) > 24 * NanosPerHour ? "hour" : "minute";
-        var bucketSizeNano = granularity == "minute" ? NanosPerMinute : NanosPerHour;
-        var table = granularity == "minute" ? "log_rollup_minute" : "log_rollup_hour";
-
-        var state = await conn.QuerySingleOrDefaultAsync<RollupStateRow>(new CommandDefinition(
-            "SELECT coverage_start_unix_nano AS CoverageStartUnixNano, rolled_until_unix_nano AS RolledUntilUnixNano " +
-            "FROM rollup_state WHERE signal_name = 'logs' AND granularity = @granularity",
-            new { granularity }, cancellationToken: cancellationToken));
-
-        if (state?.CoverageStartUnixNano is not { } coverageStart || startNano < coverageStart)
-            return null;
-
-        var rolledUntil = state.RolledUntilUnixNano;
-        var rollupEnd = Math.Min(endNano, rolledUntil);
-        if (rollupEnd < startNano) rollupEnd = startNano;
-
-        var serviceClause = string.IsNullOrEmpty(query.Service) ? "" : $" AND {ResourceServiceNameExpr()} = @service";
-        var rollupSql = $"""
-            SELECT lrm.bucket_unix_nano AS BucketUnixNano,
-                   SUM(lrm.trace_count) AS Trace,
-                   SUM(lrm.debug_count) AS Debug,
-                   SUM(lrm.info_count)  AS Info,
-                   SUM(lrm.warn_count)  AS Warn,
-                   SUM(lrm.error_count) AS Error,
-                   SUM(lrm.fatal_count) AS Fatal
-            FROM {table} AS lrm{RollupFinalHint}
-            JOIN resources r ON lrm.resource_id = r.id
-            WHERE r.tenant_id = @tenantId
-              AND lrm.bucket_unix_nano >= @start AND lrm.bucket_unix_nano < @rollupEnd
-              {serviceClause}
-            GROUP BY lrm.bucket_unix_nano
-            """;
-
-        var rollupRows = (await conn.QueryAsync<SummaryBucketRow>(new CommandDefinition(rollupSql, new
-        {
-            tenantId = TenantId,
-            start = startNano,
-            rollupEnd,
-            service = query.Service
-        }, cancellationToken: cancellationToken))).ToList();
-
-        var buckets = rollupRows.ToDictionary(r => r.BucketUnixNano);
-
-        // Raw tail: [rollupEnd, endNano), the not-yet-rolled portion of the window (typically the
-        // last SettleSeconds). Aligned to the same bucket size so it merges cleanly.
-        if (rollupEnd < endNano)
-        {
-            var tailClauses = new List<string> { "lr.time_unix_nano >= @rollupEnd", "lr.time_unix_nano < @end" };
-            if (!string.IsNullOrEmpty(query.Service)) tailClauses.Add($"{ResourceServiceNameExpr()} = @service");
-            var tailWhere = string.Join(" AND ", tailClauses);
-            var bucketIndexExpr = BucketIndexExpr("lr.time_unix_nano", "@bucketSize");
-            var tailSql = $"""
-                SELECT ({bucketIndexExpr}) AS BucketIndex, {LogSeverityGroupSql.SumCaseColumns("lr.severity_number")}
-                FROM log_records lr
-                JOIN resources r ON lr.resource_id = r.id
-                WHERE r.tenant_id = @tenantId AND {tailWhere}
-                GROUP BY ({bucketIndexExpr})
-                """;
-            var tailRows = await conn.QueryAsync<TailBucketRow>(new CommandDefinition(tailSql, new
-            {
-                tenantId = TenantId,
-                rollupEnd,
-                end = endNano,
-                service = query.Service,
-                bucketSize = bucketSizeNano
-            }, cancellationToken: cancellationToken));
-
-            foreach (var row in tailRows)
-            {
-                var bucketStart = row.BucketIndex * bucketSizeNano;
-                if (buckets.TryGetValue(bucketStart, out var existing))
-                {
-                    buckets[bucketStart] = new SummaryBucketRow
-                    {
-                        BucketUnixNano = bucketStart,
-                        Trace = existing.Trace + row.Trace,
-                        Debug = existing.Debug + row.Debug,
-                        Info = existing.Info + row.Info,
-                        Warn = existing.Warn + row.Warn,
-                        Error = existing.Error + row.Error,
-                        Fatal = existing.Fatal + row.Fatal
-                    };
-                }
-                else
-                {
-                    buckets[bucketStart] = new SummaryBucketRow
-                    {
-                        BucketUnixNano = bucketStart,
-                        Trace = row.Trace,
-                        Debug = row.Debug,
-                        Info = row.Info,
-                        Warn = row.Warn,
-                        Error = row.Error,
-                        Fatal = row.Fatal
-                    };
-                }
-            }
-        }
-
-        var orderedBuckets = buckets.Values
-            .OrderBy(b => b.BucketUnixNano)
-            .Select(b => new LogSummaryBucket
-            {
-                Timestamp = TimeConversion.UnixNanoToDateTime(b.BucketUnixNano),
-                Trace = b.Trace,
-                Debug = b.Debug,
-                Info = b.Info,
-                Warn = b.Warn,
-                Error = b.Error,
-                Fatal = b.Fatal
-            })
-            .ToList();
-
-        var total = orderedBuckets.Sum(b => b.Trace + b.Debug + b.Info + b.Warn + b.Error + b.Fatal);
-
-        return new LogSummaryResult
-        {
-            Source = "rollup",
-            Buckets = orderedBuckets,
-            Total = total,
-            TotalIsLowerBound = false
-        };
     }
 
     private async Task<LogSummaryResult> GetRawSummaryAsync(
@@ -329,8 +167,7 @@ public abstract class LogReadRepositoryBase : DapperReadRepository, ILogReadRepo
         var sql = $"""
             SELECT {clampedIndexExpr} AS BucketIndex, {LogSeverityGroupSql.SumCaseColumns("lr.severity_number")}
             FROM log_records lr
-            JOIN resources r ON lr.resource_id = r.id
-            WHERE r.tenant_id = @tenantId AND {where}
+            WHERE lr.tenant_id = @tenantId AND {where}
             GROUP BY {clampedIndexExpr}
             """;
 
@@ -404,8 +241,7 @@ public abstract class LogReadRepositoryBase : DapperReadRepository, ILogReadRepo
             SELECT COUNT(*) FROM (
                 SELECT 1 AS x
                 FROM log_records lr
-                JOIN resources r ON lr.resource_id = r.id
-                WHERE r.tenant_id = @tenantId AND {where}
+                WHERE lr.tenant_id = @tenantId AND {where}
                 ORDER BY lr.time_unix_nano DESC
                 {PagingClause}
             ) capped
@@ -427,8 +263,7 @@ public abstract class LogReadRepositoryBase : DapperReadRepository, ILogReadRepo
         var where = string.Join(" AND ", clauses);
         var sql = $"""
             SELECT COUNT(*) FROM log_records lr
-            JOIN resources r ON lr.resource_id = r.id
-            WHERE r.tenant_id = @tenantId AND {where}
+            WHERE lr.tenant_id = @tenantId AND {where}
             """;
         return await conn.ExecuteScalarAsync<long>(new CommandDefinition(sql, parameters, cancellationToken: cancellationToken));
     }
@@ -580,8 +415,7 @@ public abstract class LogReadRepositoryBase : DapperReadRepository, ILogReadRepo
                 lr.resource_id               AS ResourceId,
                 lr.scope_id                  AS ScopeId
             FROM log_records lr
-            JOIN resources r ON lr.resource_id = r.id
-            WHERE r.tenant_id = @tenantId AND {where}
+            WHERE lr.tenant_id = @tenantId AND {where}
             ORDER BY lr.time_unix_nano {order}, lr.id {order}
             {PagingClause}
             """;
@@ -598,8 +432,7 @@ public abstract class LogReadRepositoryBase : DapperReadRepository, ILogReadRepo
         var where = string.Join(" AND ", clauses);
         var sql = $"""
             SELECT COUNT(*) FROM log_records lr
-            JOIN resources r ON lr.resource_id = r.id
-            WHERE r.tenant_id = @tenantId AND {where}
+            WHERE lr.tenant_id = @tenantId AND {where}
             """;
         var (result, timedOut) = await TimedQuery.RunAsync(
             async (timeoutSeconds, ct) => await conn.ExecuteScalarAsync<long>(new CommandDefinition(
@@ -626,8 +459,7 @@ public abstract class LogReadRepositoryBase : DapperReadRepository, ILogReadRepo
         var sql = $"""
             SELECT lr.attributes_json AS AttributesJson
             FROM log_records lr
-            JOIN resources r ON lr.resource_id = r.id
-            WHERE r.tenant_id = @tenantId AND {where}
+            WHERE lr.tenant_id = @tenantId AND {where}
             ORDER BY lr.time_unix_nano DESC
             {PagingClause}
             """;
@@ -738,7 +570,7 @@ public abstract class LogReadRepositoryBase : DapperReadRepository, ILogReadRepo
 
         if (!string.IsNullOrEmpty(service))
         {
-            clauses.Add($"{ResourceServiceNameExpr()} = @service");
+            clauses.Add("lr.service_name = @service");
             parameters.Add("service", service);
         }
         if (minSeverity.HasValue)
@@ -750,7 +582,7 @@ public abstract class LogReadRepositoryBase : DapperReadRepository, ILogReadRepo
         if (parsed.IsTraceIdSearch)
         {
             clauses.Add("lr.trace_id = @traceIdSearch");
-            parameters.Add("traceIdSearch", parsed.TraceId);
+            parameters.Add("traceIdSearch", IdParam(parsed.TraceId, 32));
         }
         else if (parsed.Terms.Count > 0)
         {
@@ -771,7 +603,7 @@ public abstract class LogReadRepositoryBase : DapperReadRepository, ILogReadRepo
         var resourceRows = await conn.QueryAsync<ResourceRow>(new CommandDefinition(
             "SELECT id AS Id, schema_url AS SchemaUrl, attributes_json AS AttributesJson FROM resources WHERE tenant_id = @tenantId",
             new { tenantId = TenantId }, cancellationToken: cancellationToken));
-        return resourceRows.ToDictionary(r => r.Id);
+        return ToDictionaryFirst(resourceRows, r => r.Id, r => r);
     }
 
     private async Task<Dictionary<long, ScopeRow>> LoadScopesAsync(System.Data.Common.DbConnection conn, CancellationToken cancellationToken)
@@ -779,8 +611,11 @@ public abstract class LogReadRepositoryBase : DapperReadRepository, ILogReadRepo
         var scopeRows = await conn.QueryAsync<ScopeRow>(new CommandDefinition(
             "SELECT id AS Id, name AS Name, version AS Version, schema_url AS SchemaUrl, attributes_json AS AttributesJson FROM instrumentation_scopes",
             cancellationToken: cancellationToken));
-        return scopeRows.ToDictionary(s => s.Id);
+        return ToDictionaryFirst(scopeRows, s => s.Id, s => s);
     }
+
+    // ClickHouse stores an absent trace id/span id/event name as '' (non-Nullable columns); the model keeps null.
+    private static string? NullIfEmpty(string? value) => string.IsNullOrEmpty(value) ? null : value;
 
     private static LogRecordModel Map(LogRow r) => new()
     {
@@ -797,16 +632,16 @@ public abstract class LogReadRepositoryBase : DapperReadRepository, ILogReadRepo
             Attributes = DeserializeAttributes(r.ScopeAttributesJson) ?? new Dictionary<string, object>()
         },
         SeverityText = r.SeverityText,
-        EventName = r.EventName,
+        EventName = NullIfEmpty(r.EventName),
         SeverityNumber = r.SeverityNumber,
         Attributes = DeserializeAttributes(r.AttributesJson) ?? new Dictionary<string, object>(),
-        TraceIdHex = r.TraceId,
+        TraceIdHex = NullIfEmpty(r.TraceId),
         BodyType = r.BodyType == null ? null : Enum.Parse<AttributeType>(r.BodyType),
         BodyValue = r.BodyValue,
         DroppedAttributesCount = r.DroppedAttributesCount,
         Flags = r.Flags,
         ObservedTimeUnixNano = r.ObservedTimeUnixNano,
-        SpanIdHex = r.SpanId,
+        SpanIdHex = NullIfEmpty(r.SpanId),
         TimeUnixNano = r.TimeUnixNano
     };
 
@@ -829,16 +664,16 @@ public abstract class LogReadRepositoryBase : DapperReadRepository, ILogReadRepo
                 Attributes = DeserializeAttributes(scope?.AttributesJson) ?? new Dictionary<string, object>()
             },
             SeverityText = r.SeverityText,
-            EventName = r.EventName,
+            EventName = NullIfEmpty(r.EventName),
             SeverityNumber = r.SeverityNumber,
             Attributes = DeserializeAttributes(r.AttributesJson) ?? new Dictionary<string, object>(),
-            TraceIdHex = r.TraceId,
+            TraceIdHex = NullIfEmpty(r.TraceId),
             BodyType = r.BodyType == null ? null : Enum.Parse<AttributeType>(r.BodyType),
             BodyValue = r.BodyValue,
             DroppedAttributesCount = r.DroppedAttributesCount,
             Flags = r.Flags,
             ObservedTimeUnixNano = r.ObservedTimeUnixNano,
-            SpanIdHex = r.SpanId,
+            SpanIdHex = NullIfEmpty(r.SpanId),
             TimeUnixNano = r.TimeUnixNano
         };
     }
@@ -909,33 +744,5 @@ public abstract class LogReadRepositoryBase : DapperReadRepository, ILogReadRepo
         public long Warn { get; set; }
         public long Error { get; set; }
         public long Fatal { get; set; }
-    }
-
-    private sealed class TailBucketRow
-    {
-        public long BucketIndex { get; set; }
-        public long Trace { get; set; }
-        public long Debug { get; set; }
-        public long Info { get; set; }
-        public long Warn { get; set; }
-        public long Error { get; set; }
-        public long Fatal { get; set; }
-    }
-
-    private sealed class SummaryBucketRow
-    {
-        public long BucketUnixNano { get; set; }
-        public long Trace { get; set; }
-        public long Debug { get; set; }
-        public long Info { get; set; }
-        public long Warn { get; set; }
-        public long Error { get; set; }
-        public long Fatal { get; set; }
-    }
-
-    private sealed class RollupStateRow
-    {
-        public long? CoverageStartUnixNano { get; set; }
-        public long RolledUntilUnixNano { get; set; }
     }
 }

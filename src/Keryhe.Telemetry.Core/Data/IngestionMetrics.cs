@@ -24,6 +24,7 @@ public sealed class IngestionMetrics : IDisposable
     private readonly Counter<long> _flushRetries;
     private readonly Counter<long> _recordsFlushed;
     private readonly Histogram<long> _flushBatchSize;
+    private readonly Histogram<double> _commitLag;
 
     // signal -> reader of that signal's gate's resident count; see RegisterResidentRecords.
     private readonly ConcurrentDictionary<string, Func<int>> _residentRecords = new();
@@ -52,6 +53,12 @@ public sealed class IngestionMetrics : IDisposable
             "keryhe.telemetry.ingestion.flush_batch_size",
             unit: "{record}",
             description: "Merged batch size handed to each flush, tagged by signal.");
+        _commitLag = _meter.CreateHistogram<double>(
+            "keryhe.telemetry.ingestion.commit_lag",
+            unit: "ms",
+            description: "Time from an export being enqueued to the flush that persisted it committing, " +
+                          "one measurement per export, tagged by signal. The write-path health signal: " +
+                          "independent of any read query, it grows when the database cannot keep up.");
         _meter.CreateObservableGauge(
             "keryhe.telemetry.ingestion.resident_records",
             ObserveResidentRecords,
@@ -94,6 +101,10 @@ public sealed class IngestionMetrics : IDisposable
         if (count <= 0) return;
         _recordsFlushed.Add(count, new KeyValuePair<string, object?>("signal", signal));
     }
+
+    /// <param name="milliseconds">Enqueue-to-commit time of one export.</param>
+    public void RecordCommitLag(string signal, double milliseconds) =>
+        _commitLag.Record(milliseconds, new KeyValuePair<string, object?>("signal", signal));
 
     public void RecordFlushBatchSize(string signal, int count) =>
         _flushBatchSize.Record(count, new KeyValuePair<string, object?>("signal", signal));

@@ -1,10 +1,8 @@
 namespace Keryhe.Telemetry.Core.Data.Read;
 
 /// <summary>
-/// The six-group severity bucketing shared by <see cref="LogReadRepositoryBase"/>'s raw summary
-/// path and <c>RollupWorker</c>'s recompute query (list-pages-server-side plan, Phase 2) — kept in
-/// one place because the plan requires the two to produce identical numbers for the same data
-/// (Verification item 14). Group boundaries: Trace &lt;=4, Debug 5-8, Info NULL-or-9-12, Warn
+/// The six-group severity bucketing used by <see cref="LogReadRepositoryBase"/>'s summary query,
+/// kept in one place so every provider produces identical numbers for the same data. Group boundaries: Trace &lt;=4, Debug 5-8, Info NULL-or-9-12, Warn
 /// 13-16, Error 17-20, Fatal &gt;20 — must match exactly wherever this is used.
 /// </summary>
 public static class LogSeverityGroupSql

@@ -44,12 +44,18 @@ mysql telemetry < schema/MySQL-Schema.sql               # MySQL
 schema/apply-schema.sh <postgresql|timescale|sqlserver|clickhouse|mysql> [database]
 ```
 
+**Schema 3.0.0 is a fresh-install schema.** There is no migration from 2.x (decision 4 of
+`plans/schema-simplification.md`, which explains every change below): an existing 2.x database must
+be recreated, and `schema/migrations/` no longer exists. `apply-schema.sh` only skips when the 3.0.0
+version row is already recorded.
+
 There is one schema script per supported provider, all producing the same logical
 table/column set: `schema/PostgreSQL-Schema.sql` (plain Postgres), `schema/Timescale-Schema.sql`
-(Postgres + TimescaleDB hypertables/compression/retention/continuous aggregate),
+(Postgres + TimescaleDB hypertables and compression),
 `schema/SqlServer-Schema.sql`, `schema/MySQL-Schema.sql`, and `schema/ClickHouse-Schema.sql`
 (columnar MergeTree family; see the ClickHouse notes below). A schema change edits all five plus
-`TARGET_VERSION` in `apply-schema.sh`, in one commit.
+`TARGET_VERSION` in `apply-schema.sh`, in one commit. Production topology is the collector/API split;
+the all-in-one `Keryhe.Telemetry.Server` is for development and is not the topology that is measured.
 
 `tests/Keryhe.Telemetry.IntegrationTests` (xUnit) runs every provider's real
 `Add<Provider>CollectorServices`/`Add<Provider>ApiServices` registrations against real
@@ -60,7 +66,14 @@ Docker. The container startup, schema application and tenant/API-key seeding the
 live in `tests/Keryhe.Telemetry.TestInfrastructure` (one `ProviderContainer` per provider, plus
 `TenantSeeder` for N tenants), which the stress harness (below) shares;
 it also offers opt-in per-provider diagnostics and CPU/memory
-limits via `ContainerOptions`, which the integration fixtures leave off.
+limits (and an optional `CpusetCpus` pin) via `ContainerOptions`, which the integration fixtures leave off.
+
+Beyond the read-path tests, the suite covers per-provider retention (`RetentionTestsBase`: 200- and
+100-day-old rows, an hour either side of the cutoff, current — Timescale and ClickHouse drop whole
+chunks/days so their "hour before the cutoff" row is not asserted), the trace-list anchor semantics
+(`TracePhase3TestsBase`), `GET /api/capabilities`' shape, SQL Server's `READ_COMMITTED_SNAPSHOT` and
+id-parameter plan (no `CONVERT_IMPLICIT`), and PostgreSQL/Timescale's index-not-seq-scan plan, each
+negative-controlled.
 
 ```bash
 # All five providers (one xUnit collection fixture per provider, containers started once per run)
@@ -88,13 +101,21 @@ dotnet run --project tests/Keryhe.Telemetry.StressTests -- playwright-install
 dotnet run --project tests/Keryhe.Telemetry.StressTests -- run --provider PostgreSQL --topology allinone --profile smoke
 dotnet run --project tests/Keryhe.Telemetry.StressTests -- run --provider all --topology all --profile smoke
 dotnet run --project tests/Keryhe.Telemetry.StressTests -- run --provider SqlServer --scenario ramp
+# The provider's write ceiling with nothing reading (no browsers, no marker probes; stops on commit lag,
+# gate wait, drops and errors). Run it next to "ramp" on one commit: the difference is what reads cost writes.
+dotnet run --project tests/Keryhe.Telemetry.StressTests -- run --provider SqlServer --topology split --profile ramp-write-only
 
 # Rebuild the report from a finished run (output is in the gitignored stress-results/)
 dotnet run --project tests/Keryhe.Telemetry.StressTests -- report --in stress-results/<timestamp>
 ```
 
-The write path it measures is instrumented on `IngestionMetrics` (see "Write path decoupling" below); `RetentionWorker`'s "Retention sweep complete" log
-line carries the sweep's elapsed milliseconds for the same reason.
+The write path it measures is instrumented on `IngestionMetrics` (see "Write path decoupling" below), including `commit_lag` (enqueue to commit), the
+signal a write-only ramp stops on because it does not depend on any read query; `RetentionWorker`'s "Retention sweep complete" log
+line carries the sweep's elapsed milliseconds for the same reason. The report lists every API route's server-side latency apart from the write
+instruments, the comparison page pairs each write-only ramp with its full ramp (the isolation number), and the correctness ledger's
+"a re-delivered span collapses" flag follows the schema under test (true on 2.x, false on 3.0.0, read from `apply-schema.sh`'s `TARGET_VERSION`).
+`--db-cpuset <cpus>` pins the database container to CPUs of the Docker VM and the report says what the database shared CPUs with; pointing the
+harness at a database on another machine is not supported yet.
 
 ### Default ports
 
@@ -291,97 +312,64 @@ and the hosts `switch` on the config key to call the right one. An unknown/missi
 throws at startup.
 
 **ClickHouse provider notes.** ClickHouse is columnar/OLAP, so the provider diverges from the
-relational three in a few deliberate ways (all confined to the provider; Core interfaces are
+relational four in a few deliberate ways (all confined to the provider; Core interfaces are
 unchanged):
 - **App-generated ids.** No auto-increment / `RETURNING`. `ClickHouseBulkWriter` computes the
   `Int64` surrogate keys the read repos join on, always from the table's full `ORDER BY` key:
   resource ids from `(tenant_id, resource_hash)`, scope ids from `scope_hash` (scopes carry no
-  tenant), span ids from `(trace_id, span_id)`, metric ids from
-  `(resource_id, scope_id, name, type)` via `ClickHouseIds.FromKey`; log records and alert events
-  use a monotonic in-process generator (`RowId`). Span events and links are `events_json`/
-  `links_json` columns on the span row (schema 2.11.0), not separate rows, so they need no id of
-  their own.
-- **Dedup via `ReplacingMergeTree`, not `ON CONFLICT`.** resources/scopes/spans/metrics collapse on their
-  `ORDER BY` key at merge time, backed by `ResourceScopeCache` + per-batch dedup. Dedup is
-  *eventual* — reads may briefly see a duplicate before a merge (`OPTIMIZE ... FINAL` forces it).
+  tenant) and metric ids from `(resource_id, scope_id, name, type)`, all via `ClickHouseIds.FromKey`.
+  `spans.id` and `log_records.id` come from a monotonic in-process generator (`RowId`): they are
+  only the keyset-paging tiebreak. A span's events and links are `events_json`/`links_json` columns
+  on the span row.
+- **Reference tables are `ReplacingMergeTree`; spans are not.** resources/scopes/metrics (and the
+  control-plane tables) collapse on their `ORDER BY` key at merge time, backed by
+  `ResourceScopeCache` + per-batch dedup, so their dedup is *eventual*. `spans` and `log_records`
+  are plain `MergeTree` appends (decision 7: a re-delivered span is stored twice and reads tolerate
+  it), so there is no `LIMIT 1 BY` and no `FINAL` anywhere on the read path.
+  Two consequences are load-bearing: the writer puts an id in `ResourceScopeCache` only AFTER the row's
+  insert succeeded (caching first would leave a failed insert — e.g. the server's memory limit under
+  overload — cached forever, and every later flush would skip a catalog row that does not exist); and the
+  read repositories build their id lookups with `ToDictionaryFirst`, because two flushes that both missed
+  the cache can store the same resource/scope/metric id twice until a merge, and a plain `ToDictionary`
+  over those rows threw and turned every logs page into a `400` (`ClickHouseDuplicateReferenceRowTests`).
+- **Laid out for the way it is read (schema 3.0.0).** `spans` is `ORDER BY (tenant_id, service_name,
+  start_time_unix_nano)` and `log_records` `ORDER BY (tenant_id, service_name, time_unix_nano)`, both
+  partitioned by day, so a tenant/service/time window prunes partitions and granules. `trace_index` (an
+  `AggregatingMergeTree` fed by a materialized view from `spans`, one row per tenant/trace/day) holds
+  each trace's min/max start: trace detail and a trace-list page's follow-up query read it for time
+  bounds first (`ResolveTraceTimeBoundsAsync`), then read `spans` with tenant and time bounds, instead
+  of scanning for a trace id. `log_records` has one `bloom_filter` skip index on `trace_id` for
+  logs-by-trace. Where null carries no meaning the column is non-`Nullable` with an empty default
+  (`parent_span_id`, `trace_state`, `status_message`, `event_name`, log `trace_id`/`span_id`,
+  `service_name`) and the read repositories map `''` back to null.
 - **Writes go through `ClickHouseBulkCopy`** (async batched insert), one long-lived instance
   cached per destination table for the life of the process (`ClickHouseBulkWriter`'s singleton
   `TableBulkCopy` cache) rather than a fresh connection + `InitAsync()` schema-probe round trip on
   every flush; reads reuse the shared Dapper bases unchanged (attributes are JSON text
-  deserialized in C#; `service.name` reads the `resources.service_name` column directly, schema
-  2.13.3 — see "Provider tiers" below).
-- **Deletes** are lightweight `DELETE FROM` with explicit child-row deletes (no FK cascades),
-  applied as async mutations.
+  deserialized in C#).
+- **Retention is `ALTER TABLE ... DROP PARTITION`** for every fully expired day (no row deletes, no
+  mutations); see "Retention".
 - **Control-plane is best-effort.** Alert-rule CRUD uses `ALTER TABLE ... UPDATE` mutations and
   `TryClaimFireAsync` is NON-ATOMIC (read-check-then-update), so under concurrent evaluators a
   rule could double-fire. Acceptable because no host currently drives scheduled evaluation.
-- **Duplicate delivery reads as `LIMIT 1 BY trace_id, span_id`, not `uniqExact`/`argMax` (decision
-  34).** A re-delivered span batch (gRPC retry before a merge collapses the `ReplacingMergeTree`
-  duplicates) would otherwise double-count spans in a trace's aggregate or show a span twice in a
-  detail view. Every span read on the ClickHouse provider — trace detail, anchor/root-span lookup,
-  the trace-summary raw path, the Phase 8 export's per-trace aggregate — wraps its `FROM spans`
-  with `LIMIT 1 BY trace_id, span_id`, ClickHouse's per-group first-row idiom, rather than an
-  aggregate function: it needs the winning row's OTHER columns (name, kind, status, timestamps),
-  not just a count or a single numeric column, which is what `argMax`/`uniqExact` alone would give.
-  `spans.created_at` (evaluated at statement execution, like every other ClickHouse table's
-  `created_at`) is what the `asOf` pin compares against on this provider — combined with `LIMIT 1
-  BY`, a page fetched at a given `asOf` is stable across a later merge even though the underlying
-  rows physically collapse.
-- **Search skip indexes (schema 2.13.3).** `ngrambf_v1` bloom-filter skip indexes on
-  `spans.name`/`status_message` and `log_records.body_value` prune granules ahead of
-  `FreeTextPredicate`'s unchanged predicate; `tokenbf_v1` does the same for
-  `attributes_json` ahead of `AttributePredicate`. Both are defined against
-  `assumeNotNull(column)`, not the raw `Nullable(String)` column — `ngrambf_v1`/`tokenbf_v1`
-  only accept `String`/`FixedString` (and their `LowCardinality`/`Array` forms), and applying one
-  directly to a `Nullable(String)` column fails schema application outright
-  (`INCORRECT_QUERY`, caught by this repo's integration-test suite). Unlike the relational
-  providers, the predicate the skip index prunes ahead of is never rewritten to containment —
-  ClickHouse's `AttributePredicate` stays on its phase 1 `JSONExtractRaw` form; the skip index
-  only lets granules that provably can't match be skipped before it runs.
+- **The anchors derived table is a `GROUP BY trace_id`** with `argMin` over `(start, id)` (see "Trace
+  anchors"). ClickHouse resolves a SELECT alias over a same-named column in WHERE, so the aggregates are
+  computed under non-colliding aliases in an inner query and renamed outside it.
 
-**Provider tiers (decision 39, schema 2.13.3).** PostgreSQL, Timescale and ClickHouse are the
-**analytics tier**: `key:value`/free-text search is indexed (GIN `jsonb_path_ops`+`pg_trgm` on
-the first two, `tokenbf_v1`/`ngrambf_v1` skip indexes on the third) and unbounded by a search time
-window. SQL Server and MySQL are the **standard tier**: they keep phase 1's unindexed
-`LIKE`/`JSON_VALUE`/`JSON_EXTRACT` predicates (no SQL Server full-text catalog, no MySQL
-`FULLTEXT` index — deliberately out of scope) and a free-text/`key:value` search is rejected
-(`400`) outside a configurable window (`Telemetry:Query:RawSearchWindowHours`, default 24h) —
-see `RawSearchWindowGuard`. Every provider still gets the plain `resources.service_name` column
-(not part of the tiering split) and the other tier differences (exemplar paging, export window —
-see `ProviderCapabilities`). `GET /api/capabilities` reports the active tier plus its limits; the
-Angular client reads it once at startup (`CapabilitiesService`) and reuses it everywhere a page or
-search-help dialog needs to know the tier, rather than each feature querying it separately.
-**A positive (non-negated) `key:value` match on the analytics tier is exact-case for a
-string-valued attribute** (an intentional, documented deviation from phase 1's case-insensitive
-text comparison — see `PostgreSqlJsonAttributeHooks`'s doc comment): a numeric or boolean value
-still matches case-insensitively, negation is unaffected, and the standard tier is unaffected.
-There is no way to keep case-insensitive `@>` containment AND have Postgres actually use the GIN
-index for it (an OR between an indexable clause and a non-indexable `LOWER(...)` fallback forces
-a full scan regardless), so this phase chose the indexed, case-sensitive form.
+**Search and capabilities (schema 3.0.0, decisions 3 and 19).** Free-text and `key:value` search is
+unindexed and time-window bounded on **every** provider: one predicate form per dialect (the
+`LIKE`/`ILIKE` text form and `LOWER(col ->> key)` / `JSON_VALUE` / `JSON_EXTRACT` /
+`JSONExtractRaw` attribute comparison, all case-insensitive), no GIN/trigram/skip indexes, and a
+search or `mode=slow` request over a window longer than `Telemetry:Query:RawSearchWindowHours`
+(default 24) is rejected (`400`) by `RawSearchWindowGuard`. The provider tiers (`ProviderTier`) and
+`IndexedSearch` are gone. `ProviderCapabilities` keeps `RawSearchWindowHours`, `ExportMaxWindowDays`
+(7 on PostgreSQL/Timescale/ClickHouse, 1 on SQL Server/MySQL), `AsOfBackoffSeconds` and
+`ExemplarPaging` (the metric detail page uses it to choose keyset paging vs newest-500), and
+`GET /api/capabilities` reports them; the Angular client reads it once at startup
+(`CapabilitiesService`) and reuses it everywhere a page needs a limit.
 
-Core interfaces (in `Keryhe.Telemetry.Core`), each implemented once per provider:
-
-- `ITelemetryBulkWriter` — provider-specific bulk flush driven by the ingestion worker
-  (SqlBulkCopy/MERGE for SqlServer; Npgsql binary COPY / `ON CONFLICT` for Postgres).
-- `ITraceReadRepository`, `IMetricReadRepository`, `ILogReadRepository`,
-  `IAlertRuleRepository`, `ITenantCatalogRepository`, `IRetentionSettingsRepository` — Dapper
-  read repositories, all registered on the API side (`ConnectionStrings:Api`,
-  `Add<Provider>ApiServices`). `IRetentionSettingsRepository` owns the DB-backed
-  `retention_settings` row and the three retention `Delete*` sweeps — see the retention notes
-  below; there is no write-side equivalent (the former `ITelemetryWriteStore` was retired when
-  retention moved here).
-- `ITenantResolver` — resolves the tenant owning a hashed API key. Every gRPC service resolves
-  `Keryhe.Telemetry.Core.Data.CachingTenantResolver`, a provider-agnostic short-TTL cache wrapping
-  the provider's `IApiKeyLookup` (the raw `SELECT`, implemented once per provider). Successful
-  lookups mark `ApiKeyTouchTracker`; a periodic `ApiKeyTouchWorker` batches those into one bulk
-  `last_used_at` write per provider's `IApiKeyTouchStore` per flush interval, instead of an
-  `UPDATE` on every request. ClickHouse's `IApiKeyTouchStore` is a deliberate no-op.
-
-Provider projects build a **singleton connection pool** (`NpgsqlDataSource` for Postgres) from
-`ConnectionStrings:Collector` (ingestion host) or `ConnectionStrings:Api` (API host). Common
-Dapper machinery (base repositories, JSONB/attribute type handler) lives in
-`Keryhe.Telemetry.Data` (`Read/*RepositoryBase.cs`, `Dapper/JsonAttributesTypeHandler.cs`) and
-is shared across providers.
+**MySQL is MySQL 8.0.19+ only** (no MariaDB): upserts use the `INSERT ... VALUES (...) AS new ON
+DUPLICATE KEY UPDATE col = new.col` alias form.
 
 ### Key Patterns
 
@@ -415,7 +403,11 @@ instrument tagged by `signal` (`logs`/`traces`/`metrics`): `records_dropped` (co
 signal), `resident_records` (observable gauge — each gate's current count, registered by
 `TelemetryIngestionChannel`, which owns the gates), `flush_duration` (histogram, ms, extra tag
 `outcome` = `ok`/`failed`, one measurement per flush *attempt*), `flush_retries` (counter),
-`records_flushed` (counter) and `flush_batch_size` (histogram, one measurement per merged batch).
+`records_flushed` (counter), `flush_batch_size` (histogram, one measurement per merged batch) and
+`commit_lag` (histogram, ms — enqueue to the commit of the flush that persisted it, one measurement per
+export; the repositories stamp each export with `TelemetryIngestionChannel.MarkEnqueued`, a weak side
+table keyed by the export's list, and the worker reads it back — this is the write-path health signal,
+independent of any read query).
 All are readable out-of-process (e.g. `dotnet-counters`) with no exporter configured.
 On host shutdown the worker **drains rather than abandons** the queue (everything in it was already
 acknowledged to clients): `StopAsync` completes the channel writers, so a late export gets gRPC
@@ -443,10 +435,15 @@ that risks running long (an unindexed scan, a `COUNT(*)` over a large filtered s
 **`TimedQuery.RunAsync`**, which enforces `Telemetry:Query:SummaryTimeoutSeconds` (default 5) and
 returns a lower-bound/"≥ N" result instead of blocking the request indefinitely — `GetLogSummaryAsync`/
 `GetTraceSummaryAsync`/`GetMetricSeriesAsync` (the latter retrying once at a quarter of the
-requested point count, decision 31) all use it. `SqlServer`'s own read repositories additionally
-wrap each call in `ExecuteWithRetryAsync`, retrying once on error 1205 (see the SQL Server deadlock
-notes on `ProviderCapabilities`/`SqlServerReadConnection` below) — every other provider's override
-is a no-op.
+requested point count, decision 31) all use it; with no rollup tables (schema 3.0.0) a 3d/7d summary on
+a busy tenant is the case that hits it. `SqlServer`'s own read repositories additionally
+wrap each call in `ExecuteWithRetryAsync`, retrying once on error 1205 — every other provider's
+override is a no-op. Hot reads filter on `tenant_id`/`service_name` columns carried by `spans`,
+`log_records` and `metrics` themselves (copied from the resolved resource at ingest by
+`TelemetryIngestionHelpers.TenantAndService`); they join `resources` only where its columns are selected.
+Trace/span ids are bound through the `IdParam` hook (a sized ANSI `DbString` on SQL Server, whose id
+columns are `varchar` with a binary collation, so a lookup is a seek with no `CONVERT_IMPLICIT`) and
+matched in lists through `IdInPredicate` (`= ANY(@ids)` on PostgreSQL/Timescale).
 
 **Deduplication of the reference tables**: three entities are deduplicated, by two different
 mechanisms, and the distinction is deliberate.
@@ -479,12 +476,18 @@ type and matched an existing row would write points the reader never looks for. 
 2.7.0 — before it, `metrics` grew by one row per export cycle per metric.
 
 Inserts use ON CONFLICT DO UPDATE (Postgres/Timescale), MERGE ... WITH (HOLDLOCK) (SqlServer),
-ON DUPLICATE KEY UPDATE (MySql) or `ReplacingMergeTree` (ClickHouse). A singleton
+ON DUPLICATE KEY UPDATE ... AS new (MySql) or `ReplacingMergeTree` (ClickHouse). Spans, log records and
+the data-point tables are NOT deduplicated (schema 3.0.0): they are plain appends with no unique key and
+no foreign keys, so a re-delivered batch is stored again and reads tolerate it (the trace-list row's span
+count is `COUNT(DISTINCT span_id)` and trace detail drops a duplicate span id). A metric's `tenant_id` and
+`service_name` are written when its catalog row is first inserted only (a cache miss) and cannot go stale:
+the resource hash includes `service.name`, so a rename produces a new resource and new `metrics` rows. A singleton
 `ResourceScopeCache` (`ConcurrentDictionary`) short-circuits DB lookups for all three, so a warm
 process resolves them with no round trip. The cache needs no invalidation because nothing deletes a
 resource, scope or metrics catalog row — `IRetentionSettingsRepository` offers retention only. If a delete
-that removes catalog rows is ever added, it must clear the cache, or every data-point insert fails
-its foreign key on each subsequent batch until the process restarts.
+that removes catalog rows is ever added, it must clear the cache, or every flush keeps writing rows that
+point at a catalog row that no longer exists until the process restarts (the hot tables have no foreign
+keys to catch it any more, so it would be silent).
 
 **`metric_last_seen`** (schema 2.13.2, list-pages-server-side plan Phase 5, decision 27): a
 separate table, deliberately not a column on `metrics`, that the metrics catalog reads for its
@@ -562,10 +565,10 @@ Delta temporality is always exact — the flag only ever applies to cumulative p
 detail page marks the Min/Max stat cards and the percentile chart's Max line with "≈" when any
 charted point is approximate.
 
-**Multi-tenant architecture**: Telemetry is tenant-scoped *through* `resources.tenant_id` — only
-`resources`, `api_keys` and `alert_rules` carry a `tenant_id` column, while every signal table
-(`spans`, `metrics`, the data-point tables, `log_records`, …) carries just `resource_id` and joins
-to reach its tenant. The ingestion server
+**Multi-tenant architecture**: `resources`, `api_keys`, `alert_rules`, `spans`, `log_records` and
+`metrics` carry a `tenant_id` column (schema 3.0.0), so the hot reads filter on it directly; the five
+data-point tables get neither `tenant_id` nor `service_name`, because `metric_id` already identifies
+exactly one tenant and service. The ingestion server
 resolves tenants by hashing the `Authorization: Bearer <key>` gRPC header against `api_keys`
 (`ITenantResolver`). The API resolves the tenant in `TenantMiddleware` and carries it via a
 scoped `ITenantContext` (`ApiTenantContext`); read queries filter on `tenant_id`.
@@ -574,38 +577,38 @@ scoped `ITenantContext` (`ApiTenantContext`); read queries filter on `tenant_id`
 tenants with enabled rules, dispatching each rule type to a registered `IAlertEvaluator`
 (`MetricThreshold`, `ErrorRate`, `SlowTrace`, `LogSeveritySpike`). `ErrorRateEvaluator` and
 `SlowTraceEvaluator` read `ITraceReadRepository.GetTraceSummaryAsync`; `LogSeveritySpikeEvaluator`
-reads `ILogReadRepository.GetLogSummaryAsync` — the same rollup-table-backed summary path the
-traces/logs list pages use (see "Rollups" below), not a bespoke raw scan, so an evaluator gets the
-rollup tables' source when the rule's own filters are rollup-eligible and falls back to the raw
-path exactly like the list page would (`LogSeveritySpikeEvaluator`'s own arbitrary-severity-cutoff
-case is a documented exception that always forces the raw path — the rollup tables' severity
-groups can't reconstruct an arbitrary cutoff, same reasoning as the list page's own MinSeverity
-filter). An atomic `TryClaimFireAsync` (UPDATE with cooldown check) prevents duplicate fires under
+reads `ILogReadRepository.GetLogSummaryAsync` — the same summary path the traces/logs list pages use
+(see "Trace anchors" below), not a bespoke scan; `SlowTraceEvaluator` therefore counts inbound trace
+anchors whose own duration is over the threshold, the same duration the trace list shows. An atomic `TryClaimFireAsync` (UPDATE with cooldown check) prevents duplicate fires under
 load balancing. The API's `AlertsController` handles rule CRUD via `IAlertRuleRepository`. Note: no
 host currently registers a background worker that drives `EvaluateAllAsync` — evaluation must be
 invoked explicitly if you wire it up.
 
 **Retention** (`Keryhe.Telemetry.Api/Retention/`): the single application-level mechanism for
-telemetry retention, on every provider including Timescale (schema 2.10.0 removed Timescale's
-native `add_retention_policy` jobs for `log_records` and the five metric data-point tables —
-`spans` never had one either, and still doesn't now that it *is* a hypertable: it gained hypertable
-partitioning in schema 2.11.0, but no native retention policy was added alongside it, so it has
-relied on the application-level `RetentionWorker` from the start). `RetentionWorker`, a `BackgroundService`
-structurally mirroring `AlertEvaluationWorker`, wakes on `Retention:IntervalSeconds` (default
-3600s, config only — not part of the DB row), resolves the scoped `IRetentionSettingsRepository`,
-reads the current windows via `GetSettingsAsync`, then runs `DeleteOldTracesAsync`/
-`DeleteOldMetricDataPointsAsync`/`DeleteOldLogRecordsAsync` against them. Each sweep ends with a "Retention sweep complete" log line
-that includes the rows removed and the sweep's elapsed milliseconds. `AddRetention()`
-registers it; called from `Api.Server` and `Server`'s `Program.cs` only, never
-`Collector.Server` — retention is entirely an API-host concern now (see
-`IRetentionSettingsRepository`'s doc comment for why it replaced the former write-side
-`ITelemetryWriteStore`). `SettingsController` (`GET`/`PUT /api/settings/retention`) exposes the
-same repository for the Angular settings page to edit — no caching layer, since the worker only
-reads the row once per sweep interval. The row itself (`retention_settings`) is a single global
-singleton (`id = 1`, `CHECK` on relational providers), seeded on install with today's implicit
-defaults (traces 90d, logs 90d, metrics 180d); `UpdateSettingsAsync` is always an `UPDATE`, never
-an `INSERT`. ClickHouse follows the same "control-plane is best-effort" pattern as its alert-rule
-CRUD: `UpdateSettingsAsync` is overridden to use `ALTER TABLE ... UPDATE` instead of the shared
+telemetry retention, on every provider. `RetentionWorker`, a `BackgroundService` structurally
+mirroring `AlertEvaluationWorker`, wakes on `Retention:IntervalSeconds` (default 3600s, config only —
+not part of the DB row), resolves the scoped `IRetentionSettingsRepository`, reads the current windows
+via `GetSettingsAsync`, then runs `DeleteOldTracesAsync`/`DeleteOldMetricDataPointsAsync`/
+`DeleteOldLogRecordsAsync` against them. Each sweep ends with a "Retention sweep complete" log line that
+includes the rows removed and the sweep's elapsed milliseconds. The mechanism is per provider (schema
+3.0.0):
+
+| Provider | Retention |
+|---|---|
+| PostgreSQL, SQL Server, MySQL | Spans and logs: bounded-batch deletes **per tenant** (`tenant_id = @t AND time < @cutoff`) through the `(tenant_id, time)` access path; data points: bounded batches through their time index (PostgreSQL's BRIN, SQL Server/MySQL's `(time_unix_nano)`). The shared loop is `RetentionSettingsRepositoryBase`; a provider supplies only `BatchedDeleteSql` (PostgreSQL has no primary key on these tables, so a batch is `DELETE ... WHERE ctid = ANY (ARRAY(SELECT ctid ... LIMIT n))`; SQL Server `DELETE TOP (n)` at `DEADLOCK_PRIORITY LOW`, batch kept under the lock-escalation threshold; MySQL `DELETE ... LIMIT n`). |
+| Timescale | `drop_chunks` per hypertable (`show_chunks` + `approximate_row_count` first, for the returned estimate). Granularity is the chunk interval (6 h spans/logs, 12-24 h data points): a row survives until its whole chunk is older than the cutoff. |
+| ClickHouse | `ALTER TABLE ... DROP PARTITION ID` for each fully expired day (spans, `trace_index`, logs, data points); rows counted from `system.parts` first. No row deletes, no mutations. Granularity is the day. |
+
+`AddRetention()` registers the worker; called from `Api.Server` and `Server`'s `Program.cs` only, never
+`Collector.Server` — retention is entirely an API-host concern (see `IRetentionSettingsRepository`'s doc
+comment for why it replaced the former write-side `ITelemetryWriteStore`). The retention WINDOWS are global
+(one settings row), only the relational sweeps iterate tenants. `SettingsController`
+(`GET`/`PUT /api/settings/retention`) exposes the same repository for the Angular settings page to edit — no
+caching layer, since the worker only reads the row once per sweep interval. The row itself
+(`retention_settings`) is a single global singleton (`id = 1`, `CHECK` on relational providers), seeded on
+install with today's implicit defaults (traces 90d, logs 90d, metrics 180d); `UpdateSettingsAsync` is always
+an `UPDATE`, never an `INSERT`. ClickHouse follows the same "control-plane is best-effort" pattern as its
+alert-rule CRUD: `UpdateSettingsAsync` is overridden to use `ALTER TABLE ... UPDATE` instead of the shared
 base's plain `UPDATE`.
 
 **Export** (`Keryhe.Telemetry.Api/Controllers/*.cs`'s `GetExport` actions plus
@@ -615,7 +618,7 @@ full log records, one `TraceInfo` row per trace, or one `(display series, bucket
 series — as NDJSON or CSV, with no row cap, reusing each signal's existing filter compilation so
 export can never see a different population than the list it's exporting from. Two limits apply
 before any query runs: `ExportWindowGuard` rejects (`400`) a window wider than
-`ProviderCapabilities.ExportMaxWindowDays` (7 analytics / 1 standard, `Telemetry:Export:MaxWindowDaysOverride`)
+`ProviderCapabilities.ExportMaxWindowDays` (7 on PostgreSQL/Timescale/ClickHouse, 1 on SQL Server/MySQL, `Telemetry:Export:MaxWindowDaysOverride`)
 regardless of filters — export has no row cap, so the window is the only thing bounding the work —
 and `ExportConcurrencyGate`, a singleton `SemaphoreSlim` shared across all three signals, caps
 concurrent exports per API instance at `Telemetry:Export:MaxConcurrent` (default 2), returning
@@ -624,119 +627,96 @@ concurrent exports per API instance at `Telemetry:Export:MaxConcurrent` (default
 cancellation-token overload in the pinned Dapper version) so the reader advances one row at a time
 and `CancellationToken` — bound by MVC to `HttpContext.RequestAborted` — reaches the underlying
 database command on client disconnect, not just the enumeration loop; `CommandTimeout = 0` is set
-explicitly since Dapper's 30s default would cut off a large export. Traces export chunks (1,000
-anchors per round trip) rather than issuing one unbuffered query, because a trace row needs a
-batched whole-span-set aggregate (span count/min-start/max-end/has-error) that can't be pushed into
-a single per-row streaming query on every provider — chunking still keeps memory bounded to one
-chunk, not the whole matching population. Metrics export reuses `GetMetricSeriesAsync`'s bucketed
+explicitly since Dapper's 30s default would cut off a large export. Traces export derives the anchors ONCE and streams them
+through the same kind of reader (re-running the anchor query per keyset chunk would repeat the whole window scan for every chunk); every 1,000
+anchors a second connection fetches that chunk's exact span counts and whole-trace bounds, so memory stays bounded to one chunk and
+`CancellationToken` still reaches the database command. Metrics export reuses `GetMetricSeriesAsync`'s bucketed
 pipeline with `Top = int.MaxValue`, so `BuildDisplaySeriesAndOther`'s fold-into-"other" step is
 always empty and every series is included (decision 29) — the pipeline already collapses raw data
 points down to (streams × buckets) rows in SQL before this ever runs, so there's no separate raw
-row set to stream unbuffered. Every export runs through the same `SNAPSHOT`-isolated read
-connection as the list/summary endpoints on SQL Server (`SqlServerReadConnection`, decision 35), so
-a slow-downloading client never holds a shared page lock against ingestion. CSV cells get a
+row set to stream unbuffered. SQL Server runs with `READ_COMMITTED_SNAPSHOT ON` (decision 13), so a
+slow-downloading client never holds a shared page lock against ingestion. CSV cells get a
 formula-injection guard (`CsvFormulaGuard`): a cell starting with `=`, `+`, `-` or `@` is prefixed
 with `'`.
 
-**Rollups** (`Keryhe.Telemetry.Api/Rollups/`, list-pages-server-side plan, phases 2-3, decisions
-37-38, 41): the application-level mechanism that makes the logs/traces list pages' summary charts
-and cards fast for an unfiltered or lightly-filtered (service/operation/errors) window, backed by
-pre-aggregated **summary tables** (`log_rollup_minute`/`log_rollup_hour`,
-`trace_rollup_minute`/`trace_rollup_hour`) rather than a group-by over raw `log_records`/`spans`.
-`RollupWorker`, a `BackgroundService` structurally mirroring `AlertEvaluationWorker`/
-`RetentionWorker`, wakes on `Telemetry:Rollups:IntervalSeconds` (default 30, section
-`RollupOptions`) and for each signal/granularity (logs minute/hour, traces minute/hour):
-- **Settles**: a minute is rolled once it is `SettleSeconds` old (default 120 — "2 minutes after
-  it closes", decision 38), so a rollup row reflects data that has essentially finished arriving
-  without waiting for a hard cutoff.
-- **Re-rolls**: a minute already rolled is recomputed once it reaches `RepassMinutes` age (default
-  15) to absorb late arrivals; data landing after that re-roll is missing from the summary
-  (documented behavior) even though it's still present in the raw list.
-- **Leases**: a per-granularity claim (`LeaseSeconds`, default 120) so two API instances running
-  the worker never both roll the same minute — the sole writer of the summary tables and, for
-  traces, `orphan_roots`.
-- **Backfills** `BackfillHours` (default 24) of history on first start, not the whole retention
-  period — an explicit, narrower scope than a full historical backfill.
-
-**Orphan traces** (decision 41): a trace whose earliest span's parent id matches no span anywhere
-(the real root never arrived, or never will) has no natural anchor for the trace list's "one row
-per trace" contract. The trace rollup pass detects these immediately before each minute range's
-summary recompute (both the initial roll and the re-roll, so orphans are current whenever the
-summary is) and anchors the trace on its earliest span in `orphan_roots`, read with `NOT EXISTS`
-against a real root at query time — so a late-arriving real root silently supersedes the orphan
-row instead of the trace ever appearing twice. `detected_at` pins the orphan the same way `asOf`
-pins everything else in this plan, so an orphan detected mid-paging session doesn't appear
-mid-page.
-
-**Which filters use the summary tables, and the raw fallback**: `GetLogSummaryAsync`/
-`GetTraceSummaryAsync` try the rollup source only when the request's filters are "rollup-eligible"
-(time range plus service/operation/errors-mode only — decision 37) and the rollup tables report
-coverage of the requested window (`rollup_state.coverage_start_unix_nano`); anything else —
-free-text/attribute search, `mode=slow`'s duration filter, a `MinSeverity` cutoff (the rollup
-tables' severity groups can't reconstruct an arbitrary row-level cutoff), or a window older than
-`coverage_start` — falls back to the raw group-by path every phase before this one already used.
-`Source` on the response (`"rollup"` or `"raw"`) tells the caller which path answered; the window's
-not-yet-rolled tail (the last `SettleSeconds`) is always filled from a raw group-by over that
-narrow slice and merged in, regardless of source. `listTotal`/the paginator's own population always
-comes from the raw anchor-bounded path (decision 13), never the rollup tables — rollups only ever
-answer the chart/card aggregates, never the row-level list itself.
+**Trace anchors** (schema-simplification plan, decisions 9-18; replaces the 2.x rollup tables, `RollupWorker`,
+`orphan_roots` and root-based anchoring, all of which are gone). Every trace-list read — summary, page,
+samples, export — derives one **anchor** row per trace in `TraceReadRepositoryBase.AnchorsSql`: the trace's
+**earliest span in scope** (ranked by `(start, id)`), where scope is the selected service's own spans when a
+service is selected (any span kind) and the whole trace's otherwise. A trace without a root, or whose root
+arrives late, simply anchors on whatever its earliest span is at the time of the query (relational:
+`ROW_NUMBER()`/`MAX() OVER (PARTITION BY trace_id)`; ClickHouse: `GROUP BY trace_id` with `argMin`).
+- **Duration is the anchor span's own** `end - start` everywhere — the row, the `mode=slow` filter, the summary
+  percentiles and latency heatmap. The row's service, operation, kind and `DisplaySpanIdHex` are the anchor's;
+  the error flag is "any span in scope has ERROR" (so `mode=errors` is that flag); the span count is exact,
+  `COUNT(DISTINCT span_id)` over the page's traces in a follow-up query, scoped to the selected service when
+  one is selected. The follow-up also supplies the WHOLE trace's start/end for the detail link. The
+  request-count card and the summary charts count only inbound anchors (kind `SERVER`/`CONSUMER`); the list
+  itself shows every kind and displays it.
+- **Operation filter = the anchor's own name** (what the row shows), not "any span in the trace" as in 2.x.
+  **Search matches any span in the whole trace regardless of the service filter** ("traces containing X"), as an
+  `EXISTS` through `(trace_id, span_id)` per candidate anchor within the search window; the row stays anchored
+  per the rule above.
+- **Look-back margin**: the derivation scans `[start - lookback, end]` (`Telemetry:Query:AnchorLookbackMinutes`,
+  default 5) and drops anchors that start before the window, so a trace that began inside the margin before the
+  window is excluded from it rather than anchored on a later span. A trace that began before the margin is
+  anchored on its earliest span inside it (accepted).
+- **`asOf` pins the span set before ranking** (`created_at <= @asOf` inside the derived table), so a root that
+  arrives after the pin is not the anchor within a pinned query and becomes the anchor on the next fresh one;
+  the "new since" count is traces whose earliest in-scope `created_at` is after the pin (computed over the
+  unpinned set).
+- `Source` on the summary responses is always `"raw"` (the field stays so the client contract is unchanged).
 
 ### Database
 
-Providers: plain PostgreSQL, PostgreSQL + TimescaleDB, SQL Server, ClickHouse, or MySQL. Under TimescaleDB, the
-metric data-point tables and `log_records` are hypertables (partitioned on `time_unix_nano`);
-compression activates at 7 days. As of schema 2.10.0, raw telemetry retention (spans, metrics,
-logs) is no longer a native Timescale policy — it is the application-level `RetentionWorker` (see
-the Retention notes above), the same as every other provider. `log_severity_stats_daily` is a
-continuous aggregate (refreshes every 5 minutes) with its own, unrelated, still-native retention
-policy that prunes the aggregate, not `log_records` (see `IRetentionSettingsRepository`'s
-"Decision 1" reasoning in `plans/telemetry-retention.md` for why that one stays).
+Providers: plain PostgreSQL, PostgreSQL + TimescaleDB, SQL Server 2022, ClickHouse, or MySQL 8.0.19+. Schema
+3.0.0 (fresh install only — `plans/schema-simplification.md`):
 
-**`spans` index set (schema 2.8.0, GIN note superseded in 2.13.3 — see below)**: four indexes were
-dropped as provably redundant on the four relational providers (Postgres, Timescale, SqlServer,
-MySql) — `idx_trace_id` (a left prefix of `uk_trace_span (trace_id, span_id)`), `idx_start_time`
-(a left prefix of `idx_duration (start_time_unix_nano, end_time_unix_nano)`), and
-`idx_kind`/`idx_status` (6 and 3 distinct values respectively, too low-cardinality for the planner
-to ever choose). The GIN indexes on `spans.attributes_json` and `log_records.attributes_json`
-(Postgres/Timescale only) were also dropped at the time: no query in the read path did JSONB
-containment on either column. Confirmed via `EXPLAIN` against a live Postgres container that the
-trace-detail lookup, the service-map query, and the trace-retention sweep
-(`PostgreSqlRetentionSettingsRepository`/`TimescaleRetentionSettingsRepository`) all still resolve
-to index scans, not sequential scans, without the dropped indexes.
-
-**This GIN-indexes-unused claim no longer holds as of schema 2.13.3** (list-pages-server-side
-plan, Phase 7): `AttributePredicate`'s positive (non-negated) form now compiles to `@>`
-containment on the analytics tier (Postgres, Timescale, ClickHouse — see "Provider tiers" below),
-specifically to serve indexed `key:value` search, so `idx_spans_attributes_gin` and
-`idx_log_attributes_gin` (GIN `jsonb_path_ops`) were added back, alongside `pg_trgm` GIN indexes
-(`idx_spans_name_trgm`, `idx_spans_status_message_trgm`, `idx_log_body_trgm`) backing
-`FreeTextPredicate`'s unchanged `ILIKE '%text%'` text with no SQL change — Postgres's planner
-picks up a `gin_trgm_ops` index under an existing `ILIKE` predicate automatically. Confirmed via
-`EXPLAIN ANALYZE` against a live Postgres 16 container (~100,000 seeded `spans`/`log_records`
-rows) that both the trgm free-text queries and the GIN containment queries use the new indexes
-(a `Bitmap Index Scan`, not a sequential scan) — see `plans/list-pages-server-side.md`'s Phase 7
-section for the recorded numbers. Negated (`-k:v`) attribute predicates stay on the pre-2.13.3
-unindexed text-comparison form regardless of tier (containment can't efficiently express "absent
-or holds a different value"). The five metric data-point tables' `attributes_json` did **not**
-get an equivalent GIN index: `EXPLAIN` showed the existing `(metric_id, time_unix_nano)` index
-already narrows a realistic per-metric query to a small row set before the label filter runs, so
-a GIN index there measured no benefit while still costing write overhead on the highest-volume
-tables — see the same plan section for the measurement. Timescale's compressed chunks (>7 days
-old) don't use GIN/trigram indexes and fall back to scanning them.
-
-Schema 2.12.0 adds `idx_spans_error` back for `mode=errors` — not a reversal of `idx_status`'s
-2.8.0 removal, since it's a different shape: a partial index (`WHERE status_code = 'ERROR'`,
-`status_code = 'ERROR'` on SqlServer) covering only the rare error rows rather than a plain B-tree
-over all three status values, which is exactly the case the 2.8.0 low-cardinality reasoning doesn't
-apply to. MySQL has no filtered indexes, so its equivalent is a plain `(status_code,
-start_time_unix_nano)` composite; ClickHouse needs nothing (its `ORDER BY (trace_id, span_id)` with
-a daily partition already covers it — confirmed the partial index is chosen via `EXPLAIN` against a
-live Timescale container for the exact `ErrorTracePredicate` query shape, across compressed and
-uncompressed chunks alike).
+- **Hot tables are append targets.** `spans`, `log_records` and the five data-point tables have no unique
+  key (a re-delivered span is stored twice, decision 7) and no foreign keys to `resources`, scopes or
+  `metrics` (reference rows are committed before the data transaction, so a hot-table FK only cost insert
+  time — ~7-8% of PostgreSQL flush time — and made Timescale `drop_chunks` deadlock). FKs stay on
+  `api_keys`, `alert_rules`, `alert_events` and `metrics`. `id` is an identity/auto-increment used only as
+  the keyset tiebreak and has no index of its own on PostgreSQL/Timescale.
+- **`tenant_id` and `service_name` columns** on `spans`, `log_records` and `metrics`; the five data-point
+  tables get neither (`metric_id` identifies one tenant and service).
+- **Id columns match their driver's parameter type**: `text` on PostgreSQL/Timescale; `varchar(32)`/
+  `varchar(16)` `COLLATE Latin1_General_BIN2` on SQL Server (sent as sized `AnsiString`); `char(32)`/`char(16)`
+  `ascii_bin` on MySQL; `String` on ClickHouse.
+- **Index set (relational), every index serving a named query**: `spans (trace_id, span_id)` (trace detail, span
+  by id, spans by parent, service-map parent join), `(tenant_id, start_time_unix_nano)` (unscoped anchors,
+  windows, search, service-map child range, per-tenant retention), `(tenant_id, service_name, start_time_unix_nano)`
+  (service-scoped anchors) and an errors index (`WHERE status_code = 'ERROR'` partial/filtered on PostgreSQL,
+  Timescale and SQL Server; MySQL has no filtered index, so `(tenant_id, status_code, start_time_unix_nano)`,
+  which Phase 4 should measure and drop if its insert cost is material); `log_records (tenant_id,
+  time_unix_nano, id)` and `(trace_id)`; `metrics` unique `(resource_id, name, type, scope_id)` and
+  `(tenant_id, service_name, name)`; data points `(metric_id, time_unix_nano, id)` plus a time index for
+  retention (PostgreSQL BRIN; SQL Server/MySQL `(time_unix_nano)`; none on Timescale/ClickHouse);
+  `resources` unique `(tenant_id, resource_hash)` and `(tenant_id, service_name)`;
+  `instrumentation_scopes` unique `(scope_hash)`. No GIN/trigram/skip indexes, no `pg_trgm`.
+- **SQL Server** clusters on the access path, not an IDENTITY: `spans (tenant_id, start_time_unix_nano, id)`,
+  `log_records (tenant_id, time_unix_nano, id)`, data points `(metric_id, time_unix_nano, id)` (unique clustered
+  indexes, so `id` only makes the key unique), so concurrent flushes append at one tail per tenant instead of
+  contending for one last page. `ALTER DATABASE CURRENT SET READ_COMMITTED_SNAPSHOT ON` — the opt-in SNAPSHOT
+  isolation plumbing and its `ALLOW_SNAPSHOT_ISOLATION` are gone; reads still run at `DEADLOCK_PRIORITY LOW` on a
+  distinct Application Name. Spans are written by `SqlBulkCopy` straight into the table (no `#spans_stage`).
+- **MySQL** InnoDB clusters on the primary key, so `spans` is `PRIMARY KEY (tenant_id, start_time_unix_nano, id)`,
+  `log_records (tenant_id, time_unix_nano, id)`, data points `(metric_id, time_unix_nano, id)`, each with
+  `KEY (id)` (InnoDB needs an auto-increment column to lead some index). Span rows are sorted by
+  `(trace_id, span_id)` and log rows by time before the multi-row insert: unordered inserts deadlock on
+  secondary indexes.
+- **PostgreSQL** is plain heap tables (day partitioning can be added later without re-keying). **Timescale**
+  has hypertables on `spans`, `log_records` and the five data-point tables (6 h chunks for spans/logs, 12-24 h
+  for data points; `create_default_indexes => FALSE`), compression after 7 days (`segmentby` `tenant_id` for
+  spans/logs, `metric_id` for data points), `set_integer_now_func` registered, retention by `drop_chunks`,
+  no continuous aggregates. **ClickHouse** is described in its provider notes above.
+- **Removed from 2.x**: the views (`trace_summary`, `service_map`, `service_map_detailed`,
+  `log_severity_stats`) and Timescale's `log_severity_stats_daily` continuous aggregate (nothing referenced
+  them), the rollup tables, `rollup_state`, `orphan_roots`, `uk_trace_span`, the MySQL `is_root` column, and
+  `schema/migrations/`.
 
 **Telemetry (10)**: `resources`, `instrumentation_scopes`, `spans` (events and links folded into
-its `events_json`/`links_json` columns, schema 2.11.0, on all five providers — there are no
-separate `span_events`/`span_links` tables), `metrics`, `gauge_data_points`, `sum_data_points`,
+its `events_json`/`links_json` columns — there are no separate `span_events`/`span_links` tables), `metrics`, `gauge_data_points`, `sum_data_points`,
 `histogram_data_points`, `exponential_histogram_data_points`, `summary_data_points`, `log_records`
 
 **Multi-tenant/auth (2)**: `tenants`, `api_keys`
@@ -747,8 +727,8 @@ separate `span_events`/`span_links` tables), `metrics`, `gauge_data_points`, `su
 
 **Utility (1)**: `schema_version`
 
-Built-in views: `trace_summary`, `service_map`, `service_map_detailed`, `log_severity_stats`
-(compatibility alias over the continuous aggregate under Timescale).
+There are no views and no derived-data tables; ClickHouse additionally has `trace_index` and `metric_last_seen`
+(both fed by materialized views).
 
 Connection strings (both hosts point at the same database):
 - Ingestion server reads `ConnectionStrings:Collector` in `Keryhe.Telemetry.Collector.Server/appsettings.json`

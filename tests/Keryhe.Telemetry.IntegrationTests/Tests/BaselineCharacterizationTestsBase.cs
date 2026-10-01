@@ -22,6 +22,7 @@ public abstract class BaselineCharacterizationTestsBase : IAsyncLifetime
     public Task DisposeAsync() => Task.CompletedTask;
 
     private static readonly DateTime WindowStart = new(2026, 1, 1, 0, 0, 0, DateTimeKind.Utc);
+    private static readonly DateTime SummaryWindowStart = new(2026, 1, 15, 0, 0, 0, DateTimeKind.Utc);
 
     private IServiceScope Scope() => _fixture.Services.CreateScope();
 
@@ -61,14 +62,14 @@ public abstract class BaselineCharacterizationTestsBase : IAsyncLifetime
     /// <summary>
     /// Replaces the retired <c>GetLogHistogramAsync</c> baseline (list-pages-server-side plan,
     /// Phase 2: "these tests are replaced, not deleted, as each phase changes the behavior they pin
-    /// down"). No rollup coverage exists in this test (the fixture never runs RollupWorker), so
-    /// this necessarily exercises <c>GetLogSummaryAsync</c>'s raw path — the rollup-vs-raw parity
-    /// check lives in <c>RollupWorkerTests</c>.
+    /// down"). Schema 3.0.0 has no rollup tables, so <c>GetLogSummaryAsync</c> has one (raw) path.
     /// </summary>
     [Fact]
     public async Task LogSummary_Totals_MatchSeededWindow()
     {
-        var logs = SeededDataBuilder.BasicLogWindow(_fixture.TenantId, WindowStart, count: 600);
+        // Its own window: log rows are plain appends on every provider (schema 3.0.0), so a window
+        // another test in this shared fixture also seeded would count twice.
+        var logs = SeededDataBuilder.BasicLogWindow(_fixture.TenantId, SummaryWindowStart, count: 600);
         using (var writeScope = Scope())
             await writeScope.ServiceProvider.GetRequiredService<ITelemetryBulkWriter>().FlushLogsAsync(logs);
 
@@ -77,8 +78,8 @@ public abstract class BaselineCharacterizationTestsBase : IAsyncLifetime
 
         var summary = await repo.GetLogSummaryAsync(new LogSummaryQuery
         {
-            Start = WindowStart.AddMinutes(-1),
-            End = WindowStart.AddHours(1),
+            Start = SummaryWindowStart.AddMinutes(-1),
+            End = SummaryWindowStart.AddHours(1),
             BucketCount = 24
         });
 
@@ -91,11 +92,9 @@ public abstract class BaselineCharacterizationTestsBase : IAsyncLifetime
 
     /// <summary>
     /// Replaces the retired <c>GetTraceOverviewAsync</c> baseline (list-pages-server-side plan,
-    /// Phase 3: "these tests are replaced, not deleted"). No rollup coverage exists in this test
-    /// (the fixture never runs RollupWorker), so this exercises <c>GetTraceSummaryAsync</c>'s raw
-    /// path — the rollup-vs-raw parity check lives in the Phase 3 trace rollup tests.
-    /// <c>BasicTraceWindow</c>'s roots are all <c>SERVER</c> kind, so the inbound-anchor
-    /// restriction (decision 13) doesn't change the expected counts here.
+    /// Phase 3: "these tests are replaced, not deleted"). <c>BasicTraceWindow</c>'s roots are each
+    /// trace's earliest span and all <c>SERVER</c> kind, so every trace's anchor is its root and the
+    /// inbound-anchor restriction (schema-simplification decision 12) doesn't change the expected counts.
     /// </summary>
     [Fact]
     public virtual async Task TraceSummary_Totals_ErrorCounts_And_Percentiles_MatchSeededWindow()

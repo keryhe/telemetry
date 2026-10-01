@@ -58,8 +58,8 @@ public sealed class TraceShaper(LoadProfile profile, Topology topology, Random r
         }
 
         var entries = new List<LedgerEntry>(2);
-        if (current > 0) entries.Add(new LedgerEntry("spans", RecordAge.Current, current, false, Dedups: true));
-        if (backdated > 0) entries.Add(new LedgerEntry("spans", RecordAge.Backdated, backdated, false, Dedups: true));
+        if (current > 0) entries.Add(new LedgerEntry("spans", RecordAge.Current, current, false, Dedups: _load.RedeliveryCollapses));
+        if (backdated > 0) entries.Add(new LedgerEntry("spans", RecordAge.Backdated, backdated, false, Dedups: _load.RedeliveryCollapses));
 
         return new Payload<ExportTraceServiceRequest>(request, tenantIndex, (int)(current + backdated), entries,
             rng.NextDouble() < profile.Time.RedeliveryFraction);

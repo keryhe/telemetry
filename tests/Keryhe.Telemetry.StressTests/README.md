@@ -32,6 +32,10 @@ dotnet run --project tests/Keryhe.Telemetry.StressTests -- run --provider all --
 # Find a provider's breaking point
 dotnet run --project tests/Keryhe.Telemetry.StressTests -- run --provider SqlServer --scenario ramp
 
+# The same ramp with nothing reading the database (no browsers, no marker probes): the provider's write ceiling.
+# Run it and "ramp" on the same commit; the difference between the two ceilings is what reads cost the write path.
+dotnet run --project tests/Keryhe.Telemetry.StressTests -- run --provider SqlServer --topology split --profile ramp-write-only
+
 # Rebuild the report from a finished run, without re-running anything
 dotnet run --project tests/Keryhe.Telemetry.StressTests -- report --in stress-results/<timestamp>
 ```
@@ -47,6 +51,7 @@ dotnet run --project tests/Keryhe.Telemetry.StressTests -- report --in stress-re
 | `--browsers <n>` | Override the profile's browser users (0 to 5; 0 runs none) |
 | `--out <dir>` | Results folder (default `stress-results/<timestamp>/` at the repo root, which is gitignored) |
 | `--reuse-publish <dir>` | Use hosts published by an earlier run instead of publishing again |
+| `--db-cpuset <cpus>` | Pin the database container to these CPUs of the Docker VM (Docker `--cpuset-cpus`, e.g. `0-3`). The report states what the database shared CPUs with; under Docker Desktop the VM still shares the host's cores, so a database on another machine is the only fully separate option (not supported by the harness yet) |
 | `--retention-interval <v>` | Override the profile's retention interval: `stress` (30 s, a sweep lands in every window), `realistic` (3600 s, the API default: one sweep at host start, so retention contention does not dominate), or a number of seconds. The scenario name gets a `-ret<seconds>` suffix, so both kinds of run sit side by side in one comparison |
 
 The hosts are published once per run. Ctrl-C stops after cleaning up the current scenario. A scenario that fails part-way still writes its result
@@ -59,7 +64,7 @@ with optional browsers), and `playwright-install`.
 
 1. Starts a fresh database container with diagnostics on (pg_stat_statements, Query Store, deadlock logging, ...) and the CPU/memory cap, applies `schema/*.sql`, seeds tenants and API keys.
 2. Launches the host(s) as child processes and attaches the database observers and an EventPipe metrics listener to each host.
-3. **Warm-up**: ingestion only, so rollup coverage and data volume exist. Recorded, but excluded from the headline numbers.
+3. **Warm-up**: ingestion only, so data volume exists before anything reads. Recorded, but excluded from the headline numbers.
 4. **Measured window**: ingestion at the profile rate, the browser tour, and every observer together. Backdated records flow and the short retention interval makes sweeps land inside it. A **ramp** replaces this with rate steps and stops at the first step where a stop criterion holds for the whole step.
 5. **Quiesce**: stops the load and waits until nothing is resident in the ingestion queue and nothing has been flushed for 10s (a timeout is recorded, not raised).
 6. **Correctness check**: compares the sent ledger with per-tenant row counts. If backdated records were sent, it first waits for a retention sweep that *started after* quiescence (up to `2 x RetentionIntervalSeconds + 60s`, capped at `backdatedCheckMaxWaitSeconds`), since only then do leftover backdated rows mean anything. With a realistic retention interval no such sweep comes, and the backdated outcome is `NotVerifiable`.
@@ -73,8 +78,9 @@ with optional browsers), and `playwright-install`.
 | `standard` | 5 min | 30 min | 5,000/s | 3 | 3 |
 | `soak` | 15 min | 4 h | 5,000/s | 3 | 3 |
 | `ramp` | 1 min | steps of 60s | x1 = 1,000/s, +1,000/s per step, up to 30 steps | 3 | 3 |
+| `ramp-write-only` | 1 min | steps of 60s | same rates as `ramp` | none (no marker probes either) | 3 |
 
-All four send 2% backdated records, 2% re-deliveries, 5% late arrivals and 2% orphan traces.
+All five send 2% backdated records, 2% re-deliveries, 5% late arrivals and 2% orphan traces (traces whose root is never sent: schema 3.0.0 anchors them on their earliest span like any other).
 
 ## Writing a profile
 
@@ -99,6 +105,8 @@ A profile JSON (comments allowed) lists only what it overrides. Pass its path to
 | `load.transport` | 100 records/export, 2 channels | Also `connectionsPerChannel`, `maxInFlightExports`, `exportTimeoutSeconds` |
 | `load.time` | all 0 | `lateArrivalFraction`, `orphanFraction`, `backdatedFraction` (+ `backdatedAgeDays`), `redeliveryFraction` |
 | `load.servicesPerTenant`, `load.operationsPerService`, the rest of `load.traces/logs/metrics` | see `Load/LoadProfile.cs` | Cardinality, attribute counts, severity mix, metric type mix, exemplar and delta fractions |
+| `writeOnly` | false | No browsers and no marker probes: nothing reads the database. Pair with a `ramp` whose criteria use `maxCommitLagP95Ms` |
+| `databaseCpuset` | null | Same as `--db-cpuset` |
 | `ramp` | absent | Present means a ramp. `startScale`, `stepScale`, `stepSeconds`, `maxSteps`, and `criteria` (below) |
 
 Ramp criteria (each applies to a whole step; the rate scale multiplies the profile's load rates):
@@ -111,6 +119,7 @@ Ramp criteria (each applies to a whole step; the rate scale multiplies the profi
 | `maxErrorRatePercent` | 1 | More than this percentage of a signal's exports failed with a gRPC error |
 | `lagGrowthFactor` / `lagGrowthMinMs` | 2 / 3000 | `lag_growth`: lag in the last third of the step's probes is that many times the first third's and at least that much higher, or a probe never appeared |
 | `maxLagSeconds` | 10 | `lag_absolute`: lag in the last third of the step's probes averages more than this, growing or not (0 disables) |
+| `maxCommitLagP95Ms` | 0 (off) | `commit_lag_p95`: the worst signal's commit lag (`ingest commit_lag`, enqueue to commit) p95 for the step is higher. The write-only profile sets 5,000; it does not depend on any read query |
 
 Both lag criteria judge the log lag **after subtracting the provider's `asOf` pin offset**. The log probe reads through the pinned list page, and
 PostgreSQL/Timescale pin `asOf` at `NOW() - 5 s` by design, so their log lag has a constant 5 s floor that would otherwise shrink the growth
@@ -143,8 +152,8 @@ result, every time series, and the summary tables. Use it to compare runs by han
 
 - **Summary** cards and, for a ramp, the step table and breaking point. **Correctness** lists mismatched cells (table, tenant, expected, actual, delta); `ExplainedByDrops` means the shortfall is no bigger than `records_dropped`; `ExplainedByAbandonedExports` means a surplus no bigger than the rows of exports the client gave up on (deadline exceeded, cancelled, or cut off when the load stopped), which the server may have enqueued anyway; and a backdated outcome of `NotVerifiable` means no sweep started after quiescence so leftover rows prove nothing.
 - **Timelines** share one x-axis (time since warm-up began). Grey lines mark phase boundaries, orange dashed lines retention sweeps, blue dotted lines ramp steps; hover a line for its label. Line up a latency spike with a lock burst or a sweep by eye.
-- **Write side**: client Export latency, server gate wait / flush duration / batch size, retries and drops, ingest-to-queryable lag. Log lag sits near 5s on PostgreSQL and Timescale because list pages pin their query `asOf` to `NOW() - 5s`; trace lag is not pinned. The ramp step table shows the log lag with that offset removed.
-- **Read side**: per-page time to ready, and per endpoint the browser's timing next to the host's. Server percentiles are the count-weighted mean of per-second quantiles, so they are approximate, and the server count includes every caller of the route (including the marker probe). A `400` on a search is the standard tier's documented answer outside its raw-search window, not an error.
+- **Write side**: client Export latency, server gate wait / flush duration / batch size / **commit lag** (enqueue to commit, the write-path health signal that needs no read), retries and drops, ingest-to-queryable lag. Log lag sits near 5s on PostgreSQL and Timescale because list pages pin their query `asOf` to `NOW() - 5s`; trace lag is not pinned. The ramp step table shows the log lag with that offset removed.
+- **Read side**: per-page time to ready, and per endpoint the browser's timing next to the host's. Server percentiles are the count-weighted mean of per-second quantiles, so they are approximate, and the server count includes every caller of the route (including the marker probe). A `400` on a search is the documented answer outside the raw-search window (24 hours by default, every provider), not an error. A separate table lists **every API route's server-side latency**, whoever called it, apart from the write instruments; and in a matrix with both a write-only and a full ramp for the same provider and topology, `comparison.html` shows the two ceilings and commit lags side by side (the read/write isolation number).
 - **Database**: blocking chains, deadlocks, top statements by total and mean time, table sizes, then the provider's own diagnostics and the container's **effective server settings** (memory, WAL/redo, durability, isolation), so a comparison between providers can be checked for fairness. Diagnostics: PostgreSQL/Timescale foreign-key `FOR KEY SHARE` checks (`pg_stat_statements.track = all`, so checks fired inside `COPY` count), checkpoint/WAL deltas and "checkpoints are occurring too frequently" warnings, dead tuples and autovacuum per table, and on Timescale every policy job with its failures and errors; SQL Server `spans` index usage and operational stats, autogrowth events for the database and tempdb, file sizes; ClickHouse rows/bytes read per query shape, `part_log` merges and mutations, the mutation list, merges still running; MySQL buffer-pool hit ratio, redo and purge (history list length is also sampled every second), per-index I/O on `spans`, unused indexes. A section that could not be collected shows its error instead of failing the run. The "API reads run under SNAPSHOT" check for SQL Server reads `not checked` when no read request happened to be sampled (for example a run without browsers); that is unknown, not a failure.
 
 ## Things worth knowing

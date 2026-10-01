@@ -85,37 +85,22 @@ public abstract class DapperReadRepository
     protected virtual string PagingClause => "LIMIT @limit OFFSET @offset";
 
     /// <summary>
-    /// Modifier inserted right after a table alias in a rollup-table read
-    /// (<c>FROM {table} AS alias{RollupFinalHint}</c> — FINAL goes after the alias, not before it).
-    /// Empty everywhere except ClickHouse, which overrides it to <c>" FINAL"</c>: the rollup tables
-    /// are <c>ReplacingMergeTree</c>, and a minute rolled twice (decisions 37-38) collapses to its
-    /// newest row only at merge time or under <c>FINAL</c> — cheap here since these tables are small.
+    /// How a trace/span id is bound as a parameter. The default is the plain string, which is right
+    /// wherever the driver's default parameter type matches the column (Npgsql <c>text</c> against a
+    /// <c>text</c> column, MySqlConnector against <c>ascii_bin</c>). SQL Server overrides it to a sized
+    /// ANSI <c>DbString</c>, because Dapper's default <c>nvarchar(4000)</c> would force an implicit
+    /// conversion of the <c>varchar</c> column and turn every id seek into a scan.
     /// </summary>
-    protected virtual string RollupFinalHint => "";
+    protected virtual object IdParam(string? value, int length) => value!;
 
-    /// <summary>
-    /// SQL expression referencing a resource's <c>service_name</c> column, aliased
-    /// <paramref name="resourceAlias"/> (default <c>r</c>, the alias every existing caller's own
-    /// resources join uses; trace-side callers pass <c>r2</c> for their correlated subqueries —
-    /// see <c>TraceReadRepositoryBase.ServiceTracePredicate</c>).
-    ///
-    /// A plain column reference on every provider since schema 2.13.3 (list-pages-server-side
-    /// plan, Phase 7, decision 8): before that, this compiled a per-provider JSON extraction
-    /// expression against <c>attributes_json</c> (<c>-&gt;&gt;</c> here, <c>JSON_VALUE</c> on
-    /// SqlServer, <c>JSONExtractString</c> on ClickHouse). <c>resources.service_name</c> is
-    /// written by each provider's bulk writer resource upsert
-    /// (<c>TelemetryIngestionHelpers.ExtractServiceName</c>) and backfilled by the
-    /// 2.13.2-to-2.13.3 migration, so every provider now overrides this the same trivial way —
-    /// kept virtual rather than sealed only because SqlServer/MySql/ClickHouse each declare their
-    /// own override per repository subclass already and there is no shared base among them to
-    /// collapse it into.
-    /// </summary>
-    protected virtual string ResourceServiceNameExpr(string resourceAlias = "r") => $"{resourceAlias}.service_name";
+    /// <summary>The table expressions a fact row's resource and scope are joined from. ClickHouse overrides them to collapse the not-yet-merged duplicate rows of its eventually-deduplicated reference tables, so a duplicate cannot multiply the fact rows.</summary>
+    protected virtual string ResourcesTable => "resources";
+    protected virtual string ScopesTable => "instrumentation_scopes";
 
     /// <summary>
     /// SQL boolean expression: does the JSON column <paramref name="jsonColumn"/> contain the key
     /// named by parameter <paramref name="keyParam"/> (e.g. <c>"@tagKey0"</c>), regardless of the
-    /// value's type? Unlike <see cref="ResourceServiceNameExpr"/>'s value-extraction expressions,
+    /// value's type? Unlike a value-extraction expression,
     /// this must not return NULL for a present key whose value is a JSON object/array/null — that
     /// would under-match. Used only as a coarse, safe-to-over-include pre-filter ahead of
     /// <c>TraceReadRepositoryBase</c>'s own authoritative C# tag-value check (list-page-scale
@@ -262,6 +247,20 @@ public abstract class DapperReadRepository
         }
 
         return (" AND " + string.Join(" AND ", clauses), parameters);
+    }
+
+    /// <summary>
+    /// <c>ToDictionary</c> that keeps the first row per key instead of throwing on a duplicate. The reference
+    /// tables (<c>resources</c>, <c>instrumentation_scopes</c>, <c>metrics</c>) are <c>ReplacingMergeTree</c> on
+    /// ClickHouse, whose dedup is eventual: two flushes that both missed the cache can store the same id twice
+    /// until a merge, and a plain <c>ToDictionary</c> over those rows turned that into a 400 on every logs page.
+    /// </summary>
+    protected static Dictionary<TKey, TValue> ToDictionaryFirst<TSource, TKey, TValue>(
+        IEnumerable<TSource> source, Func<TSource, TKey> key, Func<TSource, TValue> value) where TKey : notnull
+    {
+        var result = new Dictionary<TKey, TValue>();
+        foreach (var item in source) result.TryAdd(key(item), value(item));
+        return result;
     }
 
     // =========================================================================

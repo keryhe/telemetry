@@ -1,5 +1,5 @@
 import { Component, NgZone, computed, effect, inject, signal, untracked, OnDestroy } from '@angular/core';
-import { DatePipe, DecimalPipe } from '@angular/common';
+import { DatePipe, DecimalPipe, LowerCasePipe } from '@angular/common';
 import { Router } from '@angular/router';
 import { MatButtonToggleModule } from '@angular/material/button-toggle';
 import { MatButtonModule } from '@angular/material/button';
@@ -76,7 +76,7 @@ const ERROR_TIERS: { max: number; color: string; label: string }[] = [
   selector: 'app-trace-list',
   standalone: true,
   imports: [
-    DatePipe, DecimalPipe, FormsModule,
+    DatePipe, DecimalPipe, LowerCasePipe, FormsModule,
     MatCardModule, MatPaginatorModule, MatTableModule, MatSortModule, MatTabsModule, MatIconModule,
     MatButtonToggleModule, MatButtonModule, MatSelectModule, MatFormFieldModule,
     MatInputModule, MatProgressBarModule, MatChipsModule, MatTooltipModule,
@@ -166,8 +166,8 @@ export class TraceListComponent implements OnDestroy {
   protected newSinceCount = computed(() => this.summary()?.newSinceAsOf ?? 0);
 
   /**
-   * Standard-tier search window limit, explained inline next to the search box (decision 39):
-   * shown when a raw search filter or `mode=slow` is present and the window exceeds the limit.
+   * Search window limit, explained inline next to the search box: shown when a raw search filter
+   * or `mode=slow` is present and the window exceeds the limit (search is unindexed on every provider).
    */
   protected rawSearchWindowMessage = computed<string | null>(() => {
     const caps = this.capabilities();
@@ -177,7 +177,7 @@ export class TraceListComponent implements OnDestroy {
     const { start, end } = this.timeRange.range();
     const hours = (end.getTime() - start.getTime()) / 3_600_000;
     if (hours <= caps.rawSearchWindowHours) return null;
-    return `Search is limited to a ${caps.rawSearchWindowHours}-hour window on ${caps.tier} tier. Narrow the time range or remove the search/slow filter.`;
+    return `Search is limited to a ${caps.rawSearchWindowHours}-hour window. Narrow the time range or remove the search/slow filter.`;
   });
 
   protected errorCount = computed(() => this.summary()?.summary.errorCount ?? 0);
@@ -274,7 +274,7 @@ export class TraceListComponent implements OnDestroy {
   /** Jaeger-style duration-vs-time latency chart, binned into count/error-sized bubbles. */
   protected latencyBubbleOptions = signal<ApexOptions>({});
 
-  protected readonly displayedColumns = ['service', 'operation', 'spans', 'status', 'duration', 'time'];
+  protected readonly displayedColumns = ['service', 'operation', 'kind', 'spans', 'status', 'duration', 'time'];
   protected readonly formatDuration = formatDuration;
   protected readonly parseDuration = parseDotnetTimespan;
 
@@ -698,11 +698,12 @@ export class TraceListComponent implements OnDestroy {
   protected exportCsv(): void {
     const rows = this.exportRows();
     if (!rows.length) return;
-    const headers = ['TraceId', 'Service', 'Operation', 'DurationMs', 'Spans', 'Status', 'StartTime'];
+    const headers = ['TraceId', 'Service', 'Operation', 'Kind', 'DurationMs', 'Spans', 'Status', 'StartTime'];
     const data = rows.map((t) => [
       t.traceIdHex,
       t.serviceName ?? '',
       t.rootOperationName ?? '',
+      t.anchorKind ?? '',
       parseDotnetTimespan(t.traceDuration),
       t.spanCount,
       t.hasErrors ? 'ERROR' : 'OK',

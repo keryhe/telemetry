@@ -58,21 +58,17 @@ import { CapabilitiesService } from '../../../core/services/capabilities.service
 
       <div class="note info">
         <strong>Tip:</strong> Attribute searches look in Log Attributes, Resource Attributes, and Scope Attributes.
-        Substring matching (free text and <code>:</code> "contains") works the same way on every provider.
-        @if (capabilities().indexedSearch) {
-          A number or boolean attribute value (e.g. <code>http.status_code:500</code>) matches
-          case-insensitively; a text attribute value "contains" match is case-sensitive on this
-          database.
-        }
+        Substring matching (free text and <code>:</code> "contains") and attribute value matching are
+        case-insensitive on every provider.
       </div>
       <div class="note success">
         <strong>Trace ID Search:</strong> When searching by trace ID (exactly 32 hex characters),
         the date range is optional and will be ignored. This allows you to find logs across any time period.
       </div>
-      @if (!capabilities().indexedSearch && capabilities().rawSearchWindowHours) {
+      @if (capabilities().rawSearchWindowHours) {
         <div class="note warn">
-          <strong>Search window:</strong> free-text and attribute searches on this database are limited to the
-          last {{ capabilities().rawSearchWindowHours }} hours. A plain unfiltered or service-filtered list can
+          <strong>Search window:</strong> free-text and attribute searches are limited to a
+          {{ capabilities().rawSearchWindowHours }}-hour time range. A plain unfiltered or service-filtered list can
           still cover a longer range.
         </div>
       }

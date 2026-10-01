@@ -185,6 +185,19 @@ public static class TelemetryIngestionHelpers
         };
     }
 
+    /// <summary>
+    /// The tenant and service name a signal row carries as its own columns (<c>tenant_id</c>,
+    /// <c>service_name</c> on spans, log_records and metrics), taken from the row's effective
+    /// resource. Copied at ingest so hot reads filter on the row's own columns instead of joining
+    /// <c>resources</c>. Normalizes first, so a lost resource files under the same fallback tenant
+    /// <see cref="ResourceKey(ResourceModel?)"/> would.
+    /// </summary>
+    public static (long TenantId, string? ServiceName) TenantAndService(ResourceModel? resource)
+    {
+        var normalized = NormalizeResource(resource);
+        return (normalized.TenantId, ExtractServiceName(normalized.Attributes));
+    }
+
     public static string? SerializeJsonOrNull(object? value)
         => value == null ? null : JsonSerializer.Serialize(value);
 

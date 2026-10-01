@@ -18,14 +18,19 @@ export interface TraceInfo {
   spanCount: number;
   traceStartTime: string;
   traceEndTime: string;
-  /** Whole-trace duration, or the filtered service's own duration when a service filter matched this trace. */
+  /** The anchor span's own duration (end - start). The anchor is the trace's earliest span — or, when a service filter matched, that service's own earliest span. */
   traceDuration: string;
+  /** The anchor span's service. */
   serviceName?: string;
+  /** The anchor span's name — what the operation filter matches. */
   rootOperationName?: string;
+  /** The anchor span's kind (SERVER, CLIENT, ...). */
+  anchorKind?: string;
+  /** Whether any span in scope (the selected service's spans when one is selected, else the whole trace) has an ERROR status. */
   hasErrors: boolean;
   services: string[];
   rootSpanAttributes?: Record<string, unknown>;
-  /** The trace's true root span, or the filtered service's entry span when a service filter matched this trace. Used to deep-link into trace-detail. */
+  /** The anchor span (the trace's earliest span, or the filtered service's own earliest span). Used to deep-link into trace-detail. */
   displaySpanIdHex?: string;
 }
 

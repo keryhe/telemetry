@@ -1,33 +1,84 @@
 using Dapper;
+using Microsoft.Extensions.Configuration;
 using Keryhe.Telemetry.Core;
 using Keryhe.Telemetry.Core.Models;
 
 namespace Keryhe.Telemetry.Core.Data.Read;
 
 /// <summary>
-/// Dapper implementation of <see cref="ITraceReadRepository"/>. Row-level predicates
-/// (tenant, time range, status, parent/trace ids) are pushed into SQL via a join to
-/// <c>resources</c>; span detail reads (<see cref="GetTraceByIdAsync"/> and friends) and the
-/// service-dependency/operation-analytics reads keep their original shape. The list page's
-/// summary/page/samples endpoints (list-pages-server-side plan, Phase 3) are built fresh against
-/// the anchor-based schema (root spans plus <c>orphan_roots</c>, decision 41) and the trace
-/// rollup tables (decisions 37-38) — see the SUMMARY/PAGE/SAMPLES region below.
+/// Dapper implementation of <see cref="ITraceReadRepository"/>. Since schema 3.0.0 every hot read
+/// filters on <c>spans.tenant_id</c>/<c>spans.service_name</c> directly (no join to
+/// <c>resources</c>), joining <c>resources</c> only where its attributes are actually selected
+/// (span detail, resource-attribute search).
+///
+/// The list page's summary/page/samples/export endpoints share one derived table, the
+/// <b>anchors</b> (see <see cref="AnchorsSql"/>): one row per trace, being the trace's EARLIEST span
+/// in scope -- the selected service's own earliest span when a service is selected, the whole
+/// trace's otherwise (schema-simplification decision 10). That replaces the 2.x root-plus-orphan
+/// anchors, the rollup tables and <c>orphan_roots</c>: a trace without a root, or whose root arrives
+/// late, simply anchors on whatever its earliest span is at the time of the query.
 /// </summary>
 public abstract class TraceReadRepositoryBase : DapperReadRepository, ITraceReadRepository
 {
     /// <summary>See <see cref="LogReadRepositoryBase"/>'s identical field for why this default exists.</summary>
     private readonly int _summaryTimeoutSeconds = 5;
 
+    private readonly long _anchorLookbackNanos = QueryOptions.DefaultAnchorLookbackMinutes * NanosPerMinute;
+
     private const long NanosPerMinute = 60_000_000_000L;
-    private const long NanosPerHour = 3_600_000_000_000L;
 
     protected TraceReadRepositoryBase(ITenantContext tenantContext) : base(tenantContext) { }
 
-    protected TraceReadRepositoryBase(ITenantContext tenantContext, Microsoft.Extensions.Configuration.IConfiguration configuration) : base(tenantContext)
+    protected TraceReadRepositoryBase(ITenantContext tenantContext, IConfiguration configuration) : base(tenantContext)
     {
         _summaryTimeoutSeconds = int.TryParse(configuration[$"{QueryOptions.SectionName}:SummaryTimeoutSeconds"], out var configured)
             ? configured
             : 5;
+        var lookbackMinutes = int.TryParse(configuration[$"{QueryOptions.SectionName}:AnchorLookbackMinutes"], out var lookback) && lookback >= 0
+            ? lookback
+            : QueryOptions.DefaultAnchorLookbackMinutes;
+        _anchorLookbackNanos = lookbackMinutes * NanosPerMinute;
+    }
+
+    // =========================================================================
+    // DIALECT HOOKS
+    // =========================================================================
+
+    /// <summary>
+    /// A predicate matching <paramref name="column"/> against <paramref name="ids"/>, binding each id
+    /// through <see cref="IdParam"/> into <paramref name="parameters"/>. PostgreSQL overrides it to bind
+    /// one native array (<c>= ANY</c>).
+    /// </summary>
+    protected virtual string IdInPredicate(string column, string paramPrefix, IReadOnlyList<string> ids, int length, DynamicParameters parameters)
+    {
+        var names = new List<string>(ids.Count);
+        for (var i = 0; i < ids.Count; i++)
+        {
+            var name = $"{paramPrefix}{i}";
+            parameters.Add(name, IdParam(ids[i], length));
+            names.Add($"@{name}");
+        }
+        return $"{column} IN ({string.Join(",", names)})";
+    }
+
+    /// <summary>
+    /// Optional <c>[min, max]</c> start-time bounds of the given traces, used to narrow a by-trace-id
+    /// read of <c>spans</c>. The relational providers seek <c>(trace_id, span_id)</c> and need none
+    /// (null). ClickHouse, whose <c>spans</c> sort key is <c>(tenant_id, service_name, start_time)</c>
+    /// and has no trace-id seek, overrides it to read <c>trace_index</c>, so a by-trace read touches
+    /// only the partitions and granules that can hold the trace.
+    /// </summary>
+    protected virtual Task<(long Min, long Max)?> ResolveTraceTimeBoundsAsync(
+        System.Data.Common.DbConnection conn, IReadOnlyList<string> traceIds, CancellationToken ct)
+        => Task.FromResult<(long Min, long Max)?>(null);
+
+    /// <summary>Appends <c>start_time_unix_nano</c> bounds (parameters <c>@boundMin</c>/<c>@boundMax</c>) to a by-trace-id WHERE when the provider supplied them.</summary>
+    private static string BoundsClause(string alias, (long Min, long Max)? bounds, DynamicParameters parameters)
+    {
+        if (bounds is not { } b) return "";
+        parameters.Add("boundMin", b.Min);
+        parameters.Add("boundMax", b.Max);
+        return $" AND {alias}.start_time_unix_nano >= @boundMin AND {alias}.start_time_unix_nano <= @boundMax";
     }
 
     // =========================================================================
@@ -40,10 +91,17 @@ public abstract class TraceReadRepositoryBase : DapperReadRepository, ITraceRead
             throw new ArgumentException("Trace ID cannot be null or empty", nameof(traceIdHex));
 
         await using var conn = await OpenConnectionAsync(cancellationToken);
+        var bounds = await ResolveTraceTimeBoundsAsync(conn, [traceIdHex], cancellationToken);
+        var parameters = new DynamicParameters();
+        parameters.Add("tenantId", TenantId);
+        parameters.Add("traceId", IdParam(traceIdHex, 32));
         var spans = await LoadFullSpansAsync(conn,
-            "s.trace_id = @traceId", "ORDER BY s.start_time_unix_nano",
-            new { tenantId = TenantId, traceId = traceIdHex }, cancellationToken);
-        return spans;
+            "s.trace_id = @traceId" + BoundsClause("s", bounds, parameters), "ORDER BY s.start_time_unix_nano",
+            parameters, cancellationToken);
+
+        // A re-delivered span batch is stored again (no unique key, schema-simplification decision 7);
+        // the detail view shows each span once, keeping the first stored copy.
+        return DistinctSpans(spans);
     }
 
     public async Task<SpanModel?> GetSpanByIdAsync(string traceIdHex, string spanIdHex, CancellationToken cancellationToken = default)
@@ -54,9 +112,14 @@ public abstract class TraceReadRepositoryBase : DapperReadRepository, ITraceRead
             throw new ArgumentException("Span ID cannot be null or empty", nameof(spanIdHex));
 
         await using var conn = await OpenConnectionAsync(cancellationToken);
+        var bounds = await ResolveTraceTimeBoundsAsync(conn, [traceIdHex], cancellationToken);
+        var parameters = new DynamicParameters();
+        parameters.Add("tenantId", TenantId);
+        parameters.Add("traceId", IdParam(traceIdHex, 32));
+        parameters.Add("spanId", IdParam(spanIdHex, 16));
         var spans = await LoadFullSpansAsync(conn,
-            "s.trace_id = @traceId AND s.span_id = @spanId", null,
-            new { tenantId = TenantId, traceId = traceIdHex, spanId = spanIdHex }, cancellationToken);
+            "s.trace_id = @traceId AND s.span_id = @spanId" + BoundsClause("s", bounds, parameters), null,
+            parameters, cancellationToken);
         return spans.FirstOrDefault();
     }
 
@@ -68,13 +131,25 @@ public abstract class TraceReadRepositoryBase : DapperReadRepository, ITraceRead
             throw new ArgumentException("Parent Span ID cannot be null or empty", nameof(parentSpanIdHex));
 
         await using var conn = await OpenConnectionAsync(cancellationToken);
-        return await LoadFullSpansAsync(conn,
-            "s.trace_id = @traceId AND s.parent_span_id = @parentSpanId", "ORDER BY s.start_time_unix_nano",
-            new { tenantId = TenantId, traceId = traceIdHex, parentSpanId = parentSpanIdHex }, cancellationToken);
+        var bounds = await ResolveTraceTimeBoundsAsync(conn, [traceIdHex], cancellationToken);
+        var parameters = new DynamicParameters();
+        parameters.Add("tenantId", TenantId);
+        parameters.Add("traceId", IdParam(traceIdHex, 32));
+        parameters.Add("parentSpanId", IdParam(parentSpanIdHex, 16));
+        var spans = await LoadFullSpansAsync(conn,
+            "s.trace_id = @traceId AND s.parent_span_id = @parentSpanId" + BoundsClause("s", bounds, parameters), "ORDER BY s.start_time_unix_nano",
+            parameters, cancellationToken);
+        return DistinctSpans(spans);
+    }
+
+    private static List<SpanModel> DistinctSpans(List<SpanModel> spans)
+    {
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+        return spans.Where(s => seen.Add(s.SpanIdHex)).ToList();
     }
 
     private async Task<List<SpanModel>> LoadFullSpansAsync(
-        System.Data.Common.DbConnection conn, string whereClause, string? orderClause, object parameters, CancellationToken ct)
+        System.Data.Common.DbConnection conn, string whereClause, string? orderClause, DynamicParameters parameters, CancellationToken ct)
     {
         var sql = $"""
             SELECT
@@ -103,15 +178,13 @@ public abstract class TraceReadRepositoryBase : DapperReadRepository, ITraceRead
                 sc.schema_url               AS ScopeSchemaUrl,
                 sc.attributes_json          AS ScopeAttributesJson
             FROM spans s
-            JOIN resources r               ON s.resource_id = r.id
-            JOIN instrumentation_scopes sc ON s.scope_id = sc.id
-            WHERE r.tenant_id = @tenantId AND {whereClause}
+            JOIN {ResourcesTable} r               ON s.resource_id = r.id
+            JOIN {ScopesTable} sc ON s.scope_id = sc.id
+            WHERE s.tenant_id = @tenantId AND {whereClause}
             {orderClause}
             """;
 
-        // One query. Since schema 2.11.0 a span's events and links come back as JSON columns on
-        // the span row itself, so the two extra batched SELECTs against span_events/span_links
-        // this method used to issue are gone -- as are the tables.
+        // One query: a span's events and links come back as JSON columns on the span row itself.
         var rows = (await conn.QueryAsync<FullSpanRow>(new CommandDefinition(sql, parameters, cancellationToken: ct))).ToList();
         if (rows.Count == 0) return new List<SpanModel>();
 
@@ -122,7 +195,9 @@ public abstract class TraceReadRepositoryBase : DapperReadRepository, ITraceRead
     {
         TraceIdHex = r.TraceId,
         SpanIdHex = r.SpanId,
-        ParentSpanIdHex = r.ParentSpanId,
+        // ClickHouse stores "no parent" / "no state" / "no message" as '' (non-Nullable columns);
+        // the API model keeps them null.
+        ParentSpanIdHex = string.IsNullOrEmpty(r.ParentSpanId) ? null : r.ParentSpanId,
         Name = r.Name,
         Kind = Enum.Parse<SpanKind>(r.Kind),
         StartTimeUnixNano = r.StartTimeUnixNano,
@@ -130,10 +205,10 @@ public abstract class TraceReadRepositoryBase : DapperReadRepository, ITraceRead
         DroppedAttributesCount = r.DroppedAttributesCount,
         DroppedEventsCount = r.DroppedEventsCount,
         DroppedLinksCount = r.DroppedLinksCount,
-        TraceState = r.TraceState,
+        TraceState = string.IsNullOrEmpty(r.TraceState) ? null : r.TraceState,
         Flags = r.Flags,
         StatusCode = Enum.Parse<SpanStatusCode>(r.StatusCode),
-        StatusMessage = r.StatusMessage,
+        StatusMessage = string.IsNullOrEmpty(r.StatusMessage) ? null : r.StatusMessage,
         Attributes = DeserializeAttributes(r.AttributesJson),
         Events = DeserializeList<SpanEventModel>(r.EventsJson),
         Links = DeserializeList<SpanLinkModel>(r.LinksJson),
@@ -152,41 +227,56 @@ public abstract class TraceReadRepositoryBase : DapperReadRepository, ITraceRead
     };
 
     // =========================================================================
-    // ANCHORS (list-pages-server-side plan, Phase 3, decision 41)
+    // ANCHORS (schema-simplification plan, decisions 10-12, 15-18)
     //
-    // Every summary/page/samples query below anchors on this same derived table: null-parent
-    // root spans plus orphan_roots (a trace whose real root never arrived — decision 41), each
-    // carrying its own start/end/kind/name/created_at so mode=slow's duration filter and the
-    // asOf pin both apply directly to the anchor row, never to the whole trace.
+    // Every summary/page/samples/export query below anchors on this derived table: one row per
+    // trace, carrying the trace's earliest span in scope (its start, end, kind, name, service and
+    // created_at) plus whether any span in scope has status ERROR. Duration everywhere is the
+    // anchor's own end - start, so the row, the slow filter and the summary charts all agree.
     // =========================================================================
 
     /// <summary>
-    /// Default (PostgreSQL/Timescale/SqlServer/MySql) anchors subquery: a plain <c>UNION ALL</c>
-    /// with a correlated <c>NOT EXISTS</c> re-check that a trace's orphan row is dropped the
-    /// moment its real root arrives (decision 41's "read-time" safety net, on top of the rollup
-    /// worker's own 15-minute re-roll). ClickHouse overrides this with an uncorrelated form and
-    /// <c>LIMIT 1 BY trace_id, span_id</c> dedup (decision 34) — see
-    /// <c>ClickHouseTraceReadRepository</c>.
+    /// The anchors derived table. One pass over the tenant's (or the selected service's) spans in
+    /// <c>[@anchorFrom, @end]</c> -- <c>@anchorFrom</c> is <c>@start</c> minus the look-back margin
+    /// (<see cref="QueryOptions.AnchorLookbackMinutes"/>), so a trace that began before the window is
+    /// not anchored on a later span -- ranking each trace's spans by <c>(start, id)</c> and computing
+    /// the in-scope error flag in the same pass; keeps rank 1 and drops anchors that start before
+    /// <c>@start</c>. Parameters: <c>@tenantId</c>, <c>@anchorFrom</c>, <c>@start</c>, <c>@end</c>, plus
+    /// <c>@service</c> when <paramref name="hasService"/> and <c>@asOf</c> when
+    /// <paramref name="pinAsOf"/> (spans created after the pin are excluded BEFORE ranking, so a root
+    /// that arrives late is not the anchor within a pinned query).
+    /// <paramref name="includeFirstCreated"/> adds <c>first_created_at</c> (the trace's earliest
+    /// <c>created_at</c> in scope), which the "new since the pin" count compares with the pin.
+    /// ClickHouse overrides this with a <c>GROUP BY trace_id</c> form.
     /// </summary>
-    protected virtual string AnchorsSql => """
-        (
-            SELECT s.trace_id AS trace_id, s.id AS anchor_span_pk, s.span_id AS anchor_span_id, s.resource_id AS resource_id,
-                   s.name AS root_name, s.kind AS anchor_kind,
-                   s.start_time_unix_nano AS anchor_start, s.end_time_unix_nano AS anchor_end,
-                   s.created_at AS anchor_created_at
-            FROM spans s
-            WHERE s.parent_span_id IS NULL
-            UNION ALL
-            SELECT o.trace_id, sp.id, sp.span_id, o.resource_id, sp.name, sp.kind,
-                   o.start_time_unix_nano, o.end_time_unix_nano, o.detected_at
-            FROM orphan_roots o
-            JOIN spans sp ON sp.trace_id = o.trace_id AND sp.span_id = o.span_id
-            WHERE NOT EXISTS (SELECT 1 FROM spans np WHERE np.trace_id = o.trace_id AND np.parent_span_id IS NULL)
-        )
-        """;
+    protected virtual string AnchorsSql(bool hasService, bool pinAsOf, bool includeFirstCreated = false)
+    {
+        var service = hasService ? " AND s.service_name = @service" : "";
+        var pin = pinAsOf ? " AND s.created_at <= @asOf" : "";
+        var firstCreated = includeFirstCreated ? ", MIN(s.created_at) OVER (PARTITION BY s.trace_id) AS first_created_at" : "";
+        var outerFirstCreated = includeFirstCreated ? ", x.first_created_at" : "";
+        return $"""
+            (
+                SELECT x.trace_id, x.anchor_span_pk, x.anchor_span_id, x.service_name, x.root_name, x.anchor_kind,
+                       x.anchor_start, x.anchor_end, x.anchor_created_at, x.has_error{outerFirstCreated}
+                FROM (
+                    SELECT s.trace_id AS trace_id, s.id AS anchor_span_pk, s.span_id AS anchor_span_id,
+                           s.service_name AS service_name, s.name AS root_name, s.kind AS anchor_kind,
+                           s.start_time_unix_nano AS anchor_start, s.end_time_unix_nano AS anchor_end,
+                           s.created_at AS anchor_created_at,
+                           ROW_NUMBER() OVER (PARTITION BY s.trace_id ORDER BY s.start_time_unix_nano, s.id) AS rn,
+                           MAX(CASE WHEN s.status_code = 'ERROR' THEN 1 ELSE 0 END) OVER (PARTITION BY s.trace_id) AS has_error{firstCreated}
+                    FROM spans s
+                    WHERE s.tenant_id = @tenantId
+                      AND s.start_time_unix_nano >= @anchorFrom AND s.start_time_unix_nano <= @end{service}{pin}
+                ) x
+                WHERE x.rn = 1 AND x.anchor_start >= @start
+            )
+            """;
+    }
 
     // =========================================================================
-    // SUMMARY (list-pages-server-side plan, Phase 3)
+    // SUMMARY
     // =========================================================================
 
     public async Task<TraceSummaryResult> GetTraceSummaryAsync(TraceSummaryQuery query, CancellationToken cancellationToken = default)
@@ -200,7 +290,6 @@ public abstract class TraceReadRepositoryBase : DapperReadRepository, ITraceRead
     private async Task<TraceSummaryResult> GetTraceSummaryCoreAsync(TraceSummaryQuery query, CancellationToken cancellationToken)
     {
         var parsed = SearchQueryParser.Parse(query.Search);
-        var hasRawSearchFilter = parsed.IsTraceIdSearch || parsed.Terms.Count > 0;
 
         await using var conn = await OpenConnectionAsync(cancellationToken);
         var asOf = await ResolveAsOfAsync(conn, query.AsOf, cancellationToken);
@@ -208,22 +297,11 @@ public abstract class TraceReadRepositoryBase : DapperReadRepository, ITraceRead
         var startNano = TimeConversion.DateTimeToUnixNano(query.Start);
         var endNano = TimeConversion.DateTimeToUnixNano(query.End);
 
-        // Rollup eligibility (decision 37): time/service filters only. An operation filter always
-        // falls back to raw -- the rollup's root_name is the ANCHOR's own name, whereas the page's
-        // operation filter matches any span in the trace (decision 9); reusing the rollup for that
-        // would silently narrow to a different, stricter population. mode=slow's duration filter
-        // has no rollup equivalent either (the rollup keeps only fixed latency-bucket counts, not
-        // per-trace durations), so it also forces raw.
-        var rollupEligible = !hasRawSearchFilter && string.IsNullOrEmpty(query.Operation) && query.Mode != "slow";
+        // Always the raw path: there are no rollup tables since schema 3.0.0. The chart/cards come
+        // from the anchor rows themselves; 3d/7d windows on a busy tenant may time out to "≥ N".
+        var result = await GetRawSummaryAsync(conn, query, parsed, startNano, endNano, cancellationToken);
 
-        TraceSummaryResult? rollupResult = null;
-        if (rollupEligible)
-            rollupResult = await TryGetRollupSummaryAsync(conn, query, startNano, endNano, cancellationToken);
-
-        var result = rollupResult ?? await GetRawSummaryAsync(conn, query, parsed, startNano, endNano, cancellationToken);
-
-        // listTotal always comes from the raw path (Target API), independent of which source
-        // answered the buckets/services/summary above.
+        // listTotal always counts every anchor (all kinds), independent of the cards' inbound-only population.
         var (listTotal, totalIsLowerBound) = await GetListTotalAsync(conn, query, parsed, startNano, endNano, asOf, cancellationToken);
         var newSince = await CountNewSinceAsOfAsync(conn, query, parsed, startNano, endNano, asOf, cancellationToken);
 
@@ -242,184 +320,14 @@ public abstract class TraceReadRepositoryBase : DapperReadRepository, ITraceRead
         };
     }
 
-    /// <summary>
-    /// Attempts the rollup-table source (decisions 37-38), the same minute/hour-plus-raw-tail
-    /// merge as <c>LogReadRepositoryBase.TryGetRollupSummaryAsync</c>. Restricted to
-    /// <c>inbound = 1</c> rows throughout (decision 13: cards/chart count inbound-request anchors
-    /// only). Returns null when there is no coverage of this window at all.
-    /// </summary>
-    private async Task<TraceSummaryResult?> TryGetRollupSummaryAsync(
-        System.Data.Common.DbConnection conn, TraceSummaryQuery query, long startNano, long endNano, CancellationToken cancellationToken)
-    {
-        var granularity = (endNano - startNano) > 24 * NanosPerHour ? "hour" : "minute";
-        var table = granularity == "minute" ? "trace_rollup_minute" : "trace_rollup_hour";
-
-        var state = await conn.QuerySingleOrDefaultAsync<RollupStateRow>(new CommandDefinition(
-            "SELECT coverage_start_unix_nano AS CoverageStartUnixNano, rolled_until_unix_nano AS RolledUntilUnixNano " +
-            "FROM rollup_state WHERE signal_name = 'traces' AND granularity = @granularity",
-            new { granularity }, cancellationToken: cancellationToken));
-
-        if (state?.CoverageStartUnixNano is not { } coverageStart || startNano < coverageStart)
-            return null;
-
-        var rolledUntil = state.RolledUntilUnixNano;
-        var rollupEnd = Math.Min(endNano, rolledUntil);
-        if (rollupEnd < startNano) rollupEnd = startNano;
-
-        var serviceClause = string.IsNullOrEmpty(query.Service) ? "" : $" AND {ResourceServiceNameExpr()} = @service";
-        var lbColumns = string.Join(",\n                   ", LatencyBucketSql.ColumnNames().Select((c, i) => $"SUM(trm.{c}) AS Lb{i:D2}"));
-        var rollupSql = $"""
-            SELECT trm.bucket_unix_nano AS BucketUnixNano,
-                   SUM(trm.trace_count) AS TraceCount,
-                   SUM(trm.error_count) AS ErrorCount,
-                   SUM(trm.duration_sum_ms) AS DurationSumMs,
-                   MAX(trm.duration_max_ms) AS DurationMaxMs,
-                   {lbColumns}
-            FROM {table} AS trm{RollupFinalHint}
-            JOIN resources r ON trm.resource_id = r.id
-            WHERE r.tenant_id = @tenantId AND trm.inbound = 1
-              AND trm.bucket_unix_nano >= @start AND trm.bucket_unix_nano < @rollupEnd
-              {serviceClause}
-            GROUP BY trm.bucket_unix_nano
-            """;
-
-        var rollupRows = (await conn.QueryAsync<TraceBucketAggRow>(new CommandDefinition(rollupSql, new
-        {
-            tenantId = TenantId,
-            start = startNano,
-            rollupEnd,
-            service = query.Service
-        }, cancellationToken: cancellationToken))).ToList();
-
-        var byBucket = rollupRows.ToDictionary(r => r.BucketUnixNano);
-
-        // Raw tail: [rollupEnd, endNano), aligned to the same bucket size, using the same anchor
-        // scan the raw path uses (bounded by inbound anchors in the tail window, not spans).
-        if (rollupEnd < endNano)
-        {
-            var bucketSizeNano = granularity == "minute" ? NanosPerMinute : NanosPerHour;
-            var tailRows = await FetchAnchorAggregatesAsync(conn, "all", query.Service, null, null, null,
-                new ParsedSearchQuery(), rollupEnd, endNano, null, inboundOnly: true, cancellationToken);
-            foreach (var group in tailRows.GroupBy(a => AlignDown(a.AnchorStart, bucketSizeNano)))
-            {
-                var bucketStart = group.Key;
-                var durations = group.Select(a => (double)(a.MaxEnd - a.MinStart) / 1_000_000.0).ToList();
-                var lb = new long[LatencyBucketSql.BucketCount];
-                foreach (var a in group)
-                {
-                    var idx = Array.FindLastIndex(LatencyBucketSql.LowerBoundsNano, b => (a.MaxEnd - a.MinStart) >= b);
-                    if (idx < 0) idx = 0;
-                    lb[idx]++;
-                }
-                var agg = new TraceBucketAggRow
-                {
-                    BucketUnixNano = bucketStart,
-                    TraceCount = group.Count(),
-                    ErrorCount = group.Count(a => a.HasErrorInt != 0),
-                    DurationSumMs = durations.Sum(),
-                    DurationMaxMs = durations.Count > 0 ? durations.Max() : 0,
-                };
-                agg.SetBuckets(lb);
-                if (byBucket.TryGetValue(bucketStart, out var existing))
-                    byBucket[bucketStart] = existing.MergeWith(agg);
-                else
-                    byBucket[bucketStart] = agg;
-            }
-        }
-
-        var orderedBuckets = byBucket.Values.OrderBy(b => b.BucketUnixNano).ToList();
-        var buckets = orderedBuckets.Select(b => new TraceVolumeBucket
-        {
-            Timestamp = TimeConversion.UnixNanoToDateTime(b.BucketUnixNano),
-            Count = (int)b.TraceCount,
-            ErrorCount = (int)b.ErrorCount,
-            SumDurationMs = b.DurationSumMs,
-            P50Ms = LatencyBucketSql.EstimatePercentile(b.Buckets(), 50),
-            P95Ms = LatencyBucketSql.EstimatePercentile(b.Buckets(), 95),
-            P99Ms = LatencyBucketSql.EstimatePercentile(b.Buckets(), 99),
-        }).ToList();
-
-        var totalCount = orderedBuckets.Sum(b => b.TraceCount);
-        var totalErrors = orderedBuckets.Sum(b => b.ErrorCount);
-        var mergedLb = new long[LatencyBucketSql.BucketCount];
-        foreach (var b in orderedBuckets)
-        {
-            var bb = b.Buckets();
-            for (var i = 0; i < mergedLb.Length; i++) mergedLb[i] += bb[i];
-        }
-
-        var services = await BuildServiceStatsFromRollupAsync(conn, query, startNano, rollupEnd, endNano, cancellationToken);
-
-        var lastStart = await conn.ExecuteScalarAsync<long?>(new CommandDefinition(
-            $"""
-            SELECT MAX(a.anchor_start) FROM {AnchorsSql} a
-            JOIN resources r ON r.id = a.resource_id
-            WHERE r.tenant_id = @tenantId AND a.anchor_kind IN ('SERVER', 'CONSUMER')
-              AND a.anchor_start >= @start AND a.anchor_start <= @end
-              {(string.IsNullOrEmpty(query.Service) ? "" : $"AND {ResourceServiceNameExpr()} = @service")}
-            """,
-            new { tenantId = TenantId, start = startNano, end = endNano, service = query.Service }, cancellationToken: cancellationToken));
-
-        return new TraceSummaryResult
-        {
-            Source = "rollup",
-            Buckets = buckets,
-            Summary = new TraceWindowSummary
-            {
-                Count = (int)totalCount,
-                ErrorCount = (int)totalErrors,
-                P50Ms = LatencyBucketSql.EstimatePercentile(mergedLb, 50),
-                P95Ms = LatencyBucketSql.EstimatePercentile(mergedLb, 95),
-                P99Ms = LatencyBucketSql.EstimatePercentile(mergedLb, 99),
-                ServiceCount = services.Count,
-                LastTraceStartTime = lastStart.HasValue ? TimeConversion.UnixNanoToDateTime(lastStart.Value) : null,
-            },
-            Services = services,
-            LatencyBuckets = BuildLatencyBucketsFromCounts(mergedLb, query),
-            RequestCount = totalCount,
-            TotalIsLowerBound = false,
-        };
-    }
-
-    private async Task<List<ServiceStats>> BuildServiceStatsFromRollupAsync(
-        System.Data.Common.DbConnection conn, TraceSummaryQuery query, long startNano, long rollupEnd, long endNano, CancellationToken ct)
-    {
-        // Per-service stats read the raw anchor set for the whole window -- resource cardinality
-        // is small (services, not traces), so this stays cheap even though it revisits the window
-        // rather than reusing the rollup's own per-bucket rows (which don't carry service identity
-        // once summed for the chart).
-        var rows = await FetchAnchorAggregatesAsync(conn, "all", query.Service, null, null, null,
-            new ParsedSearchQuery(), startNano, endNano, null, inboundOnly: true, ct);
-        var windowSeconds = Math.Max((endNano - startNano) / 1_000_000_000.0, 1);
-        return rows.GroupBy(r => r.ServiceName ?? "(unknown)")
-            .Select(g =>
-            {
-                var durations = g.Select(r => (r.MaxEnd - r.MinStart) / 1_000_000.0).OrderBy(x => x).ToList();
-                var count = durations.Count;
-                var errorCount = g.Count(r => r.HasErrorInt != 0);
-                return new ServiceStats
-                {
-                    Service = g.Key,
-                    Count = count,
-                    ErrorCount = errorCount,
-                    ErrorRate = count > 0 ? errorCount / (double)count * 100 : 0,
-                    RatePerSecond = count / windowSeconds,
-                    AvgMs = count > 0 ? durations.Average() : 0,
-                    P95Ms = Percentile(durations, 95),
-                };
-            })
-            .OrderByDescending(s => s.Count)
-            .ToList();
-    }
-
     private async Task<TraceSummaryResult> GetRawSummaryAsync(
         System.Data.Common.DbConnection conn, TraceSummaryQuery query, ParsedSearchQuery parsed,
         long startNano, long endNano, CancellationToken cancellationToken)
     {
         var (rows, timedOut) = await TimedQuery.RunAsync(
-            async (timeoutSeconds, ct) => await FetchAnchorAggregatesAsync(
+            async (timeoutSeconds, ct) => await FetchSummaryAnchorsAsync(
                 conn, query.Mode, query.Service, query.Operation, query.MinDurationMs, query.MaxDurationMs,
-                parsed, startNano, endNano, timeoutSeconds, inboundOnly: true, ct),
+                parsed, startNano, endNano, timeoutSeconds, ct),
             _summaryTimeoutSeconds, cancellationToken);
 
         if (timedOut || rows == null)
@@ -432,7 +340,7 @@ public abstract class TraceReadRepositoryBase : DapperReadRepository, ITraceRead
         var rangeTicks = Math.Max(1, query.End.Ticks - startTicks);
 
         var buckets = new List<TraceVolumeBucket>(bucketCount);
-        var byIndex = new List<AnchorAggregateRow>[bucketCount];
+        var byIndex = new List<AnchorSummaryRow>[bucketCount];
         for (var i = 0; i < bucketCount; i++) byIndex[i] = [];
         foreach (var r in rows)
         {
@@ -443,7 +351,7 @@ public abstract class TraceReadRepositoryBase : DapperReadRepository, ITraceRead
         for (var i = 0; i < bucketCount; i++)
         {
             var group = byIndex[i];
-            var durations = group.Select(r => (r.MaxEnd - r.MinStart) / 1_000_000.0).OrderBy(x => x).ToList();
+            var durations = group.Select(DurationMs).OrderBy(x => x).ToList();
             buckets.Add(new TraceVolumeBucket
             {
                 Timestamp = new DateTime(startTicks + (long)i * rangeTicks / bucketCount, query.Start.Kind),
@@ -456,14 +364,14 @@ public abstract class TraceReadRepositoryBase : DapperReadRepository, ITraceRead
             });
         }
 
-        var allDurations = rows.Select(r => (r.MaxEnd - r.MinStart) / 1_000_000.0).OrderBy(x => x).ToList();
-        var services = rows.GroupBy(r => r.ServiceName ?? "(unknown)")
+        var allDurations = rows.Select(DurationMs).OrderBy(x => x).ToList();
+        var windowSeconds = Math.Max((endNano - startNano) / 1_000_000_000.0, 1);
+        var services = rows.GroupBy(r => string.IsNullOrEmpty(r.ServiceName) ? "(unknown)" : r.ServiceName)
             .Select(g =>
             {
-                var durations = g.Select(r => (r.MaxEnd - r.MinStart) / 1_000_000.0).OrderBy(x => x).ToList();
+                var durations = g.Select(DurationMs).OrderBy(x => x).ToList();
                 var count = durations.Count;
                 var errorCount = g.Count(r => r.HasErrorInt != 0);
-                var windowSeconds = Math.Max((endNano - startNano) / 1_000_000_000.0, 1);
                 return new ServiceStats
                 {
                     Service = g.Key,
@@ -499,33 +407,10 @@ public abstract class TraceReadRepositoryBase : DapperReadRepository, ITraceRead
         };
     }
 
-    /// <summary>Merges the fixed 40 latency-bucket counts pairwise down to the requested row count, clipped to the non-empty range (decision 12/Target API's latency heatmap note).</summary>
-    private static List<TraceLatencyBucket> BuildLatencyBucketsFromCounts(long[] counts, TraceSummaryQuery query)
-    {
-        var rows = Math.Clamp(query.LatencyDurationRows, 1, LatencyBucketSql.BucketCount);
-        var result = new List<TraceLatencyBucket>();
-        var groupSize = (double)LatencyBucketSql.BucketCount / rows;
-        for (var r = 0; r < rows; r++)
-        {
-            var lo = (int)(r * groupSize);
-            var hi = (int)Math.Min(LatencyBucketSql.BucketCount, (r + 1) * groupSize);
-            long sum = 0;
-            for (var i = lo; i < hi; i++) sum += counts[i];
-            if (sum == 0) continue;
-            result.Add(new TraceLatencyBucket
-            {
-                XStart = default,
-                XEnd = default,
-                YStartMs = LatencyBucketSql.LowerBoundsMs[lo],
-                YEndMs = hi < LatencyBucketSql.BucketCount ? LatencyBucketSql.LowerBoundsMs[hi] : LatencyBucketSql.LowerBoundsMs[^1] * 2,
-                Count = (int)sum,
-            });
-        }
-        return result;
-    }
+    private static double DurationMs(AnchorSummaryRow r) => (r.AnchorEnd - r.AnchorStart) / 1_000_000.0;
 
-    /// <summary>Raw-path latency heatmap: a proper time x duration grid over the fetched anchor rows.</summary>
-    private static List<TraceLatencyBucket> BuildLatencyBucketsFromRows(List<AnchorAggregateRow> rows, TraceSummaryQuery query)
+    /// <summary>Latency heatmap: a proper time x duration grid over the fetched anchor rows.</summary>
+    private static List<TraceLatencyBucket> BuildLatencyBucketsFromRows(List<AnchorSummaryRow> rows, TraceSummaryQuery query)
     {
         if (rows.Count == 0) return [];
 
@@ -534,7 +419,7 @@ public abstract class TraceReadRepositoryBase : DapperReadRepository, ITraceRead
         var startTicks = query.Start.Ticks;
         var rangeTicks = Math.Max(1, query.End.Ticks - startTicks);
 
-        var durationsMs = rows.Select(r => (r.MaxEnd - r.MinStart) / 1_000_000.0).ToList();
+        var durationsMs = rows.Select(DurationMs).ToList();
         var yMin = Math.Max(1.0, durationsMs.Min());
         var yMax = Math.Max(yMin * 10, durationsMs.Max());
         var logMin = Math.Log(yMin);
@@ -546,7 +431,7 @@ public abstract class TraceReadRepositoryBase : DapperReadRepository, ITraceRead
         {
             var startTime = TimeConversion.UnixNanoToDateTime(r.AnchorStart);
             var col = Math.Clamp((int)((startTime.Ticks - startTicks) * timeCols / rangeTicks), 0, timeCols - 1);
-            var durationMs = (r.MaxEnd - r.MinStart) / 1_000_000.0;
+            var durationMs = DurationMs(r);
             var row = durationMs <= yMin ? 0 : Math.Clamp((int)((Math.Log(durationMs) - logMin) / logStep), 0, durationRows - 1);
             var key = (col, row);
             cells[key] = cells.TryGetValue(key, out var existing)
@@ -571,16 +456,17 @@ public abstract class TraceReadRepositoryBase : DapperReadRepository, ITraceRead
         return result;
     }
 
-    /// <summary><c>listTotal</c>: an exact (or capped, on timeout) count of every anchor matching the filter, always on the raw path (Target API).</summary>
+    /// <summary><c>listTotal</c>: an exact (or capped, on timeout) count of every anchor matching the filter (all kinds), as of the pin.</summary>
     private async Task<(long Total, bool IsLowerBound)> GetListTotalAsync(
         System.Data.Common.DbConnection conn, TraceSummaryQuery query, ParsedSearchQuery parsed,
         long startNano, long endNano, DateTime asOf, CancellationToken cancellationToken)
     {
+        var hasService = !string.IsNullOrEmpty(query.Service);
         var (clauses, parameters) = BuildAnchorFilterClauses(query.Mode, query.Service, query.Operation, query.MinDurationMs, query.MaxDurationMs, parsed, startNano, endNano);
-        clauses.Add("a.anchor_created_at <= @asOf");
         parameters.Add("asOf", asOf);
-        var where = string.Join(" AND ", clauses);
-        var sql = $"SELECT COUNT(*) FROM {AnchorsSql} a JOIN resources r ON r.id = a.resource_id WHERE r.tenant_id = @tenantId AND {where}";
+        var where = clauses.Count == 0 ? "1 = 1" : string.Join(" AND ", clauses);
+        var anchors = AnchorsSql(hasService, pinAsOf: true);
+        var sql = $"SELECT COUNT(*) FROM {anchors} a WHERE {where}";
 
         var (result, timedOut) = await TimedQuery.RunAsync(
             async (timeoutSeconds, ct) => await conn.ExecuteScalarAsync<long>(new CommandDefinition(
@@ -589,12 +475,11 @@ public abstract class TraceReadRepositoryBase : DapperReadRepository, ITraceRead
 
         if (!timedOut) return (result, false);
 
-        // Capped fallback (decision 11): count a capped candidate set instead.
+        // Capped fallback: count a capped candidate set instead.
         var cappedSql = $"""
             SELECT COUNT(*) FROM (
-                SELECT 1 FROM {AnchorsSql} a
-                JOIN resources r ON r.id = a.resource_id
-                WHERE r.tenant_id = @tenantId AND {where}
+                SELECT 1 AS x FROM {anchors} a
+                WHERE {where}
                 ORDER BY a.anchor_start DESC
                 {PagingClause}
             ) capped
@@ -606,20 +491,25 @@ public abstract class TraceReadRepositoryBase : DapperReadRepository, ITraceRead
         return (capped, true);
     }
 
+    /// <summary>
+    /// The "new since the pin" count: traces matching the filter whose earliest in-scope span was
+    /// created after <paramref name="asOf"/> -- i.e. traces the pinned view cannot contain at all.
+    /// Computed over the unpinned span set.
+    /// </summary>
     private async Task<long> CountNewSinceAsOfAsync(
         System.Data.Common.DbConnection conn, TraceSummaryQuery query, ParsedSearchQuery parsed,
         long startNano, long endNano, DateTime asOf, CancellationToken cancellationToken)
     {
+        var hasService = !string.IsNullOrEmpty(query.Service);
         var (clauses, parameters) = BuildAnchorFilterClauses(query.Mode, query.Service, query.Operation, query.MinDurationMs, query.MaxDurationMs, parsed, startNano, endNano);
-        clauses.Add("a.anchor_created_at > @asOf");
+        clauses.Add("a.first_created_at > @asOf");
         parameters.Add("asOf", asOf);
-        var where = string.Join(" AND ", clauses);
-        var sql = $"SELECT COUNT(*) FROM {AnchorsSql} a JOIN resources r ON r.id = a.resource_id WHERE r.tenant_id = @tenantId AND {where}";
+        var sql = $"SELECT COUNT(*) FROM {AnchorsSql(hasService, pinAsOf: false, includeFirstCreated: true)} a WHERE {string.Join(" AND ", clauses)}";
         return await conn.ExecuteScalarAsync<long>(new CommandDefinition(sql, parameters, cancellationToken: cancellationToken));
     }
 
     // =========================================================================
-    // PAGE (list-pages-server-side plan, Phase 3, keyset paging)
+    // PAGE (keyset paging)
     // =========================================================================
 
     public async Task<TracePageResult> GetTracePageAsync(TraceQuery query, CancellationToken cancellationToken = default)
@@ -634,6 +524,7 @@ public abstract class TraceReadRepositoryBase : DapperReadRepository, ITraceRead
     {
         var size = Math.Clamp(query.Size, 1, 500);
         var parsed = SearchQueryParser.Parse(query.Search);
+        var hasService = !string.IsNullOrEmpty(query.Service);
 
         await using var conn = await OpenConnectionAsync(cancellationToken);
         var asOf = await ResolveAsOfAsync(conn, query.AsOf, cancellationToken);
@@ -641,8 +532,8 @@ public abstract class TraceReadRepositoryBase : DapperReadRepository, ITraceRead
         var startNano = TimeConversion.DateTimeToUnixNano(query.Start);
         var endNano = TimeConversion.DateTimeToUnixNano(query.End);
         var (clauses, parameters) = BuildAnchorFilterClauses(query.Mode, query.Service, query.Operation, query.MinDurationMs, query.MaxDurationMs, parsed, startNano, endNano);
-        clauses.Add("a.anchor_created_at <= @asOf");
         parameters.Add("asOf", asOf);
+        var anchors = AnchorsSql(hasService, pinAsOf: true);
 
         var filterHashText = $"{query.Start:O}|{query.End:O}|{asOf:O}|{query.Mode}|{query.Service}|{query.Operation}|{query.MinDurationMs}|{query.MaxDurationMs}|{query.Search}";
         var filterHash = KeysetCursor.ComputeFilterHash(filterHashText);
@@ -668,7 +559,7 @@ public abstract class TraceReadRepositoryBase : DapperReadRepository, ITraceRead
                 clauses.Add(KeysetCursor.Predicate("a.anchor_start", "a.anchor_span_pk", "cursorK", "cursorId", descending: true));
                 parameters.Add("cursorK", cursor!.K);
                 parameters.Add("cursorId", cursor.Id);
-                rows = await FetchAnchorPageAsync(conn, clauses, parameters, requestedSize, descending: true, cancellationToken);
+                rows = await FetchAnchorPageAsync(conn, anchors, clauses, parameters, requestedSize, descending: true, cancellationToken);
                 break;
 
             case "prev":
@@ -677,20 +568,20 @@ public abstract class TraceReadRepositoryBase : DapperReadRepository, ITraceRead
                 clauses.Add(KeysetCursor.Predicate("a.anchor_start", "a.anchor_span_pk", "cursorK", "cursorId", descending: false));
                 parameters.Add("cursorK", cursor!.K);
                 parameters.Add("cursorId", cursor.Id);
-                rows = await FetchAnchorPageAsync(conn, clauses, parameters, requestedSize, descending: false, cancellationToken);
+                rows = await FetchAnchorPageAsync(conn, anchors, clauses, parameters, requestedSize, descending: false, cancellationToken);
                 break;
 
             case "last":
                 forward = false;
-                var lastCount = await TryGetExactAnchorCountAsync(conn, clauses, parameters, cancellationToken);
+                var lastCount = await TryGetExactAnchorCountAsync(conn, anchors, clauses, parameters, cancellationToken);
                 requestedSize = lastCount.HasValue ? KeysetCursor.LastPageRowCount(lastCount.Value, size) : size;
-                rows = await FetchAnchorPageAsync(conn, clauses, parameters, requestedSize, descending: false, cancellationToken);
+                rows = await FetchAnchorPageAsync(conn, anchors, clauses, parameters, requestedSize, descending: false, cancellationToken);
                 break;
 
             default: // "first"
                 forward = true;
                 requestedSize = size;
-                rows = await FetchAnchorPageAsync(conn, clauses, parameters, requestedSize, descending: true, cancellationToken);
+                rows = await FetchAnchorPageAsync(conn, anchors, clauses, parameters, requestedSize, descending: true, cancellationToken);
                 break;
         }
 
@@ -724,29 +615,30 @@ public abstract class TraceReadRepositoryBase : DapperReadRepository, ITraceRead
             }
         }
 
-        // Whole-trace aggregation for just this page's anchors (bounded by `size`), matching
-        // TraceInfo's existing contract (error flag / duration over the FULL span set, decision 37's
-        // "which duration" note) rather than the anchor's own narrower span.
-        var items = await LoadPageTraceInfosAsync(conn, displayRows, cancellationToken);
+        // Exact span counts and whole-trace bounds for just this page's anchors (bounded by `size`).
+        var items = await LoadPageTraceInfosAsync(conn, displayRows, query.Service, cancellationToken);
 
         return new TracePageResult { Items = items, NextCursor = nextCursor, PrevCursor = prevCursor, AsOf = asOf };
     }
 
     private static string Encode(AnchorRow row, string filterHash) => KeysetCursor.Encode(row.AnchorStart, row.AnchorSpanPk, filterHash);
 
+    private const string AnchorSelectColumns = """
+        a.trace_id AS TraceId, a.anchor_span_pk AS AnchorSpanPk, a.anchor_span_id AS AnchorSpanId, a.service_name AS ServiceName,
+        a.root_name AS RootName, a.anchor_kind AS AnchorKind, a.anchor_start AS AnchorStart, a.anchor_end AS AnchorEnd,
+        a.has_error AS HasErrorInt
+        """;
+
     private async Task<List<AnchorRow>> FetchAnchorPageAsync(
-        System.Data.Common.DbConnection conn, List<string> clauses, DynamicParameters parameters,
+        System.Data.Common.DbConnection conn, string anchors, List<string> clauses, DynamicParameters parameters,
         int size, bool descending, CancellationToken cancellationToken)
     {
-        var where = string.Join(" AND ", clauses);
+        var where = clauses.Count == 0 ? "1 = 1" : string.Join(" AND ", clauses);
         var order = descending ? "DESC" : "ASC";
         var sql = $"""
-            SELECT a.trace_id AS TraceId, a.anchor_span_pk AS AnchorSpanPk, a.anchor_span_id AS AnchorSpanId, a.resource_id AS ResourceId,
-                   a.root_name AS RootName, a.anchor_kind AS AnchorKind,
-                   a.anchor_start AS AnchorStart, a.anchor_end AS AnchorEnd
-            FROM {AnchorsSql} a
-            JOIN resources r ON r.id = a.resource_id
-            WHERE r.tenant_id = @tenantId AND {where}
+            SELECT {AnchorSelectColumns}
+            FROM {anchors} a
+            WHERE {where}
             ORDER BY a.anchor_start {order}, a.anchor_span_pk {order}
             {PagingClause}
             """;
@@ -758,10 +650,10 @@ public abstract class TraceReadRepositoryBase : DapperReadRepository, ITraceRead
     }
 
     private async Task<long?> TryGetExactAnchorCountAsync(
-        System.Data.Common.DbConnection conn, List<string> clauses, DynamicParameters parameters, CancellationToken cancellationToken)
+        System.Data.Common.DbConnection conn, string anchors, List<string> clauses, DynamicParameters parameters, CancellationToken cancellationToken)
     {
-        var where = string.Join(" AND ", clauses);
-        var sql = $"SELECT COUNT(*) FROM {AnchorsSql} a JOIN resources r ON r.id = a.resource_id WHERE r.tenant_id = @tenantId AND {where}";
+        var where = clauses.Count == 0 ? "1 = 1" : string.Join(" AND ", clauses);
+        var sql = $"SELECT COUNT(*) FROM {anchors} a WHERE {where}";
         var (result, timedOut) = await TimedQuery.RunAsync(
             async (timeoutSeconds, ct) => await conn.ExecuteScalarAsync<long>(new CommandDefinition(
                 sql, parameters, commandTimeout: timeoutSeconds, cancellationToken: ct)),
@@ -769,35 +661,44 @@ public abstract class TraceReadRepositoryBase : DapperReadRepository, ITraceRead
         return timedOut ? null : result;
     }
 
+    /// <summary>
+    /// Shapes the page's anchors into <see cref="TraceInfo"/> rows. Duration, error flag, service,
+    /// operation and kind come straight from the anchor (decisions 10-11); the follow-up query supplies
+    /// only the exact span count (decisions 14, 18) and the whole trace's start/end for the detail link.
+    /// </summary>
     private async Task<List<TraceInfo>> LoadPageTraceInfosAsync(
-        System.Data.Common.DbConnection conn, List<AnchorRow> anchors, CancellationToken ct)
+        System.Data.Common.DbConnection conn, List<AnchorRow> anchors, string? service, CancellationToken ct)
     {
         if (anchors.Count == 0) return [];
 
-        var traceIds = anchors.Select(a => a.TraceId).Distinct().ToArray();
-        var resourceIds = anchors.Select(a => a.ResourceId).Distinct().ToArray();
+        var traceIds = anchors.Select(a => a.TraceId).Distinct().ToList();
+        var bounds = await ResolveTraceTimeBoundsAsync(conn, traceIds, ct);
 
+        var parameters = new DynamicParameters();
+        parameters.Add("tenantId", TenantId);
+        var inList = IdInPredicate("fs.trace_id", "traceId", traceIds, 32, parameters);
+        var scoped = !string.IsNullOrEmpty(service);
+        if (scoped) parameters.Add("service", service);
+
+        // COUNT(DISTINCT span_id): a re-delivered span is stored twice and must count once. With a
+        // service selected the count is that service's spans in the trace; otherwise the whole trace.
+        var spanCount = scoped
+            ? "COUNT(DISTINCT CASE WHEN fs.service_name = @service THEN fs.span_id END)"
+            : "COUNT(DISTINCT fs.span_id)";
         var aggSql = $"""
-            SELECT fs.trace_id AS TraceId, COUNT(*) AS SpanCount,
-                   MIN(fs.start_time_unix_nano) AS MinStart, MAX(fs.end_time_unix_nano) AS MaxEnd,
-                   MAX(CASE WHEN fs.status_code = 'ERROR' THEN 1 ELSE 0 END) AS HasErrorInt
+            SELECT fs.trace_id AS TraceId, {spanCount} AS SpanCount,
+                   MIN(fs.start_time_unix_nano) AS MinStart, MAX(fs.end_time_unix_nano) AS MaxEnd
             FROM spans fs
-            WHERE {TraceIdInPredicate("fs")}
+            WHERE fs.tenant_id = @tenantId AND {inList}{BoundsClause("fs", bounds, parameters)}
             GROUP BY fs.trace_id
             """;
         var aggRows = (await conn.QueryAsync<TraceAggRow>(new CommandDefinition(
-            aggSql, new { traceIds }, cancellationToken: ct))).ToDictionary(r => r.TraceId);
-
-        var resourceRows = (await conn.QueryAsync<ResourceLookupRow>(new CommandDefinition(
-            $"SELECT id AS Id, attributes_json AS AttributesJson FROM resources WHERE {ResourceIdInPredicate}",
-            new { resourceIds }, cancellationToken: ct))).ToDictionary(r => r.Id);
+            aggSql, parameters, cancellationToken: ct))).ToDictionary(r => r.TraceId);
 
         var items = new List<TraceInfo>(anchors.Count);
         foreach (var a in anchors)
         {
             aggRows.TryGetValue(a.TraceId, out var agg);
-            resourceRows.TryGetValue(a.ResourceId, out var resource);
-            var serviceName = ExtractServiceName(DeserializeAttributes(resource?.AttributesJson));
             var minStart = agg?.MinStart ?? a.AnchorStart;
             var maxEnd = agg?.MaxEnd ?? a.AnchorEnd;
             items.Add(new TraceInfo
@@ -806,10 +707,11 @@ public abstract class TraceReadRepositoryBase : DapperReadRepository, ITraceRead
                 SpanCount = agg?.SpanCount ?? 1,
                 TraceStartTime = TimeConversion.UnixNanoToDateTime(minStart),
                 TraceEndTime = TimeConversion.UnixNanoToDateTime(maxEnd),
-                TraceDuration = TimeSpan.FromTicks((maxEnd - minStart) / 100),
-                ServiceName = serviceName,
+                TraceDuration = TimeSpan.FromTicks((a.AnchorEnd - a.AnchorStart) / 100),
+                ServiceName = string.IsNullOrEmpty(a.ServiceName) ? null : a.ServiceName,
                 RootOperationName = a.RootName,
-                HasErrors = (agg?.HasErrorInt ?? 0) != 0,
+                AnchorKind = a.AnchorKind,
+                HasErrors = a.HasErrorInt != 0,
                 DisplaySpanIdHex = a.AnchorSpanId,
             });
         }
@@ -817,32 +719,22 @@ public abstract class TraceReadRepositoryBase : DapperReadRepository, ITraceRead
     }
 
     // =========================================================================
-    // EXPORT (list-pages-server-side plan, Phase 8, decision 17)
+    // EXPORT
     // =========================================================================
+
+    private const int ExportChunkSize = 1000;
 
     /// <summary>
     /// Streams one <see cref="TraceInfo"/> row per matching trace, oldest first, with no row cap.
-    /// Reuses <see cref="BuildAnchorFilterClauses"/> — the same time/mode/service/operation/
-    /// duration/search compilation the summary and page endpoints use — plus the existing
-    /// <see cref="FetchAnchorPageAsync"/>/<see cref="LoadPageTraceInfosAsync"/> pair (unchanged from
-    /// Phase 3) to fetch and shape each chunk.
+    /// Reuses <see cref="BuildAnchorFilterClauses"/> -- the same filter compilation the summary and
+    /// page endpoints use -- so export can never see a different population than the list.
     ///
-    /// Deliberately chunked (<see cref="ExportChunkSize"/> anchors per round trip) rather than a
-    /// single Dapper unbuffered query like <see cref="LogReadRepositoryBase.ExportLogsAsync"/>:
-    /// a trace row isn't produced by one flat SELECT — <see cref="LoadPageTraceInfosAsync"/> needs
-    /// each chunk's whole trace-id set up front to run its own batched aggregate query (span count/
-    /// min-start/max-end/has-error across the FULL span set of the matching traces, not just their
-    /// anchors) and its own resource lookup, and that aggregate cannot be pushed into a single
-    /// per-row streaming query without either an un-portable LATERAL/CROSS APPLY join (SqlServer/
-    /// Postgres only) or a correlated subquery per row (which ClickHouse does not reliably support —
-    /// see <see cref="DapperReadRepository.SpanLevelMatchPredicate"/>'s own doc comment on exactly
-    /// that limitation). Chunking keeps memory bounded to one chunk's anchors/aggregates at a time
-    /// (not the whole matching population) while staying correct on every provider; see this
-    /// project's Phase 8 CLAUDE.md notes for the full reasoning behind this deviation from a literal
-    /// unbuffered read.
+    /// The anchors are derived ONCE and streamed through a data reader (ordered by anchor start);
+    /// every <see cref="ExportChunkSize"/> anchors a second connection fetches that chunk's exact span
+    /// counts and bounds. Re-running the anchor query per chunk with a keyset cursor would repeat the
+    /// whole window scan for every chunk. Memory stays bounded to one chunk; the cancellation token
+    /// reaches the reader's command, so a client disconnect cancels the database work too.
     /// </summary>
-    private const int ExportChunkSize = 1000;
-
     public async IAsyncEnumerable<TraceInfo> ExportTracesAsync(
         TraceExportQuery query, [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken cancellationToken = default)
     {
@@ -852,52 +744,40 @@ public abstract class TraceReadRepositoryBase : DapperReadRepository, ITraceRead
         var parsed = SearchQueryParser.Parse(query.Search);
         var startNano = TimeConversion.DateTimeToUnixNano(query.Start);
         var endNano = TimeConversion.DateTimeToUnixNano(query.End);
-        var (baseClauses, baseParameters) = BuildAnchorFilterClauses(
+        var (clauses, parameters) = BuildAnchorFilterClauses(
             query.Mode, query.Service, query.Operation, query.MinDurationMs, query.MaxDurationMs, parsed, startNano, endNano);
+        var where = clauses.Count == 0 ? "1 = 1" : string.Join(" AND ", clauses);
+        var sql = $"""
+            SELECT {AnchorSelectColumns}
+            FROM {AnchorsSql(!string.IsNullOrEmpty(query.Service), pinAsOf: false)} a
+            WHERE {where}
+            ORDER BY a.anchor_start ASC, a.anchor_span_pk ASC
+            """;
 
-        await using var conn = await OpenConnectionAsync(cancellationToken);
+        await using var readConn = await OpenConnectionAsync(cancellationToken);
+        await using var lookupConn = await OpenConnectionAsync(cancellationToken);
+        await using var reader = await readConn.ExecuteReaderAsync(new CommandDefinition(
+            sql, parameters, commandTimeout: 0, cancellationToken: cancellationToken));
+        var parse = reader.GetRowParser<AnchorRow>();
 
-        long? cursorK = null;
-        long? cursorId = null;
-        while (true)
+        var chunk = new List<AnchorRow>(ExportChunkSize);
+        while (await reader.ReadAsync(cancellationToken))
         {
-            cancellationToken.ThrowIfCancellationRequested();
+            chunk.Add(parse(reader));
+            if (chunk.Count < ExportChunkSize) continue;
 
-            var clauses = new List<string>(baseClauses);
-            var parameters = new DynamicParameters(baseParameters);
-            if (cursorK.HasValue)
-            {
-                clauses.Add(KeysetCursor.Predicate("a.anchor_start", "a.anchor_span_pk", "cursorK", "cursorId", descending: false));
-                parameters.Add("cursorK", cursorK.Value);
-                parameters.Add("cursorId", cursorId!.Value);
-            }
-
-            var rows = await FetchAnchorPageAsync(conn, clauses, parameters, ExportChunkSize, descending: false, cancellationToken);
-            if (rows.Count == 0) yield break;
-
-            var hasMore = rows.Count > ExportChunkSize;
-            if (hasMore) rows.RemoveAt(rows.Count - 1);
-
-            var infos = await LoadPageTraceInfosAsync(conn, rows, cancellationToken);
-            foreach (var info in infos)
+            foreach (var info in await LoadPageTraceInfosAsync(lookupConn, chunk, query.Service, cancellationToken))
                 yield return info;
-
-            if (!hasMore) yield break;
-
-            var last = rows[^1];
-            cursorK = last.AnchorStart;
-            cursorId = last.AnchorSpanPk;
+            chunk.Clear();
         }
+
+        if (chunk.Count > 0)
+            foreach (var info in await LoadPageTraceInfosAsync(lookupConn, chunk, query.Service, cancellationToken))
+                yield return info;
     }
 
-    /// <summary>Predicate matching <c>@traceIds</c> against a trace_id column on the given alias. Postgres/Timescale override to <c>= ANY(@traceIds)</c>.</summary>
-    protected virtual string TraceIdInPredicate(string alias) => $"{alias}.trace_id IN @traceIds";
-
-    /// <summary>Predicate matching <c>@resourceIds</c> against <c>resources.id</c>. Postgres/Timescale override to <c>= ANY(@resourceIds)</c>.</summary>
-    protected virtual string ResourceIdInPredicate => "id IN @resourceIds";
-
     // =========================================================================
-    // SAMPLES (list-pages-server-side plan, Phase 3, Target API) -- dashboard widgets
+    // SAMPLES -- dashboard widgets
     // =========================================================================
 
     public async Task<List<TraceInfo>> GetTraceSamplesAsync(TraceSamplesQuery query, CancellationToken cancellationToken = default)
@@ -911,89 +791,83 @@ public abstract class TraceReadRepositoryBase : DapperReadRepository, ITraceRead
 
         await using var conn = await OpenConnectionAsync(cancellationToken);
 
+        var parameters = new DynamicParameters();
+        parameters.Add("tenantId", TenantId);
+        parameters.Add("start", startNano);
+        parameters.Add("end", endNano);
+        parameters.Add("anchorFrom", startNano - _anchorLookbackNanos);
+        parameters.Add("limit", limit);
+        parameters.Add("offset", 0);
+
+        // Both widgets read the unpinned, unscoped anchors of the window: the newest traces with an
+        // error span, and the slowest anchors (by the anchor's own duration, above a 500 ms floor).
+        string filter, order;
         if (query.Kind == "errors")
         {
-            // Newest error traces, through idx_spans_error -- unfiltered population (Target API).
-            var sql = $"""
-                SELECT DISTINCT a.trace_id AS TraceId, a.anchor_span_pk AS AnchorSpanPk, a.anchor_span_id AS AnchorSpanId, a.resource_id AS ResourceId,
-                       a.root_name AS RootName, a.anchor_kind AS AnchorKind, a.anchor_start AS AnchorStart, a.anchor_end AS AnchorEnd
-                FROM {AnchorsSql} a
-                JOIN resources r ON r.id = a.resource_id
-                WHERE r.tenant_id = @tenantId AND a.anchor_start >= @start AND a.anchor_start <= @end
-                  AND a.trace_id IN (
-                      SELECT s2.trace_id FROM spans s2
-                      JOIN resources r2 ON s2.resource_id = r2.id
-                      WHERE r2.tenant_id = @tenantId AND s2.status_code = 'ERROR'
-                        AND s2.start_time_unix_nano >= @start AND s2.start_time_unix_nano <= @end
-                  )
-                ORDER BY a.anchor_start DESC
-                {PagingClause}
-                """;
-            var rows = (await conn.QueryAsync<AnchorRow>(new CommandDefinition(sql,
-                new { tenantId = TenantId, start = startNano, end = endNano, limit, offset = 0 }, cancellationToken: cancellationToken))).ToList();
-            return await LoadPageTraceInfosAsync(conn, rows, cancellationToken);
+            filter = "a.has_error = 1";
+            order = "a.anchor_start DESC, a.anchor_span_pk DESC";
         }
         else // "slowest"
         {
-            // Anchors in the window ordered by the anchor's OWN duration (decision behind
-            // mode=slow, applied the same way here), keeping the >500ms floor. There is no
-            // duration index (decision 4 dropped it); scanning the window's anchors through
-            // idx_spans_root_time (which covers end_time_unix_nano) stays cheap for the
-            // dashboard's default 1-hour window.
-            var sql = $"""
-                SELECT a.trace_id AS TraceId, a.anchor_span_pk AS AnchorSpanPk, a.anchor_span_id AS AnchorSpanId, a.resource_id AS ResourceId,
-                       a.root_name AS RootName, a.anchor_kind AS AnchorKind, a.anchor_start AS AnchorStart, a.anchor_end AS AnchorEnd
-                FROM {AnchorsSql} a
-                JOIN resources r ON r.id = a.resource_id
-                WHERE r.tenant_id = @tenantId AND a.anchor_start >= @start AND a.anchor_start <= @end
-                  AND (a.anchor_end - a.anchor_start) > 500000000
-                ORDER BY (a.anchor_end - a.anchor_start) DESC
-                {PagingClause}
-                """;
-            var rows = (await conn.QueryAsync<AnchorRow>(new CommandDefinition(sql,
-                new { tenantId = TenantId, start = startNano, end = endNano, limit, offset = 0 }, cancellationToken: cancellationToken))).ToList();
-            return await LoadPageTraceInfosAsync(conn, rows, cancellationToken);
+            filter = "(a.anchor_end - a.anchor_start) > 500000000";
+            order = "(a.anchor_end - a.anchor_start) DESC, a.anchor_span_pk DESC";
         }
+
+        var sql = $"""
+            SELECT {AnchorSelectColumns}
+            FROM {AnchorsSql(hasService: false, pinAsOf: false)} a
+            WHERE {filter}
+            ORDER BY {order}
+            {PagingClause}
+            """;
+        var rows = (await conn.QueryAsync<AnchorRow>(new CommandDefinition(sql, parameters, cancellationToken: cancellationToken))).ToList();
+        return await LoadPageTraceInfosAsync(conn, rows, null, cancellationToken);
     }
 
     // =========================================================================
-    // SHARED FILTER COMPILATION / ANCHOR AGGREGATE FETCH
+    // SHARED FILTER COMPILATION / ANCHOR FETCH
     // =========================================================================
 
     /// <summary>
-    /// Builds the time/service/operation/duration/search WHERE clauses shared by the summary,
-    /// listTotal, page and samples queries, all scoped to the <see cref="AnchorsSql"/> alias
-    /// <c>a</c>. Operation and search terms match ANY span in the trace (decision 9), via
-    /// <see cref="DapperReadRepository.SpanLevelMatchPredicate"/>; mode=slow's duration filter
-    /// applies to the anchor's own <c>anchor_end - anchor_start</c> (decision 4).
+    /// Builds the WHERE clauses shared by the summary, listTotal, page, export and samples queries,
+    /// all scoped to the <see cref="AnchorsSql"/> alias <c>a</c>, plus the parameters the anchors
+    /// derived table and the clauses reference (<c>@tenantId</c>, <c>@start</c>, <c>@end</c>,
+    /// <c>@anchorFrom</c>, <c>@service</c>). The time/service/pin scoping itself lives inside the
+    /// anchors derived table; what is left here is what applies to an anchor row:
+    /// <list type="bullet">
+    /// <item>operation filter = the anchor span's own name (decision 15), no per-trace subquery;</item>
+    /// <item><c>errors</c> mode = the in-scope error flag (decision 11);</item>
+    /// <item><c>slow</c> mode = the anchor's own duration (decision 11);</item>
+    /// <item>search = ANY span in the whole trace matches, regardless of the service filter (decision
+    /// 16), as an <c>EXISTS</c> through <c>(trace_id, span_id)</c> per candidate anchor, within the
+    /// search window.</item>
+    /// </list>
     /// </summary>
     private (List<string> Clauses, DynamicParameters Parameters) BuildAnchorFilterClauses(
         string mode, string? service, string? operation, double? minDurationMs, double? maxDurationMs,
         ParsedSearchQuery parsed, long startNano, long endNano)
     {
-        var clauses = new List<string> { "a.anchor_start >= @start", "a.anchor_start <= @end" };
+        var clauses = new List<string>();
         var parameters = new DynamicParameters();
         parameters.Add("tenantId", TenantId);
         parameters.Add("start", startNano);
         parameters.Add("end", endNano);
+        parameters.Add("anchorFrom", startNano - _anchorLookbackNanos);
 
         if (!string.IsNullOrEmpty(service))
-        {
-            clauses.Add($"{ResourceServiceNameExpr()} = @service");
             parameters.Add("service", service);
-        }
 
-        const string innerTime = " AND s2.start_time_unix_nano >= @start AND s2.start_time_unix_nano <= @end";
+        const string innerTime = " AND s2.tenant_id = @tenantId AND s2.start_time_unix_nano >= @anchorFrom AND s2.start_time_unix_nano <= @end";
 
         if (!string.IsNullOrEmpty(operation))
         {
-            clauses.Add(SpanLevelMatchPredicate("a.trace_id", innerTime, "s2.name = @operation"));
+            clauses.Add("a.root_name = @operation");
             parameters.Add("operation", operation);
         }
 
         if (mode == "errors")
         {
-            clauses.Add(SpanLevelMatchPredicate("a.trace_id", innerTime, "s2.status_code = 'ERROR'"));
+            clauses.Add("a.has_error = 1");
         }
         else if (mode == "slow")
         {
@@ -1010,7 +884,7 @@ public abstract class TraceReadRepositoryBase : DapperReadRepository, ITraceRead
         if (parsed.IsTraceIdSearch)
         {
             clauses.Add("a.trace_id = @traceIdSearch");
-            parameters.Add("traceIdSearch", parsed.TraceId);
+            parameters.Add("traceIdSearch", IdParam(parsed.TraceId, 32));
         }
         else if (parsed.Terms.Count > 0)
         {
@@ -1024,9 +898,8 @@ public abstract class TraceReadRepositoryBase : DapperReadRepository, ITraceRead
                     var valueParam = $"searchVal{i}";
                     parameters.Add(keyParam, AttributeKeyParamValue(term.Key ?? ""));
                     parameters.Add(valueParam, term.Value ?? "");
-                    // decision 6/7: attribute filters match against either the span's own
-                    // attributes or its resource's (a common case: filtering by a resource
-                    // attribute like a k8s pod label).
+                    // Attribute filters match against either the span's own attributes or its
+                    // resource's (a common case: filtering by a resource attribute like a k8s pod label).
                     var spanPred = AttributePredicate("s2.attributes_json", $"@{keyParam}", $"@{valueParam}", term.Negate);
                     var resPred = AttributePredicate("rs2.attributes_json", $"@{keyParam}", $"@{valueParam}", term.Negate);
                     innerPredicate = $"({spanPred} OR {resPred})";
@@ -1035,7 +908,7 @@ public abstract class TraceReadRepositoryBase : DapperReadRepository, ITraceRead
                 {
                     var valueParam = $"searchText{i}";
                     parameters.Add(valueParam, $"%{EscapeLike(term.FreeText ?? "")}%");
-                    // decision 6: free text matches span name or status_message.
+                    // Free text matches span name or status_message.
                     var pred = $"({FreeTextPredicate("s2.name", $"@{valueParam}")} OR {FreeTextPredicate("s2.status_message", $"@{valueParam}")})";
                     innerPredicate = term.Negate ? $"NOT ({pred})" : pred;
                 }
@@ -1050,48 +923,37 @@ public abstract class TraceReadRepositoryBase : DapperReadRepository, ITraceRead
     /// <summary>
     /// <see cref="DapperReadRepository.SpanLevelMatchPredicate"/> joined to the matching span's own
     /// resource (aliased <c>rs2</c>), for a search term whose <c>innerPredicate</c> references a
-    /// resource-attribute check as well as a span-attribute one. PostgreSQL/Timescale/SqlServer/MySql
-    /// use a correlated <c>EXISTS</c> with an extra join; ClickHouse overrides with its uncorrelated
-    /// form.
+    /// resource-attribute check as well as a span-attribute one. The relational providers use a
+    /// correlated <c>EXISTS</c> with an extra join; ClickHouse overrides with its uncorrelated form.
     /// </summary>
     protected virtual string SpanLevelMatchPredicateWithResource(string traceIdColumn, string innerTimeClause, string innerPredicate)
         => $"EXISTS (SELECT 1 FROM spans s2 JOIN resources rs2 ON rs2.id = s2.resource_id WHERE s2.trace_id = {traceIdColumn}{innerTimeClause} AND {innerPredicate})";
 
     /// <summary>
-    /// Fetches, per matching anchor trace, its whole-trace aggregate (span_count/min_start/max_end/
-    /// has_error) plus its anchor's own resource/name/kind — the shared shape behind the raw
-    /// summary path, the rollup's raw-tail merge, and per-service stats. Bounded by anchors in the
-    /// window (not spans): the fan-out join to <c>spans</c> for the aggregate touches every span of
-    /// every MATCHING trace, which for a busy window is still far smaller than every span in the
-    /// window.
+    /// Fetches the anchor rows the summary is computed from: inbound anchors only (kind
+    /// <c>SERVER</c>/<c>CONSUMER</c>, decision 12), unpinned, bounded by the window's anchors rather
+    /// than by spans.
     /// </summary>
-    private async Task<List<AnchorAggregateRow>> FetchAnchorAggregatesAsync(
+    private async Task<List<AnchorSummaryRow>> FetchSummaryAnchorsAsync(
         System.Data.Common.DbConnection conn, string mode, string? service, string? operation,
         double? minDurationMs, double? maxDurationMs, ParsedSearchQuery parsed,
-        long startNano, long endNano, int? commandTimeoutSeconds, bool inboundOnly, CancellationToken ct)
+        long startNano, long endNano, int? commandTimeoutSeconds, CancellationToken ct)
     {
         var (clauses, parameters) = BuildAnchorFilterClauses(mode, service, operation, minDurationMs, maxDurationMs, parsed, startNano, endNano);
-        if (inboundOnly) clauses.Add("a.anchor_kind IN ('SERVER', 'CONSUMER')");
+        clauses.Add("a.anchor_kind IN ('SERVER', 'CONSUMER')");
         var where = string.Join(" AND ", clauses);
 
         var sql = $"""
-            SELECT a.trace_id AS TraceId, a.resource_id AS ResourceId, a.anchor_start AS AnchorStart,
-                   {ResourceServiceNameExpr("r")} AS ServiceName,
-                   MIN(fs.start_time_unix_nano) AS MinStart, MAX(fs.end_time_unix_nano) AS MaxEnd,
-                   MAX(CASE WHEN fs.status_code = 'ERROR' THEN 1 ELSE 0 END) AS HasErrorInt
-            FROM {AnchorsSql} a
-            JOIN resources r ON r.id = a.resource_id
-            JOIN spans fs ON fs.trace_id = a.trace_id
-            WHERE r.tenant_id = @tenantId AND {where}
-            GROUP BY a.trace_id, a.resource_id, a.anchor_start, {ResourceServiceNameExpr("r")}
+            SELECT a.trace_id AS TraceId, a.anchor_start AS AnchorStart, a.anchor_end AS AnchorEnd,
+                   a.service_name AS ServiceName, a.has_error AS HasErrorInt
+            FROM {AnchorsSql(!string.IsNullOrEmpty(service), pinAsOf: false)} a
+            WHERE {where}
             """;
 
-        var rows = await conn.QueryAsync<AnchorAggregateRow>(new CommandDefinition(
+        var rows = await conn.QueryAsync<AnchorSummaryRow>(new CommandDefinition(
             sql, parameters, commandTimeout: commandTimeoutSeconds, cancellationToken: ct));
         return rows.ToList();
     }
-
-    private static long AlignDown(long nano, long bucketSize) => nano / bucketSize * bucketSize;
 
     // =========================================================================
     // ANALYSIS READS
@@ -1099,18 +961,18 @@ public abstract class TraceReadRepositoryBase : DapperReadRepository, ITraceRead
 
     public async Task<List<ServiceDependency>> GetServiceDependenciesAsync(DateTime? startTime = null, DateTime? endTime = null, CancellationToken cancellationToken = default)
     {
+        // A child span's parent is found through (trace_id, span_id); the child side is a
+        // (tenant_id, start_time) range. Service names come straight off the span rows.
         var sql = """
             SELECT
-                pr.attributes_json AS ParentResourceAttributesJson,
-                cr.attributes_json AS ChildResourceAttributesJson,
-                child.kind         AS Kind,
-                child.status_code  AS StatusCode,
+                parent.service_name AS ParentService,
+                child.service_name  AS ChildService,
+                child.kind          AS Kind,
+                child.status_code   AS StatusCode,
                 (child.end_time_unix_nano - child.start_time_unix_nano) AS DurationNano
             FROM spans child
-            JOIN spans parent    ON child.parent_span_id = parent.span_id AND child.trace_id = parent.trace_id
-            JOIN resources pr    ON parent.resource_id = pr.id
-            JOIN resources cr    ON child.resource_id = cr.id
-            WHERE cr.tenant_id = @tenantId AND pr.tenant_id = @tenantId
+            JOIN spans parent ON child.parent_span_id = parent.span_id AND child.trace_id = parent.trace_id
+            WHERE child.tenant_id = @tenantId AND parent.tenant_id = @tenantId
             """;
         if (startTime.HasValue) sql += " AND child.start_time_unix_nano >= @start";
         if (endTime.HasValue) sql += " AND child.start_time_unix_nano <= @end";
@@ -1126,13 +988,13 @@ public abstract class TraceReadRepositoryBase : DapperReadRepository, ITraceRead
         var dependencies = rows
             .Select(x => new
             {
-                ParentService = ServiceNameOf(x.ParentResourceAttributesJson),
-                ChildService = ServiceNameOf(x.ChildResourceAttributesJson),
+                x.ParentService,
+                x.ChildService,
                 Kind = Enum.Parse<SpanKind>(x.Kind),
                 x.StatusCode,
                 x.DurationNano
             })
-            .Where(x => x.ParentService != null && x.ChildService != null && x.ParentService != x.ChildService)
+            .Where(x => !string.IsNullOrEmpty(x.ParentService) && !string.IsNullOrEmpty(x.ChildService) && x.ParentService != x.ChildService)
             .ToList();
 
         return dependencies
@@ -1158,23 +1020,17 @@ public abstract class TraceReadRepositoryBase : DapperReadRepository, ITraceRead
         if (string.IsNullOrEmpty(serviceName))
             throw new ArgumentException("Service name cannot be null or empty", nameof(serviceName));
 
-        var (where, p) = BuildTimeFilter(startTime, endTime, startBound: "s.start_time_unix_nano", endBound: "s.end_time_unix_nano");
+        var (where, p) = BuildServiceTimeFilter(serviceName, startTime, endTime);
         var sql = $"""
-            SELECT s.name AS Name, r.attributes_json AS ResourceAttributesJson
-            FROM spans s JOIN resources r ON s.resource_id = r.id
-            WHERE r.tenant_id = @tenantId AND {where}
+            SELECT s.name AS Name
+            FROM spans s
+            WHERE {where}
             """;
 
         await using var conn = await OpenConnectionAsync(cancellationToken);
-        var rows = await conn.QueryAsync<NameAttrRow>(new CommandDefinition(sql, p, cancellationToken: cancellationToken));
+        var rows = await conn.QueryAsync<NameRow>(new CommandDefinition(sql, p, cancellationToken: cancellationToken));
 
-        return rows
-            .Select(s => new { s.Name, ResourceAttributes = DeserializeAttributes(s.ResourceAttributesJson) })
-            .Where(s => s.ResourceAttributes != null &&
-                        s.ResourceAttributes.ContainsKey("service.name") &&
-                        s.ResourceAttributes["service.name"]?.ToString() == serviceName)
-            .GroupBy(s => s.Name)
-            .ToDictionary(g => g.Key, g => g.Count());
+        return rows.GroupBy(s => s.Name).ToDictionary(g => g.Key, g => g.Count());
     }
 
     public async Task<Dictionary<string, double>> GetAverageLatenciesAsync(string serviceName, DateTime? startTime = null, DateTime? endTime = null, CancellationToken cancellationToken = default)
@@ -1182,22 +1038,17 @@ public abstract class TraceReadRepositoryBase : DapperReadRepository, ITraceRead
         if (string.IsNullOrEmpty(serviceName))
             throw new ArgumentException("Service name cannot be null or empty", nameof(serviceName));
 
-        var (where, p) = BuildTimeFilter(startTime, endTime, startBound: "s.start_time_unix_nano", endBound: "s.end_time_unix_nano");
+        var (where, p) = BuildServiceTimeFilter(serviceName, startTime, endTime);
         var sql = $"""
-            SELECT s.name AS Name, s.start_time_unix_nano AS StartTimeUnixNano, s.end_time_unix_nano AS EndTimeUnixNano, r.attributes_json AS ResourceAttributesJson
-            FROM spans s JOIN resources r ON s.resource_id = r.id
-            WHERE r.tenant_id = @tenantId AND {where}
+            SELECT s.name AS Name, s.start_time_unix_nano AS StartTimeUnixNano, s.end_time_unix_nano AS EndTimeUnixNano
+            FROM spans s
+            WHERE {where}
             """;
 
         await using var conn = await OpenConnectionAsync(cancellationToken);
         var rows = await conn.QueryAsync<LatencyRow>(new CommandDefinition(sql, p, cancellationToken: cancellationToken));
 
-        return rows
-            .Select(s => new { s.Name, s.StartTimeUnixNano, s.EndTimeUnixNano, ResourceAttributes = DeserializeAttributes(s.ResourceAttributesJson) })
-            .Where(s => s.ResourceAttributes != null &&
-                        s.ResourceAttributes.ContainsKey("service.name") &&
-                        s.ResourceAttributes["service.name"]?.ToString() == serviceName)
-            .GroupBy(s => s.Name)
+        return rows.GroupBy(s => s.Name)
             .ToDictionary(g => g.Key, g => g.Average(s => s.EndTimeUnixNano - s.StartTimeUnixNano) / 1_000_000.0);
     }
 
@@ -1206,11 +1057,11 @@ public abstract class TraceReadRepositoryBase : DapperReadRepository, ITraceRead
         if (string.IsNullOrEmpty(serviceName))
             throw new ArgumentException("Service name cannot be null or empty", nameof(serviceName));
 
-        var (where, p) = BuildTimeFilter(startTime, endTime, startBound: "s.start_time_unix_nano", endBound: "s.end_time_unix_nano");
+        var (where, p) = BuildServiceTimeFilter(serviceName, startTime, endTime);
         var sql = $"""
-            SELECT s.name AS Name, s.start_time_unix_nano AS StartTimeUnixNano, s.end_time_unix_nano AS EndTimeUnixNano, s.status_code AS StatusCode, r.attributes_json AS ResourceAttributesJson
-            FROM spans s JOIN resources r ON s.resource_id = r.id
-            WHERE r.tenant_id = @tenantId AND {where}
+            SELECT s.name AS Name, s.start_time_unix_nano AS StartTimeUnixNano, s.end_time_unix_nano AS EndTimeUnixNano, s.status_code AS StatusCode
+            FROM spans s
+            WHERE {where}
             """;
 
         await using var conn = await OpenConnectionAsync(cancellationToken);
@@ -1223,12 +1074,8 @@ public abstract class TraceReadRepositoryBase : DapperReadRepository, ITraceRead
             {
                 s.Name,
                 s.StatusCode,
-                DurationMs = (s.EndTimeUnixNano - s.StartTimeUnixNano) / 1_000_000.0,
-                ResourceAttributes = DeserializeAttributes(s.ResourceAttributesJson)
+                DurationMs = (s.EndTimeUnixNano - s.StartTimeUnixNano) / 1_000_000.0
             })
-            .Where(s => s.ResourceAttributes != null &&
-                        s.ResourceAttributes.ContainsKey("service.name") &&
-                        s.ResourceAttributes["service.name"]?.ToString() == serviceName)
             .GroupBy(s => s.Name)
             .Select(g =>
             {
@@ -1256,23 +1103,25 @@ public abstract class TraceReadRepositoryBase : DapperReadRepository, ITraceRead
     // HELPERS
     // =========================================================================
 
-    private (string where, object parameters) BuildTimeFilter(DateTime? startTime, DateTime? endTime, string startBound, string endBound, string? extra = null)
+    /// <summary>Tenant + service + optional time bounds on <c>spans s</c>, through <c>idx_spans_tenant_service_time</c>.</summary>
+    private (string where, DynamicParameters parameters) BuildServiceTimeFilter(string serviceName, DateTime? startTime, DateTime? endTime)
     {
-        var clauses = new List<string>();
-        if (extra != null) clauses.Add(extra);
-        if (startTime.HasValue) clauses.Add($"{startBound} >= @start");
-        if (endTime.HasValue) clauses.Add($"{endBound} <= @end");
-        var where = clauses.Count > 0 ? string.Join(" AND ", clauses) : "1 = 1";
-        return (where, new
+        var clauses = new List<string> { "s.tenant_id = @tenantId", "s.service_name = @service" };
+        var parameters = new DynamicParameters();
+        parameters.Add("tenantId", TenantId);
+        parameters.Add("service", serviceName);
+        if (startTime.HasValue)
         {
-            tenantId = TenantId,
-            start = startTime.HasValue ? TimeConversion.DateTimeToUnixNano(startTime.Value) : (long?)null,
-            end = endTime.HasValue ? TimeConversion.DateTimeToUnixNano(endTime.Value) : (long?)null
-        });
+            clauses.Add("s.start_time_unix_nano >= @start");
+            parameters.Add("start", TimeConversion.DateTimeToUnixNano(startTime.Value));
+        }
+        if (endTime.HasValue)
+        {
+            clauses.Add("s.end_time_unix_nano <= @end");
+            parameters.Add("end", TimeConversion.DateTimeToUnixNano(endTime.Value));
+        }
+        return (string.Join(" AND ", clauses), parameters);
     }
-
-    private static string? ServiceNameOf(string? attributesJson)
-        => ExtractServiceName(DeserializeAttributes(attributesJson));
 
     /// <summary>Nearest-rank percentile over an ascending-sorted list of values.</summary>
     private static double Percentile(IReadOnlyList<double> sortedAsc, double percentile)
@@ -1288,76 +1137,12 @@ public abstract class TraceReadRepositoryBase : DapperReadRepository, ITraceRead
     // ROW DTOs
     // =========================================================================
 
-    private sealed class RollupStateRow
-    {
-        public long? CoverageStartUnixNano { get; set; }
-        public long RolledUntilUnixNano { get; set; }
-    }
-
-    private sealed class TraceBucketAggRow
-    {
-        public long BucketUnixNano { get; set; }
-        public long TraceCount { get; set; }
-        public long ErrorCount { get; set; }
-        public double DurationSumMs { get; set; }
-        public double DurationMaxMs { get; set; }
-        public long Lb00 { get; set; } public long Lb01 { get; set; } public long Lb02 { get; set; } public long Lb03 { get; set; }
-        public long Lb04 { get; set; } public long Lb05 { get; set; } public long Lb06 { get; set; } public long Lb07 { get; set; }
-        public long Lb08 { get; set; } public long Lb09 { get; set; } public long Lb10 { get; set; } public long Lb11 { get; set; }
-        public long Lb12 { get; set; } public long Lb13 { get; set; } public long Lb14 { get; set; } public long Lb15 { get; set; }
-        public long Lb16 { get; set; } public long Lb17 { get; set; } public long Lb18 { get; set; } public long Lb19 { get; set; }
-        public long Lb20 { get; set; } public long Lb21 { get; set; } public long Lb22 { get; set; } public long Lb23 { get; set; }
-        public long Lb24 { get; set; } public long Lb25 { get; set; } public long Lb26 { get; set; } public long Lb27 { get; set; }
-        public long Lb28 { get; set; } public long Lb29 { get; set; } public long Lb30 { get; set; } public long Lb31 { get; set; }
-        public long Lb32 { get; set; } public long Lb33 { get; set; } public long Lb34 { get; set; } public long Lb35 { get; set; }
-        public long Lb36 { get; set; } public long Lb37 { get; set; } public long Lb38 { get; set; } public long Lb39 { get; set; }
-
-        public long[] Buckets() =>
-        [
-            Lb00, Lb01, Lb02, Lb03, Lb04, Lb05, Lb06, Lb07, Lb08, Lb09,
-            Lb10, Lb11, Lb12, Lb13, Lb14, Lb15, Lb16, Lb17, Lb18, Lb19,
-            Lb20, Lb21, Lb22, Lb23, Lb24, Lb25, Lb26, Lb27, Lb28, Lb29,
-            Lb30, Lb31, Lb32, Lb33, Lb34, Lb35, Lb36, Lb37, Lb38, Lb39,
-        ];
-
-        public void SetBuckets(long[] values)
-        {
-            Lb00 = values[0]; Lb01 = values[1]; Lb02 = values[2]; Lb03 = values[3]; Lb04 = values[4];
-            Lb05 = values[5]; Lb06 = values[6]; Lb07 = values[7]; Lb08 = values[8]; Lb09 = values[9];
-            Lb10 = values[10]; Lb11 = values[11]; Lb12 = values[12]; Lb13 = values[13]; Lb14 = values[14];
-            Lb15 = values[15]; Lb16 = values[16]; Lb17 = values[17]; Lb18 = values[18]; Lb19 = values[19];
-            Lb20 = values[20]; Lb21 = values[21]; Lb22 = values[22]; Lb23 = values[23]; Lb24 = values[24];
-            Lb25 = values[25]; Lb26 = values[26]; Lb27 = values[27]; Lb28 = values[28]; Lb29 = values[29];
-            Lb30 = values[30]; Lb31 = values[31]; Lb32 = values[32]; Lb33 = values[33]; Lb34 = values[34];
-            Lb35 = values[35]; Lb36 = values[36]; Lb37 = values[37]; Lb38 = values[38]; Lb39 = values[39];
-        }
-
-        public TraceBucketAggRow MergeWith(TraceBucketAggRow other)
-        {
-            var a = Buckets(); var b = other.Buckets();
-            var merged = new long[a.Length];
-            for (var i = 0; i < a.Length; i++) merged[i] = a[i] + b[i];
-            var result = new TraceBucketAggRow
-            {
-                BucketUnixNano = BucketUnixNano,
-                TraceCount = TraceCount + other.TraceCount,
-                ErrorCount = ErrorCount + other.ErrorCount,
-                DurationSumMs = DurationSumMs + other.DurationSumMs,
-                DurationMaxMs = Math.Max(DurationMaxMs, other.DurationMaxMs),
-            };
-            result.SetBuckets(merged);
-            return result;
-        }
-    }
-
-    private sealed class AnchorAggregateRow
+    private sealed class AnchorSummaryRow
     {
         public string TraceId { get; set; } = null!;
-        public long ResourceId { get; set; }
         public long AnchorStart { get; set; }
+        public long AnchorEnd { get; set; }
         public string? ServiceName { get; set; }
-        public long MinStart { get; set; }
-        public long MaxEnd { get; set; }
         public int HasErrorInt { get; set; }
     }
 
@@ -1366,11 +1151,12 @@ public abstract class TraceReadRepositoryBase : DapperReadRepository, ITraceRead
         public string TraceId { get; set; } = null!;
         public long AnchorSpanPk { get; set; }
         public string AnchorSpanId { get; set; } = null!;
-        public long ResourceId { get; set; }
+        public string? ServiceName { get; set; }
         public string RootName { get; set; } = null!;
         public string AnchorKind { get; set; } = "UNSPECIFIED";
         public long AnchorStart { get; set; }
         public long AnchorEnd { get; set; }
+        public int HasErrorInt { get; set; }
     }
 
     private sealed class TraceAggRow
@@ -1379,13 +1165,6 @@ public abstract class TraceReadRepositoryBase : DapperReadRepository, ITraceRead
         public int SpanCount { get; set; }
         public long MinStart { get; set; }
         public long MaxEnd { get; set; }
-        public int HasErrorInt { get; set; }
-    }
-
-    private sealed class ResourceLookupRow
-    {
-        public long Id { get; set; }
-        public string? AttributesJson { get; set; }
     }
 
     private sealed class FullSpanRow
@@ -1418,17 +1197,16 @@ public abstract class TraceReadRepositoryBase : DapperReadRepository, ITraceRead
 
     private sealed class DependencyRow
     {
-        public string? ParentResourceAttributesJson { get; set; }
-        public string? ChildResourceAttributesJson { get; set; }
+        public string? ParentService { get; set; }
+        public string? ChildService { get; set; }
         public string Kind { get; set; } = null!;
         public string StatusCode { get; set; } = null!;
         public long DurationNano { get; set; }
     }
 
-    private sealed class NameAttrRow
+    private sealed class NameRow
     {
         public string Name { get; set; } = null!;
-        public string? ResourceAttributesJson { get; set; }
     }
 
     private sealed class LatencyRow
@@ -1436,7 +1214,6 @@ public abstract class TraceReadRepositoryBase : DapperReadRepository, ITraceRead
         public string Name { get; set; } = null!;
         public long StartTimeUnixNano { get; set; }
         public long EndTimeUnixNano { get; set; }
-        public string? ResourceAttributesJson { get; set; }
     }
 
     private sealed class StatsRow
@@ -1445,6 +1222,5 @@ public abstract class TraceReadRepositoryBase : DapperReadRepository, ITraceRead
         public long StartTimeUnixNano { get; set; }
         public long EndTimeUnixNano { get; set; }
         public string StatusCode { get; set; } = null!;
-        public string? ResourceAttributesJson { get; set; }
     }
 }

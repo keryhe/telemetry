@@ -5,57 +5,60 @@ namespace Keryhe.Telemetry.IntegrationTests.Tests;
 
 /// <summary>
 /// Pure-logic unit tests for <see cref="RawSearchWindowGuard"/> — no database dependency
-/// (list-pages-server-side plan, Phase 1, decision 39). Covers tier-based accept/reject for both
-/// the analytics tier (no limit) and the standard tier (24-hour default), plus the exemption path.
+/// (schema-simplification plan: search is unindexed and window-bounded on every provider, so
+/// there is no tier axis any more). Covers accept/reject at the 24-hour default, the exemption path,
+/// and the configured override.
 /// </summary>
 public class RawSearchWindowGuardTests
 {
     [Fact]
-    public void Analytics_Tier_Never_Limited()
+    public void Every_Provider_Default_Limits_Search_To_24_Hours()
     {
-        var capabilities = ProviderCapabilities.AnalyticsDefault();
-        var result = RawSearchWindowGuard.Check(capabilities, hasRawSearchFilter: true, isExempt: false, windowLength: TimeSpan.FromDays(30));
-        Assert.True(result.Allowed);
+        foreach (var capabilities in new[] { ProviderCapabilities.Default(), ProviderCapabilities.Constrained() })
+        {
+            Assert.Equal(24, capabilities.RawSearchWindowHours);
+            Assert.False(RawSearchWindowGuard.Check(capabilities, hasRawSearchFilter: true, isExempt: false, windowLength: TimeSpan.FromDays(30)).Allowed);
+        }
     }
 
     [Fact]
-    public void Standard_Tier_Allows_Search_Within_Window()
+    public void Default_Allows_Search_Within_Window()
     {
-        var capabilities = ProviderCapabilities.StandardDefault();
+        var capabilities = ProviderCapabilities.Default();
         var result = RawSearchWindowGuard.Check(capabilities, hasRawSearchFilter: true, isExempt: false, windowLength: TimeSpan.FromHours(24));
         Assert.True(result.Allowed);
     }
 
     [Fact]
-    public void Standard_Tier_Rejects_Search_Beyond_Window()
+    public void Default_Rejects_Search_Beyond_Window()
     {
-        var capabilities = ProviderCapabilities.StandardDefault();
+        var capabilities = ProviderCapabilities.Default();
         var result = RawSearchWindowGuard.Check(capabilities, hasRawSearchFilter: true, isExempt: false, windowLength: TimeSpan.FromHours(24.01));
         Assert.False(result.Allowed);
         Assert.Contains("24", result.Message);
     }
 
     [Fact]
-    public void Standard_Tier_Never_Limited_Without_A_Search_Filter()
+    public void Default_Never_Limited_Without_A_Search_Filter()
     {
-        var capabilities = ProviderCapabilities.StandardDefault();
+        var capabilities = ProviderCapabilities.Default();
         var result = RawSearchWindowGuard.Check(capabilities, hasRawSearchFilter: false, isExempt: false, windowLength: TimeSpan.FromDays(365));
         Assert.True(result.Allowed);
     }
 
     [Fact]
-    public void Standard_Tier_Exempt_Request_Is_Never_Limited()
+    public void Default_Exempt_Request_Is_Never_Limited()
     {
-        var capabilities = ProviderCapabilities.StandardDefault();
+        var capabilities = ProviderCapabilities.Default();
         // e.g. a trace-id lookup or mode=errors — the caller expresses the exemption.
         var result = RawSearchWindowGuard.Check(capabilities, hasRawSearchFilter: true, isExempt: true, windowLength: TimeSpan.FromDays(30));
         Assert.True(result.Allowed);
     }
 
     [Fact]
-    public void Standard_Tier_Honors_Configured_Override()
+    public void Default_Honors_Configured_Override()
     {
-        var capabilities = ProviderCapabilities.StandardDefault() with { RawSearchWindowHours = 12 };
+        var capabilities = ProviderCapabilities.Default() with { RawSearchWindowHours = 12 };
         var withinOverride = RawSearchWindowGuard.Check(capabilities, hasRawSearchFilter: true, isExempt: false, windowLength: TimeSpan.FromHours(12));
         var beyondOverride = RawSearchWindowGuard.Check(capabilities, hasRawSearchFilter: true, isExempt: false, windowLength: TimeSpan.FromHours(13));
 
@@ -64,9 +67,9 @@ public class RawSearchWindowGuardTests
     }
 
     [Fact]
-    public void Standard_Tier_Override_To_Null_Removes_Limit()
+    public void Default_Override_To_Null_Removes_Limit()
     {
-        var capabilities = ProviderCapabilities.StandardDefault() with { RawSearchWindowHours = null };
+        var capabilities = ProviderCapabilities.Default() with { RawSearchWindowHours = null };
         var result = RawSearchWindowGuard.Check(capabilities, hasRawSearchFilter: true, isExempt: false, windowLength: TimeSpan.FromDays(365));
         Assert.True(result.Allowed);
     }

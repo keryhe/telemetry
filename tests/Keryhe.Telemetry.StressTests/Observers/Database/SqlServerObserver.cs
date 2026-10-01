@@ -10,7 +10,9 @@ namespace Keryhe.Telemetry.StressTests.Observers.Database;
 /// resource description and both sessions' current SQL); lock escalation is the delta of
 /// <c>index_lock_promotion_count</c>; deadlocks are counted from the Deadlocks performance counter and
 /// their graphs read from the <c>system_health</c> ring buffer; slowest SQL is Query Store, falling back
-/// to <c>sys.dm_exec_query_stats</c>. It also confirms the API's reads really run under SNAPSHOT (decision 35).
+/// to <c>sys.dm_exec_query_stats</c>. It also confirms readers never block behind ingestion: schema 3.0.0 runs the database with
+/// <c>READ_COMMITTED_SNAPSHOT ON</c> (decision 13), which the check reads from <c>sys.databases</c>; on a 2.x schema (no RCSI) it falls back to confirming
+/// the API's reads really run under SNAPSHOT.
 /// </summary>
 public sealed class SqlServerObserver : DatabaseObserverBase
 {
@@ -93,7 +95,11 @@ public sealed class SqlServerObserver : DatabaseObserverBase
 
         var checks = new List<ObserverCheck>();
         // A reader blocked on ingestion would be a regression, so the report lists the isolation check explicitly.
-        checks.Add(_readRequestsSeen == 0
+        var rcsiOn = await ScalarAsync("SELECT CAST(is_read_committed_snapshot_on AS float) FROM sys.databases WHERE name = DB_NAME()", cancellationToken) == 1;
+        if (rcsiOn)
+            checks.Add(new ObserverCheck("Readers use row versioning (READ_COMMITTED_SNAPSHOT)", CheckOutcome.Passed,
+                "The database runs READ_COMMITTED_SNAPSHOT ON, so a plain read neither blocks behind nor blocks ingestion's open transactions."));
+        else checks.Add(_readRequestsSeen == 0
             ? new ObserverCheck("API reads run under SNAPSHOT", CheckOutcome.NotChecked, "No running API read request was caught by a sample (a run with no browsers or other readers has none), so the isolation level was not checked.")
             : new ObserverCheck("API reads run under SNAPSHOT", _nonSnapshotReadRequestsSeen == 0 ? CheckOutcome.Passed : CheckOutcome.Failed,
                 $"{_readRequestsSeen} running API read request(s) sampled; {_nonSnapshotReadRequestsSeen} not under SNAPSHOT."));

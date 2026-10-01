@@ -165,6 +165,7 @@ public sealed class TelemetryIngestionWorker(
         while (true)
         {
             List<T>? batch = null;
+            List<long> enqueuedAt = [];
             var batchSize = 0;
             try
             {
@@ -194,6 +195,7 @@ public sealed class TelemetryIngestionWorker(
                     // RecordCountGate makes for its own capacity. At low load this drains one
                     // write; at high load it merges many.
                     batch = new List<T>();
+                    enqueuedAt = new List<long>();
                     while (reader.TryPeek(out var peeked))
                     {
                         var peekedSize = sizeOf(peeked);
@@ -202,6 +204,8 @@ public sealed class TelemetryIngestionWorker(
                         if (!reader.TryRead(out var items))
                             break;
 
+                        if (ingestionChannel.TryTakeEnqueued(items, out var stamp))
+                            enqueuedAt.Add(stamp);
                         batch.AddRange(items);
                         batchSize += peekedSize;
                         if (batchSize >= maxBatchSize)
@@ -230,7 +234,12 @@ public sealed class TelemetryIngestionWorker(
                     // FlushWithRetryAsync throws) stays counted for StopAsync to report.
                     Interlocked.Add(ref inFlight.Value, -batchSize);
                     if (flushed)
+                    {
                         metrics.RecordFlushed(signalName, batchSize);
+                        var committed = Stopwatch.GetTimestamp();
+                        foreach (var stamp in enqueuedAt)
+                            metrics.RecordCommitLag(signalName, Stopwatch.GetElapsedTime(stamp, committed).TotalMilliseconds);
+                    }
                     else
                         metrics.RecordDropped(signalName, batchSize);
                 }

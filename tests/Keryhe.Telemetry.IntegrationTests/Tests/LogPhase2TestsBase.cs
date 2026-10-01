@@ -1,19 +1,17 @@
-using Keryhe.Telemetry.Api.Rollups;
 using Keryhe.Telemetry.Core;
 using Keryhe.Telemetry.Core.Models;
 using Keryhe.Telemetry.IntegrationTests.Fixtures;
 using Keryhe.Telemetry.IntegrationTests.Seeding;
 using Microsoft.Extensions.DependencyInjection;
-using Microsoft.Extensions.Logging.Abstractions;
-using Microsoft.Extensions.Options;
 using Xunit;
 
 namespace Keryhe.Telemetry.IntegrationTests.Tests;
 
 /// <summary>
-/// Phase 2 correctness checks (list-pages-server-side plan, Verification items 3, 4 and 14):
-/// rollup-vs-raw summary agreement, keyset paging with no gaps/overlaps, and the ingestion-time
-/// pin excluding late arrivals from a page while still counting them in "new since".
+/// Log list correctness checks (list-pages-server-side plan, Verification items 3 and 4): keyset
+/// paging with no gaps/overlaps, and the ingestion-time pin excluding late arrivals from a page
+/// while still counting them in "new since". (The rollup-vs-raw agreement check is gone with the
+/// rollup tables: schema 3.0.0's summary has one path.)
 /// </summary>
 public abstract class LogPhase2TestsBase : IAsyncLifetime
 {
@@ -26,53 +24,6 @@ public abstract class LogPhase2TestsBase : IAsyncLifetime
     private static readonly DateTime WindowStart = new(2026, 2, 1, 0, 0, 0, DateTimeKind.Utc);
 
     private IServiceScope Scope() => _fixture.Services.CreateScope();
-
-    /// <summary>
-    /// Runs the rollup worker's per-cycle logic directly and synchronously, rather than waiting on
-    /// its real interval/timer — this is what makes it testable without real wall-clock timing
-    /// (the plan's own suggestion). Small Settle/Repass values so one call fully rolls and
-    /// re-passes a window well in the past relative to <paramref name="now"/>.
-    /// </summary>
-    private async Task RunRollupCycleAsync(DateTime now)
-    {
-        var worker = new RollupWorker(
-            scopeFactory: null!, // RunCycleAsync doesn't use the scope factory (only ExecuteAsync's real loop does)
-            Options.Create(new RollupOptions { SettleSeconds = 1, RepassMinutes = 1, BackfillHours = 24, LeaseSeconds = 300 }),
-            NullLogger<RollupWorker>.Instance);
-
-        using var scope = Scope();
-        await worker.RunCycleAsync(scope.ServiceProvider, now, CancellationToken.None);
-    }
-
-    [Fact]
-    public async Task RollupWorker_LogSummary_MatchesRawPath()
-    {
-        var logs = SeededDataBuilder.BasicLogWindow(_fixture.TenantId, WindowStart, count: 300); // 5 minutes, one per second
-        using (var writeScope = Scope())
-            await writeScope.ServiceProvider.GetRequiredService<ITelemetryBulkWriter>().FlushLogsAsync(logs);
-
-        // now well past the window so SettleSeconds/RepassMinutes both clear it in one cycle.
-        await RunRollupCycleAsync(WindowStart.AddMinutes(10));
-
-        using var readScope = Scope();
-        var repo = readScope.ServiceProvider.GetRequiredService<ILogReadRepository>();
-
-        var windowEnd = WindowStart.AddMinutes(5);
-        var rollupSummary = await repo.GetLogSummaryAsync(new LogSummaryQuery { Start = WindowStart, End = windowEnd, BucketCount = 5 });
-        Assert.Equal("rollup", rollupSummary.Source);
-
-        // Force the raw path with a search term every seeded row matches (decision 37: any `q`
-        // filter always uses raw) — same population, so the two paths must agree exactly.
-        var rawSummary = await repo.GetLogSummaryAsync(new LogSummaryQuery { Start = WindowStart, End = windowEnd, BucketCount = 5, Search = "phase0" });
-        Assert.Equal("raw", rawSummary.Source);
-
-        Assert.Equal(logs.Count, rollupSummary.Total);
-        Assert.Equal(rawSummary.Total, rollupSummary.Total);
-        Assert.Equal(rawSummary.Buckets.Sum(b => b.Error), rollupSummary.Buckets.Sum(b => b.Error));
-        Assert.Equal(rawSummary.Buckets.Sum(b => b.Warn), rollupSummary.Buckets.Sum(b => b.Warn));
-        Assert.Equal(rawSummary.Buckets.Sum(b => b.Info), rollupSummary.Buckets.Sum(b => b.Info));
-        Assert.Equal(rawSummary.Buckets.Sum(b => b.Debug), rollupSummary.Buckets.Sum(b => b.Debug));
-    }
 
     /// <summary>
     /// Paging forward to the end then back returns the same rows in reverse, and `nav=last`

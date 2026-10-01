@@ -235,10 +235,25 @@ public class DatabaseObserverTests
     }
 
     [Fact]
-    public async Task SqlServer_check_passes_for_snapshot_readers_and_fails_for_any_other_reader()
+    public async Task SqlServer_check_passes_when_the_database_runs_read_committed_snapshot()
+    {
+        await using var container = ProviderContainerFactory.Create(ProviderNames.SqlServer);
+        await container.StartAsync(new ContainerOptions(Diagnostics: true));   // schema 3.0.0: READ_COMMITTED_SNAPSHOT ON
+
+        await using var session = await DatabaseObserverSession.StartAsync(ProviderNames.SqlServer, container, TimeSpan.FromMilliseconds(300));
+        var check = Assert.Single((await session.StopAsync()).Locks.Checks);
+        Assert.Equal(CheckOutcome.Passed, check.Outcome);
+        Assert.Contains("READ_COMMITTED_SNAPSHOT", check.Name);
+    }
+
+    /// <summary>The fallback path, for a 2.x schema (no RCSI): readers must run under SNAPSHOT. RCSI is switched off here to exercise it.</summary>
+    [Fact]
+    public async Task SqlServer_check_passes_for_snapshot_readers_and_fails_for_any_other_reader_without_rcsi()
     {
         await using var container = ProviderContainerFactory.Create(ProviderNames.SqlServer);
         await container.StartAsync(new ContainerOptions(Diagnostics: true));
+        using (var admin = Open(ProviderNames.SqlServer, container.ConnectionString))
+            await ExecAsync(admin, "ALTER DATABASE CURRENT SET READ_COMMITTED_SNAPSHOT OFF WITH ROLLBACK IMMEDIATE");
 
         // The check looks at running requests, so each reader holds one open for a few seconds.
         async Task<ObserverCheck> CheckWithReaderAsync(string isolation)

@@ -8,17 +8,13 @@ using Xunit;
 namespace Keryhe.Telemetry.IntegrationTests.Tests;
 
 /// <summary>
-/// Phase 7 search parity checks (list-pages-server-side plan, Verification item 6): a fixed set
-/// of search queries must return exactly the same matching rows before and after this phase's
-/// indexes existed. Since the indexes are baked into the schema once applied, "before" is
-/// approximated by hand-computing the expected match set directly from
-/// <see cref="SeededDataBuilder.BasicLogWindow"/>'s own deterministic formula (every attribute
-/// value is derived from the loop index, so the expected set is knowable without querying the
-/// database at all) and asserting the repository's actual output -- running through whichever
-/// predicate form this phase wired up for this provider (typed containment on the analytics
-/// tier, the unchanged phase 1 text form on the standard tier) -- equals it exactly. This
-/// exercises the real indexed code path end-to-end (real SQL against a real database), not a
-/// mock, so a wrong index OR a wrong predicate rewrite both show up as a mismatch.
+/// Search parity checks (list-pages-server-side plan, Verification item 6): a fixed set of search
+/// queries must return exactly the matching rows on every provider. Search is unindexed everywhere
+/// since schema 3.0.0 (one predicate form per dialect), and the expected match set is
+/// hand-computed directly from <see cref="SeededDataBuilder.BasicLogWindow"/>'s own deterministic
+/// formula (every attribute value is derived from the loop index, so the expected set is knowable
+/// without querying the database at all) and compared with the repository's actual output. This
+/// exercises the real code path end-to-end (real SQL against a real database), not a mock.
 ///
 /// Covers the exact set the plan's Verification item 6 asks for: a numeric attribute
 /// (`http.status_code:500`), a boolean attribute (`retry:true`), a negated term (`-retry:true`,

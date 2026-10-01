@@ -34,12 +34,9 @@ public class LogSeveritySpikeEvaluator : IAlertEvaluator
 
         var windowStart = now.AddMinutes(-condition.WindowMinutes);
 
-        // GetLogSummaryAsync's rollup path can't answer an arbitrary severity cutoff (see
-        // LogReadRepositoryBase's own note on why MinSeverity always falls back to raw), but this
-        // evaluator's rule condition IS a MinSeverity filter by definition — so this always takes
-        // the raw path today. Still a large improvement over the retired
-        // GetLogRecordsBySeverityAsync, which loaded every matching row just to count them; this
-        // reads a SQL GROUP BY aggregate instead.
+        // A SQL GROUP BY aggregate over the window's log_records (there is no rollup path since
+        // schema 3.0.0), which beats the retired GetLogRecordsBySeverityAsync that loaded every
+        // matching row just to count them.
         var summary = await _logs.GetLogSummaryAsync(new LogSummaryQuery
         {
             Start = windowStart,

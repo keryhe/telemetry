@@ -34,7 +34,7 @@ internal static class MySqlJsonAttributeHooks
 }
 
 public class MySqlTraceReadRepository(IConfiguration configuration, ITenantContext tenantContext)
-    : TraceReadRepositoryBase(tenantContext)
+    : TraceReadRepositoryBase(tenantContext, configuration)
 {
     private readonly string _connectionString = configuration.GetConnectionString("Api")!;
 
@@ -106,7 +106,7 @@ public class MySqlMetricReadRepository(IConfiguration configuration, ITenantCont
 }
 
 public class MySqlLogReadRepository(IConfiguration configuration, ITenantContext tenantContext)
-    : LogReadRepositoryBase(tenantContext)
+    : LogReadRepositoryBase(tenantContext, configuration)
 {
     private readonly string _connectionString = configuration.GetConnectionString("Api")!;
 
@@ -163,28 +163,6 @@ public class MySqlTenantCatalogRepository(IConfiguration configuration)
     }
 }
 
-/// <summary>
-/// MySQL implementation of <see cref="IRollupRepository"/>. The recompute's <c>INSERT ... SELECT</c>
-/// runs at READ COMMITTED explicitly: under InnoDB's default REPEATABLE READ it would take shared
-/// locks on the <c>log_records</c> rows it reads, blocking ingestion.
-/// </summary>
-public class MySqlLogRollupRepository(IConfiguration configuration) : LogRollupRepositoryBase
-{
-    private readonly string _connectionString = configuration.GetConnectionString("Api")!;
-
-    protected override async Task<DbConnection> OpenConnectionAsync(CancellationToken cancellationToken)
-    {
-        var conn = new MySqlConnection(_connectionString);
-        await conn.OpenAsync(cancellationToken);
-        return conn;
-    }
-
-    protected override string IntDivExpr(string numerator, string denominator) => $"({numerator} DIV {denominator})";
-
-    protected override async Task<DbTransaction> BeginRecomputeTransactionAsync(DbConnection conn, CancellationToken cancellationToken)
-        => await conn.BeginTransactionAsync(System.Data.IsolationLevel.ReadCommitted, cancellationToken);
-}
-
 public class MySqlAlertRuleRepository(IConfiguration configuration, ITenantContext tenantContext)
     : AlertRuleRepositoryBase(tenantContext)
 {
@@ -214,9 +192,11 @@ public class MySqlAlertRuleRepository(IConfiguration configuration, ITenantConte
 }
 
 /// <summary>
-/// MySQL implementation of the <see cref="IRetentionSettingsRepository"/> sweeps. Span events
-/// and links are removed by the schema's <c>ON DELETE CASCADE</c> foreign keys, so the trace
-/// sweep targets only <c>spans</c>.
+/// MySQL implementation of the <see cref="IRetentionSettingsRepository"/> sweeps: the shared
+/// batched, per-tenant shape from <see cref="RetentionSettingsRepositoryBase"/>. The batch is
+/// <c>DELETE ... LIMIT n</c>, which InnoDB serves from the clustered primary key
+/// (<c>(tenant_id, time, id)</c> on spans and log records) or the data-point time index, bounded so
+/// a sweep cannot escalate to a table lock or build an enormous undo log while ingestion appends.
 /// </summary>
 public class MySqlRetentionSettingsRepository(IConfiguration configuration)
     : RetentionSettingsRepositoryBase
@@ -230,57 +210,6 @@ public class MySqlRetentionSettingsRepository(IConfiguration configuration)
         return conn;
     }
 
-    /// <summary>
-    /// Rows removed per statement by the retention sweeps. Bounded so a sweep cannot escalate to a
-    /// table lock (or build an enormous InnoDB undo log) while the ingest path is still appending.
-    /// </summary>
-    private const int DeleteBatchSize = 50_000;
-
-    public override Task<int> DeleteOldTracesAsync(TimeSpan retentionPeriod, CancellationToken cancellationToken = default)
-        => SweepAsync(["spans"], "start_time_unix_nano", retentionPeriod, cancellationToken);
-
-    public override Task<int> DeleteOldMetricDataPointsAsync(TimeSpan retentionPeriod, CancellationToken cancellationToken = default)
-        => SweepAsync(TelemetryIngestionHelpers.TimePrunedMetricTables, "time_unix_nano", retentionPeriod, cancellationToken);
-
-    public override async Task<int> DeleteOldLogRecordsAsync(TimeSpan retentionPeriod, CancellationToken cancellationToken = default)
-    {
-        var removed = await SweepAsync(["log_records"], "time_unix_nano", retentionPeriod, cancellationToken);
-        await using var conn = await OpenConnectionAsync(cancellationToken);
-        await SweepLogRollupTablesAsync(conn, CutoffNano(retentionPeriod), cancellationToken);
-        return removed;
-    }
-
-    /// <summary>
-    /// Deletes every row in <paramref name="tables"/> whose <paramref name="timeColumn"/> predates the
-    /// cutoff, in bounded chunks. Returns the total rows removed.
-    ///
-    /// The table and column names are interpolated rather than parameterized because they are not
-    /// user input: they are compile-time literals and the entries of
-    /// <see cref="TelemetryIngestionHelpers.TimePrunedMetricTables"/>.
-    /// </summary>
-    private async Task<int> SweepAsync(
-        IReadOnlyList<string> tables,
-        string timeColumn,
-        TimeSpan retentionPeriod,
-        CancellationToken cancellationToken)
-    {
-        var cutoffNano = CutoffNano(retentionPeriod);
-
-        await using var conn = await OpenConnectionAsync(cancellationToken);
-
-        var total = 0;
-        foreach (var table in tables)
-        {
-            int batch;
-            do
-            {
-                batch = await conn.ExecuteAsync(new CommandDefinition(
-                    $"DELETE FROM {table} WHERE {timeColumn} < @cutoff LIMIT {DeleteBatchSize}",
-                    new { cutoff = cutoffNano }, cancellationToken: cancellationToken));
-                total += batch;
-            } while (batch == DeleteBatchSize);
-        }
-
-        return total;
-    }
+    protected override string BatchedDeleteSql(string table, string predicate)
+        => $"DELETE FROM {table} WHERE {predicate} LIMIT {DeleteBatchSize}";
 }

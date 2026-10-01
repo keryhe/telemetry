@@ -31,6 +31,12 @@ public sealed class RampCriteria
     /// back-off neither inflates the growth ratio's denominator nor counts against this limit.
     /// </summary>
     public double MaxLagSeconds { get; set; } = 10;
+
+    /// <summary>
+    /// Stop when the worst signal's commit-lag p95 (enqueue to commit, <c>ingest_commit_lag</c>) exceeds this many ms (0 disables). The
+    /// write-path health signal: it does not depend on any read query, so a write-only ramp stops on it instead of on the marker probes.
+    /// </summary>
+    public double MaxCommitLagP95Ms { get; set; }
 }
 
 /// <summary>
@@ -75,12 +81,21 @@ public sealed class ScenarioProfile
     public string Name { get; set; } = "custom";
     public int Tenants { get; set; } = 2;
 
-    /// <summary>Ingestion only, before any browser starts, so rollup coverage and data volume exist. Excluded from the headline numbers.</summary>
+    /// <summary>Ingestion only, before any browser starts, so data volume exists before anything reads. Excluded from the headline numbers.</summary>
     public int WarmupSeconds { get; set; } = 60;
     public int MeasuredSeconds { get; set; } = 300;
 
     public LoadProfile Load { get; set; } = new();
     public BrowserProfile Browsers { get; set; } = new();
+
+    /// <summary>
+    /// A write-only run: no browsers and no marker probes, so nothing reads the database. The ramp stops only on drops, gate wait, client
+    /// export latency/errors and commit lag, which gives the provider's write ceiling uncontaminated by reads (schema-simplification plan, Phase 1 item 2).
+    /// </summary>
+    public bool WriteOnly { get; set; }
+
+    /// <summary>CPUs the database container is pinned to (Docker <c>--cpuset-cpus</c>, e.g. "0-3"), or null for the shared pool. See the report's CPU-separation note.</summary>
+    public string? DatabaseCpuset { get; set; }
 
     /// <summary>Decision 17: the same CPU/memory cap for every DB container.</summary>
     public double ContainerCpus { get; set; } = 4;
@@ -129,7 +144,7 @@ public sealed class ScenarioProfile
 
     public bool IsRamp => Ramp is not null;
 
-    public static IReadOnlyList<string> Builtin { get; } = ["smoke", "standard", "soak", "ramp"];
+    public static IReadOnlyList<string> Builtin { get; } = ["smoke", "standard", "soak", "ramp", "ramp-write-only"];
 
     /// <summary>Loads a built-in profile by name (from the <c>Profiles/</c> folder beside the executable) or any profile JSON by path.</summary>
     public static ScenarioProfile Resolve(string nameOrPath)
@@ -148,6 +163,7 @@ public sealed class ScenarioProfile
     {
         if (Tenants < 1) throw new InvalidDataException($"Profile '{Name}': Tenants must be at least 1.");
         if (MeasuredSeconds < 1 && Ramp is null) throw new InvalidDataException($"Profile '{Name}': MeasuredSeconds must be positive.");
+        if (WriteOnly) Browsers.Users = 0;
         if (Browsers.Users is < 0 or > 5) throw new InvalidDataException($"Profile '{Name}': Browsers.Users must be 0 to 5.");
         if (Ramp is { StepSeconds: < 1 } or { MaxSteps: < 1 } or { StepScale: <= 0 } or { StartScale: <= 0 })
             throw new InvalidDataException($"Profile '{Name}': Ramp needs positive StartScale, StepScale, StepSeconds and MaxSteps.");

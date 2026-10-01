@@ -167,7 +167,7 @@ public static class SeededDataBuilder
         return spans;
     }
 
-    /// <summary>A trace whose earliest span's parent id matches no span anywhere — the anchor for the <c>orphan_roots</c>/decision-41 behavior.</summary>
+    /// <summary>A trace whose earliest span's parent id matches no span anywhere (the real root never arrived). It anchors on its earliest span like any other trace.</summary>
     public static List<SpanModel> OrphanTrace(long tenantId, DateTime start)
     {
         var traceId = HexId(32, 999_001);
@@ -208,7 +208,7 @@ public static class SeededDataBuilder
         ];
     }
 
-    /// <summary>Sends the same span batch twice, simulating gRPC re-delivery before a ClickHouse <c>ReplacingMergeTree</c> merge.</summary>
+    /// <summary>A span batch to send twice, simulating gRPC re-delivery: schema 3.0.0 stores both copies.</summary>
     public static List<SpanModel> RedeliveredSpanBatch(long tenantId, DateTime start) => BasicTraceWindow(tenantId, start, traceCount: 5);
 
     // =========================================================================

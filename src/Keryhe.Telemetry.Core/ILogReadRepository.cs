@@ -24,8 +24,8 @@ public interface ILogReadRepository
     /// <summary>
     /// Chart/stat-card summary for the logs list page (list-pages-server-side plan, Phase 2):
     /// per-severity-group bucket counts, the exact (or lower-bound, on timeout) total, and the "new
-    /// since asOf" count. Reads the rollup tables when eligible (decision 37), the raw
-    /// <c>log_records</c> group-by otherwise.
+    /// since asOf" count, from a group-by over <c>log_records</c> (there are no rollup tables since
+    /// schema 3.0.0).
     /// </summary>
     Task<LogSummaryResult> GetLogSummaryAsync(LogSummaryQuery query, CancellationToken cancellationToken = default);
 

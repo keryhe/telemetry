@@ -1,27 +1,26 @@
--- OpenTelemetry MySQL Schema (MySQL 8.0+)
--- Translated from SqlServer-Schema.sql (the closest relational analog).
+-- OpenTelemetry MySQL Schema (MySQL 8.0+) -- schema 3.0.0
+-- Supports OTLP logs, metrics, and traces as defined in opentelemetry-proto. MySQL 8 only: no
+-- MariaDB compatibility is maintained.
+--
+-- Schema 3.0.0 is a fresh-install schema: there is no upgrade path from 2.x. See
+-- plans/schema-simplification.md for what changed and why. In short: the hot tables (spans,
+-- log_records, the five data-point tables) are append targets with no unique key and no foreign
+-- keys, whose InnoDB primary key follows the access path instead of an AUTO_INCREMENT id, with
+-- only the indexes a named query needs; tenant_id and service_name are columns on spans,
+-- log_records and metrics; and there are no rollup tables, views or orphan tracking.
 --
 -- Differences from the SQL Server schema:
---   BIGINT IDENTITY(1,1) PRIMARY KEY  ->  BIGINT AUTO_INCREMENT PRIMARY KEY
---   INT IDENTITY(1,1)                 ->  INT AUTO_INCREMENT
+--   BIGINT IDENTITY(1,1)              ->  BIGINT AUTO_INCREMENT
 --   NVARCHAR(n)                       ->  VARCHAR(n)
---   NVARCHAR(MAX) (text)             ->  TEXT / LONGTEXT
---   NVARCHAR(MAX) (JSON attributes)  ->  JSON  (native)
+--   NVARCHAR(MAX) (text)              ->  TEXT / LONGTEXT
+--   NVARCHAR(MAX) (JSON attributes)   ->  JSON  (native)
 --   FLOAT                             ->  DOUBLE
 --   BIT                               ->  TINYINT(1)
 --   DATETIME2                         ->  DATETIME(6)
---   SYSDATETIME() / GETUTCDATE()      ->  CURRENT_TIMESTAMP(6) / UTC_TIMESTAMP(6)
---   [type] (bracketed reserved word)  ->  type  (TYPE is non-reserved in MySQL)
---   MERGE / ON CONFLICT               ->  INSERT ... ON DUPLICATE KEY UPDATE (runtime, in C#)
---   JSON_VALUE(col, '$.x')            ->  col ->> '$."x"'
---   DATEADD(DAY, n, '1970-01-01')     ->  DATE_ADD('1970-01-01', INTERVAL n DAY)
---   integer division ( / )            ->  DIV   (MySQL '/' is floating-point division)
+--   SYSDATETIME()                     ->  CURRENT_TIMESTAMP(6)
+--   MERGE                             ->  INSERT ... ON DUPLICATE KEY UPDATE (runtime, in C#)
 --   filtered index WHERE enabled = 1  ->  plain index (MySQL has no filtered indexes)
 --   inline column REFERENCES          ->  table-level FOREIGN KEY (MySQL ignores inline refs)
---
--- All tables are InnoDB / utf8mb4 so the real ON DELETE CASCADE foreign keys used by
--- the write-path deletes are enforced. TimescaleDB hypertables / compression / retention
--- have no MySQL equivalent and are omitted, as in the SQL Server schema.
 --
 -- Usage:
 --   mysql telemetry < schema/MySQL-Schema.sql
@@ -50,7 +49,8 @@ CREATE TABLE api_keys (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 CREATE INDEX idx_api_keys_tenant_id ON api_keys (tenant_id);
 
--- Resource represents the entity producing telemetry.
+-- Resource represents the entity producing telemetry. A resource hash is not a resource identity
+-- (two tenants running the same service share one), hence UNIQUE (tenant_id, resource_hash).
 CREATE TABLE resources (
     id              BIGINT AUTO_INCREMENT PRIMARY KEY,
     tenant_id       BIGINT       NOT NULL DEFAULT 1,
@@ -58,18 +58,15 @@ CREATE TABLE resources (
     schema_url      VARCHAR(2048),
     created_at      DATETIME(6)  NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
     attributes_json JSON,
-    -- service_name (schema 2.13.3, list-pages-server-side plan Phase 7): a real column, written
-    -- by the bulk writer's resource upsert, extracted from attributes_json's "service.name" key.
-    -- ResourceServiceNameExpr() is now just "{alias}.service_name" on every provider.
+    -- Extracted from attributes_json's "service.name" at upsert, and copied onto spans,
+    -- log_records and metrics so hot reads filter on a column instead of joining here.
     service_name    VARCHAR(255),
     CONSTRAINT uk_resource_tenant_hash UNIQUE (tenant_id, resource_hash),
     CONSTRAINT fk_resources_tenants FOREIGN KEY (tenant_id) REFERENCES tenants (id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
-CREATE INDEX idx_resources_tenant_id ON resources (tenant_id);
-CREATE INDEX idx_created_at          ON resources (created_at);
-CREATE INDEX idx_resources_service_name ON resources (service_name);
+CREATE INDEX idx_resources_tenant_service ON resources (tenant_id, service_name);
 
--- Instrumentation scope (library).
+-- Instrumentation scope (library). Shared across tenants on purpose: UNIQUE (scope_hash).
 CREATE TABLE instrumentation_scopes (
     id              BIGINT AUTO_INCREMENT PRIMARY KEY,
     name            VARCHAR(255) NOT NULL,
@@ -80,17 +77,29 @@ CREATE TABLE instrumentation_scopes (
     attributes_json JSON,
     CONSTRAINT uk_scope_hash UNIQUE (scope_hash)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
-CREATE INDEX idx_name_version ON instrumentation_scopes (name, version);
 
 -- =============================================================================
 -- TRACES TABLES
 -- =============================================================================
 
+-- Trace spans. Events and links live in events_json/links_json on this row.
+--
+-- A plain append target: no unique key (a re-delivered span is stored twice and reads tolerate
+-- it -- schema-simplification decision 7) and no foreign keys. InnoDB clusters on the primary
+-- key, so it is (tenant_id, start_time_unix_nano, id): concurrent flushes append at one tail per
+-- tenant instead of all contending for the last page of an AUTO_INCREMENT key. id stays
+-- AUTO_INCREMENT as the keyset-paging tiebreak, and InnoDB requires an auto-increment column to
+-- lead some index, hence KEY (id) (sequential, cheap).
+--
+-- trace_id/span_id are ascii_bin so lookups are exact, case-sensitive and use the index with the
+-- connector's string parameters.
 CREATE TABLE spans (
-    id                       BIGINT AUTO_INCREMENT PRIMARY KEY,
-    trace_id                 CHAR(32)     NOT NULL,
-    span_id                  CHAR(16)     NOT NULL,
-    parent_span_id           CHAR(16),
+    id                       BIGINT       NOT NULL AUTO_INCREMENT,
+    tenant_id                BIGINT       NOT NULL,
+    service_name             VARCHAR(255),
+    trace_id                 CHAR(32)     CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+    span_id                  CHAR(16)     CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+    parent_span_id           CHAR(16)     CHARACTER SET ascii COLLATE ascii_bin,
     resource_id              BIGINT       NOT NULL,
     scope_id                 BIGINT       NOT NULL,
     name                     VARCHAR(255) NOT NULL,
@@ -110,93 +119,58 @@ CREATE TABLE spans (
     attributes_json          JSON,
     events_json              JSON,
     links_json               JSON,
-    -- Stored generated column for the root-span index (schema 2.13.1, list-pages-server-side
-    -- plan Phase 3): MySQL has no filtered/partial index, so root-anchored queries instead
-    -- seek on this boolean-shaped column.
-    is_root                  BOOLEAN GENERATED ALWAYS AS (parent_span_id IS NULL) STORED,
-    CONSTRAINT fk_spans_resources FOREIGN KEY (resource_id) REFERENCES resources (id),
-    CONSTRAINT fk_spans_scopes    FOREIGN KEY (scope_id)    REFERENCES instrumentation_scopes (id),
-    CONSTRAINT uk_trace_span      UNIQUE (trace_id, span_id)
+    PRIMARY KEY (tenant_id, start_time_unix_nano, id),
+    KEY idx_spans_id (id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
--- idx_trace_id, idx_start_time, idx_kind and idx_status dropped in 2.8.0: idx_trace_id is a left
--- prefix of uk_trace_span (trace_id, span_id); idx_start_time is a left prefix of idx_duration
--- (start_time_unix_nano, end_time_unix_nano); idx_kind (6 distinct values) and idx_status (3
--- distinct values) are too low-cardinality for the planner to ever choose. All three carried real
--- write cost for zero read benefit.
-CREATE INDEX idx_span_id             ON spans (span_id);
-CREATE INDEX idx_parent_span         ON spans (parent_span_id);
-CREATE INDEX idx_spans_trace_parent  ON spans (trace_id, parent_span_id);
-CREATE INDEX idx_end_time            ON spans (end_time_unix_nano DESC);
-CREATE INDEX idx_duration            ON spans (start_time_unix_nano, end_time_unix_nano);
-CREATE INDEX idx_spans_name          ON spans (name);
-CREATE INDEX idx_spans_resource_time ON spans (resource_id, start_time_unix_nano DESC);
--- MySQL has no filtered/partial index, unlike the other four providers' idx_spans_error — the
--- nearest equivalent is a plain composite leading on the low-cardinality column, which still lets
--- mode=errors seek straight to the 'ERROR' slice of the index instead of scanning every row
--- (schema 2.12.0). Not the same "too low-cardinality" case 2.8.0's idx_status was: this indexes
--- the rare rows a status_code predicate actually selects (errors are the minority status), not an
--- equality lookup expected to touch most of the table.
-CREATE INDEX idx_spans_error ON spans (status_code, start_time_unix_nano DESC);
-
--- Trace page/summary anchor on roots (schema 2.13.1, decision Phase 3 root-span index): MySQL
--- has no filtered index, so this indexes the generated is_root column instead -- root-anchored
--- queries seek is_root = 1 rather than scanning idx_duration and filtering non-roots in C#.
-CREATE INDEX idx_spans_root_time ON spans (is_root, start_time_unix_nano DESC, end_time_unix_nano);
-
--- span_events and span_links were dropped in 2.11.0: neither was ever read or written
--- independently of its parent span, so both collapsed into spans.events_json/links_json.
+-- Trace detail, span by id, spans by parent within a trace, service-map parent join.
+CREATE INDEX idx_spans_trace_span ON spans (trace_id, span_id);
+-- Service-scoped anchors (the trace list's anchor is the selected service's earliest span).
+CREATE INDEX idx_spans_tenant_service_time ON spans (tenant_id, service_name, start_time_unix_nano);
+-- MySQL has no filtered index, so errors mode gets a plain composite that lets it seek straight to
+-- the 'ERROR' slice. It costs an index entry on every insert; Phase 4 measures it and it is
+-- dropped if material.
+CREATE INDEX idx_spans_error ON spans (tenant_id, status_code, start_time_unix_nano);
 
 -- =============================================================================
 -- METRICS TABLES
 -- =============================================================================
 
+-- Base metrics table. One row per (resource, scope, name, type); tenant_id and service_name are
+-- copied from the resolved resource when the row is first written (cannot go stale: the
+-- resource hash includes service.name, so a rename produces a new resource and new metrics rows).
 CREATE TABLE metrics (
-    id          BIGINT AUTO_INCREMENT PRIMARY KEY,
-    resource_id BIGINT       NOT NULL,
-    scope_id    BIGINT       NOT NULL,
-    name        VARCHAR(255) NOT NULL,
-    description TEXT,
-    unit        VARCHAR(63),
-    type        VARCHAR(30)  NOT NULL
+    id           BIGINT AUTO_INCREMENT PRIMARY KEY,
+    tenant_id    BIGINT       NOT NULL,
+    service_name VARCHAR(255),
+    resource_id  BIGINT       NOT NULL,
+    scope_id     BIGINT       NOT NULL,
+    name         VARCHAR(255) NOT NULL,
+    description  TEXT,
+    unit         VARCHAR(63),
+    type         VARCHAR(30)  NOT NULL
         CHECK (type IN ('GAUGE', 'SUM', 'HISTOGRAM', 'EXPONENTIAL_HISTOGRAM', 'SUMMARY')),
-    created_at  DATETIME(6)  NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+    created_at   DATETIME(6)  NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
     CONSTRAINT fk_metrics_resources FOREIGN KEY (resource_id) REFERENCES resources (id),
     CONSTRAINT fk_metrics_scopes    FOREIGN KEY (scope_id)    REFERENCES instrumentation_scopes (id),
-    -- Metric identity: one row per (resource, scope, name, type), not one row per OTLP
-    -- export cycle. Resources and instrumentation_scopes dedup on an unbounded attribute map
-    -- and therefore need a SHA-256 hash column; a metric is identified by bounded scalar
-    -- columns that already exist here, so a plain composite UNIQUE is enough.
-    --
-    -- type is part of the key, not merely updated on conflict. The write path chooses which
-    -- data-point table to insert into from the INCOMING type while the read path chooses which
-    -- to read from the STORED type, so a metric that changes type mid-stream and matched an
-    -- existing row would write points the reader would never look for. Keying on type makes
-    -- such a change a new row instead: old points stay readable, new points are found.
-    --
-    -- Column order is deliberate. Leading with (resource_id, name, ...) makes the former
-    -- idx_resource_name an exact redundant left prefix, so it is dropped below.
-    --
+    -- Ingestion upsert key. type is part of it: the write path picks a data-point table from the
+    -- incoming type while the read path picks from the stored type.
     -- Key bytes: 8 + 255*4 + 30*4 + 8 = 1156. Under the 3072-byte InnoDB limit for
-    -- ROW_FORMAT=DYNAMIC, but OVER the 767-byte limit for COMPACT/REDUNDANT -- hence the
-    -- explicit ROW_FORMAT below, so this cannot fail on a server whose
-    -- innodb_default_row_format has been changed. See the SqlServer file for the
-    -- matching note on case-insensitive collation (utf8mb4_0900_ai_ci here).
+    -- ROW_FORMAT=DYNAMIC, but OVER the 767-byte limit for COMPACT/REDUNDANT -- hence the explicit
+    -- ROW_FORMAT below, so this cannot fail on a server whose innodb_default_row_format has been
+    -- changed. Under a case-insensitive collation (utf8mb4_0900_ai_ci) metric names differing only
+    -- by case are the same metric, which PostgreSQL and ClickHouse do not do. Accepted.
     CONSTRAINT uk_metric_identity UNIQUE (resource_id, name, type, scope_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 ROW_FORMAT=DYNAMIC;
-CREATE INDEX idx_metrics_name  ON metrics (name);
-CREATE INDEX idx_type          ON metrics (type);
--- idx_resource_name (resource_id, name) dropped in 2.7.0: now a left prefix of uk_metric_identity.
+-- Catalog (with or without a service filter) and by-name lookups. Key bytes: 8 + 1020 + 1020 = 2048.
+CREATE INDEX idx_metrics_tenant_service_name ON metrics (tenant_id, service_name, name);
 
--- exemplars_json (2.9.0) replaces the former single exemplar_id column and the shared
--- `exemplars` table, which no writer ever populated. OTLP declares `repeated Exemplar
--- exemplars` on every data point except Summary, so one id per row could never hold more than
--- the first. The list is stored as JSON on the data point itself: a child table would need each
--- data point's generated id, which the bulk-load path (binary COPY / bulk copy) does not hand
--- back, and JSON is already how bucket_counts, explicit_bounds and quantile_values are stored.
--- Trade-off: an exemplar's trace_id is no longer indexable. No read path queries it.
--- Gauge data points.
+-- Data-point tables: no foreign key, no unique key beyond the primary key, which is
+-- (metric_id, time_unix_nano, id) -- series reads and raw-point keyset paging. id stays
+-- AUTO_INCREMENT behind KEY (id). exemplars_json holds the OTLP exemplar list (every data point
+-- except Summary).
+
 CREATE TABLE gauge_data_points (
-    id                   BIGINT AUTO_INCREMENT PRIMARY KEY,
+    id                   BIGINT NOT NULL AUTO_INCREMENT,
     metric_id            BIGINT NOT NULL,
     start_time_unix_nano BIGINT,
     time_unix_nano       BIGINT NOT NULL,
@@ -205,84 +179,81 @@ CREATE TABLE gauge_data_points (
     flags                INT    DEFAULT 0,
     attributes_json      JSON,
     exemplars_json       JSON,
-    CONSTRAINT fk_gauge_data_points_metrics FOREIGN KEY (metric_id) REFERENCES metrics (id) ON DELETE CASCADE
+    PRIMARY KEY (metric_id, time_unix_nano, id),
+    KEY idx_gauge_id (id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
-CREATE INDEX idx_gauge_metric_time ON gauge_data_points (metric_id, time_unix_nano DESC);
-CREATE INDEX idx_gauge_time        ON gauge_data_points (time_unix_nano DESC);
+-- Time access for retention (a batched delete by time).
+CREATE INDEX idx_gauge_time ON gauge_data_points (time_unix_nano);
 
--- Sum data points.
 CREATE TABLE sum_data_points (
-    id                      BIGINT AUTO_INCREMENT PRIMARY KEY,
-    metric_id               BIGINT      NOT NULL,
+    id                      BIGINT NOT NULL AUTO_INCREMENT,
+    metric_id               BIGINT       NOT NULL,
     start_time_unix_nano    BIGINT,
-    time_unix_nano          BIGINT      NOT NULL,
+    time_unix_nano          BIGINT       NOT NULL,
     value_double            DOUBLE,
     value_int               BIGINT,
-    aggregation_temporality VARCHAR(20) NOT NULL DEFAULT 'UNSPECIFIED'
+    aggregation_temporality VARCHAR(20)  NOT NULL DEFAULT 'UNSPECIFIED'
         CHECK (aggregation_temporality IN ('UNSPECIFIED', 'DELTA', 'CUMULATIVE')),
-    is_monotonic            TINYINT(1)  DEFAULT 0,
-    flags                   INT         DEFAULT 0,
+    is_monotonic            TINYINT(1)   DEFAULT 0,
+    flags                   INT          DEFAULT 0,
     attributes_json         JSON,
     exemplars_json          JSON,
-    CONSTRAINT fk_sum_data_points_metrics FOREIGN KEY (metric_id) REFERENCES metrics (id) ON DELETE CASCADE
+    PRIMARY KEY (metric_id, time_unix_nano, id),
+    KEY idx_sum_id (id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
--- Standalone time index added in 2.7.0: metric retention now deletes from the data-point
--- tables by time_unix_nano alone, which without this would full-scan.
-CREATE INDEX idx_sum_metric_time ON sum_data_points (metric_id, time_unix_nano DESC);
-CREATE INDEX idx_sum_time        ON sum_data_points (time_unix_nano DESC);
-CREATE INDEX idx_temporality     ON sum_data_points (aggregation_temporality);
+-- Time access for retention (a batched delete by time).
+CREATE INDEX idx_sum_time ON sum_data_points (time_unix_nano);
 
--- Histogram data points.
 CREATE TABLE histogram_data_points (
-    id                      BIGINT      AUTO_INCREMENT PRIMARY KEY,
-    metric_id               BIGINT      NOT NULL,
+    id                      BIGINT NOT NULL AUTO_INCREMENT,
+    metric_id               BIGINT       NOT NULL,
     start_time_unix_nano    BIGINT,
-    time_unix_nano          BIGINT      NOT NULL,
-    count                   BIGINT      NOT NULL,
+    time_unix_nano          BIGINT       NOT NULL,
+    count                   BIGINT       NOT NULL,
     sum_value               DOUBLE,
     bucket_counts           JSON,
     explicit_bounds         JSON,
-    aggregation_temporality VARCHAR(20) NOT NULL DEFAULT 'UNSPECIFIED'
+    aggregation_temporality VARCHAR(20)  NOT NULL DEFAULT 'UNSPECIFIED'
         CHECK (aggregation_temporality IN ('UNSPECIFIED', 'DELTA', 'CUMULATIVE')),
-    flags                   INT         DEFAULT 0,
+    flags                   INT          DEFAULT 0,
     min_value               DOUBLE,
     max_value               DOUBLE,
     attributes_json         JSON,
     exemplars_json          JSON,
-    CONSTRAINT fk_histogram_data_points_metrics FOREIGN KEY (metric_id) REFERENCES metrics (id) ON DELETE CASCADE
+    PRIMARY KEY (metric_id, time_unix_nano, id),
+    KEY idx_histogram_id (id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
-CREATE INDEX idx_histogram_metric_time ON histogram_data_points (metric_id, time_unix_nano DESC);
-CREATE INDEX idx_histogram_time        ON histogram_data_points (time_unix_nano DESC);
+-- Time access for retention (a batched delete by time).
+CREATE INDEX idx_histogram_time ON histogram_data_points (time_unix_nano);
 
--- Exponential histogram data points.
 CREATE TABLE exponential_histogram_data_points (
-    id                      BIGINT      AUTO_INCREMENT PRIMARY KEY,
-    metric_id               BIGINT      NOT NULL,
+    id                      BIGINT NOT NULL AUTO_INCREMENT,
+    metric_id               BIGINT       NOT NULL,
     start_time_unix_nano    BIGINT,
-    time_unix_nano          BIGINT      NOT NULL,
-    count                   BIGINT      NOT NULL,
+    time_unix_nano          BIGINT       NOT NULL,
+    count                   BIGINT       NOT NULL,
     sum_value               DOUBLE,
-    scale                   INT         NOT NULL,
-    zero_count              BIGINT      NOT NULL,
+    scale                   INT          NOT NULL,
+    zero_count              BIGINT       NOT NULL,
     positive_offset         INT,
     positive_bucket_counts  JSON,
     negative_offset         INT,
     negative_bucket_counts  JSON,
-    aggregation_temporality VARCHAR(20) NOT NULL DEFAULT 'UNSPECIFIED'
+    aggregation_temporality VARCHAR(20)  NOT NULL DEFAULT 'UNSPECIFIED'
         CHECK (aggregation_temporality IN ('UNSPECIFIED', 'DELTA', 'CUMULATIVE')),
-    flags                   INT         DEFAULT 0,
+    flags                   INT          DEFAULT 0,
     min_value               DOUBLE,
     max_value               DOUBLE,
     attributes_json         JSON,
     exemplars_json          JSON,
-    CONSTRAINT fk_exponential_histogram_data_points_metrics FOREIGN KEY (metric_id) REFERENCES metrics (id) ON DELETE CASCADE
+    PRIMARY KEY (metric_id, time_unix_nano, id),
+    KEY idx_exp_histogram_id (id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
-CREATE INDEX idx_exp_histogram_metric_time ON exponential_histogram_data_points (metric_id, time_unix_nano DESC);
-CREATE INDEX idx_exp_histogram_time        ON exponential_histogram_data_points (time_unix_nano DESC);
+-- Time access for retention (a batched delete by time).
+CREATE INDEX idx_exp_histogram_time ON exponential_histogram_data_points (time_unix_nano);
 
--- Summary data points.
 CREATE TABLE summary_data_points (
-    id                   BIGINT AUTO_INCREMENT PRIMARY KEY,
+    id                   BIGINT NOT NULL AUTO_INCREMENT,
     metric_id            BIGINT NOT NULL,
     start_time_unix_nano BIGINT,
     time_unix_nano       BIGINT NOT NULL,
@@ -291,14 +262,15 @@ CREATE TABLE summary_data_points (
     quantile_values      JSON,
     flags                INT    DEFAULT 0,
     attributes_json      JSON,
-    CONSTRAINT fk_summary_data_points_metrics FOREIGN KEY (metric_id) REFERENCES metrics (id) ON DELETE CASCADE
+    PRIMARY KEY (metric_id, time_unix_nano, id),
+    KEY idx_summary_id (id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
-CREATE INDEX idx_summary_metric_time ON summary_data_points (metric_id, time_unix_nano DESC);
-CREATE INDEX idx_summary_time        ON summary_data_points (time_unix_nano DESC);
+-- Time access for retention (a batched delete by time).
+CREATE INDEX idx_summary_time ON summary_data_points (time_unix_nano);
 
--- metric_last_seen (schema 2.13.2, list-pages-server-side plan Phase 5, decision 27): not a
--- column on metrics -- see PostgreSQL-Schema.sql's identical table for the full rationale (no
--- FK, so ingestion's metrics upsert and this table's touch worker can never deadlock).
+-- metric_last_seen: the metrics catalog's "has data in range" check reads this instead of scanning
+-- the five data-point tables. No FK to metrics (a FK would make every touch lock-check the
+-- metrics row, so ingestion's metrics upsert and this table's touch worker could deadlock).
 CREATE TABLE metric_last_seen (
     metric_id           BIGINT NOT NULL PRIMARY KEY,
     last_seen_unix_nano BIGINT NOT NULL
@@ -309,9 +281,13 @@ CREATE INDEX idx_metric_last_seen_last_seen ON metric_last_seen (last_seen_unix_
 -- LOGS TABLES
 -- =============================================================================
 
--- Default 0 for time_unix_nano handles OTLP records where TimeUnixNano is absent.
+-- Log records. Same append-target shape as spans: no unique key, no foreign keys, primary key
+-- (tenant_id, time_unix_nano, id) behind KEY (id). Default 0 for time_unix_nano handles OTLP
+-- records where TimeUnixNano is absent.
 CREATE TABLE log_records (
-    id                       BIGINT      AUTO_INCREMENT PRIMARY KEY,
+    id                       BIGINT      NOT NULL AUTO_INCREMENT,
+    tenant_id                BIGINT      NOT NULL,
+    service_name             VARCHAR(255),
     resource_id              BIGINT      NOT NULL,
     scope_id                 BIGINT      NOT NULL,
     time_unix_nano           BIGINT      NOT NULL DEFAULT 0,
@@ -324,216 +300,24 @@ CREATE TABLE log_records (
     body_value               LONGTEXT,
     dropped_attributes_count INT         DEFAULT 0,
     flags                    INT         DEFAULT 0,
-    trace_id                 CHAR(32),
-    span_id                  CHAR(16),
+    trace_id                 CHAR(32)    CHARACTER SET ascii COLLATE ascii_bin,
+    span_id                  CHAR(16)    CHARACTER SET ascii COLLATE ascii_bin,
     created_at               DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
     attributes_json          JSON,
-    CONSTRAINT fk_log_records_resources FOREIGN KEY (resource_id) REFERENCES resources (id),
-    CONSTRAINT fk_log_records_scopes    FOREIGN KEY (scope_id)    REFERENCES instrumentation_scopes (id)
+    PRIMARY KEY (tenant_id, time_unix_nano, id),
+    KEY idx_log_id (id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
--- idx_log_time dropped in 2.13.0: it is a pure left prefix of idx_log_time_id below, the new
--- keyset-paging tiebreak index (same provably-redundant reasoning as the 2.8.0 spans index
--- cleanup documented in CLAUDE.md).
-CREATE INDEX idx_log_time_id       ON log_records (time_unix_nano DESC, id DESC);
-CREATE INDEX idx_observed_time     ON log_records (observed_time_unix_nano  DESC);
-CREATE INDEX idx_severity          ON log_records (severity_number);
-CREATE INDEX idx_log_severity_time ON log_records (severity_number, time_unix_nano DESC);
-CREATE INDEX idx_log_trace_span    ON log_records (trace_id, span_id);
-CREATE INDEX idx_log_resource_time ON log_records (resource_id, time_unix_nano DESC);
-
--- =============================================================================
--- ROLLUP TABLES (schema 2.13.0, list-pages-server-side plan decisions 37-38)
--- =============================================================================
-
--- One row per signal + granularity, claimed by RollupWorker with an atomic
--- UPDATE ... WHERE lease_expires_at < now, the same pattern as alert_rules'
--- TryClaimFireAsync. No foreign keys: the worker's writes must never lock resources or
--- anything ingestion touches.
-CREATE TABLE rollup_state (
-    signal_name                   VARCHAR(20)  NOT NULL,
-    granularity              VARCHAR(10)  NOT NULL,
-    coverage_start_unix_nano BIGINT,
-    rolled_until_unix_nano   BIGINT       NOT NULL DEFAULT 0,
-    repassed_until_unix_nano BIGINT       NOT NULL DEFAULT 0,
-    lease_owner              VARCHAR(100),
-    lease_expires_at         DATETIME(6)  NOT NULL DEFAULT '1970-01-01 00:00:00',
-    PRIMARY KEY (signal_name, granularity)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
-
--- Per-minute log summary, recomputed from raw log_records by RollupWorker -- never
--- incremented during ingestion (decision 38). Severity groups match
--- LogReadRepositoryBase.GetLogHistogramAsync's six-group CASE exactly. No foreign key on
--- resource_id: the worker's writes must never lock resources.
-CREATE TABLE log_rollup_minute (
-    bucket_unix_nano BIGINT NOT NULL,
-    resource_id      BIGINT NOT NULL,
-    trace_count      INT    NOT NULL DEFAULT 0,
-    debug_count      INT    NOT NULL DEFAULT 0,
-    info_count       INT    NOT NULL DEFAULT 0,
-    warn_count       INT    NOT NULL DEFAULT 0,
-    error_count      INT    NOT NULL DEFAULT 0,
-    fatal_count      INT    NOT NULL DEFAULT 0,
-    PRIMARY KEY (bucket_unix_nano, resource_id)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
-CREATE INDEX idx_log_rollup_minute_bucket ON log_rollup_minute (bucket_unix_nano);
-
--- Same shape, one row per hour.
-CREATE TABLE log_rollup_hour (
-    bucket_unix_nano BIGINT NOT NULL,
-    resource_id      BIGINT NOT NULL,
-    trace_count      INT    NOT NULL DEFAULT 0,
-    debug_count      INT    NOT NULL DEFAULT 0,
-    info_count       INT    NOT NULL DEFAULT 0,
-    warn_count       INT    NOT NULL DEFAULT 0,
-    error_count      INT    NOT NULL DEFAULT 0,
-    fatal_count      INT    NOT NULL DEFAULT 0,
-    PRIMARY KEY (bucket_unix_nano, resource_id)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
-CREATE INDEX idx_log_rollup_hour_bucket ON log_rollup_hour (bucket_unix_nano);
-
--- Seed the two rows this phase needs (logs/minute, logs/hour); phase 3 adds traces/*.
--- Traces whose root span never arrived (schema 2.13.1, decision 41): one row per trace,
--- holding the anchor span (its earliest span, whose own parent does not exist anywhere) that
--- the rollup worker detected per finished minute. No foreign keys: the worker's writes must
--- never lock resources. Indexed to merge with idx_spans_root_time in the same order.
-CREATE TABLE orphan_roots (
-    trace_id             CHAR(32)     NOT NULL PRIMARY KEY,
-    span_id              CHAR(16)     NOT NULL,
-    resource_id          BIGINT       NOT NULL,
-    start_time_unix_nano BIGINT       NOT NULL,
-    end_time_unix_nano   BIGINT       NOT NULL,
-    detected_at          DATETIME(6)  NOT NULL DEFAULT CURRENT_TIMESTAMP(6)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
-CREATE INDEX idx_orphan_roots_start ON orphan_roots (start_time_unix_nano DESC, trace_id);
-
--- Per-minute trace summary (schema 2.13.1, decisions 37-38, 41): one row per minute, per
--- anchor span's resource, operation name (folded to '__other__' past the 200-distinct-name
--- cardinality guard) and inbound flag (anchor kind SERVER/CONSUMER). Counts traces whose
--- ANCHOR (null-parent root, or its orphan_roots span) starts in that minute; error flag and
--- duration are aggregated over the trace's full span set. lb_00..lb_39 are the fixed
--- latency-bucket counts (LatencyBucketSql) as plain columns so SQL can sum them across rows.
-CREATE TABLE trace_rollup_minute (
-    bucket_unix_nano BIGINT       NOT NULL,
-    resource_id      BIGINT       NOT NULL,
-    root_name        VARCHAR(255) NOT NULL,
-    inbound          TINYINT      NOT NULL,
-    trace_count      INT          NOT NULL DEFAULT 0,
-    error_count      INT          NOT NULL DEFAULT 0,
-    duration_sum_ms  DOUBLE       NOT NULL DEFAULT 0,
-    duration_max_ms  DOUBLE       NOT NULL DEFAULT 0,
-    lb_00 INT NOT NULL DEFAULT 0,
-    lb_01 INT NOT NULL DEFAULT 0,
-    lb_02 INT NOT NULL DEFAULT 0,
-    lb_03 INT NOT NULL DEFAULT 0,
-    lb_04 INT NOT NULL DEFAULT 0,
-    lb_05 INT NOT NULL DEFAULT 0,
-    lb_06 INT NOT NULL DEFAULT 0,
-    lb_07 INT NOT NULL DEFAULT 0,
-    lb_08 INT NOT NULL DEFAULT 0,
-    lb_09 INT NOT NULL DEFAULT 0,
-    lb_10 INT NOT NULL DEFAULT 0,
-    lb_11 INT NOT NULL DEFAULT 0,
-    lb_12 INT NOT NULL DEFAULT 0,
-    lb_13 INT NOT NULL DEFAULT 0,
-    lb_14 INT NOT NULL DEFAULT 0,
-    lb_15 INT NOT NULL DEFAULT 0,
-    lb_16 INT NOT NULL DEFAULT 0,
-    lb_17 INT NOT NULL DEFAULT 0,
-    lb_18 INT NOT NULL DEFAULT 0,
-    lb_19 INT NOT NULL DEFAULT 0,
-    lb_20 INT NOT NULL DEFAULT 0,
-    lb_21 INT NOT NULL DEFAULT 0,
-    lb_22 INT NOT NULL DEFAULT 0,
-    lb_23 INT NOT NULL DEFAULT 0,
-    lb_24 INT NOT NULL DEFAULT 0,
-    lb_25 INT NOT NULL DEFAULT 0,
-    lb_26 INT NOT NULL DEFAULT 0,
-    lb_27 INT NOT NULL DEFAULT 0,
-    lb_28 INT NOT NULL DEFAULT 0,
-    lb_29 INT NOT NULL DEFAULT 0,
-    lb_30 INT NOT NULL DEFAULT 0,
-    lb_31 INT NOT NULL DEFAULT 0,
-    lb_32 INT NOT NULL DEFAULT 0,
-    lb_33 INT NOT NULL DEFAULT 0,
-    lb_34 INT NOT NULL DEFAULT 0,
-    lb_35 INT NOT NULL DEFAULT 0,
-    lb_36 INT NOT NULL DEFAULT 0,
-    lb_37 INT NOT NULL DEFAULT 0,
-    lb_38 INT NOT NULL DEFAULT 0,
-    lb_39 INT NOT NULL DEFAULT 0,
-    PRIMARY KEY (bucket_unix_nano, resource_id, root_name, inbound)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
-CREATE INDEX idx_trace_rollup_minute_bucket ON trace_rollup_minute (bucket_unix_nano);
-
--- Same shape, one row per hour.
-CREATE TABLE trace_rollup_hour (
-    bucket_unix_nano BIGINT       NOT NULL,
-    resource_id      BIGINT       NOT NULL,
-    root_name        VARCHAR(255) NOT NULL,
-    inbound          TINYINT      NOT NULL,
-    trace_count      INT          NOT NULL DEFAULT 0,
-    error_count      INT          NOT NULL DEFAULT 0,
-    duration_sum_ms  DOUBLE       NOT NULL DEFAULT 0,
-    duration_max_ms  DOUBLE       NOT NULL DEFAULT 0,
-    lb_00 INT NOT NULL DEFAULT 0,
-    lb_01 INT NOT NULL DEFAULT 0,
-    lb_02 INT NOT NULL DEFAULT 0,
-    lb_03 INT NOT NULL DEFAULT 0,
-    lb_04 INT NOT NULL DEFAULT 0,
-    lb_05 INT NOT NULL DEFAULT 0,
-    lb_06 INT NOT NULL DEFAULT 0,
-    lb_07 INT NOT NULL DEFAULT 0,
-    lb_08 INT NOT NULL DEFAULT 0,
-    lb_09 INT NOT NULL DEFAULT 0,
-    lb_10 INT NOT NULL DEFAULT 0,
-    lb_11 INT NOT NULL DEFAULT 0,
-    lb_12 INT NOT NULL DEFAULT 0,
-    lb_13 INT NOT NULL DEFAULT 0,
-    lb_14 INT NOT NULL DEFAULT 0,
-    lb_15 INT NOT NULL DEFAULT 0,
-    lb_16 INT NOT NULL DEFAULT 0,
-    lb_17 INT NOT NULL DEFAULT 0,
-    lb_18 INT NOT NULL DEFAULT 0,
-    lb_19 INT NOT NULL DEFAULT 0,
-    lb_20 INT NOT NULL DEFAULT 0,
-    lb_21 INT NOT NULL DEFAULT 0,
-    lb_22 INT NOT NULL DEFAULT 0,
-    lb_23 INT NOT NULL DEFAULT 0,
-    lb_24 INT NOT NULL DEFAULT 0,
-    lb_25 INT NOT NULL DEFAULT 0,
-    lb_26 INT NOT NULL DEFAULT 0,
-    lb_27 INT NOT NULL DEFAULT 0,
-    lb_28 INT NOT NULL DEFAULT 0,
-    lb_29 INT NOT NULL DEFAULT 0,
-    lb_30 INT NOT NULL DEFAULT 0,
-    lb_31 INT NOT NULL DEFAULT 0,
-    lb_32 INT NOT NULL DEFAULT 0,
-    lb_33 INT NOT NULL DEFAULT 0,
-    lb_34 INT NOT NULL DEFAULT 0,
-    lb_35 INT NOT NULL DEFAULT 0,
-    lb_36 INT NOT NULL DEFAULT 0,
-    lb_37 INT NOT NULL DEFAULT 0,
-    lb_38 INT NOT NULL DEFAULT 0,
-    lb_39 INT NOT NULL DEFAULT 0,
-    PRIMARY KEY (bucket_unix_nano, resource_id, root_name, inbound)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
-CREATE INDEX idx_trace_rollup_hour_bucket ON trace_rollup_hour (bucket_unix_nano);
-
--- Seed the four rows this phase needs (logs/traces x minute/hour).
-INSERT INTO rollup_state (signal_name, granularity) VALUES ('logs', 'minute'), ('logs', 'hour'), ('traces', 'minute'), ('traces', 'hour')
-ON DUPLICATE KEY UPDATE signal_name = signal_name;
+-- Logs for a trace. The service filter is a residual predicate on the primary key.
+CREATE INDEX idx_log_trace ON log_records (trace_id);
 
 -- =============================================================================
 -- UTILITY TABLES
 -- =============================================================================
 
 CREATE TABLE schema_version (
-    version    VARCHAR(20) PRIMARY KEY,
+    version    VARCHAR(20) NOT NULL PRIMARY KEY,
     applied_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
--- NOTE: the schema_version row is seeded at the very END of this script (after all
--- tables and views), so a partial/failed apply never records a version that the
--- apply-schema.sh version gate would wrongly treat as "already applied".
 
 -- =============================================================================
 -- ALERTING TABLES
@@ -571,9 +355,9 @@ CREATE INDEX idx_alert_events_fired_at ON alert_events (fired_at DESC);
 -- RETENTION TABLES
 -- =============================================================================
 
--- Single global row (id = 1, enforced by the CHECK below) — see
--- IRetentionSettingsRepository for why this is untenanted and why UPDATE, never INSERT,
--- is the only mutation the app issues against it after the seed row below.
+-- Single global row (id = 1, enforced by the CHECK below) -- see IRetentionSettingsRepository for
+-- why this is untenanted and why UPDATE, never INSERT, is the only mutation the app issues
+-- against it after the seed row below.
 CREATE TABLE retention_settings (
     id                    SMALLINT    NOT NULL PRIMARY KEY DEFAULT 1,
     trace_retention_days  INT         NOT NULL,
@@ -582,106 +366,8 @@ CREATE TABLE retention_settings (
     updated_at            DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
     CONSTRAINT chk_retention_settings_singleton CHECK (id = 1)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
--- Seeded with today's implicit defaults (traces 90d, logs 90d, metrics 180d).
 INSERT INTO retention_settings (id, trace_retention_days, log_retention_days, metric_retention_days)
 VALUES (1, 90, 90, 180);
-
--- =============================================================================
--- VIEWS
--- =============================================================================
-
-DROP VIEW IF EXISTS log_severity_stats;
-DROP VIEW IF EXISTS service_map_detailed;
-DROP VIEW IF EXISTS service_map;
-DROP VIEW IF EXISTS trace_summary;
-
--- Trace summary: aggregated span counts and timing per trace.
-CREATE VIEW trace_summary AS
-SELECT
-    s.trace_id                                                AS trace_id_hex,
-    s.trace_id,
-    COUNT(*)                                                  AS span_count,
-    MIN(s.start_time_unix_nano)                               AS trace_start_time,
-    MAX(s.end_time_unix_nano)                                 AS trace_end_time,
-    MAX(s.end_time_unix_nano) - MIN(s.start_time_unix_nano)   AS trace_duration_ns,
-    r.id                                                      AS resource_id
-FROM spans s
-JOIN resources r ON s.resource_id = r.id
-GROUP BY s.trace_id, r.id;
-
--- Service map: service-to-service call relationships extracted from span parent-child pairs.
--- The ->> operator (JSON_UNQUOTE(JSON_EXTRACT(...))) replaces SQL Server's JSON_VALUE.
--- The attribute key "service.name" contains a dot, so the JSON path quotes it: $."service.name".
-CREATE VIEW service_map AS
-SELECT
-    parent_res.service_name AS parent_service,
-    child_res.service_name AS child_service,
-    child.kind                                         AS span_kind,
-    COUNT(*)                                           AS call_count
-FROM spans child
-INNER JOIN spans parent
-    ON child.parent_span_id = parent.span_id
-   AND child.trace_id       = parent.trace_id
-INNER JOIN resources parent_res ON parent.resource_id = parent_res.id
-INNER JOIN resources child_res  ON child.resource_id  = child_res.id
-WHERE
-    parent_res.service_name IS NOT NULL
-    AND child_res.service_name IS NOT NULL
-    AND parent_res.service_name <>
-        child_res.service_name
-GROUP BY
-    parent_res.service_name,
-    child_res.service_name,
-    child.kind;
-
--- Service map with performance metrics.
-CREATE VIEW service_map_detailed AS
-SELECT
-    parent_res.service_name                              AS parent_service,
-    child_res.service_name                              AS child_service,
-    child.kind                                                                     AS span_kind,
-    COUNT(*)                                                                       AS call_count,
-    AVG(child.end_time_unix_nano - child.start_time_unix_nano) / 1000000           AS avg_duration_ms,
-    MIN(child.end_time_unix_nano - child.start_time_unix_nano) / 1000000           AS min_duration_ms,
-    MAX(child.end_time_unix_nano - child.start_time_unix_nano) / 1000000           AS max_duration_ms,
-    SUM(CASE WHEN child.status_code = 'ERROR' THEN 1 ELSE 0 END)                   AS error_count,
-    SUM(CASE WHEN child.status_code = 'ERROR' THEN 1 ELSE 0 END) / COUNT(*) * 100  AS error_rate
-FROM spans child
-INNER JOIN spans parent
-    ON child.parent_span_id = parent.span_id
-   AND child.trace_id       = parent.trace_id
-INNER JOIN resources parent_res ON parent.resource_id = parent_res.id
-INNER JOIN resources child_res  ON child.resource_id  = child_res.id
-WHERE
-    parent_res.service_name IS NOT NULL
-    AND child_res.service_name IS NOT NULL
-    AND parent_res.service_name <>
-        child_res.service_name
-GROUP BY
-    parent_res.service_name,
-    child_res.service_name,
-    child.kind;
-
--- Log severity distribution by day.
--- SQL Server used a regular view; MySQL does the same (computed on demand).
--- The day bucket integer-divides nanoseconds down to whole days since epoch (DIV, since
--- MySQL '/' is floating-point), then converts back to a DATE via DATE_ADD.
-CREATE VIEW log_severity_stats AS
-WITH bucketed AS (
-    SELECT
-        severity_text,
-        severity_number,
-        (time_unix_nano DIV 1000000000 DIV 86400) AS day_bucket
-    FROM log_records
-    WHERE time_unix_nano > 0
-)
-SELECT
-    severity_text,
-    severity_number,
-    COUNT(*)                                       AS count,
-    DATE_ADD('1970-01-01', INTERVAL day_bucket DAY) AS log_date
-FROM bucketed
-GROUP BY severity_text, severity_number, day_bucket;
 
 -- =============================================================================
 -- SCHEMA VERSION (recorded LAST)
@@ -689,19 +375,15 @@ GROUP BY severity_text, severity_number, day_bucket;
 -- Only inserted when every statement above succeeded, so a partial apply cannot
 -- leave a false version marker for the apply-schema.sh gate.
 INSERT INTO schema_version (version, applied_at)
-VALUES ('2.13.3', CURRENT_TIMESTAMP(6))
+VALUES ('3.0.0', CURRENT_TIMESTAMP(6))
 ON DUPLICATE KEY UPDATE applied_at = CURRENT_TIMESTAMP(6);
 
 -- =============================================================================
 -- POST-APPLY VERIFICATION (MANUAL SQL CHECKS)
 -- =============================================================================
--- 1) List all base tables (expect 19)
+-- 1) List all base tables
 --    SELECT table_name FROM information_schema.tables
 --    WHERE table_schema = DATABASE() AND table_type = 'BASE TABLE' ORDER BY table_name;
 --
--- 2) List all views (expect 4)
---    SELECT table_name FROM information_schema.views
---    WHERE table_schema = DATABASE() ORDER BY table_name;
---
--- 3) Verify schema version
+-- 2) Verify schema version
 --    SELECT * FROM schema_version;

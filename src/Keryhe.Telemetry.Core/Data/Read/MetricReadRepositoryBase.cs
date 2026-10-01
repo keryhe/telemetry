@@ -41,9 +41,9 @@ public abstract class MetricReadRepositoryBase : DapperReadRepository, IMetricRe
 
     private const string MetricSelect = """
         SELECT m.id AS Id, m.name AS Name, m.description AS Description, m.unit AS Unit,
-               m.type AS Type, m.created_at AS CreatedAt, r.attributes_json AS ResourceAttributesJson
-        FROM metrics m JOIN resources r ON m.resource_id = r.id
-        WHERE r.tenant_id = @tenantId
+               m.type AS Type, m.created_at AS CreatedAt, m.service_name AS ServiceName
+        FROM metrics m
+        WHERE m.tenant_id = @tenantId
         """;
 
     // =========================================================================
@@ -54,7 +54,7 @@ public abstract class MetricReadRepositoryBase : DapperReadRepository, IMetricRe
     {
         await using var conn = await OpenConnectionAsync(cancellationToken);
         var exists = await conn.QuerySingleOrDefaultAsync<long?>(new CommandDefinition(
-            "SELECT m.id FROM metrics m JOIN resources r ON m.resource_id = r.id WHERE m.id = @id AND r.tenant_id = @tenantId",
+            "SELECT m.id FROM metrics m WHERE m.id = @id AND m.tenant_id = @tenantId",
             new { id, tenantId = TenantId }, cancellationToken: cancellationToken));
         // Parity with the former EF repository: a found metric maps to an (intentionally empty) MetricModel.
         return exists == null ? null : new MetricModel();
@@ -70,7 +70,7 @@ public abstract class MetricReadRepositoryBase : DapperReadRepository, IMetricRe
             MetricSelect + " AND m.name = @name", new { tenantId = TenantId, name }, cancellationToken: cancellationToken))).ToList();
 
         var stats = await GetMetricStatsAsync(conn, rows, cancellationToken);
-        return rows.Select(m => ToMetricInfo(m, ExtractServiceName(DeserializeAttributes(m.ResourceAttributesJson)) ?? "", stats.GetValueOrDefault(m.Id))).ToList();
+        return rows.Select(m => ToMetricInfo(m, Svc(m.ServiceName) ?? "", stats.GetValueOrDefault(m.Id))).ToList();
     }
 
     public async Task<List<MetricInfo>> GetMetricsByTypeAsync(MetricType type, CancellationToken cancellationToken = default)
@@ -80,7 +80,7 @@ public abstract class MetricReadRepositoryBase : DapperReadRepository, IMetricRe
             MetricSelect + " AND m.type = @type", new { tenantId = TenantId, type = type.ToString() }, cancellationToken: cancellationToken))).ToList();
 
         var stats = await GetMetricStatsAsync(conn, rows, cancellationToken);
-        return rows.Select(m => ToMetricInfo(m, ExtractServiceName(DeserializeAttributes(m.ResourceAttributesJson)) ?? "", stats.GetValueOrDefault(m.Id))).ToList();
+        return rows.Select(m => ToMetricInfo(m, Svc(m.ServiceName) ?? "", stats.GetValueOrDefault(m.Id))).ToList();
     }
 
     /// <summary>
@@ -95,14 +95,13 @@ public abstract class MetricReadRepositoryBase : DapperReadRepository, IMetricRe
 
         var parameters = new DynamicParameters();
         parameters.Add("tenantId", TenantId);
-        var where = "r.tenant_id = @tenantId";
+        var where = "m.tenant_id = @tenantId";
         if (startTime.HasValue && endTime.HasValue)
             where += " AND " + SeenInRangeClause(startTime.Value, endTime.Value, parameters);
 
         var sql = $"""
             SELECT DISTINCT m.name AS Name, m.type AS Type
             FROM metrics m
-            JOIN resources r ON m.resource_id = r.id
             LEFT JOIN {MetricLastSeenSql} mls ON mls.metric_id = m.id
             WHERE {where}
             """;
@@ -240,7 +239,7 @@ public abstract class MetricReadRepositoryBase : DapperReadRepository, IMetricRe
         if (!string.IsNullOrWhiteSpace(query.Service))
         {
             parameters.Add("service", query.Service);
-            clauses.Add($"{ResourceServiceNameExpr()} = @service");
+            clauses.Add("m.service_name = @service");
         }
         if (query.Type.HasValue)
         {
@@ -271,7 +270,7 @@ public abstract class MetricReadRepositoryBase : DapperReadRepository, IMetricRe
                 throw new ArgumentException("Invalid or stale cursor.");
         }
 
-        var baseWhere = $"r.tenant_id = @tenantId AND {seenClause}{filterClause}";
+        var baseWhere = $"m.tenant_id = @tenantId AND {seenClause}{filterClause}";
 
         List<MetricRow> rows;
         bool forward;
@@ -338,11 +337,11 @@ public abstract class MetricReadRepositoryBase : DapperReadRepository, IMetricRe
             }
         }
 
-        var items = displayRows.Select(m => ToMetricInfo(m, ExtractServiceName(DeserializeAttributes(m.ResourceAttributesJson)))).ToList();
+        var items = displayRows.Select(m => ToMetricInfo(m, Svc(m.ServiceName))).ToList();
 
         var (total, timedOut) = await TimedQuery.RunAsync(
             async (timeoutSeconds, ct) => await conn.ExecuteScalarAsync<long>(new CommandDefinition(
-                $"SELECT COUNT(*) FROM metrics m JOIN resources r ON m.resource_id = r.id LEFT JOIN {MetricLastSeenSql} mls ON mls.metric_id = m.id WHERE {baseWhere}",
+                $"SELECT COUNT(*) FROM metrics m LEFT JOIN {MetricLastSeenSql} mls ON mls.metric_id = m.id WHERE {baseWhere}",
                 parameters, commandTimeout: timeoutSeconds, cancellationToken: ct)),
             _summaryTimeoutSeconds, cancellationToken);
 
@@ -366,9 +365,8 @@ public abstract class MetricReadRepositoryBase : DapperReadRepository, IMetricRe
         var order = descending ? "DESC" : "ASC";
         var sql = $"""
             SELECT m.id AS Id, m.name AS Name, m.description AS Description, m.unit AS Unit,
-                   m.type AS Type, m.created_at AS CreatedAt, r.attributes_json AS ResourceAttributesJson
+                   m.type AS Type, m.created_at AS CreatedAt, m.service_name AS ServiceName
             FROM metrics m
-            JOIN resources r ON m.resource_id = r.id
             LEFT JOIN {MetricLastSeenSql} mls ON mls.metric_id = m.id
             WHERE {where}
             ORDER BY m.created_at {order}, m.id {order}
@@ -393,7 +391,7 @@ public abstract class MetricReadRepositoryBase : DapperReadRepository, IMetricRe
     {
         var (result, timedOut) = await TimedQuery.RunAsync(
             async (timeoutSeconds, ct) => await conn.ExecuteScalarAsync<long>(new CommandDefinition(
-                $"SELECT COUNT(*) FROM metrics m JOIN resources r ON m.resource_id = r.id LEFT JOIN {MetricLastSeenSql} mls ON mls.metric_id = m.id WHERE {where}",
+                $"SELECT COUNT(*) FROM metrics m LEFT JOIN {MetricLastSeenSql} mls ON mls.metric_id = m.id WHERE {where}",
                 parameters, commandTimeout: timeoutSeconds, cancellationToken: ct)),
             _summaryTimeoutSeconds, cancellationToken);
         return timedOut ? null : result;
@@ -426,7 +424,7 @@ public abstract class MetricReadRepositoryBase : DapperReadRepository, IMetricRe
                 throw new ArgumentException("Invalid or stale cursor.");
         }
 
-        var baseWhere = $"r.tenant_id = @tenantId AND {seenClause}{filterClause}";
+        var baseWhere = $"m.tenant_id = @tenantId AND {seenClause}{filterClause}";
 
         List<NameGroupRow> rows;
         bool forward;
@@ -502,9 +500,8 @@ public abstract class MetricReadRepositoryBase : DapperReadRepository, IMetricRe
 
             var detailSql = $"""
                 SELECT m.name AS Name, m.description AS Description, m.unit AS Unit, m.type AS Type,
-                       m.created_at AS CreatedAt, r.attributes_json AS ResourceAttributesJson
+                       m.created_at AS CreatedAt, m.service_name AS ServiceName
                 FROM metrics m
-                JOIN resources r ON m.resource_id = r.id
                 LEFT JOIN {MetricLastSeenSql} mls ON mls.metric_id = m.id
                 WHERE {baseWhere} AND m.name IN ({namesList})
                 """;
@@ -515,7 +512,7 @@ public abstract class MetricReadRepositoryBase : DapperReadRepository, IMetricRe
             {
                 var group = byName.GetValueOrDefault(row.Name) ?? new List<MetricRow>();
                 var services = group
-                    .Select(r => ExtractServiceName(DeserializeAttributes(r.ResourceAttributesJson)))
+                    .Select(r => Svc(r.ServiceName))
                     .Where(s => !string.IsNullOrEmpty(s))
                     .Distinct()
                     .OrderBy(s => s)
@@ -540,7 +537,6 @@ public abstract class MetricReadRepositoryBase : DapperReadRepository, IMetricRe
                 SELECT COUNT(*) FROM (
                     SELECT m.name
                     FROM metrics m
-                    JOIN resources r ON m.resource_id = r.id
                     LEFT JOIN {MetricLastSeenSql} mls ON mls.metric_id = m.id
                     WHERE {baseWhere}
                     GROUP BY m.name
@@ -570,7 +566,6 @@ public abstract class MetricReadRepositoryBase : DapperReadRepository, IMetricRe
         var sql = $"""
             SELECT m.name AS Name, MAX(m.created_at) AS NewestCreatedAt, COUNT(*) AS InstanceCount
             FROM metrics m
-            JOIN resources r ON m.resource_id = r.id
             LEFT JOIN {MetricLastSeenSql} mls ON mls.metric_id = m.id
             WHERE {baseWhere}
             GROUP BY m.name
@@ -606,7 +601,6 @@ public abstract class MetricReadRepositoryBase : DapperReadRepository, IMetricRe
                 SELECT COUNT(*) FROM (
                     SELECT m.name
                     FROM metrics m
-                    JOIN resources r ON m.resource_id = r.id
                     LEFT JOIN {MetricLastSeenSql} mls ON mls.metric_id = m.id
                     WHERE {where}
                     GROUP BY m.name
@@ -686,8 +680,8 @@ public abstract class MetricReadRepositoryBase : DapperReadRepository, IMetricRe
         var type = Enum.Parse<MetricType>(metrics[0].Type);
         var unit = metrics[0].Unit;
         var metricIds = metrics.Select(m => m.Id).ToList();
-        var serviceNameByMetricId = metrics.ToDictionary(m => m.Id,
-            m => ExtractServiceName(DeserializeAttributes(m.ResourceAttributesJson)) ?? "unknown");
+        var serviceNameByMetricId = ToDictionaryFirst(metrics, m => m.Id,
+            m => Svc(m.ServiceName) ?? "unknown");
 
         var points = Math.Clamp(query.Points, 1, 1000);
         var top = Math.Max(1, query.Top);
@@ -1902,7 +1896,7 @@ public abstract class MetricReadRepositoryBase : DapperReadRepository, IMetricRe
         var table = TableFor(type);
         var isCountTable = type is MetricType.HISTOGRAM or MetricType.EXPONENTIAL_HISTOGRAM;
         var metricIds = metrics.Select(m => m.Id).ToList();
-        var serviceNameByMetricId = metrics.ToDictionary(m => m.Id, m => ExtractServiceName(DeserializeAttributes(m.ResourceAttributesJson)) ?? "unknown");
+        var serviceNameByMetricId = ToDictionaryFirst(metrics, m => m.Id, m => Svc(m.ServiceName) ?? "unknown");
 
         var (labelClause, lp) = LabelFilterClause(query.LabelFilters);
         var (timeClause, tp) = TimeRange(query.Start, query.End);
@@ -2113,7 +2107,7 @@ public abstract class MetricReadRepositoryBase : DapperReadRepository, IMetricRe
         foreach (var group in metrics.GroupBy(m => Enum.Parse<MetricType>(m.Type)))
         {
             if (group.Key == MetricType.SUMMARY) continue;
-            var serviceNameByMetricId = group.ToDictionary(m => m.Id, m => ExtractServiceName(DeserializeAttributes(m.ResourceAttributesJson)) ?? "unknown");
+            var serviceNameByMetricId = ToDictionaryFirst(group, m => m.Id, m => Svc(m.ServiceName) ?? "unknown");
             var ids = group.Select(m => m.Id).ToList();
 
             var (rows, rowsReturned) = await ScanExemplarRowsAsync(conn, group.Key, ids, query.Start, query.End, cap, query.LabelFilters, cancellationToken);
@@ -2240,21 +2234,13 @@ public abstract class MetricReadRepositoryBase : DapperReadRepository, IMetricRe
         {
             var rows = await conn.QueryAsync<LatestValueRow>(new CommandDefinition($"""
                 SELECT m.name AS MetricName, dp.time_unix_nano AS TimeUnixNano,
-                       COALESCE(dp.value_double, dp.value_int, 0) AS Value,
-                       r.attributes_json AS ResourceAttributesJson
+                       COALESCE(dp.value_double, dp.value_int, 0) AS Value
                 FROM {table} dp
                 JOIN metrics m   ON dp.metric_id = m.id
-                JOIN resources r ON m.resource_id = r.id
-                WHERE r.tenant_id = @tenantId
-                """, new { tenantId = TenantId }, cancellationToken: cancellationToken));
+                WHERE m.tenant_id = @tenantId AND m.service_name = @service
+                """, new { tenantId = TenantId, service = serviceName }, cancellationToken: cancellationToken));
 
             var values = rows
-                .Where(x =>
-                {
-                    var attrs = DeserializeAttributes(x.ResourceAttributesJson);
-                    return attrs != null && attrs.ContainsKey("service.name") &&
-                           attrs["service.name"]?.ToString() == serviceName;
-                })
                 .GroupBy(x => x.MetricName)
                 .Select(g => new { MetricName = g.Key, LatestValue = g.OrderByDescending(x => x.TimeUnixNano).First().Value });
 
@@ -2268,19 +2254,9 @@ public abstract class MetricReadRepositoryBase : DapperReadRepository, IMetricRe
     public async Task<Dictionary<string, int>> GetMetricCountsByTypeAsync(string? serviceName = null, CancellationToken cancellationToken = default)
     {
         await using var conn = await OpenConnectionAsync(cancellationToken);
-        var rows = (await conn.QueryAsync<MetricRow>(new CommandDefinition(MetricSelect, new { tenantId = TenantId }, cancellationToken: cancellationToken))).ToList();
+        var rows = await QueryMetricRowsAsync(conn, serviceName, cancellationToken);
 
-        IEnumerable<MetricRow> filtered = rows;
-        if (!string.IsNullOrEmpty(serviceName))
-        {
-            filtered = rows.Where(m =>
-            {
-                var attrs = DeserializeAttributes(m.ResourceAttributesJson);
-                return attrs != null && attrs.ContainsKey("service.name") && attrs["service.name"]?.ToString() == serviceName;
-            });
-        }
-
-        return filtered
+        return rows
             .GroupBy(m => Enum.Parse<MetricType>(m.Type))
             .ToDictionary(g => g.Key.ToString(), g => g.Count());
     }
@@ -2288,19 +2264,17 @@ public abstract class MetricReadRepositoryBase : DapperReadRepository, IMetricRe
     public async Task<List<string>> GetUniqueMetricNamesAsync(string? serviceName = null, CancellationToken cancellationToken = default)
     {
         await using var conn = await OpenConnectionAsync(cancellationToken);
-        var rows = (await conn.QueryAsync<MetricRow>(new CommandDefinition(MetricSelect, new { tenantId = TenantId }, cancellationToken: cancellationToken))).ToList();
+        var rows = await QueryMetricRowsAsync(conn, serviceName, cancellationToken);
 
-        IEnumerable<MetricRow> filtered = rows;
-        if (!string.IsNullOrEmpty(serviceName))
-        {
-            filtered = rows.Where(m =>
-            {
-                var attrs = DeserializeAttributes(m.ResourceAttributesJson);
-                return attrs != null && attrs.ContainsKey("service.name") && attrs["service.name"]?.ToString() == serviceName;
-            });
-        }
+        return rows.Select(m => m.Name).Distinct().OrderBy(name => name).ToList();
+    }
 
-        return filtered.Select(m => m.Name).Distinct().OrderBy(name => name).ToList();
+    /// <summary>The tenant's metrics catalog rows, narrowed to <paramref name="serviceName"/> in SQL when given.</summary>
+    private async Task<List<MetricRow>> QueryMetricRowsAsync(DbConnection conn, string? serviceName, CancellationToken cancellationToken)
+    {
+        var sql = string.IsNullOrEmpty(serviceName) ? MetricSelect : MetricSelect + " AND m.service_name = @service";
+        return (await conn.QueryAsync<MetricRow>(new CommandDefinition(
+            sql, new { tenantId = TenantId, service = serviceName }, cancellationToken: cancellationToken))).ToList();
     }
 
     /// <summary>Row cap for the label picker's distinct-attribute-set scan (decision 25).</summary>
@@ -2479,6 +2453,9 @@ public abstract class MetricReadRepositoryBase : DapperReadRepository, IMetricRe
         }
     }
 
+    // ClickHouse stores a missing service name as '' (non-Nullable column); treat it as absent everywhere.
+    private static string? Svc(string? serviceName) => string.IsNullOrEmpty(serviceName) ? null : serviceName;
+
     private static MetricInfo ToMetricInfo(MetricRow m, string? serviceName, MetricStat? stat = null) => new()
     {
         Id = m.Id,
@@ -2559,7 +2536,7 @@ public abstract class MetricReadRepositoryBase : DapperReadRepository, IMetricRe
         public string? Unit { get; set; }
         public string Type { get; set; } = null!;
         public DateTime CreatedAt { get; set; }
-        public string? ResourceAttributesJson { get; set; }
+        public string? ServiceName { get; set; }
     }
 
     private sealed class LatestValueRow
@@ -2567,7 +2544,6 @@ public abstract class MetricReadRepositoryBase : DapperReadRepository, IMetricRe
         public string MetricName { get; set; } = null!;
         public long TimeUnixNano { get; set; }
         public double Value { get; set; }
-        public string? ResourceAttributesJson { get; set; }
     }
 
     /// <summary>Wide row DTO shared by every Phase 4 bucketed-query projection; a given SQL text only selects the subset of columns it needs, and Dapper leaves the rest at their default.</summary>

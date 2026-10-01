@@ -6,8 +6,9 @@ namespace Keryhe.Telemetry.TestInfrastructure.Containers;
 /// </summary>
 /// <param name="Diagnostics">Apply the per-provider diagnostic configuration (pg_stat_statements, Query Store, deadlock printing, ...).</param>
 /// <param name="CpuLimit">CPU cap for the container (e.g. 4 = four cores); null for unlimited.</param>
+/// <param name="CpusetCpus">CPUs the container may run on (Docker's <c>--cpuset-cpus</c>, e.g. "0-3"); null leaves it on the shared pool. Under Docker Desktop these are CPUs of the Linux VM, which itself shares the host.</param>
 /// <param name="MemoryLimitBytes">Memory cap for the container; null for unlimited.</param>
-public sealed record ContainerOptions(bool Diagnostics = false, double? CpuLimit = null, long? MemoryLimitBytes = null)
+public sealed record ContainerOptions(bool Diagnostics = false, double? CpuLimit = null, long? MemoryLimitBytes = null, string? CpusetCpus = null)
 {
     public static ContainerOptions Default { get; } = new();
 
