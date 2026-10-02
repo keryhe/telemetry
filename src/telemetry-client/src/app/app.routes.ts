@@ -2,21 +2,11 @@ import { Routes } from '@angular/router';
 import { ShellComponent } from './layout/shell/shell.component';
 
 export const routes: Routes = [
-  { path: '', redirectTo: 'global', pathMatch: 'full' },
+  { path: '', redirectTo: 'dashboard', pathMatch: 'full' },
   {
     path: '',
     component: ShellComponent,
     children: [
-      {
-        // A child of the shell, not a sibling: the Global Dashboard keeps the toolbar (branding,
-        // time-range picker, theme toggle) and the page scroll contract.
-        path: 'global',
-        title: 'Global',
-        loadComponent: () =>
-          import('./features/global-dashboard/global-dashboard.component').then(
-            (m) => m.GlobalDashboardComponent
-          ),
-      },
       {
         path: 'dashboard',
         title: 'Dashboard',

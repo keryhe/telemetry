@@ -193,7 +193,7 @@ public sealed class TraceSummaryResult
     public string Source { get; init; } = "raw";
     public List<TraceVolumeBucket> Buckets { get; init; } = [];
 
-    /// <summary>Window-wide totals/percentiles over inbound-request anchors (decision 12), including <see cref="TraceWindowSummary.LastTraceStartTime"/>.</summary>
+    /// <summary>Window-wide totals/percentiles over inbound-request anchors (decision 12).</summary>
     public TraceWindowSummary Summary { get; init; } = new();
     public List<ServiceStats> Services { get; init; } = [];
     public List<TraceLatencyBucket> LatencyBuckets { get; init; } = [];
@@ -292,16 +292,6 @@ public sealed class TraceWindowSummary
     public double P50Ms { get; init; }
     public double P95Ms { get; init; }
     public double P99Ms { get; init; }
-
-    /// <summary>Distinct root-span services seen in the window (matches <c>Services.Count</c>).</summary>
-    public int ServiceCount { get; init; }
-
-    /// <summary>
-    /// Start time of the most recent trace in the window, or null when there were none. Bounded
-    /// by the query range, so it answers "is this still moving?" — not "when did this tenant
-    /// last report?", which needs an unbounded lookup.
-    /// </summary>
-    public DateTime? LastTraceStartTime { get; init; }
 }
 
 /// <summary>One bucket of the log volume-by-severity histogram.</summary>

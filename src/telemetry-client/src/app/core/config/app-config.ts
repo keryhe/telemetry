@@ -3,9 +3,7 @@ import type { HealthThresholds } from '../../shared/config/health-thresholds';
 
 /** A threshold override: every field optional, merged field by field over the built-in defaults. */
 export type HealthThresholdOverrides = {
-  [K in keyof HealthThresholds]?: HealthThresholds[K] extends number
-    ? number
-    : Partial<HealthThresholds[K]>;
+  [K in keyof HealthThresholds]?: Partial<HealthThresholds[K]>;
 };
 
 /**
@@ -42,7 +40,7 @@ export interface AppConfig {
   brandTagline: string;
 
   /**
-   * Overrides for the Global Dashboard's health thresholds, present only when the host configured
+   * Overrides for the Dashboard's health thresholds, present only when the host configured
    * some. The defaults stay in `health-thresholds.ts`; this is merged over them in `main.ts`, so
    * it is deliberately not part of {@link DEFAULT_APP_CONFIG}.
    */
@@ -60,7 +58,7 @@ export const DEFAULT_APP_CONFIG: AppConfig = {
 };
 
 /**
- * Injected by the eight `*ApiService` classes to build their base URLs.
+ * Injected by the seven `*ApiService` classes to build their base URLs.
  *
  * Carries a default factory *and* is explicitly provided in `main.ts`, the same belt-and-braces
  * arrangement as `HEALTH_THRESHOLDS_TOKEN`: the factory keeps the token usable in tests and in

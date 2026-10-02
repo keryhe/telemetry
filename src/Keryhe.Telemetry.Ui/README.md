@@ -64,22 +64,16 @@ precedence, configuration first).
 
 ### Health thresholds
 
-The Global Dashboard labels each tenant `healthy`, `warning`, `degraded`, `slow tail`, `silent` or
-`unknown` from a handful of thresholds. The defaults are built into the bundle; set any of them
-under `TelemetryUi:HealthThresholds` to retune a deployment without rebuilding. Every key is
-optional, and partial overrides merge field by field. Rates are 0-1 fractions, durations are
-milliseconds. The settings apply to every tenant.
+The Dashboard colours its Error Rate card from a warn and a critical error-rate threshold. The
+defaults are built into the bundle; set either under `TelemetryUi:HealthThresholds:ErrorRate` to
+retune a deployment without rebuilding. Both keys are optional, and a partial override merges field
+by field. Rates are 0-1 fractions. The setting applies to every tenant.
 
 ```jsonc
 {
   "TelemetryUi": {
     "HealthThresholds": {
-      "ErrorRate":    { "Warn": 0.01, "Critical": 0.05 },  // warning / degraded
-      "P95Ms":        { "Warn": 500,  "Critical": 1500 },  // warning / degraded
-      "LogErrorRate": { "Warn": 0.05, "Critical": 0.20 },  // Critical raises warning; Warn only colours the count
-      "MinSamples": 100,                                   // traces needed before latency rules apply
-      "TailRatio": 2,                                      // p99 above this multiple of p95 is a slow tail
-      "SilentAfterMs": 300000                              // empty window and nothing seen this long: silent
+      "ErrorRate": { "Warn": 0.01, "Critical": 0.05 }  // warn / error colouring
     }
   }
 }

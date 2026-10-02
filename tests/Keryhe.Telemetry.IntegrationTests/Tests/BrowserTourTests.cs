@@ -43,8 +43,7 @@ public class BrowserTourTests
         var steps = TourPlan.Build("6h", new TourOptions(), Full);
         var names = steps.Select(s => s.Name).ToList();
 
-        Assert.Equal("global", names[0]);
-        Assert.Equal("dashboard", names[1]);
+        Assert.Equal("dashboard", names[0]);
         foreach (var page in new[] { "traces", "trace-detail", "metrics", "metric-detail", "logs", "alerts", "settings" })
             Assert.Contains(steps, s => s.Page == page);
         Assert.Equal(["traces:next-1", "traces:next-2", "traces:next-3"], names.Where(n => n.StartsWith("traces:next")));

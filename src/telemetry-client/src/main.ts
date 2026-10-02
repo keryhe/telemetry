@@ -8,7 +8,7 @@ import {
 } from './app/shared/config/health-thresholds';
 
 // Deployment config is fetched before bootstrap rather than in an app initializer so that
-// APP_CONFIG is already a settled value when the first `inject(APP_CONFIG)` runs. The eight
+// APP_CONFIG is already a settled value when the first `inject(APP_CONFIG)` runs. The seven
 // *ApiService classes read it in a field initializer, so an initializer-based load would be a
 // race: any service constructed during bootstrap would capture the default and keep it.
 loadAppConfig()

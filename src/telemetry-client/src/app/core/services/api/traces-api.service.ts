@@ -50,14 +50,12 @@ export interface TraceWindowSummary {
   p50Ms: number;
   p95Ms: number;
   p99Ms: number;
-  serviceCount: number;
-  lastTraceStartTime: Date | null;
 }
 
 interface TraceSummaryDto {
   source: 'rollup' | 'raw';
   buckets: (TimeBucket & { timestamp: string })[];
-  summary: Omit<TraceWindowSummary, 'lastTraceStartTime'> & { lastTraceStartTime: string | null };
+  summary: TraceWindowSummary;
   services: ServiceStats[];
   latencyBuckets: (Omit<TraceLatencyBucket, 'xStart' | 'xEnd'> & { xStart: string; xEnd: string })[];
   listTotal: number;
@@ -101,7 +99,7 @@ export class TracesApiService {
       map((dto) => ({
         source: dto.source,
         buckets: dto.buckets.map((b) => ({ ...b, timestamp: new Date(b.timestamp) })),
-        summary: { ...dto.summary, lastTraceStartTime: dto.summary.lastTraceStartTime ? new Date(dto.summary.lastTraceStartTime) : null },
+        summary: dto.summary,
         services: dto.services,
         latencyBuckets: dto.latencyBuckets.map((b) => ({ ...b, xStart: new Date(b.xStart), xEnd: new Date(b.xEnd) })),
         listTotal: dto.listTotal,

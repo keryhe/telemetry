@@ -96,9 +96,8 @@ export class DashboardComponent {
     this.totalTraces() > 0 ? this.errorTraces() / this.totalTraces() : 0
   );
   /**
-   * Coloring for the Error Rate card. Thresholds come from the shared health config rather than
-   * this file so the Global Dashboard's tenant cards — and the legend explaining them — classify
-   * identically.
+   * Coloring for the Error Rate card. Thresholds come from the shared health config, which a host
+   * can override through `config.json`, rather than from this file.
    */
   protected errorRateColor = computed<HealthColor>(() =>
     classifyErrorRate(this.errorRate(), this.thresholds)

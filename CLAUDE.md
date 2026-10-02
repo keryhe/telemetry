@@ -217,7 +217,7 @@ answers `GET {BasePath}/config.json` with the host's configured options: API loc
 and, via the Angular client's `BrandedTitleStrategy`, in every route's browser tab title. All
 default to this UI's own out-of-the-box branding ("Sentinel" / "OpenTelemetry Visualization"), so a
 host that sets nothing sees exactly what it always has. `config.json` also carries the optional
-`TelemetryUi:HealthThresholds` overrides for the Global Dashboard's status bands, only the keys
+`TelemetryUi:HealthThresholds` overrides for the Dashboard's error-rate bands, only the keys
 that are set (the defaults live in `health-thresholds.ts`, merged over in `main.ts` by
 `resolveHealthThresholds`; `TelemetryUiOptions.Validate()` fails startup on a bad value). It must
 run before the tenant middleware,

@@ -397,8 +397,6 @@ public abstract class TraceReadRepositoryBase : DapperReadRepository, ITraceRead
                 P50Ms = Percentile(allDurations, 50),
                 P95Ms = Percentile(allDurations, 95),
                 P99Ms = Percentile(allDurations, 99),
-                ServiceCount = services.Count,
-                LastTraceStartTime = rows.Count > 0 ? TimeConversion.UnixNanoToDateTime(rows.Max(r => r.AnchorStart)) : null,
             },
             Services = services,
             LatencyBuckets = BuildLatencyBucketsFromRows(rows, query),

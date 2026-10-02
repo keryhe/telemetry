@@ -131,7 +131,7 @@ instead of "Sentinel", configure it rather than rebuilding it:
 [the UI package README](src/Keryhe.Telemetry.Ui/README.md#hosting-the-ui-under-a-sub-path). The
 same settings are available in code via `AddKeryheTelemetryUi(configuration, options => ...)` or
 `app.UseKeryheTelemetryUi(options => ...)`, which take precedence over the configuration section.
-The Global Dashboard's health thresholds are configurable the same way, under
+The Dashboard's error-rate thresholds are configurable the same way, under
 `TelemetryUi:HealthThresholds`; see
 [the UI package README](src/Keryhe.Telemetry.Ui/README.md#health-thresholds).
 

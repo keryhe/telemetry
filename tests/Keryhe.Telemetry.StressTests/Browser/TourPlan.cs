@@ -29,7 +29,6 @@ public static class TourPlan
         string Q(string text) => $"&q={Uri.EscapeDataString(text)}";
         var steps = new List<TourStep>
         {
-            new("global", "global", [".tenant-card, app-empty-state"], $"global?{Range()}"),
             new("dashboard", "dashboard", [Cards, Chart], $"dashboard?{Range()}"),
 
             new("traces", "traces", [Cards, Rows, Chart], $"traces?{Range()}"),

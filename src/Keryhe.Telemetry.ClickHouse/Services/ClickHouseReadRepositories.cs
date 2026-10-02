@@ -297,13 +297,6 @@ public class ClickHouseTenantCatalogRepository(IConfiguration configuration)
 {
     private readonly string _connectionString = configuration.GetConnectionString("Api")!;
 
-    protected override string TenantActivitySql => """
-        SELECT tenant_id AS TenantId, max(start_time_unix_nano) AS LastSeenUnixNano
-        FROM spans
-        WHERE start_time_unix_nano >= @since
-        GROUP BY tenant_id
-        """;
-
     protected override Task<DbConnection> OpenConnectionAsync(CancellationToken cancellationToken)
         => ClickHouseConnectionFactory.OpenReadAsync(_connectionString, cancellationToken);
 }
