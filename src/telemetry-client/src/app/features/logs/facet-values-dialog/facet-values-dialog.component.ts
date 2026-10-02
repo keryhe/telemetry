@@ -102,13 +102,13 @@ const TYPE_ICON: Record<FacetValueType, string> = { string: 'abc', number: 'tag'
       border-radius: 4px;
       &:hover { background: var(--mat-sys-surface-container-high); }
       &.active .value-text { color: var(--mat-sys-primary); font-weight: 600; }
-      &.excluded .value-text { color: var(--mat-sys-error); text-decoration: line-through; }
+      &.excluded .value-text { color: var(--app-error); text-decoration: line-through; }
     }
     .bar {
       position: absolute; left: 0; top: 3px; bottom: 3px;
       background: color-mix(in srgb, var(--mat-sys-primary) 14%, transparent);
       border-radius: 3px; pointer-events: none;
-      &.excluded { background: color-mix(in srgb, var(--mat-sys-error) 14%, transparent); }
+      &.excluded { background: color-mix(in srgb, var(--app-error) 14%, transparent); }
     }
     .value-main {
       position: relative; z-index: 1;
@@ -128,7 +128,7 @@ const TYPE_ICON: Record<FacetValueType, string> = { string: 'abc', number: 'tag'
       mat-icon { font-size: 16px; width: 16px; height: 16px; }
     }
     .act.include:hover { color: var(--mat-sys-primary); }
-    .act.exclude:hover { color: var(--mat-sys-error); }
+    .act.exclude:hover { color: var(--app-error); }
   `],
 })
 export class FacetValuesDialogComponent {

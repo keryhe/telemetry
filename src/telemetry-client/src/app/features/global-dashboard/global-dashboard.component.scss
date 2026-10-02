@@ -3,6 +3,18 @@
 // inherit the same value and stay aligned.
 :host {
   --page-max-width: var(--dashboard-max-width, 2400px);
+
+  // One colour per status, read by the card border, the card icon, the stat cards and the legend.
+  // `warning` is the app-wide warn orange; `slow-tail` is a distinct amber so the two never read
+  // as the same state.
+  // The app-wide error red (styles.scss), not Material's --mat-sys-error, whose dark-theme tone is
+  // desaturated and reads as a different red.
+  --status-degraded: var(--app-error);
+  --status-warning: #ff9800;
+  --status-slow-tail: #ffc107;
+  --status-healthy: #4caf50;
+  --status-silent: var(--mat-sys-on-surface-variant);
+  --status-unknown: var(--mat-sys-on-surface-variant);
 }
 
 // -------------------------------------------------------------------------------------------
@@ -25,43 +37,50 @@
   flex: 1 1 auto;
 }
 
-.legend {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 8px 12px;
-  margin-bottom: 16px;
+// -------------------------------------------------------------------------------------------
+// Status summary: one stat card per status above the controls, each a filter on the grid.
+// -------------------------------------------------------------------------------------------
+.summary-label {
   font-size: 12px;
   color: var(--mat-sys-on-surface-variant);
-}
-
-.legend-label {
   text-transform: uppercase;
   letter-spacing: 0.5px;
-  font-weight: 500;
+  margin-bottom: 8px;
 }
 
-.legend-item {
-  display: flex;
-  align-items: center;
-  gap: 6px;
+.summary-filter {
+  text-transform: none;
+  letter-spacing: 0;
 }
 
-.legend-swatch {
-  width: 10px;
-  height: 10px;
-  border-radius: 2px;
-  flex: none;
-
-  &.ok { background: var(--mat-sys-outline-variant); }
-  &.warn { background: #ff9800; }
-  &.error { background: var(--mat-sys-error); }
+.summary-row {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(150px, 100%), 1fr));
+  gap: 12px;
+  margin-bottom: 16px;
 }
 
-.legend-divider {
-  width: 1px;
-  height: 14px;
-  background: var(--mat-sys-outline-variant);
+// The button only supplies keyboard and screen-reader behaviour; the stat card inside draws it.
+.summary-button {
+  display: block;
+  padding: 0;
+  border: 0;
+  background: none;
+  font: inherit;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+  border-radius: var(--mdc-elevated-card-container-shape, 12px);
+
+  &:focus-visible {
+    outline: 2px solid var(--mat-sys-primary);
+    outline-offset: 2px;
+  }
+
+  &.is-active {
+    outline: 2px solid var(--mat-sys-primary);
+    outline-offset: 2px;
+  }
 }
 
 // -------------------------------------------------------------------------------------------
@@ -95,10 +114,16 @@
     opacity: 0.72;
   }
 
-  // Only the worst state gets a border; a grid where every card is outlined has no signal left.
-  &.is-degraded {
-    border: 1px solid var(--mat-sys-error);
-  }
+  // Every card is outlined in its status colour. Outlines no longer single out the worst card on
+  // their own, so the icon, the reason line and the worst-first sort carry that.
+  border: 1px solid var(--status-border, var(--mat-sys-outline-variant));
+
+  &.status-degraded { --status-border: var(--status-degraded); }
+  &.status-warning { --status-border: var(--status-warning); }
+  &.status-slow-tail { --status-border: var(--status-slow-tail); }
+  &.status-healthy { --status-border: var(--status-healthy); }
+  &.status-silent { --status-border: var(--status-silent); }
+  &.status-unknown { --status-border: var(--status-unknown); }
 
   mat-card-content {
     padding: 14px !important;
@@ -118,11 +143,12 @@
   height: 18px;
   flex: none;
 
-  &.healthy { color: #4caf50; }
-  &.degraded { color: var(--mat-sys-error); }
-  &.slow-tail { color: #ff9800; }
-  &.silent,
-  &.unknown { color: var(--mat-sys-on-surface-variant); }
+  &.healthy { color: var(--status-healthy); }
+  &.degraded { color: var(--status-degraded); }
+  &.warning { color: var(--status-warning); }
+  &.slow-tail { color: var(--status-slow-tail); }
+  &.silent { color: var(--status-silent); }
+  &.unknown { color: var(--status-unknown); }
 }
 
 .tenant-name {
@@ -136,6 +162,7 @@
 .status-row {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 6px;
   margin: 2px 0 12px 26px;
   min-height: 20px;
@@ -143,7 +170,20 @@
 
 .status-word {
   font-size: 12px;
+  font-weight: 500;
   color: var(--mat-sys-on-surface-variant);
+}
+
+.status-reason {
+  font-size: 12px;
+  color: var(--mat-sys-on-surface-variant);
+}
+
+.reason-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin: -6px 0 12px 26px;
 }
 
 .chip {
@@ -151,14 +191,8 @@
   padding: 1px 8px;
   border-radius: 10px;
   white-space: nowrap;
-
-  // #ff9800 for both the tint and the text — the same warn literal `app-stat-card` uses. A
-  // darker amber would read better on white but is unreadable on the dark theme, and the theme
-  // here is driven by `color-scheme` rather than a class this stylesheet can branch on.
-  &.warn {
-    background: color-mix(in srgb, #ff9800 18%, transparent);
-    color: #ff9800;
-  }
+  background: var(--mat-sys-surface-container-highest);
+  color: var(--mat-sys-on-surface-variant);
 }
 
 .metric-row {
@@ -233,32 +267,6 @@
   margin: 0 2px;
 }
 
-// The line inherits `currentColor`, so the tone classes below are all that decide its colour —
-// which is what lets the neutral case use a theme token instead of a hardcoded grey.
-.sparkline {
-  display: block;
-  width: 100%;
-  height: 40px;
-  margin-top: 6px;
-  color: var(--mat-sys-outline);
-
-  &.error { color: var(--mat-sys-error); }
-  &.warn { color: #ff9800; }
-}
-
-.sparkline-empty {
-  height: 40px;
-  margin-top: 6px;
-  background-image: linear-gradient(
-    to right,
-    var(--mat-sys-outline-variant) 0 4px,
-    transparent 4px 8px
-  );
-  background-repeat: repeat-x;
-  background-size: 8px 1px;
-  background-position: left 75%;
-}
-
 .card-footer {
   display: flex;
   align-items: center;
@@ -285,9 +293,56 @@
   height: 14px;
 }
 
+// -------------------------------------------------------------------------------------------
+// Status legend under the grid.
+// -------------------------------------------------------------------------------------------
+.status-legend {
+  margin-top: 8px;
+  font-size: 13px;
+}
+
+.legend-title {
+  margin: 0 0 8px;
+  font-size: 12px;
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--mat-sys-on-surface-variant);
+}
+
+.legend-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 6px;
+}
+
+.legend-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.legend-status {
+  min-width: 72px;
+  font-weight: 500;
+}
+
+.legend-rule,
+.legend-note {
+  color: var(--mat-sys-on-surface-variant);
+}
+
+.legend-note {
+  margin: 10px 0 0;
+  font-size: 12px;
+}
+
 // Value colouring, matching `app-stat-card`'s own `.error` / `.warn` classes (and its two
 // literals) so a number means the same thing on both dashboards.
-.error { color: var(--mat-sys-error); }
+.error { color: var(--status-degraded); }
 .warn { color: #ff9800; }
 
 // Same 599.98px handset threshold as the shell header and the per-tenant dashboard's control

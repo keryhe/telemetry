@@ -8,7 +8,6 @@ import { routes } from './app.routes';
 import { BrandedTitleStrategy } from './core/title/branded-title-strategy';
 import { tenantInterceptor } from './core/interceptors/tenant.interceptor';
 import { timezoneInterceptor } from './core/interceptors/timezone.interceptor';
-import { HEALTH_THRESHOLDS, HEALTH_THRESHOLDS_TOKEN } from './shared/config/health-thresholds';
 import { GroupedPaginatorIntl } from './shared/utils/paginator-intl';
 
 export const appConfig: ApplicationConfig = {
@@ -17,9 +16,6 @@ export const appConfig: ApplicationConfig = {
     provideRouter(routes, withComponentInputBinding()),
     provideHttpClient(withInterceptors([tenantInterceptor, timezoneInterceptor])),
     provideAnimationsAsync(),
-    // Redundant with the token's own default factory, and deliberately so: this line is the
-    // discoverable place to retune the dashboard health thresholds for a deployment.
-    { provide: HEALTH_THRESHOLDS_TOKEN, useValue: HEALTH_THRESHOLDS },
     // Prepends the configured brand name to every route's browser-tab title — see
     // BrandedTitleStrategy for why this replaces Angular's DefaultTitleStrategy rather than
     // hardcoding "Sentinel - " into each route in app.routes.ts.

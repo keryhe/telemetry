@@ -17,17 +17,67 @@ import { TenantService } from '../../core/services/tenant.service';
 import { TimeRangeService, recommendedRefreshIntervalMs } from '../../core/services/time-range.service';
 import { PageHeaderComponent } from '../../shared/components/page-header/page-header.component';
 import { EmptyStateComponent } from '../../shared/components/empty-state/empty-state.component';
-import { SparklineShape, buildSparklineShape, formatDuration } from '../../shared/utils/chart.utils';
+import { StatCardComponent } from '../../shared/components/stat-card/stat-card.component';
+import { formatDuration } from '../../shared/utils/chart.utils';
 import { loadPageState, savePageState } from '../../shared/utils/page-state';
 import {
-  HEALTH_THRESHOLDS_TOKEN, HealthColor, TENANT_STATUS_ORDER, TenantStatus,
-  classifyErrorRate, classifyLogErrorRate, classifyP95, hasEnoughSamples, hasSlowTail,
-  tenantStatus,
+  HEALTH_THRESHOLDS_TOKEN, HealthColor, HealthReason, TENANT_STATUS_ORDER, TenantStatus,
+  classifyErrorRate, classifyLogErrorRate, classifyP95, hasEnoughSamples,
+  tenantHealth,
 } from '../../shared/config/health-thresholds';
+
+function formatPercent(fraction: number): string {
+  const pct = fraction * 100;
+  return `${Number.isInteger(pct) ? pct : pct.toFixed(1)}%`;
+}
+
+/** A threshold as a person would write it: 500 ms, 1.5 s (no trailing zeros, unlike a measured value). */
+function formatThresholdMs(ms: number): string {
+  return ms >= 1000 ? `${+(ms / 1000).toFixed(2)} s` : `${+ms.toFixed(1)} ms`;
+}
+
+function formatAge(ms: number): string {
+  const minutes = Math.round(ms / 60000);
+  if (minutes < 60) return `${minutes}m`;
+  const hours = Math.round(minutes / 60);
+  return hours < 48 ? `${hours}h` : `${Math.round(hours / 24)}d`;
+}
 
 const STATE_KEY = 'state.globalDashboard';
 
 type SortKey = 'health' | 'name' | 'traffic' | 'errors' | 'latency';
+
+/**
+ * What a stat card filters the grid by. `no data` groups `silent` and `unknown`: both mean the
+ * dashboard cannot say anything about the tenant, and the second is a collection failure rather
+ * than a state worth its own count.
+ */
+type StatusGroup = 'degraded' | 'warning' | 'slow tail' | 'healthy' | 'no data';
+
+function statusGroup(status: TenantStatus): StatusGroup {
+  return status === 'silent' || status === 'unknown' ? 'no data' : status;
+}
+
+/** One status stat card above the grid. */
+interface StatusSummary {
+  group: StatusGroup;
+  label: string;
+  icon: string;
+  count: number;
+  /** The icon's colour, so the stat card matches the status colours the cards use. */
+  iconColor: string;
+  color: 'default' | 'error' | 'warn' | 'success';
+}
+
+/** The one place a status gets its icon: card, stat card and legend all read this. */
+const STATUS_ICON: Record<TenantStatus, string> = {
+  'degraded': 'error',
+  'warning': 'warning',
+  'slow tail': 'timelapse',
+  'healthy': 'check_circle',
+  'silent': 'cloud_off',
+  'unknown': 'help',
+};
 
 /**
  * A tenant's stats plus everything the card renders that is derived from them. Computed once per
@@ -43,12 +93,11 @@ export interface TenantCard {
   logErrorColor: HealthColor;
   /** False below the sample floor: the p95 is shown as unavailable rather than as a number. */
   showP95: boolean;
-  showTail: boolean;
   tracesPerMinute: number;
-  /** Null when there is nothing to plot; the card draws a flat dashed rule instead. */
-  sparkline: SparklineShape | null;
-  /** Drives the line's colour through a CSS class, so it follows the theme like every other value. */
-  sparklineTone: HealthColor;
+  /** The worst matched condition, as text. Null for a healthy card. */
+  primaryReason: string | null;
+  /** Every other matched condition, as chips. */
+  extraReasons: string[];
 }
 
 @Component({
@@ -56,7 +105,7 @@ export interface TenantCard {
   standalone: true,
   imports: [
     DecimalPipe, NgClass, PercentPipe,
-    MatCardModule, MatIconModule, MatButtonModule, MatProgressBarModule,
+    StatCardComponent, MatCardModule, MatIconModule, MatButtonModule, MatProgressBarModule,
     MatSlideToggleModule, MatTooltipModule, MatFormFieldModule, MatSelectModule,
     PageHeaderComponent, EmptyStateComponent,
   ],
@@ -79,6 +128,11 @@ export class GlobalDashboardComponent {
   protected loading = signal(true);
   protected autoRefresh = signal(this.saved.autoRefresh);
   protected sortBy = signal<SortKey>(this.saved.sortBy);
+  /**
+   * Deliberately not part of the saved page state: a filter left on from a previous visit would
+   * hide problem tenants without anyone having asked for that today.
+   */
+  protected statusFilter = signal<StatusGroup | null>(null);
   protected readonly preset = computed(() => this.timeRange.range().preset);
   private refreshSub?: Subscription;
 
@@ -94,18 +148,20 @@ export class GlobalDashboardComponent {
 
   protected readonly formatDuration = formatDuration;
 
-  /** One card model per tenant, already classified and sorted. */
-  protected readonly cards = computed<TenantCard[]>(() => {
+  /** One card model per tenant, already classified (unfiltered, unsorted). */
+  private readonly allCards = computed<TenantCard[]>(() => {
     const t = this.thresholds;
 
-    const cards = this.tenants().map((stats) => {
+    return this.tenants().map((stats) => {
       const errorRate = stats.traceCount > 0 ? stats.errorCount / stats.traceCount : 0;
-      const status = tenantStatus(
+      const { status, reasons } = tenantHealth(
         {
           traceCount: stats.traceCount,
           errorCount: stats.errorCount,
           p95Ms: stats.p95Ms,
           p99Ms: stats.p99Ms,
+          logCount: stats.logCount,
+          logErrorCount: stats.logErrorCount,
           lastSeenUtc: stats.lastSeenUtc,
           failed: stats.failed,
         },
@@ -121,19 +177,63 @@ export class GlobalDashboardComponent {
         p95Color: classifyP95(stats.p95Ms, stats.traceCount, t),
         logErrorColor: classifyLogErrorRate(stats.logErrorCount, stats.logCount, t),
         showP95,
-        showTail: showP95 && hasSlowTail(stats.p95Ms, stats.p99Ms, t),
         tracesPerMinute: stats.traceCount / this.windowMinutes(),
-        sparkline: this.buildCardSparkline(stats, status),
-        // Coloured only when the tenant is unhealthy: a grid of neutral lines with one red line
-        // reads at a glance, a grid of coloured lines does not.
-        sparklineTone: status === 'degraded' ? 'error' : status === 'slow tail' ? 'warn' : 'default',
+        primaryReason: reasons.length ? this.reasonText(reasons[0]) : null,
+        extraReasons: reasons.slice(1).map((r) => this.reasonText(r)),
       } satisfies TenantCard;
     });
-
-    return this.sortCards(cards, this.sortBy());
   });
 
-  protected readonly hasTenants = computed(() => this.cards().length > 0);
+  /** The cards the grid shows: filtered by the selected stat card, then sorted. */
+  protected readonly cards = computed<TenantCard[]>(() => {
+    const filter = this.statusFilter();
+    const visible = filter
+      ? this.allCards().filter((c) => statusGroup(c.status) === filter)
+      : this.allCards();
+    return this.sortCards(visible, this.sortBy());
+  });
+
+  /**
+   * Counts come from the same classified cards the grid renders, so a stat card and the grid
+   * under it cannot disagree. "No data" appears only when something is in it.
+   */
+  protected readonly statusSummaries = computed<StatusSummary[]>(() => {
+    const counts = new Map<StatusGroup, number>();
+    for (const card of this.allCards()) {
+      const group = statusGroup(card.status);
+      counts.set(group, (counts.get(group) ?? 0) + 1);
+    }
+
+    const make = (
+      group: StatusGroup, label: string, status: TenantStatus,
+      problem: 'error' | 'warn' | null, color: string,
+    ): StatusSummary => {
+      const count = counts.get(group) ?? 0;
+      // Colour only a count that is above zero: a red "Degraded 0" is noise.
+      const lit = count > 0;
+      return {
+        group, label, count, icon: STATUS_ICON[status],
+        color: lit ? (problem ?? (group === 'healthy' ? 'success' : 'default')) : 'default',
+        iconColor: lit ? color : 'var(--mat-sys-on-surface-variant)',
+      };
+    };
+
+    const summaries = [
+      make('degraded', 'Degraded', 'degraded', 'error', 'var(--status-degraded)'),
+      make('warning', 'Warning', 'warning', 'warn', 'var(--status-warning)'),
+      make('slow tail', 'Slow tail', 'slow tail', null, 'var(--status-slow-tail)'),
+      make('healthy', 'Healthy', 'healthy', null, 'var(--status-healthy)'),
+    ];
+    if ((counts.get('no data') ?? 0) > 0) {
+      summaries.push(make('no data', 'No data', 'silent', null, 'var(--status-silent)'));
+    }
+    return summaries;
+  });
+
+  protected readonly tenantTotal = computed(() => this.allCards().length);
+
+  // Unfiltered: a filter that matches nothing is not "no tenants".
+  protected readonly hasTenants = computed(() => this.allCards().length > 0);
 
   constructor() {
     this.timeRange.refreshRelativeWindow();
@@ -186,12 +286,74 @@ export class GlobalDashboardComponent {
   }
 
   protected statusIcon(status: TenantStatus): string {
-    switch (status) {
-      case 'degraded': return 'error';
-      case 'slow tail': return 'timelapse';
-      case 'silent': return 'cloud_off';
-      case 'unknown': return 'help';
-      default: return 'check_circle';
+    return STATUS_ICON[status];
+  }
+
+  /** Click again on the selected card to clear the filter. */
+  protected toggleStatusFilter(group: StatusGroup): void {
+    this.statusFilter.update((current) => (current === group ? null : group));
+  }
+
+  /**
+   * Rows for the legend under the grid: every status with the rule that gives it, read from the
+   * same thresholds the classifier uses so the two cannot describe different numbers.
+   */
+  protected readonly legend = computed(() => {
+    const t = this.thresholds;
+    const pct = (v: number) => formatPercent(v);
+    const minutes = Math.round(t.silentAfterMs / 60000);
+    return [
+      {
+        status: 'degraded' as TenantStatus,
+        rule: `error rate at ${pct(t.errorRate.critical)} or more, or p95 at ${formatThresholdMs(t.p95Ms.critical)} or more`,
+      },
+      {
+        status: 'warning' as TenantStatus,
+        rule: `error rate at ${pct(t.errorRate.warn)} or more, p95 at ${formatThresholdMs(t.p95Ms.warn)} or more, `
+          + `or log errors at ${pct(t.logErrorRate.critical)} or more of logs`,
+      },
+      {
+        status: 'slow tail' as TenantStatus,
+        rule: `p99 more than ${t.tailRatio}× the p95`,
+      },
+      {
+        status: 'healthy' as TenantStatus,
+        rule: 'none of the above',
+      },
+      {
+        status: 'silent' as TenantStatus,
+        rule: `no traces in the window and none seen for ${minutes} ${minutes === 1 ? 'minute' : 'minutes'}`,
+      },
+      {
+        status: 'unknown' as TenantStatus,
+        rule: 'the tenant\'s stats could not be loaded',
+      },
+    ];
+  });
+
+  protected readonly legendNote = computed(() => {
+    const t = this.thresholds;
+    return `Latency rules (p95, slow tail) need at least ${t.minSamples} traces in the window. `
+      + `Log errors raise a tenant's status only at ${formatPercent(t.logErrorRate.critical)} or more; `
+      + `from ${formatPercent(t.logErrorRate.warn)} they only colour the log count.`;
+  });
+
+  private reasonText(r: HealthReason): string {
+    switch (r.kind) {
+      case 'failed':
+        return 'stats could not be loaded';
+      case 'silent':
+        return r.value !== undefined && isFinite(r.value)
+          ? `no data for ${formatAge(r.value)}`
+          : 'no data seen';
+      case 'errorRate':
+        return `error rate ${formatPercent(r.value!)} (≥ ${formatPercent(r.threshold!)})`;
+      case 'p95':
+        return `p95 ${formatDuration(r.value!)} (≥ ${formatThresholdMs(r.threshold!)})`;
+      case 'logErrors':
+        return `log errors ${formatPercent(r.value!)} (≥ ${formatPercent(r.threshold!)})`;
+      case 'slowTail':
+        return `p99 ${r.value!.toFixed(1)}× p95 (> ${r.threshold}×)`;
     }
   }
 
@@ -213,19 +375,6 @@ export class GlobalDashboardComponent {
   private windowMinutes(): number {
     const { start, end } = this.timeRange.range();
     return Math.max((end.getTime() - start.getTime()) / 60000, 1);
-  }
-
-  /**
-   * Volume sparkline geometry. Silent and failed tenants get none — the template draws a flat
-   * dashed rule instead, so "no data" never renders as a line sitting on the axis.
-   */
-  private buildCardSparkline(stats: GlobalTenantStats, status: TenantStatus): SparklineShape | null {
-    if (status === 'silent' || status === 'unknown' || stats.buckets.length === 0) return null;
-
-    // `null`, never 0, for empty buckets: a 0 would draw a dip to the axis, which reads as
-    // "traffic collapsed" rather than "nothing here".
-    const shape = buildSparklineShape(stats.buckets.map((b) => (b.count > 0 ? b.count : null)));
-    return shape.segments.length || shape.dots.length ? shape : null;
   }
 
   private sortCards(cards: TenantCard[], key: SortKey): TenantCard[] {

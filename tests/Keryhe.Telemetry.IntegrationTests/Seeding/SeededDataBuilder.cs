@@ -6,9 +6,9 @@ namespace Keryhe.Telemetry.IntegrationTests.Seeding;
 /// Deterministic builders for <see cref="ITelemetryBulkWriter"/> input: fixed timestamps,
 /// services, attributes, span trees and metric streams, so a test's expectations can be computed
 /// by hand instead of re-deriving them from whatever a run happened to generate. Deliberately not
-/// <c>Keryhe.Telemetry.TestDataGenerator</c> — that emits random, time-dependent OTLP traffic
-/// through the real gRPC path, which is the wrong shape for a repeatable characterization test
-/// (see the plan's Phase 0 section).
+/// <c>Keryhe.Telemetry.TestDataGenerator</c> — that emits time-dependent OTLP traffic
+/// through the real gRPC path (a simulated shop, backfill plus live), which is the wrong shape for a
+/// repeatable characterization test whose expectations are computed by hand (see the plan's Phase 0 section).
 ///
 /// Every builder writes through the same <see cref="Keryhe.Telemetry.Core.ITelemetryBulkWriter"/>
 /// the ingestion worker uses, so hashing/dedup/upsert logic runs exactly as it does in production.

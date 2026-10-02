@@ -1,4 +1,12 @@
 import { InjectionToken } from '@angular/core';
+import type { HealthThresholds } from '../../shared/config/health-thresholds';
+
+/** A threshold override: every field optional, merged field by field over the built-in defaults. */
+export type HealthThresholdOverrides = {
+  [K in keyof HealthThresholds]?: HealthThresholds[K] extends number
+    ? number
+    : Partial<HealthThresholds[K]>;
+};
 
 /**
  * Deployment-specific settings the UI reads at startup rather than at build time.
@@ -32,6 +40,13 @@ export interface AppConfig {
 
   /** The tagline shown under {@link brandName} in the header bar. */
   brandTagline: string;
+
+  /**
+   * Overrides for the Global Dashboard's health thresholds, present only when the host configured
+   * some. The defaults stay in `health-thresholds.ts`; this is merged over them in `main.ts`, so
+   * it is deliberately not part of {@link DEFAULT_APP_CONFIG}.
+   */
+  healthThresholds?: HealthThresholdOverrides;
 }
 
 /**

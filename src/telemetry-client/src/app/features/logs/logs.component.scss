@@ -145,7 +145,7 @@
     .facet-value-text { color: var(--mat-sys-on-primary-container); font-weight: 600; }
     .facet-value-count { color: color-mix(in srgb, var(--mat-sys-on-primary-container) 80%, transparent); }
   }
-  &.excluded .facet-value-text { color: var(--mat-sys-error); text-decoration: line-through; }
+  &.excluded .facet-value-text { color: var(--app-error); text-decoration: line-through; }
 }
 
 // Proportion bar behind each value (width bound to v.pct).
@@ -155,7 +155,7 @@
   background: color-mix(in srgb, var(--mat-sys-primary) 14%, transparent);
   border-radius: 3px;
   pointer-events: none;
-  &.excluded { background: color-mix(in srgb, var(--mat-sys-error) 14%, transparent); }
+  &.excluded { background: color-mix(in srgb, var(--app-error) 14%, transparent); }
 }
 
 .facet-value-main {
@@ -187,7 +187,7 @@
   mat-icon { font-size: 15px; width: 15px; height: 15px; }
 
   &.include:hover { color: var(--mat-sys-primary); }
-  &.exclude:hover { color: var(--mat-sys-error); }
+  &.exclude:hover { color: var(--app-error); }
 }
 
 // "top N of M" + Show more / Show all (per field), and the field-list show-more footer.
@@ -520,7 +520,7 @@ mark.search-hit {
   align-items: center;
   gap: 4px;
   font-size: 12px;
-  color: var(--mat-sys-error);
+  color: var(--app-error);
   max-width: 320px;
 
   mat-icon {

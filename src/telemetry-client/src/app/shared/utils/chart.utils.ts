@@ -72,76 +72,6 @@ export function buildSparklineOptions(
   };
 }
 
-/**
- * Geometry for a sparkline drawn as raw inline SVG, as an alternative to
- * {@link buildSparklineOptions}.
- *
- * ApexCharts is the right tool for one chart on a page; it is the wrong tool for one chart per
- * row of a grid, where each instance is a full chart engine rendering its own SVG for a line
- * with no axes, no grid, no tooltip and no interaction. A grid of fifty tenant cards pays that
- * fifty times over. This returns the handful of numbers a `<polyline>` needs instead.
- *
- * Same `null`-means-no-data contract as {@link buildSparklineOptions}: a null value breaks the
- * line rather than dipping it to zero, which is why the result is a list of segments.
- */
-export interface SparklineShape {
-  /** One `points` attribute per run of consecutive non-null values. */
-  segments: string[];
-  /**
-   * Runs of length one. A `<polyline>` with a single point renders nothing at all, so an
-   * isolated sample has to be drawn as a mark of its own or it silently disappears.
-   */
-  dots: { x: number; y: number }[];
-}
-
-/**
- * @param values Bucket values, `null` for "no data" (never 0 — see {@link SparklineShape}).
- * @param width  viewBox width. Pair with `preserveAspectRatio="none"` and a CSS width so the
- *               line stretches to the card; use `vector-effect="non-scaling-stroke"` on the
- *               shapes so the resulting non-uniform scale doesn't thicken the stroke sideways.
- */
-export function buildSparklineShape(
-  values: (number | null)[],
-  width = 100,
-  height = 24,
-): SparklineShape {
-  const empty: SparklineShape = { segments: [], dots: [] };
-  if (values.length === 0) return empty;
-
-  // Peak defines the top of the plot. An all-zero window is "nothing happened", not a flat line
-  // pinned to the axis, so it draws nothing — same reasoning as the null contract.
-  const max = Math.max(...values.map((v) => v ?? 0));
-  if (max <= 0) return empty;
-
-  // Half a stroke of headroom top and bottom, or the peak and the baseline get clipped.
-  const pad = 2;
-  const span = height - pad * 2;
-  const step = values.length > 1 ? width / (values.length - 1) : 0;
-  const xOf = (i: number) => (values.length > 1 ? i * step : width / 2);
-  const yOf = (v: number) => height - pad - (v / max) * span;
-
-  const segments: string[] = [];
-  const dots: { x: number; y: number }[] = [];
-  let run: string[] = [];
-
-  const flush = () => {
-    if (run.length > 1) segments.push(run.join(' '));
-    else if (run.length === 1) {
-      const [x, y] = run[0].split(',');
-      dots.push({ x: Number(x), y: Number(y) });
-    }
-    run = [];
-  };
-
-  values.forEach((v, i) => {
-    if (v == null) { flush(); return; }
-    run.push(`${xOf(i).toFixed(2)},${yOf(v).toFixed(2)}`);
-  });
-  flush();
-
-  return { segments, dots };
-}
-
 export interface TimeBucket {
   timestamp: Date;
   count: number;
@@ -284,52 +214,176 @@ function formatDurationMs(ms: number): string {
   return `${(ms / 1000).toFixed(2)}s`;
 }
 
-/** Auto-scaled B/KB/MB/GB/TB label for a non-negative byte count (binary/1024-based steps). */
-function formatBytes(bytes: number): string {
-  const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+/** Auto-scaled B/KiB/MiB/GiB/TiB label for a non-negative byte count (binary/1024-based steps). */
+function formatBinaryBytes(bytes: number): string {
+  const units = ['B', 'KiB', 'MiB', 'GiB', 'TiB'];
   let v = bytes;
   let i = 0;
   while (v >= 1024 && i < units.length - 1) { v /= 1024; i++; }
   return `${i === 0 ? v.toFixed(0) : v.toFixed(2)}${units[i]}`;
 }
 
-/** Milliseconds-per-unit for recognized OTLP/UCUM time units. */
-const TIME_UNIT_TO_MS: Record<string, number> = {
-  s: 1000, ms: 1, us: 0.001, 'µs': 0.001, ns: 0.000001,
+/** Auto-scaled B/kB/MB/GB/TB label for a non-negative byte count (SI/1000-based steps). */
+function formatDecimalBytes(bytes: number): string {
+  const units = ['B', 'kB', 'MB', 'GB', 'TB'];
+  let v = bytes;
+  let i = 0;
+  while (v >= 1000 && i < units.length - 1) { v /= 1000; i++; }
+  return `${i === 0 ? v.toFixed(0) : v.toFixed(2)}${units[i]}`;
+}
+
+/** Auto-scaled bit/kbit/Mbit/Gbit label for a non-negative bit count (SI/1000-based steps). */
+function formatBits(bits: number): string {
+  const units = ['bit', 'kbit', 'Mbit', 'Gbit', 'Tbit'];
+  let v = bits;
+  let i = 0;
+  while (v >= 1000 && i < units.length - 1) { v /= 1000; i++; }
+  return `${i === 0 ? v.toFixed(0) : v.toFixed(2)} ${units[i]}`;
+}
+
+/** Time label that keeps scaling above seconds (min / h / d). Used only when the metric's own unit is
+ *  already minutes, hours or days; a unit of seconds or below stays capped at seconds (see
+ *  {@link formatDurationMs}), so latency charts read as they always have. */
+function formatLongDurationMs(ms: number): string {
+  if (ms < 60_000) return formatDurationMs(ms);
+  const min = ms / 60_000;
+  if (min < 60) return `${min.toFixed(1)}min`;
+  const h = min / 60;
+  if (h < 24) return `${h.toFixed(1)}h`;
+  return `${(h / 24).toFixed(1)}d`;
+}
+
+type UnitKind =
+  | 'none' | 'time' | 'longTime' | 'bytesBinary' | 'bytesDecimal' | 'bits'
+  | 'percent' | 'hz' | 'cel' | 'unknown';
+
+/** A recognised unit: what family it belongs to and how many of the family's base unit (ms, bytes,
+ *  bits) one of it is. */
+interface UnitDef { kind: UnitKind; factor: number; }
+
+/** Exact (case-sensitive) spellings. UCUM is case-sensitive: `MBy` and `mBy` differ by a factor of a
+ *  billion, so prefixed spellings are only ever matched here, never through the alias table. */
+const UNIT_TABLE: Record<string, UnitDef> = {
+  // time (base unit: milliseconds)
+  ns: { kind: 'time', factor: 0.000001 }, us: { kind: 'time', factor: 0.001 }, 'µs': { kind: 'time', factor: 0.001 },
+  ms: { kind: 'time', factor: 1 }, s: { kind: 'time', factor: 1000 },
+  min: { kind: 'longTime', factor: 60_000 }, h: { kind: 'longTime', factor: 3_600_000 }, d: { kind: 'longTime', factor: 86_400_000 },
+  // bytes, binary (base unit: bytes)
+  By: { kind: 'bytesBinary', factor: 1 }, KiBy: { kind: 'bytesBinary', factor: 1024 },
+  MiBy: { kind: 'bytesBinary', factor: 1024 ** 2 }, GiBy: { kind: 'bytesBinary', factor: 1024 ** 3 },
+  TiBy: { kind: 'bytesBinary', factor: 1024 ** 4 },
+  // bytes, decimal
+  kBy: { kind: 'bytesDecimal', factor: 1000 }, KBy: { kind: 'bytesDecimal', factor: 1000 },
+  MBy: { kind: 'bytesDecimal', factor: 1000 ** 2 }, GBy: { kind: 'bytesDecimal', factor: 1000 ** 3 },
+  TBy: { kind: 'bytesDecimal', factor: 1000 ** 4 },
+  // bits (base unit: bits)
+  bit: { kind: 'bits', factor: 1 },
+  // symbols
+  '%': { kind: 'percent', factor: 1 }, Hz: { kind: 'hz', factor: 1 }, Cel: { kind: 'cel', factor: 1 },
+  // dimensionless ratio
+  '1': { kind: 'none', factor: 1 },
 };
 
-/** Bytes-per-unit for recognized OTLP/UCUM byte units (binary/1024-based). */
-const BYTE_UNIT_TO_BYTES: Record<string, number> = {
-  By: 1, KiBy: 1024, MiBy: 1024 ** 2, GiBy: 1024 ** 3, TiBy: 1024 ** 4,
+/** Case-insensitive aliases, matched on the lower-cased spelling. Only spellings with a single
+ *  possible meaning are here: no prefixed units (`mBy`/`MBy`) and no single letters (`S` is siemens,
+ *  `H` henry in UCUM), so an ambiguous input falls through to "unrecognized" instead of being guessed. */
+const UNIT_ALIASES: Record<string, UnitDef> = {
+  by: UNIT_TABLE['By'], byte: UNIT_TABLE['By'], bytes: UNIT_TABLE['By'],
+  ns: UNIT_TABLE['ns'], nanosecond: UNIT_TABLE['ns'], nanoseconds: UNIT_TABLE['ns'],
+  us: UNIT_TABLE['us'], microsecond: UNIT_TABLE['us'], microseconds: UNIT_TABLE['us'],
+  ms: UNIT_TABLE['ms'], millisecond: UNIT_TABLE['ms'], milliseconds: UNIT_TABLE['ms'],
+  second: UNIT_TABLE['s'], seconds: UNIT_TABLE['s'], sec: UNIT_TABLE['s'], secs: UNIT_TABLE['s'],
+  min: UNIT_TABLE['min'], minute: UNIT_TABLE['min'], minutes: UNIT_TABLE['min'],
+  hour: UNIT_TABLE['h'], hours: UNIT_TABLE['h'], day: UNIT_TABLE['d'], days: UNIT_TABLE['d'],
+  bits: UNIT_TABLE['bit'], hz: UNIT_TABLE['Hz'], percent: UNIT_TABLE['%'],
 };
+
+export interface ParsedUnit {
+  kind: UnitKind;
+  /** How many of the family's base unit (ms / bytes / bits) one of this unit is. */
+  factor: number;
+  /** The unit is itself a per-second rate (`By/s`, `{request}/s`). */
+  perSecond: boolean;
+  /** The spelling to show for an unrecognised unit, annotations removed. Empty for every other kind. */
+  text: string;
+}
+
+/** Removes UCUM annotations (`{...}`) from a unit string: `{requests}` -> ``, `By{sent}` -> `By`,
+ *  `{request}/s` -> `/s`. */
+function stripAnnotations(raw: string): string {
+  return raw.replace(/\{[^{}]*\}/g, '').trim();
+}
 
 /**
- * Formats a raw metric value using its OTLP/UCUM `unit` string: recognized time units
- * auto-scale through µs/ms/s (via {@link formatDurationMs}), recognized byte units
- * auto-scale through B/KB/MB/GB/TB, `%` and dimensionless (`1`) get their conventional
- * bare/suffixed form, and any other unit (or no unit) falls back to a plain rounded number
- * with the raw unit string appended. Used for histogram/exp-histogram bucket bounds and
- * axis/tooltip labels so a chart's numbers read in a unit-appropriate scale instead of the
- * stored magnitude verbatim.
+ * Reads an OTLP/UCUM unit string. Annotations are stripped first, so a unit that is only an
+ * annotation (`{requests}`) is `none`, shown nowhere; a trailing `/s` marks a per-second rate; the
+ * remainder is looked up case-sensitively, then through the unambiguous alias table; anything else
+ * is `unknown` and keeps its (annotation-free) spelling.
  */
-export function formatUnitValue(value: number, unit?: string | null): string {
-  const u = unit ?? '';
+export function parseUnit(raw?: string | null): ParsedUnit {
+  let rest = stripAnnotations(raw ?? '');
+  let perSecond = false;
+  if (rest.endsWith('/s')) { perSecond = true; rest = rest.slice(0, -2).trim(); }
+  if (rest === '') return { kind: 'none', factor: 1, perSecond, text: '' };
+
+  const def = UNIT_TABLE[rest] ?? UNIT_ALIASES[rest.toLowerCase()];
+  if (def) return { kind: def.kind, factor: def.factor, perSecond, text: '' };
+  return { kind: 'unknown', factor: 1, perSecond, text: perSecond ? `${rest}/s` : rest };
+}
+
+/** The unit as text for a chip, a table cell or a metadata row; empty when there is nothing to show
+ *  (no unit, or a braced annotation like `{requests}`), so the caller can hide the element. */
+export function formatUnitLabel(raw?: string | null): string {
+  const p = parseUnit(raw);
+  if (p.kind === 'none') return p.perSecond ? '/s' : '';
+  if (p.kind === 'unknown') return p.text;
+  return stripAnnotations(raw ?? '');
+}
+
+export interface FormatUnitOptions {
+  /** The value is a per-second rate of a quantity measured in `unit` (a Sum shown as a rate). */
+  perSecond?: boolean;
+}
+
+/**
+ * Formats a raw metric value using its OTLP/UCUM `unit` string: time units auto-scale through
+ * µs/ms/s (and min/h/d when the unit itself is minutes, hours or days), byte units auto-scale
+ * through B/KiB/MiB/GiB/TiB (binary inputs) or B/kB/MB/GB/TB (decimal inputs), bits through
+ * bit/kbit/Mbit/..., `%`, `Hz` and `Cel` carry their symbol, a braced annotation or a dimensionless
+ * `1` is a bare number, and any other unit falls back to a plain number with its spelling appended.
+ * A per-second rate (`options.perSecond`, or a unit that already ends in `/s`) gets a `/s` suffix.
+ * Used for stat cards, axis/tooltip labels, exemplars and histogram bucket bounds so a chart's
+ * numbers read in a unit-appropriate scale instead of the stored magnitude verbatim.
+ */
+export function formatUnitValue(value: number, unit?: string | null, options?: FormatUnitOptions): string {
+  const p = parseUnit(unit);
+  const rate = p.perSecond || options?.perSecond === true ? '/s' : '';
   const sign = value < 0 ? '-' : '';
   const abs = Math.abs(value);
 
-  if (u in TIME_UNIT_TO_MS) return sign + formatDurationMs(abs * TIME_UNIT_TO_MS[u]);
-  if (u in BYTE_UNIT_TO_BYTES) return sign + formatBytes(abs * BYTE_UNIT_TO_BYTES[u]);
-  if (u === '%') return `${plainNumber(value)}%`;
-  if (u === '1' || u === '') return plainNumber(value);
-  return `${plainNumber(value)} ${u}`;
+  switch (p.kind) {
+    case 'time': return sign + formatDurationMs(abs * p.factor) + rate;
+    case 'longTime': return sign + formatLongDurationMs(abs * p.factor) + rate;
+    case 'bytesBinary': return sign + formatBinaryBytes(abs * p.factor) + rate;
+    case 'bytesDecimal': return sign + formatDecimalBytes(abs * p.factor) + rate;
+    case 'bits': return sign + formatBits(abs * p.factor) + rate;
+    case 'percent': return `${plainNumber(value)}%${rate}`;
+    case 'hz': return `${plainNumber(value)} Hz${rate}`;
+    case 'cel': return `${plainNumber(value)} °C${rate}`;
+    case 'unknown': return `${plainNumber(value)} ${p.text}${options?.perSecond && !p.perSecond ? '/s' : ''}`;
+    default: return plainNumber(value) + rate;
+  }
 }
 
-/** Bare-number formatting shared by the unit-less fallback paths: fixed precision for typical
- *  magnitudes, significant-digit precision (no scientific notation surprises) for very small/large. */
+/** Bare-number formatting shared by the unit-less fallback paths: whole thousands-separated numbers
+ *  from 1,000 up (never a rounded-to-3-significant-digits value, which would turn 12,345 into 12,300),
+ *  fixed precision for typical magnitudes, significant-digit precision for very small values. */
 function plainNumber(v: number): string {
   const abs = Math.abs(v);
   if (abs === 0) return '0';
-  if (abs >= 1000 || abs < 0.01) return Number(v.toPrecision(3)).toString();
+  if (abs >= 1e15) return Number(v.toPrecision(3)).toString();
+  if (abs >= 1000) return Math.round(v).toLocaleString();
+  if (abs < 0.01) return Number(v.toPrecision(3)).toString();
   return Number(v.toFixed(3)).toString();
 }
 
@@ -380,6 +434,7 @@ export const CATEGORICAL_COLORS = [
 export function buildShareDonut(
   slices: { name: string; value: number }[],
   isDark: boolean,
+  unit?: string | null,
 ): ApexOptions | null {
   const positive = slices.filter((s) => s.value > 0);
   if (!positive.length) return null;
@@ -390,6 +445,7 @@ export function buildShareDonut(
     labels: positive.map((s) => s.name),
     colors: positive.map((_, i) => CATEGORICAL_COLORS[i % CATEGORICAL_COLORS.length]),
     dataLabels: { enabled: true, formatter: (val: number) => `${val.toFixed(1)}%` },
+    tooltip: { y: { formatter: (v: number) => formatUnitValue(v, unit) } },
     legend: { position: 'right' },
     stroke: { width: 0 },
     grid: chartGrid(isDark),

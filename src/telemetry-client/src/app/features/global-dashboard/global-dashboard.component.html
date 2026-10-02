@@ -3,6 +3,34 @@
 }
 
 <app-page-header>
+  @if (tenantTotal() > 0) {
+    <div class="summary-label">
+      {{ tenantTotal() }} {{ tenantTotal() === 1 ? 'tenant' : 'tenants' }}
+      @if (statusFilter(); as filter) {
+        <span class="summary-filter">· showing {{ filter }} only</span>
+      }
+    </div>
+    <div class="summary-row">
+      @for (s of statusSummaries(); track s.group) {
+        <button
+          type="button"
+          class="summary-button"
+          [class.is-active]="statusFilter() === s.group"
+          [attr.aria-pressed]="statusFilter() === s.group"
+          [attr.aria-label]="s.count + ' ' + s.label + ' — ' + (statusFilter() === s.group ? 'clear filter' : 'filter the grid')"
+          (click)="toggleStatusFilter(s.group)">
+          <app-stat-card
+            [label]="s.label"
+            [value]="s.count"
+            [icon]="s.icon"
+            [color]="s.color"
+            [iconColor]="s.iconColor"
+            [clickable]="true" />
+        </button>
+      }
+    </div>
+  }
+
   <div class="global-header">
     <mat-form-field appearance="outline" subscriptSizing="dynamic" class="sort-select">
       <mat-label>Sort</mat-label>
@@ -26,48 +54,6 @@
       Auto-refresh
     </mat-slide-toggle>
   </div>
-
-  <!-- Legend. Rendered from the injected thresholds, never from literals, so it cannot describe
-       one set of bands while the cards are coloured by another. -->
-  <div class="legend">
-    <span class="legend-label">errors</span>
-    <span class="legend-item">
-      <span class="legend-swatch warn"></span>
-      over {{ thresholds.errorRate.warn | percent: '1.0-2' }}
-    </span>
-    <span class="legend-item">
-      <span class="legend-swatch error"></span>
-      over {{ thresholds.errorRate.critical | percent: '1.0-2' }}
-    </span>
-
-    <span class="legend-divider"></span>
-    
-    <span class="legend-label">p95</span>
-    <span class="legend-item">
-      <span class="legend-swatch ok"></span>
-      under {{ formatDuration(thresholds.p95Ms.warn) }}
-    </span>
-    <span class="legend-item">
-      <span class="legend-swatch warn"></span>
-      {{ formatDuration(thresholds.p95Ms.warn) }}–{{ formatDuration(thresholds.p95Ms.critical) }}
-    </span>
-    <span class="legend-item">
-      <span class="legend-swatch error"></span>
-      over {{ formatDuration(thresholds.p95Ms.critical) }}
-    </span>
-
-    <span class="legend-divider"></span>
-
-    <span class="legend-label">log errors</span>
-    <span class="legend-item">
-      <span class="legend-swatch warn"></span>
-      over {{ thresholds.logErrorRate.warn | percent: '1.0-2' }}
-    </span>
-    <span class="legend-item">
-      <span class="legend-swatch error"></span>
-      over {{ thresholds.logErrorRate.critical | percent: '1.0-2' }}
-    </span>
-  </div>
 </app-page-header>
 
 <div class="page-container">
@@ -77,7 +63,7 @@
         <mat-card
           class="tenant-card"
           [class.is-muted]="card.status === 'silent' || card.status === 'unknown'"
-          [class.is-degraded]="card.status === 'degraded'"
+          [ngClass]="'status-' + card.status.replace(' ', '-')"
           tabindex="0"
           role="link"
           [attr.aria-label]="card.stats.tenantName + ' — ' + card.status"
@@ -97,14 +83,17 @@
 
             <div class="status-row">
               <span class="status-word">{{ card.status }}</span>
-              @if (card.showTail) {
-                <span
-                  class="chip warn"
-                  [matTooltip]="'p99 is more than ' + thresholds.tailRatio + '× the p95 — a slow tail the p95 alone hides.'">
-                  p99 {{ formatDuration(card.stats.p99Ms) }}
-                </span>
+              @if (card.primaryReason) {
+                <span class="status-reason">· {{ card.primaryReason }}</span>
               }
             </div>
+            @if (card.extraReasons.length) {
+              <div class="reason-chips">
+                @for (reason of card.extraReasons; track reason) {
+                  <span class="chip">{{ reason }}</span>
+                }
+              </div>
+            }
 
             <div class="metric-row">
               <div class="metric">
@@ -142,35 +131,6 @@
               </span>
             </div>
 
-            @if (card.sparkline) {
-              <!-- preserveAspectRatio="none" stretches the 100x24 viewBox to the card's width;
-                   non-scaling-stroke keeps that from thickening the line horizontally. -->
-              <svg
-                class="sparkline"
-                [ngClass]="card.sparklineTone"
-                viewBox="0 0 100 24"
-                preserveAspectRatio="none"
-                aria-hidden="true">
-                @for (points of card.sparkline.segments; track $index) {
-                  <polyline
-                    [attr.points]="points"
-                    fill="none"
-                    stroke="currentColor"
-                    stroke-width="1.5"
-                    stroke-linejoin="round"
-                    stroke-linecap="round"
-                    vector-effect="non-scaling-stroke" />
-                }
-                @for (dot of card.sparkline.dots; track $index) {
-                  <circle [attr.cx]="dot.x" [attr.cy]="dot.y" r="1.2" fill="currentColor" />
-                }
-              </svg>
-            } @else {
-              <!-- No chart for a tenant with nothing to plot: a flat dashed rule says "no data"
-                   where a zero-valued line would say "traffic collapsed". -->
-              <div class="sparkline-empty"></div>
-            }
-
             <!-- Only the error half is coloured, the same rule the p50/p95 line follows: the
                  total is context, the error share is the signal. Bands are the legend's. -->
             <div class="logs-row">
@@ -205,6 +165,27 @@
         </mat-card>
       }
     </div>
+
+    @if (cards().length === 0) {
+      <app-empty-state
+        icon="filter_alt_off"
+        message="No tenants with this status"
+        hint="Select the highlighted status card again to clear the filter." />
+    }
+
+    <section class="status-legend" aria-label="What each status means">
+      <h2 class="legend-title">Status</h2>
+      <ul class="legend-list">
+        @for (row of legend(); track row.status) {
+          <li class="legend-row">
+            <mat-icon class="status-icon" [ngClass]="row.status.replace(' ', '-')">{{ statusIcon(row.status) }}</mat-icon>
+            <span class="legend-status">{{ row.status }}</span>
+            <span class="legend-rule">{{ row.rule }}</span>
+          </li>
+        }
+      </ul>
+      <p class="legend-note">{{ legendNote() }}</p>
+    </section>
   } @else if (!loading()) {
     <app-empty-state
       icon="domain"

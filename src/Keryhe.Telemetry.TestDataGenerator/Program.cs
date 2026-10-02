@@ -1,185 +1,28 @@
-using System.Diagnostics;
-using System.Diagnostics.Metrics;
+using Keryhe.Telemetry.TestDataGenerator;
+using Keryhe.Telemetry.TestDataGenerator.Config;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
-using Microsoft.Extensions.Options;
-using OpenTelemetry;
-using OpenTelemetry.Exporter;
-using OpenTelemetry.Logs;
-using OpenTelemetry.Metrics;
-using OpenTelemetry.Resources;
-using OpenTelemetry.Trace;
-using Keryhe.Telemetry.TestDataGenerator;
-using Keryhe.Telemetry.TestDataGenerator.Generators;
 
-var host = new HostBuilder()
-    .ConfigureAppConfiguration((context, config) =>
-    {
-        config
-            .SetBasePath(Directory.GetCurrentDirectory())
-            .AddJsonFile("appsettings.json", optional: false, reloadOnChange: true)
-            .AddJsonFile($"appsettings.{context.HostingEnvironment.EnvironmentName}.json", optional: true, reloadOnChange: true)
-            .AddEnvironmentVariables();
-    })
-    .ConfigureServices((context, services) =>
-    {
-        // Register configuration
-        services.Configure<GeneratorConfig>(context.Configuration.GetSection("GeneratorConfig"));
-        var generatorConfig = context.Configuration.GetSection("GeneratorConfig").Get<GeneratorConfig>()
-            ?? new GeneratorConfig();
+var builder = Host.CreateApplicationBuilder(args);
 
-        // Build service sources: one ActivitySource per simulated service
-        List<ServiceSource> serviceSources;
-        if (generatorConfig.Services.Count > 0)
-        {
-            serviceSources = generatorConfig.Services
-                .Select(def => new ServiceSource
-                {
-                    ActivitySource = new ActivitySource(def.Name, def.Version),
-                    Definition = def
-                })
-                .ToList();
-        }
-        else
-        {
-            // Fallback: single service using top-level ServiceName / ServiceVersion
-            serviceSources =
-            [
-                new ServiceSource
-                {
-                    ActivitySource = new ActivitySource(generatorConfig.ServiceName, generatorConfig.ServiceVersion),
-                    Definition = new ServiceDefinition
-                    {
-                        Name = generatorConfig.ServiceName,
-                        Version = generatorConfig.ServiceVersion,
-                        CanBeRootService = true
-                    }
-                }
-            ];
-        }
+// Tenant API keys live in user secrets. The host only loads them in the Development environment, so load
+// them regardless, then re-apply environment variables and the command line so those still win.
+builder.Configuration.AddUserSecrets(typeof(GeneratorWorker).Assembly, optional: true);
+builder.Configuration.AddEnvironmentVariables();
+builder.Configuration.AddCommandLine(args);
 
-        services.AddSingleton<IReadOnlyList<ServiceSource>>(serviceSources);
-
-        // Keep a single ActivitySource registered for the Meter and LogGenerator
-        services.AddSingleton(serviceSources[0].ActivitySource);
-
-        // Create Meter for metrics (single service)
-        Meter? meter = new Meter(
-            generatorConfig.ServiceName,
-            generatorConfig.ServiceVersion
-        );
-        services.AddSingleton(meter);
-
-        // Register background worker
-        services.AddHostedService<TelemetryGeneratorWorker>();
-
-        // Add logging
-        services.AddLogging(loggingBuilder =>
-        {
-            loggingBuilder.ClearProviders();
-            loggingBuilder.AddConsole();
-        });
-    })
-    .ConfigureLogging((context, logging) =>
-    {
-        logging.ClearProviders();
-        logging.AddConsole();
-        
-        // Configure log levels
-        logging.AddFilter("Microsoft.Hosting.Lifetime", LogLevel.Information);
-        logging.SetMinimumLevel(
-            context.HostingEnvironment.IsDevelopment() ? LogLevel.Debug : LogLevel.Information
-        );
-
-        var otlpEndpoint = context.Configuration.GetSection("GeneratorConfig:OtlpEndpoint").Value
-            ?? "http://localhost:5117";
-        var otlpHeaders = context.Configuration.GetSection("GeneratorConfig:OtlpHeaders").Value
-            ?? "";
-        var serviceName = context.Configuration.GetSection("GeneratorConfig:ServiceName").Value
-            ?? "telemetry-test-generator";
-        var serviceVersion = context.Configuration.GetSection("GeneratorConfig:ServiceVersion").Value
-            ?? "1.0.0";
-
-        // Export ILogger logs to OTLP so they are stored by the telemetry server.
-        logging.AddOpenTelemetry(otlpLogging =>
-        {
-            otlpLogging.IncludeFormattedMessage = true;
-            // Scope key/values are promoted to log-record attributes, which lets a generator attach
-            // structured context (e.g. a JSON payload) without it bleeding into the formatted body.
-            otlpLogging.IncludeScopes = true;
-            otlpLogging
-                .SetResourceBuilder(ResourceBuilder.CreateDefault().AddService(serviceName, serviceVersion: serviceVersion))
-                .AddOtlpExporter(exporterOptions =>
-                {
-                    exporterOptions.Endpoint = new Uri(otlpEndpoint);
-                    exporterOptions.Headers = otlpHeaders;
-                    exporterOptions.Protocol = OtlpExportProtocol.Grpc;
-                });
-        });
-    })
-    .Build();
-
-// Get configuration for OpenTelemetry setup
-var config = host.Services.GetRequiredService<IOptions<GeneratorConfig>>()?.Value
-    ?? new GeneratorConfig();
-
-var otlpEndpoint = new Uri(config.OtlpEndpoint);
-
-// Create one TracerProvider per simulated service so each service gets its own
-// service.name resource attribute in exported spans.
-var serviceSources = host.Services.GetRequiredService<IReadOnlyList<ServiceSource>>();
-var tracerProviders = serviceSources
-    .Select(ss => Sdk.CreateTracerProviderBuilder()
-        .SetResourceBuilder(ResourceBuilder.CreateDefault()
-            .AddService(ss.Definition.Name, serviceVersion: ss.Definition.Version))
-        .AddSource(ss.Definition.Name)
-        .AddOtlpExporter(exporterOptions =>
-        {
-            exporterOptions.Endpoint = otlpEndpoint;
-            exporterOptions.Headers = config.OtlpHeaders;
-            exporterOptions.Protocol = OtlpExportProtocol.Grpc;
-        })
-        .Build())
-    .ToList();
-
-// Configure OpenTelemetry Metrics (single provider for the primary service)
-var meterProvider = Sdk.CreateMeterProviderBuilder()
-    .SetResourceBuilder(ResourceBuilder.CreateDefault()
-        .AddService(config.ServiceName, serviceVersion: config.ServiceVersion))
-    .AddMeter(config.ServiceName)
-    // Exemplars are off by default in the .NET SDK (ExemplarFilterType.AlwaysOff), so without this
-    // the generator exports none at all and the collector's exemplar path is never exercised.
-    // TraceBased rather than AlwaysOn: it only samples a measurement recorded inside a sampled
-    // Activity, which is what gives each exemplar the trace/span id the UI links to. MetricGenerator
-    // records inside an activity for exactly this reason. Note that observable instruments (the two
-    // ObservableGauges) cannot carry exemplars at all -- expect them on the counters and histograms.
-    .SetExemplarFilter(ExemplarFilterType.TraceBased)
-    // Emit http.request.duration_exp_ms as a base-2 exponential histogram so the exp-histogram
-    // rendering path has real data to exercise.
-    .AddView("http.request.duration_exp_ms", new Base2ExponentialBucketHistogramConfiguration())
-    // Response sizes span ~50 B–50 KB, which overshoots the SDK's default explicit buckets (max
-    // 10,000) and dumps most observations into the +Inf overflow. Give it boundaries that cover the
-    // real range so percentiles and the bucket-distribution charts stay meaningful.
-    .AddView("http.response.size_bytes", new ExplicitBucketHistogramConfiguration
-    {
-        Boundaries = [500, 1000, 2500, 5000, 10000, 20000, 30000, 50000],
-    })
-    .AddOtlpExporter((exporterOptions, metricReaderOptions) =>
-    {
-        exporterOptions.Endpoint = otlpEndpoint;
-        exporterOptions.Headers = config.OtlpHeaders;
-        exporterOptions.Protocol = OtlpExportProtocol.Grpc;
-        metricReaderOptions.PeriodicExportingMetricReaderOptions.ExportIntervalMilliseconds = 15_000;
-    })
-    .Build();
-
-await host.RunAsync();
-
-// Dispose all tracer providers
-foreach (var tp in tracerProviders)
+builder.Logging.ClearProviders();
+builder.Logging.AddSimpleConsole(o =>
 {
-    tp.Dispose();
-}
-meterProvider.Dispose();
+    o.SingleLine = true;
+    o.TimestampFormat = "HH:mm:ss ";
+});
+// The generator's own logging stays on the console; what it simulates is sent through OTLP, not through ILogger.
+
+builder.Services.Configure<GeneratorOptions>(builder.Configuration.GetSection(GeneratorOptions.SectionName));
+builder.Services.AddHostedService<GeneratorWorker>();
+
+await builder.Build().RunAsync();
+return Environment.ExitCode;

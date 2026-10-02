@@ -62,6 +62,33 @@ precedence, configuration first).
 }
 ```
 
+### Health thresholds
+
+The Global Dashboard labels each tenant `healthy`, `warning`, `degraded`, `slow tail`, `silent` or
+`unknown` from a handful of thresholds. The defaults are built into the bundle; set any of them
+under `TelemetryUi:HealthThresholds` to retune a deployment without rebuilding. Every key is
+optional, and partial overrides merge field by field. Rates are 0-1 fractions, durations are
+milliseconds. The settings apply to every tenant.
+
+```jsonc
+{
+  "TelemetryUi": {
+    "HealthThresholds": {
+      "ErrorRate":    { "Warn": 0.01, "Critical": 0.05 },  // warning / degraded
+      "P95Ms":        { "Warn": 500,  "Critical": 1500 },  // warning / degraded
+      "LogErrorRate": { "Warn": 0.05, "Critical": 0.20 },  // Critical raises warning; Warn only colours the count
+      "MinSamples": 100,                                   // traces needed before latency rules apply
+      "TailRatio": 2,                                      // p99 above this multiple of p95 is a slow tail
+      "SilentAfterMs": 300000                              // empty window and nothing seen this long: silent
+    }
+  }
+}
+```
+
+The values shown are the defaults. A value out of range, or a `Warn` that is not below its
+`Critical`, fails the host at startup naming the key. Only the keys you set are sent to the browser
+in `config.json`, so the defaults live in one place.
+
 ### Hosting the UI under a sub-path
 
 Set `BasePath` to serve the UI beside another app rather than at the origin root:

@@ -43,16 +43,15 @@ public class GlobalController : ControllerBase
         _logger = logger;
     }
 
-    // GET /api/global/overview?start=&end=&bucketCount=
+    // GET /api/global/overview?start=&end=
     /// <summary>
-    /// One card's worth of stats per tenant: RED metrics, window percentiles, a volume
-    /// histogram for the sparkline, and last-seen.
+    /// One card's worth of stats per tenant: RED metrics, window percentiles, log counts and
+    /// last-seen.
     /// </summary>
     [HttpGet("overview")]
     public async Task<ActionResult<GlobalOverviewDto>> GetOverview(
         [FromQuery] DateTime start,
         [FromQuery] DateTime end,
-        [FromQuery] int bucketCount = 24,
         CancellationToken ct = default)
     {
         // Validated here rather than left to the repository: GetTraceOverviewAsync throws
@@ -65,7 +64,10 @@ public class GlobalController : ControllerBase
         var lastSeen = (await _tenants.GetTenantActivityAsync(DateTime.UtcNow - ActivityLookback, ct))
             .ToDictionary(a => a.TenantId, a => a.LastSeenUtc);
 
-        var query = new TraceSummaryQuery { Start = start, End = end, BucketCount = bucketCount };
+        // One bucket: the card wants window totals, not a time series, and the response no longer
+        // carries buckets. The summary's window percentiles come from all the fetched anchors, not
+        // from the buckets, so this does not change them.
+        var query = new TraceSummaryQuery { Start = start, End = end, BucketCount = 1 };
 
         // One bucket, because the card wants window totals rather than a log time series.
         // Unfiltered (time only): one bucket, so the group-by over the tenant's log window returns a
@@ -143,7 +145,6 @@ public class GlobalController : ControllerBase
             LogCount = (int)logCount,
             LogErrorCount = (int)logErrorCount,
             LastSeenUtc = lastSeen,
-            Buckets = overview.Buckets,
         };
     }
 }
@@ -184,9 +185,6 @@ public sealed class GlobalTenantStatsDto
     /// within the lookback.
     /// </summary>
     public DateTime? LastSeenUtc { get; init; }
-
-    /// <summary>Volume histogram over the window; drives the card's sparkline.</summary>
-    public List<TraceVolumeBucket> Buckets { get; init; } = [];
 
     /// <summary>True when this tenant's query threw. The card renders "unknown", not "silent".</summary>
     public bool Failed { get; init; }

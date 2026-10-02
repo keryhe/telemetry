@@ -37,7 +37,7 @@ read/write implementation and is selected by the host at startup.
 | `Keryhe.Telemetry.Server` | All-in-one host: gRPC ingestion, REST API, and the Angular UI in a single process |
 | `Keryhe.Telemetry.Ui` | Prebuilt Angular UI, packaged as static web assets — see [Build your own host](#build-your-own-host) below |
 | `Keryhe.Telemetry.Alerting` | Alert rule evaluators, webhook delivery, periodic evaluation worker |
-| `Keryhe.Telemetry.TestDataGenerator` | Worker service that emits synthetic telemetry |
+| `Keryhe.Telemetry.TestDataGenerator` | Worker service that simulates a multi-tenant e-commerce system and emits realistic traces, logs and metrics (24h backfill, then live) |
 | `src/telemetry-client` | Angular 20 SPA source (Dashboard, Traces, Metrics, Logs, Alerts) — built into `Keryhe.Telemetry.Ui`, not part of the .sln |
 
 See [CLAUDE.md](CLAUDE.md) for a deeper architectural walkthrough (composition roots, ingestion
@@ -131,6 +131,9 @@ instead of "Sentinel", configure it rather than rebuilding it:
 [the UI package README](src/Keryhe.Telemetry.Ui/README.md#hosting-the-ui-under-a-sub-path). The
 same settings are available in code via `AddKeryheTelemetryUi(configuration, options => ...)` or
 `app.UseKeryheTelemetryUi(options => ...)`, which take precedence over the configuration section.
+The Global Dashboard's health thresholds are configurable the same way, under
+`TelemetryUi:HealthThresholds`; see
+[the UI package README](src/Keryhe.Telemetry.Ui/README.md#health-thresholds).
 
 Add `Keryhe.Telemetry.Collector` (plus `AddKeryheTelemetryCollector()`/`MapKeryheTelemetryCollector()`
 and the matching `Add<Provider>CollectorServices(configuration)` call, e.g.

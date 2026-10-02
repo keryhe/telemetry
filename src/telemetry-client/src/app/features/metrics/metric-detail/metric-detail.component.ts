@@ -38,7 +38,7 @@ import { EmptyStateComponent } from '../../../shared/components/empty-state/empt
 import { PageHeaderComponent } from '../../../shared/components/page-header/page-header.component';
 import {
   buildHistogramBarFromBuckets, buildHistogramHeatmapFromBuckets, buildRadialGauge, buildShareDonut,
-  chartGrid, foldPointsAcrossGroups, formatUnitValue, histogramQuantile, sumDefined, timeRangeZoom,
+  chartGrid, foldPointsAcrossGroups, formatUnitLabel, formatUnitValue, histogramQuantile, sumDefined, timeRangeZoom,
 } from '../../../shared/utils/chart.utils';
 import { loadPageState, savePageState } from '../../../shared/utils/page-state';
 import { UrlStateService } from '../../../shared/utils/url-state';
@@ -176,6 +176,8 @@ export class MetricDetailComponent implements OnInit, AfterViewInit, OnDestroy {
 
   protected metricType = computed(() => this.instances()[0]?.type ?? this.seriesResult()?.type ?? MetricType.Gauge);
   protected metricUnit = computed(() => this.instances()[0]?.unit ?? this.seriesResult()?.unit ?? '');
+  /** The unit as display text: empty (so the chip is hidden) for no unit or a braced annotation like `{requests}`. */
+  protected unitLabel = computed(() => formatUnitLabel(this.metricUnit()));
   protected typeLabel = computed(() => TYPE_LABEL_OF[this.metricType()] ?? 'Unknown');
   protected typeColor = computed(() => getTypeColor(this.metricType()));
 
@@ -382,11 +384,6 @@ export class MetricDetailComponent implements OnInit, AfterViewInit, OnDestroy {
 
   /** Stats are rates only for Sum when not showing raw per-bucket increases. */
   protected statsAreRates = computed(() => this.isSum() && !this.showRaw());
-  protected statsUnitSuffix = computed(() => (this.statsAreRates() ? '/s' : ''));
-  /** Stat cards unit-format for Gauge and every distribution type; Sum can be a "/s" rate or a
-   *  raw per-bucket increase, which formatUnitValue can't represent, so it keeps plain/rate formatting. */
-  protected statsUseUnit = computed(() => this.isDistribution() || this.metricType() === MetricType.Gauge);
-
   protected services = signal<string[]>([]);
   protected labelKeys = computed(() => Object.keys(this.labels()));
 
@@ -399,7 +396,8 @@ export class MetricDetailComponent implements OnInit, AfterViewInit, OnDestroy {
     const rows: { label: string; value: string }[] = [];
     rows.push({ label: 'Metric Name', value: this.metricName() });
     rows.push({ label: 'Type', value: this.typeLabel() });
-    if (info?.unit) rows.push({ label: 'Unit', value: info.unit });
+    const unitLabel = formatUnitLabel(info?.unit);
+    if (unitLabel) rows.push({ label: 'Unit', value: unitLabel });
     if (info?.description) rows.push({ label: 'Description', value: info.description });
     rows.push({ label: 'Services', value: this.services().join(', ') || '—' });
     rows.push({ label: 'Instance Count', value: String(this.instances().length) });
@@ -741,8 +739,11 @@ export class MetricDetailComponent implements OnInit, AfterViewInit, OnDestroy {
 
     if (chartType !== 'bar') chartSeries = connectAcrossEmptyBuckets(chartSeries, stacked);
 
-    const unit = this.isDistribution() || this.metricType() === MetricType.Gauge ? this.metricUnit() : '';
-    const valueFormatter = (v: number) => (unit ? formatUnitValue(v, unit) : v.toFixed(2));
+    // Every type formats through its unit. A Sum shown as a rate is `unit/s`; a raw per-bucket
+    // increase (and a Gauge or distribution) is in the metric's own unit.
+    const unit = this.metricUnit();
+    const perSecond = this.isSum() && !this.showRaw();
+    const valueFormatter = (v: number) => formatUnitValue(v, unit, { perSecond });
 
     // With empty buckets dropped, only a series holding a single point draws no line — mark
     // those so a lone observation is still visible; every other series stays a plain line.
@@ -758,7 +759,7 @@ export class MetricDetailComponent implements OnInit, AfterViewInit, OnDestroy {
       fill: { opacity: chartType === 'area' ? (stacked ? 0.7 : 0.15) : 1 },
       dataLabels: { enabled: false },
       yaxis: { labels: { formatter: valueFormatter } },
-      tooltip: unit ? { y: { formatter: valueFormatter } } : undefined,
+      tooltip: { y: { formatter: valueFormatter } },
       grid: chartGrid(isDark),
       legend: { position: 'top' },
     });
@@ -771,7 +772,7 @@ export class MetricDetailComponent implements OnInit, AfterViewInit, OnDestroy {
   private buildShareChart(isDark: boolean): void {
     const groups = this.allGroups();
     const slices = groups.map((g) => ({ name: g.name, value: g.points.reduce((a, p) => a + (p.value ?? 0), 0) }));
-    this.chartOptions.set(buildShareDonut(slices, isDark) ?? {});
+    this.chartOptions.set(buildShareDonut(slices, isDark, this.metricUnit()) ?? {});
   }
 
   /** Dial/radial-gauge view (phase 6): current value against the unit's natural bound (100 for
@@ -842,8 +843,7 @@ export class MetricDetailComponent implements OnInit, AfterViewInit, OnDestroy {
   protected fmtStat(v: number | null | undefined, approximate = false): string {
     if (v == null) return '—';
     const prefix = approximate ? '≈ ' : '';
-    if (this.statsUseUnit()) return prefix + formatUnitValue(v, this.metricUnit());
-    return `${prefix}${v.toFixed(3)}${this.statsUnitSuffix()}`;
+    return prefix + formatUnitValue(v, this.metricUnit(), { perSecond: this.statsAreRates() });
   }
 
   /** Tooltip text for the Min/Max stat cards when {@link minMaxApproximate} is true. */

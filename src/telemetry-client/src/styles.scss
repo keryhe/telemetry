@@ -54,6 +54,12 @@ body.theme-system {
 // -------------------------------------------------------------------------------------------
 :root {
   --page-max-width: 1600px;
+
+  // The one "error" red, the same in light and dark. Material's --mat-sys-error is deliberately
+  // desaturated in the dark theme and read as a different red from the log severity, chart and
+  // stat-card errors, so error text, borders and fills use this instead. Charts and other JS-side
+  // colours cannot read a CSS variable and keep the literal #f44336.
+  --app-error: #f44336;
 }
 
 // The routed component's host element sits between `.content` and the page's own markup, so it

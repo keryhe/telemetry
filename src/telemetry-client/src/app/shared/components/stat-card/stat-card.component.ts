@@ -68,7 +68,7 @@ import type { ApexOptions } from 'ng-apexcharts';
        surfaces, which reads as pale/washed out here. Matches SEVERITY_COLORS.Error
        (log.models.ts) and the dashboard's error-series chart color instead, so "error" is the
        same red everywhere in the app. */
-    .error { color: #f44336; }
+    .error { color: var(--app-error); }
     .warn { color: #ff9800; }
     .success { color: #4caf50; }
   `],

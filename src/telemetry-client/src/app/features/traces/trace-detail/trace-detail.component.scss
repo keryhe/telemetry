@@ -67,7 +67,7 @@ mat-card-header {
   &.selected { background: var(--mat-sys-secondary-container); }
   &.error {
     background: rgba(244, 67, 54, 0.12);
-    .op-name { color: var(--mat-sys-error); }
+    .op-name { color: var(--app-error); }
   }
   /* Find-in-trace: matched rows tinted, the active match outlined. */
   &.search-match { background: color-mix(in srgb, var(--mat-sys-primary) 14%, transparent); }
@@ -264,7 +264,7 @@ mat-card-header {
   z-index: 1;
   &:hover { opacity: 0.45; }
   /* In-track error cue: red stripe on the leading edge */
-  &.err { box-shadow: inset 3px 0 0 0 var(--mat-sys-error); }
+  &.err { box-shadow: inset 3px 0 0 0 var(--app-error); }
 }
 
 /* Saturated segments where the span itself was doing work (self-time) */
@@ -290,7 +290,7 @@ mat-card-header {
   background: var(--mat-sys-tertiary);
   cursor: default;
   z-index: 3;
-  &.err { background: var(--mat-sys-error); }
+  &.err { background: var(--app-error); }
 }
 
 .duration-label {
@@ -312,7 +312,7 @@ mat-card-header {
   background: color-mix(in srgb, #808080 8%, var(--mat-sys-surface));
   border-left: 3px solid var(--mat-sys-primary);
   border-bottom: 1px solid var(--mat-sys-outline-variant);
-  &.error { border-left-color: var(--mat-sys-error); }
+  &.error { border-left-color: var(--app-error); }
 }
 
 .detail-grid {
@@ -346,9 +346,9 @@ mat-card-header {
   font-weight: 600;
   color: #fff;
   &.ok { background: #4caf50; }
-  &.err { background: #f44336; }
+  &.err { background: var(--app-error); }
 }
-.status-message { margin-left: 8px; color: var(--mat-sys-error); font-size: 12px; }
+.status-message { margin-left: 8px; color: var(--app-error); font-size: 12px; }
 
 .dropped-chip {
   background: #ff9800;
@@ -435,7 +435,7 @@ mat-card-header {
     gap: 4px;
     font-size: 12px;
     font-weight: 600;
-    color: var(--mat-sys-error);
+    color: var(--app-error);
     font-variant-numeric: tabular-nums;
     mat-icon { font-size: 16px; width: 16px; height: 16px; }
   }
@@ -575,7 +575,7 @@ mat-card-header {
   transition: opacity 0.1s ease;
 
   &:hover { opacity: 1; }
-  &.err { border: 2px solid var(--mat-sys-error); }
+  &.err { border: 2px solid var(--app-error); }
   // Highlight every instance of the hovered operation.
   &.op-match {
     outline: 2px solid var(--mat-sys-primary);

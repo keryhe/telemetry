@@ -26,6 +26,7 @@ import {
 import { StatCardComponent } from '../../../shared/components/stat-card/stat-card.component';
 import { EmptyStateComponent } from '../../../shared/components/empty-state/empty-state.component';
 import { PageHeaderComponent } from '../../../shared/components/page-header/page-header.component';
+import { formatUnitLabel } from '../../../shared/utils/chart.utils';
 import { loadPageState, savePageState } from '../../../shared/utils/page-state';
 import { UrlStateService } from '../../../shared/utils/url-state';
 
@@ -100,6 +101,9 @@ export class MetricListComponent implements OnDestroy {
   protected histogramCount = computed(() =>
     this.countFor(MetricType.Histogram, MetricType.ExponentialHistogram)
   );
+
+  /** Unit text for the Unit column: empty for no unit or a braced annotation like `{requests}`. */
+  protected readonly unitLabel = formatUnitLabel;
 
   protected readonly uniqueCols = ['name', 'type', 'unit', 'instances', 'services', 'lastSeen'];
   protected readonly allCols = ['name', 'type', 'unit', 'service', 'lastSeen'];

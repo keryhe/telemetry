@@ -70,6 +70,24 @@ public sealed partial class TelemetryUiOptions
     public string BrandTagline { get; set; } = "OpenTelemetry Visualization";
 
     /// <summary>
+    /// Overrides for the thresholds the Global Dashboard uses to label a tenant healthy, warning,
+    /// degraded, slow-tailed or silent. Every value is optional and has no default here: the
+    /// defaults live in the SPA (<c>health-thresholds.ts</c>), and only what is set is sent to the
+    /// browser to be merged over them, so the two sides cannot drift apart.
+    /// Deployment-wide; there are no per-tenant overrides.
+    /// </summary>
+    public HealthThresholdOptions HealthThresholds { get; set; } = new();
+
+    /// <summary>
+    /// Validates the settings that can be checked without knowing the SPA's defaults. Called at
+    /// startup so a bad deployment fails there, rather than being ignored silently in each
+    /// browser.
+    /// </summary>
+    /// <exception cref="InvalidOperationException">A health threshold is out of range, or a
+    /// <c>Warn</c> is not below its <c>Critical</c>.</exception>
+    internal void Validate() => HealthThresholds.Validate();
+
+    /// <summary>
     /// Reduces <see cref="BasePath"/> to one of exactly two shapes — <c>""</c> for the origin root,
     /// or <c>"/telemetry"</c> (leading slash, no trailing slash) — so every consumer can use
     /// <see cref="Http.PathString.StartsWithSegments(Http.PathString, out Http.PathString)"/> and
@@ -118,4 +136,111 @@ public sealed partial class TelemetryUiOptions
 
     [GeneratedRegex(@"^(/[A-Za-z0-9._~-]+)+$", RegexOptions.CultureInvariant)]
     private static partial Regex BasePathPattern();
+}
+
+/// <summary>
+/// Optional overrides for the Global Dashboard's health thresholds. Rates are 0-1 fractions (0.05
+/// is 5%), durations are milliseconds, matching the SPA's own units. See
+/// <see cref="TelemetryUiOptions.HealthThresholds"/>.
+/// </summary>
+public sealed class HealthThresholdOptions
+{
+    /// <summary>Trace error rate: <c>Warn</c> gives a warning, <c>Critical</c> degraded.</summary>
+    public HealthBandOptions ErrorRate { get; set; } = new();
+
+    /// <summary>Window p95 trace duration in milliseconds, with the same two bands.</summary>
+    public HealthBandOptions P95Ms { get; set; } = new();
+
+    /// <summary>
+    /// Error and fatal logs as a fraction of all logs. Only <c>Critical</c> raises a tenant's
+    /// status (to warning); <c>Warn</c> only colours the log count.
+    /// </summary>
+    public HealthBandOptions LogErrorRate { get; set; } = new();
+
+    /// <summary>Traces needed in the window before latency rules apply.</summary>
+    public int? MinSamples { get; set; }
+
+    /// <summary>A p99 above this multiple of the p95 is a slow tail.</summary>
+    public double? TailRatio { get; set; }
+
+    /// <summary>
+    /// A tenant with no traces in the window and nothing seen for longer than this (milliseconds)
+    /// is silent rather than idle.
+    /// </summary>
+    public double? SilentAfterMs { get; set; }
+
+    internal void Validate()
+    {
+        ValidateBand(nameof(ErrorRate), ErrorRate, 0, 1);
+        ValidateBand(nameof(P95Ms), P95Ms, 0, double.MaxValue);
+        ValidateBand(nameof(LogErrorRate), LogErrorRate, 0, 1);
+
+        if (MinSamples is < 1)
+            throw Invalid(nameof(MinSamples), MinSamples, "must be at least 1");
+        if (TailRatio is not null && !(TailRatio > 1 && double.IsFinite(TailRatio.Value)))
+            throw Invalid(nameof(TailRatio), TailRatio, "must be a number greater than 1");
+        if (SilentAfterMs is not null && !(SilentAfterMs > 0 && double.IsFinite(SilentAfterMs.Value)))
+            throw Invalid(nameof(SilentAfterMs), SilentAfterMs, "must be a number greater than 0");
+    }
+
+    /// <summary>
+    /// The set values as the <c>healthThresholds</c> object <c>config.json</c> carries, or null when
+    /// nothing is set so the key is omitted entirely.
+    /// </summary>
+    internal Dictionary<string, object>? ToConfigPayload()
+    {
+        var payload = new Dictionary<string, object>();
+
+        AddBand(payload, "errorRate", ErrorRate);
+        AddBand(payload, "p95Ms", P95Ms);
+        AddBand(payload, "logErrorRate", LogErrorRate);
+        if (MinSamples is { } minSamples) payload["minSamples"] = minSamples;
+        if (TailRatio is { } tailRatio) payload["tailRatio"] = tailRatio;
+        if (SilentAfterMs is { } silentAfterMs) payload["silentAfterMs"] = silentAfterMs;
+
+        return payload.Count == 0 ? null : payload;
+    }
+
+    private static void AddBand(Dictionary<string, object> payload, string key, HealthBandOptions band)
+    {
+        var values = new Dictionary<string, object>();
+        if (band.Warn is { } warn) values["warn"] = warn;
+        if (band.Critical is { } critical) values["critical"] = critical;
+        if (values.Count > 0) payload[key] = values;
+    }
+
+    private static void ValidateBand(string name, HealthBandOptions band, double min, double max)
+    {
+        CheckBound($"{name}:Warn", band.Warn, min, max);
+        CheckBound($"{name}:Critical", band.Critical, min, max);
+
+        if (band.Warn is { } warn && band.Critical is { } critical && warn >= critical)
+        {
+            throw new InvalidOperationException(
+                $"{TelemetryUiOptions.SectionName}:HealthThresholds:{name}: Warn ({warn}) must be below Critical ({critical}).");
+        }
+    }
+
+    private static void CheckBound(string name, double? value, double min, double max)
+    {
+        if (value is null) return;
+        if (!double.IsFinite(value.Value) || value <= min || value > max)
+        {
+            throw Invalid(name, value,
+                max == double.MaxValue ? $"must be greater than {min}" : $"must be greater than {min} and at most {max}");
+        }
+    }
+
+    private static InvalidOperationException Invalid(string name, object? value, string rule) =>
+        new($"{TelemetryUiOptions.SectionName}:HealthThresholds:{name} '{value}' {rule}.");
+}
+
+/// <summary>A warn/critical pair for one health threshold; either may be left unset.</summary>
+public sealed class HealthBandOptions
+{
+    /// <summary>The value at or above which a tenant is a warning.</summary>
+    public double? Warn { get; set; }
+
+    /// <summary>The value at or above which a tenant is degraded.</summary>
+    public double? Critical { get; set; }
 }

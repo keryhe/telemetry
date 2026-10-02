@@ -63,6 +63,12 @@ function normalize(config: Partial<AppConfig>): Partial<AppConfig> {
     console.warn(`[config] Ignoring invalid apiUrl; using '${DEFAULT_APP_CONFIG.apiUrl}'.`);
   }
 
+  // Passed through as-is: the thresholds are validated and merged field by field against their
+  // defaults in `resolveHealthThresholds`, which owns those defaults.
+  if (config.healthThresholds !== undefined) {
+    normalized.healthThresholds = config.healthThresholds;
+  }
+
   normalizeText(config, normalized, 'brandName');
   normalizeText(config, normalized, 'brandTagline');
 

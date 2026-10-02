@@ -60,6 +60,7 @@ public static class TelemetryUiApplicationBuilderExtensions
 
         var options = app.Services.GetRequiredService<IOptions<TelemetryUiOptions>>().Value;
         configure?.Invoke(options);
+        options.Validate();
 
         // Fixes the effective BasePath and builds the shell. Everything below — and
         // MapKeryheTelemetryUiFallback's route pattern — reads it back from the shell rather than
@@ -83,13 +84,18 @@ public static class TelemetryUiApplicationBuilderExtensions
                 string.Equals(rest.Value, "/config.json", StringComparison.OrdinalIgnoreCase))
             {
                 context.Response.ContentType = "application/json";
-                await context.Response.WriteAsync(
-                    JsonSerializer.Serialize(new
-                    {
-                        apiUrl = options.ApiBasePath,
-                        brandName = options.BrandName,
-                        brandTagline = options.BrandTagline,
-                    }));
+                // Thresholds are sent only when something is configured, and only the values that
+                // are set: the SPA owns the defaults and merges these over them.
+                var config = new Dictionary<string, object>
+                {
+                    ["apiUrl"] = options.ApiBasePath,
+                    ["brandName"] = options.BrandName,
+                    ["brandTagline"] = options.BrandTagline,
+                };
+                if (options.HealthThresholds.ToConfigPayload() is { } healthThresholds)
+                    config["healthThresholds"] = healthThresholds;
+
+                await context.Response.WriteAsync(JsonSerializer.Serialize(config));
                 return;
             }
 

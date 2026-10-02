@@ -81,7 +81,7 @@
             </ng-container>
             <ng-container matColumnDef="unit">
               <th mat-header-cell *matHeaderCellDef>Unit</th>
-              <td mat-cell *matCellDef="let m">{{ m.unit || '—' }}</td>
+              <td mat-cell *matCellDef="let m">{{ unitLabel(m.unit) || '—' }}</td>
             </ng-container>
             <ng-container matColumnDef="instances">
               <th mat-header-cell *matHeaderCellDef>Instances</th>
@@ -116,7 +116,7 @@
             </ng-container>
             <ng-container matColumnDef="unit">
               <th mat-header-cell *matHeaderCellDef>Unit</th>
-              <td mat-cell *matCellDef="let m">{{ m.unit || '—' }}</td>
+              <td mat-cell *matCellDef="let m">{{ unitLabel(m.unit) || '—' }}</td>
             </ng-container>
             <ng-container matColumnDef="service">
               <th mat-header-cell *matHeaderCellDef>Service</th>

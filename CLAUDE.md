@@ -30,8 +30,17 @@ dotnet publish src/Keryhe.Telemetry.Api.Server -c Release -o ./publish
 # Keryhe.Telemetry.Ui, not the host, but propagates transitively through the ProjectReference):
 dotnet publish src/Keryhe.Telemetry.Api.Server -c Release -p:BuildSpa=false
 
-# Run the test data generator (sends synthetic OTLP data to the gRPC server)
+# Run the test data generator: simulates three e-commerce tenants and emits them live through the real
+# OpenTelemetry SDK. Tenant API keys must already exist in the database and go in user secrets
+# (Generator:Tenants:N:ApiKey), never appsettings.
 dotnet run --project src/Keryhe.Telemetry.TestDataGenerator
+# Backfilling history (hand-built OTLP, then continues live) is opt-in; the window defaults to 24h.
+# A second backfill over the same window stores it twice, so truncate the hot tables first.
+dotnet run --project src/Keryhe.Telemetry.TestDataGenerator -- --Generator:Backfill:Enabled=true
+# e.g. only the last hour, and stop instead of going live:
+dotnet run --project src/Keryhe.Telemetry.TestDataGenerator -- --Generator:Backfill:Enabled=true --Generator:Backfill:Window=01:00:00 --Generator:Live=false
+# Its tests (no database or Docker; sinks are compared through an in-process fake collector):
+dotnet test tests/Keryhe.Telemetry.TestDataGenerator.Tests
 
 # Apply database schema (per provider)
 psql -d telemetry -f schema/PostgreSQL-Schema.sql      # PostgreSQL (plain)
@@ -61,7 +70,7 @@ the all-in-one `Keryhe.Telemetry.Server` is for development and is not the topol
 `Add<Provider>CollectorServices`/`Add<Provider>ApiServices` registrations against real
 Testcontainers-managed databases, applying the actual `schema/*.sql` scripts and seeding through
 `ITelemetryBulkWriter` (not `Keryhe.Telemetry.TestDataGenerator`, whose OTLP/gRPC-based data is
-random and time-dependent — see `plans/list-pages-server-side.md`'s Phase 0 section). Requires
+time-dependent and not hand-computable — see `plans/list-pages-server-side.md`'s Phase 0 section). Requires
 Docker. The container startup, schema application and tenant/API-key seeding these fixtures use
 live in `tests/Keryhe.Telemetry.TestInfrastructure` (one `ProviderContainer` per provider, plus
 `TenantSeeder` for N tenants), which the stress harness (below) shares;
@@ -116,6 +125,41 @@ instruments, the comparison page pairs each write-only ramp with its full ramp (
 "a re-delivered span collapses" flag follows the schema under test (true on 2.x, false on 3.0.0, read from `apply-schema.sh`'s `TARGET_VERSION`).
 `--db-cpuset <cpus>` pins the database container to CPUs of the Docker VM and the report says what the database shared CPUs with; pointing the
 harness at a database on another machine is not supported yet.
+
+### Test data generator
+
+`src/Keryhe.Telemetry.TestDataGenerator` simulates a small e-commerce system (web-frontend → api-gateway →
+user/catalog/cart/order services → inventory/payment, with Postgres, Redis, a message queue, Stripe and an
+email provider behind them) for each configured tenant, and sends it to the collector. The design and
+decisions are in `plans/test-data-generator-realism.md`. The shape worth knowing before touching it:
+
+- **One simulation core, two sinks.** `TenantSimulator` produces a neutral model (`Model/SimModel.cs`: span
+  trees with their logs and measurements attached, background logs, periodic samples) for any stretch of
+  *virtual* time. Every random decision is seeded from (seed, tenant, time), so the same range always gives
+  the same telemetry however it is chunked. Flows (`Flows/Journeys.cs`) build spans through `SpanScope`, whose
+  cursor makes durations nest by construction and propagates failures up the call chain.
+- **Backfill is hand-built OTLP (`Sinks/OtlpSink`).** The SDK cannot backdate logs (stamped at emit) or metrics
+  (stamped at export, cumulative from process start), so history goes straight to the Collector's generated
+  gRPC client stubs, with cumulative metrics from `MetricAggregator`, retry/backoff on backpressure and one
+  chunk (default 60 s) per metric interval. 24 h at the default volume takes a few minutes.
+- **Live is the real SDK (`Sinks/SdkSink`).** One tracer/meter/logger provider set per pod, authenticated as the
+  tenant. Spans are started with explicit start/end times; logs and measurements are recorded while their span is
+  the current `Activity`, which is how the SDK attaches trace ids and exemplars. A processor re-stamps each log
+  record with the simulated time. Live emission trails the clock by `LiveLagSeconds` so a request has finished.
+  A provider listens by source/meter *name*, so scope names are per pod and tenant (`<pod name>`), not a library name.
+- **Tenants and incidents.** `Generator:Tenants` (name, scale, API key); the same topology at each tenant's own
+  traffic level. `Generator:Incidents` are recurring daily windows in UTC (latency multiplier, extra error
+  rate, optional version change, which replaces the service's pods like a rollout and restores them on rollback).
+  Traffic follows a daily curve (peak 20:00 UTC), a weekend lift and per-minute bursts.
+- **Keys.** The generator does not create tenants or keys; they must exist (`api_keys.key_hash` is the
+  lowercase-hex SHA-256 of the bearer token). `Validate()` fails fast naming the missing user-secret.
+- **Guard rails.** `tests/Keryhe.Telemetry.TestDataGenerator.Tests` checks the simulation invariants (trees nest, a
+  failed child fails its parent, consumer traces link to producers, logs belong to their span) and runs the same
+  chunks through both sinks into an in-process fake collector, asserting the two look alike (spans, resources,
+  logs, metric names/units/types/attributes, exemplars). Change a sink and run them.
+- Re-running a backfill over a window already ingested stores those spans a second time (spans are plain appends,
+  and the simulation is deterministic, so the ids repeat). Truncate the hot tables first (leave the
+  reference tables alone: the host's `ResourceScopeCache` would then point at rows that no longer exist).
 
 ### Default ports
 
@@ -172,7 +216,11 @@ answers `GET {BasePath}/config.json` with the host's configured options: API loc
 `BrandName`/`BrandTagline`, the consumer-facing product name and tagline shown in the header bar
 and, via the Angular client's `BrandedTitleStrategy`, in every route's browser tab title. All
 default to this UI's own out-of-the-box branding ("Sentinel" / "OpenTelemetry Visualization"), so a
-host that sets nothing sees exactly what it always has. It must run before the tenant middleware,
+host that sets nothing sees exactly what it always has. `config.json` also carries the optional
+`TelemetryUi:HealthThresholds` overrides for the Global Dashboard's status bands, only the keys
+that are set (the defaults live in `health-thresholds.ts`, merged over in `main.ts` by
+`resolveHealthThresholds`; `TelemetryUiOptions.Validate()` fails startup on a bad value). It must
+run before the tenant middleware,
 so UI asset requests — `config.json` included — skip scoped tenant resolution, and it also
 negotiates `.br`/`.gz` variants that the SDK generates automatically at the *host's* publish
 (`Keryhe.Telemetry.Ui` itself has no compressed variants — `MapStaticAssets()` would give that
@@ -252,7 +300,7 @@ REST API consumed by an Angular single-page application.
 | `Keryhe.Telemetry.Server` | All-in-one host: gRPC ingestion + REST API + Angular UI in one process |
 | `Keryhe.Telemetry.Ui` | Prebuilt Angular UI, packaged as static web assets (Razor class library; no .razor/.cshtml) |
 | `Keryhe.Telemetry.Alerting` | Alert rule evaluation with pluggable evaluators and webhook delivery |
-| `Keryhe.Telemetry.TestDataGenerator` | Worker service that emits synthetic telemetry via the OpenTelemetry SDK |
+| `Keryhe.Telemetry.TestDataGenerator` | Worker service that simulates a multi-tenant e-commerce system and emits it as OTLP: hand-built OTLP for backfill, the OpenTelemetry SDK for live (see "Test data generator") |
 | `src/telemetry-client` | Angular 20 UI source (Angular Material, ApexCharts, ngx-graph) — not part of the .sln; built by `Keryhe.Telemetry.Ui`, not by any host directly |
 
 > The former `Keryhe.Telemetry.Server` (monolithic gRPC host) and `Keryhe.Telemetry.Client`
@@ -547,8 +595,8 @@ table could not represent the signal — and no writer ever populated it. The li
 each data point's generated id, which none of the bulk-load paths (binary `COPY`, `SqlBulkCopy`,
 `ClickHouseBulkCopy`) hands back. Trade-off: an exemplar's `trace_id` is no longer indexable; no read
 path queries it. Note the .NET SDK emits no exemplars unless a meter provider sets `SetExemplarFilter`
-— `Keryhe.Telemetry.TestDataGenerator` does, and records its measurements inside an `Activity` so
-they carry trace ids.
+— `Keryhe.Telemetry.TestDataGenerator`'s live sink does, and records each measurement while the span
+it belongs to is the current `Activity`, so it carries trace ids; its backfill sink attaches exemplars itself.
 
 **Cumulative histogram/exp-histogram Min/Max are sometimes an estimate, not the true bucket
 extreme** (`MetricBucketPoint.MinMaxApproximate`, `MetricReadRepositoryBase.EstimateMax`/

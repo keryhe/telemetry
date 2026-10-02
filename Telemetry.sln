@@ -38,6 +38,8 @@ Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Keryhe.Telemetry.TestInfras
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Keryhe.Telemetry.StressTests", "tests\Keryhe.Telemetry.StressTests\Keryhe.Telemetry.StressTests.csproj", "{C6484CDE-6DDB-4C77-B5A2-7F5FC1F54BA5}"
 EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Keryhe.Telemetry.TestDataGenerator.Tests", "tests\Keryhe.Telemetry.TestDataGenerator.Tests\Keryhe.Telemetry.TestDataGenerator.Tests.csproj", "{2E0805BE-BAEE-486E-A7F0-938AFF728D6D}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -252,6 +254,18 @@ Global
 		{C6484CDE-6DDB-4C77-B5A2-7F5FC1F54BA5}.Release|x64.Build.0 = Release|Any CPU
 		{C6484CDE-6DDB-4C77-B5A2-7F5FC1F54BA5}.Release|x86.ActiveCfg = Release|Any CPU
 		{C6484CDE-6DDB-4C77-B5A2-7F5FC1F54BA5}.Release|x86.Build.0 = Release|Any CPU
+		{2E0805BE-BAEE-486E-A7F0-938AFF728D6D}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{2E0805BE-BAEE-486E-A7F0-938AFF728D6D}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{2E0805BE-BAEE-486E-A7F0-938AFF728D6D}.Debug|x64.ActiveCfg = Debug|Any CPU
+		{2E0805BE-BAEE-486E-A7F0-938AFF728D6D}.Debug|x64.Build.0 = Debug|Any CPU
+		{2E0805BE-BAEE-486E-A7F0-938AFF728D6D}.Debug|x86.ActiveCfg = Debug|Any CPU
+		{2E0805BE-BAEE-486E-A7F0-938AFF728D6D}.Debug|x86.Build.0 = Debug|Any CPU
+		{2E0805BE-BAEE-486E-A7F0-938AFF728D6D}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{2E0805BE-BAEE-486E-A7F0-938AFF728D6D}.Release|Any CPU.Build.0 = Release|Any CPU
+		{2E0805BE-BAEE-486E-A7F0-938AFF728D6D}.Release|x64.ActiveCfg = Release|Any CPU
+		{2E0805BE-BAEE-486E-A7F0-938AFF728D6D}.Release|x64.Build.0 = Release|Any CPU
+		{2E0805BE-BAEE-486E-A7F0-938AFF728D6D}.Release|x86.ActiveCfg = Release|Any CPU
+		{2E0805BE-BAEE-486E-A7F0-938AFF728D6D}.Release|x86.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE
@@ -274,5 +288,6 @@ Global
 		{7CEA2345-3EF6-48F9-B9F2-48E672F8BFC4} = {0AB3BF05-4346-4AA6-1389-037BE0695223}
 		{C51A42D4-84EE-499E-92BC-F70DBE56484D} = {0AB3BF05-4346-4AA6-1389-037BE0695223}
 		{C6484CDE-6DDB-4C77-B5A2-7F5FC1F54BA5} = {0AB3BF05-4346-4AA6-1389-037BE0695223}
+		{2E0805BE-BAEE-486E-A7F0-938AFF728D6D} = {0AB3BF05-4346-4AA6-1389-037BE0695223}
 	EndGlobalSection
 EndGlobal
