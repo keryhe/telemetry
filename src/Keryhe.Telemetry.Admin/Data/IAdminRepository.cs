@@ -25,7 +25,8 @@ public interface IAdminRepository
 
     Task<IReadOnlyList<ApiKeyRow>> GetApiKeysAsync(long tenantId, CancellationToken ct);
 
-    Task<long> CreateApiKeyAsync(long tenantId, string name, string keyHash, CancellationToken ct);
+    /// <param name="expiresAtUtc">Optional expiry, UTC; null means the key never expires.</param>
+    Task<long> CreateApiKeyAsync(long tenantId, string name, string keyHash, DateTime? expiresAtUtc, CancellationToken ct);
 
     Task<bool> SetApiKeyActiveAsync(long apiKeyId, bool active, CancellationToken ct);
 

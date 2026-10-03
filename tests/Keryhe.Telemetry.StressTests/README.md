@@ -1,7 +1,7 @@
 # Keryhe.Telemetry.StressTests
 
-A provider stress harness. For each database provider (PostgreSQL, Timescale, SqlServer, MySql, ClickHouse) and each host topology
-(all-in-one, or split collector + API), it ingests a large volume of logs, traces and metrics over OTLP/gRPC while headless Chromium walks every
+A provider stress harness. For each database provider (PostgreSQL, Timescale, SqlServer, MySql, ClickHouse), against the split collector + API
+topology, it ingests a large volume of logs, traces and metrics over OTLP/gRPC while headless Chromium walks every
 UI page, then reports what was slow, what locked, what it cost, and whether the rows in the database match what was sent.
 
 It reports **numbers, not verdicts**: there are no pass/fail thresholds and no baseline comparison. The design and the decisions behind it are in
@@ -24,9 +24,9 @@ All commands start with `dotnet run --project tests/Keryhe.Telemetry.StressTests
 
 ```bash
 # One scenario, the quick built-in profile (about 7 minutes)
-dotnet run --project tests/Keryhe.Telemetry.StressTests -- run --provider PostgreSQL --topology allinone --profile smoke
+dotnet run --project tests/Keryhe.Telemetry.StressTests -- run --provider PostgreSQL --topology split --profile smoke
 
-# The whole matrix: every provider by both topologies, one profile (runs sequentially, never in parallel)
+# The whole matrix: every provider, one profile (runs sequentially, never in parallel)
 dotnet run --project tests/Keryhe.Telemetry.StressTests -- run --provider all --topology all --profile smoke
 
 # Find a provider's breaking point
@@ -45,7 +45,7 @@ dotnet run --project tests/Keryhe.Telemetry.StressTests -- report --in stress-re
 | Option | Meaning |
 |---|---|
 | `--provider` | `PostgreSQL`, `Timescale`, `SqlServer`, `MySql`, `ClickHouse`, or `all` (default `PostgreSQL`) |
-| `--topology` | `allinone`, `split`, or `all` (default `allinone`) |
+| `--topology` | `split` or `all` (default `split`; kept so existing scripts keep working) |
 | `--profile` | `smoke`, `standard`, `soak`, `ramp`, `all`, or the path of a profile JSON (default `smoke`, or `ramp` with `--scenario ramp`) |
 | `--scenario` | `fixed` or `ramp`; picks the default profile and rejects a mismatched one |
 | `--browsers <n>` | Override the profile's browser users (0 to 5; 0 runs none) |
@@ -91,7 +91,7 @@ A profile JSON (comments allowed) lists only what it overrides. Pass its path to
 | `name` | file name | Used in folder names and the report |
 | `tenants` | 2 | Tenants seeded, each with one API key |
 | `warmupSeconds` / `measuredSeconds` | 60 / 300 | `measuredSeconds` is ignored for a ramp |
-| `retentionIntervalSeconds` | 30 | `Retention:IntervalSeconds` for the host, so a sweep lands in the window (see `--retention-interval`) |
+| `retentionIntervalSeconds` | 30 | `Telemetry:Retention:IntervalSeconds` for the host, so a sweep lands in the window (see `--retention-interval`) |
 | `backdatedCheckMaxWaitSeconds` | 300 | Longest the correctness check waits for a post-quiescence retention sweep |
 | `containerCpus` / `containerMemoryGb` | 4 / 8 | The same cap for every DB container |
 | `markerIntervalSeconds` | 5 | How often a marker log and span are sent to time ingest-to-queryable lag |

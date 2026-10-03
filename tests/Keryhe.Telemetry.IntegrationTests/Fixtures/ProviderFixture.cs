@@ -39,6 +39,10 @@ public abstract class ProviderFixture : IAsyncLifetime
     /// <summary>The test database's connection string, for tests that issue raw SQL (counting rows, reading plans).</summary>
     public string DatabaseConnectionString => Container.ConnectionString;
 
+    /// <summary>Seeds another tenant and API key (optionally expiring at a UTC instant) in the shared test database.</summary>
+    public Task<Keryhe.Telemetry.TestInfrastructure.Seeding.SeededTenant> SeedTenantAsync(string tenantName, string apiKeyName, string apiKeyPlainText, DateTime? expiresAtUtc = null) =>
+        Container.SeedTenantAsync(tenantName, apiKeyName, apiKeyPlainText, expiresAtUtc: expiresAtUtc);
+
     /// <summary>Connection string for the write side (<c>ConnectionStrings:Collector</c>).</summary>
     protected string CollectorConnectionString => Container.ConnectionString;
 

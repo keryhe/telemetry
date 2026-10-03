@@ -5,26 +5,117 @@ set falls back to the default shown here. Any key can be set the usual .NET ways
 `appsettings.{Environment}.json`, User Secrets, environment variables (`:` becomes `__`, e.g.
 `Telemetry__Query__SummaryTimeoutSeconds=10`) or the command line (`--Telemetry:Query:SummaryTimeoutSeconds=10`).
 
-**Which host reads what.** The collector host (`Keryhe.Telemetry.Collector.Server`) reads the write-side sections, the
-API host (`Keryhe.Telemetry.Api.Server`) the read-side and UI sections, and the all-in-one host
-(`Keryhe.Telemetry.Server`) both. The "Host" column says which.
+**Which host reads what.** The collector host (`Keryhe.Telemetry.Collector.Server`) reads the [Collector](#collector)
+sections, the API host (`Keryhe.Telemetry.Api.Server`) the [API](#api) sections. [Common](#common-settings) settings apply
+to both.
 
-## Database and connection strings
+## Common settings
+
+### Database and connection strings
 
 | Key | Default | Host | Description |
 |---|---|---|---|
-| `Database:Provider` | none (required) | all, Admin | `PostgreSQL`, `Timescale`, `SqlServer`, `ClickHouse` or `MySql`. Unknown or missing fails startup. |
-| `ConnectionStrings:Collector` | none (required) | collector, all-in-one | Write path: bulk writer, tenant resolution, API-key and metric touch workers. |
-| `ConnectionStrings:Api` | none (required) | API, all-in-one | Read path: every read repository, alert rules, retention settings. |
+| `Database:Provider` | none (required) | collector, API, Admin | `PostgreSQL`, `Timescale`, `SqlServer`, `ClickHouse` or `MySql`. Unknown or missing fails startup. |
+| `ConnectionStrings:Collector` | none (required) | collector | Write path: bulk writer, tenant resolution, API-key and metric touch workers. |
+| `ConnectionStrings:Api` | none (required) | API | Read path: every read repository, alert rules, retention settings. |
 | `ConnectionStrings:Admin` | none (required) | Admin tool | `Keryhe.Telemetry.Admin`'s connection. |
 
-On PostgreSQL and Timescale the all-in-one host requires `Api` and `Collector` to be identical (it fails at startup
-otherwise; see CLAUDE.md, "All-in-one constraint"). The committed `appsettings.json` files leave the connection strings
-empty; local values live in User Secrets.
+The committed `appsettings.json` files leave the connection strings empty; local values live in User Secrets.
 
-## Ingestion (`Telemetry:Ingestion`)
+### Host settings
 
-Collector and all-in-one hosts. `TelemetryIngestionOptions`.
+| Key | Default | Host | Description |
+|---|---|---|---|
+| `Kestrel:Endpoints` | per host | both | Listening ports and protocols (CLAUDE.md, "Default ports"). Don't set `ASPNETCORE_URLS` on the collector: it replaces these endpoints and collapses their per-endpoint protocols, breaking h2c gRPC on 5117. |
+| `Logging:LogLevel` | ASP.NET Core defaults | both | Standard .NET logging levels. |
+| `AllowedHosts` | `*` | both | Standard ASP.NET Core host filtering. |
+
+## Collector
+
+Host: `Keryhe.Telemetry.Collector.Server` (gRPC OTLP ingestion, the write path). Uses `Database:Provider` and
+`ConnectionStrings:Collector` above.
+
+```json
+{
+  "Telemetry": {
+    "Collector": { "AllowInsecureTransport": false },
+    "Ingestion": { "FlushConcurrency": 4 },
+    "TenantResolution": { "PositiveCacheTtlSeconds": 30 },
+    "MetricTouch": { "FlushIntervalSeconds": 60 }
+  }
+}
+```
+
+### Transport (`Telemetry:Collector`)
+
+`TelemetryCollectorOptions`.
+
+| Key | Default | Description |
+|---|---|---|
+| `AllowInsecureTransport` | `false` | Outside Development the collector fails startup on a plaintext (`http://`) TCP address, because API keys would cross the network in cleartext. Set `true` only when TLS is terminated by a proxy in front of the collector. Unix-socket addresses are exempt. |
+
+### Listening endpoint and certificate (`Kestrel:Endpoints`)
+
+The collector's endpoints are named Kestrel endpoints. The files merge by endpoint name, so an override only needs
+the keys it changes.
+
+| Key | Default | Description |
+|---|---|---|
+| `Kestrel:Endpoints:Https:Url` | `https://0.0.0.0:7057` | The TLS gRPC endpoint (`appsettings.json`). |
+| `Kestrel:Endpoints:Https:Protocols` | `Http2` | gRPC requires HTTP/2. |
+| `Kestrel:Endpoints:Https:Certificate:Path` | none | A `.pfx` (or a `.pem`/`.crt` with `KeyPath`). With no certificate configured Kestrel uses the ASP.NET Core development certificate, which is normally absent (startup fails) or untrusted outside a development machine. |
+| `Kestrel:Endpoints:Https:Certificate:Password` | none | The `.pfx` (or encrypted key) password. Set it as an environment variable or secret, never in a committed file. |
+| `Kestrel:Endpoints:Https:Certificate:KeyPath` | none | The private key file, when `Path` is a PEM certificate. |
+| `Kestrel:Endpoints:Https:Certificate:Store` / `Location` / `Subject` | none | Load from a certificate store instead of a file (e.g. `My` / `LocalMachine` / `collector.example.com`). `AllowInvalid` (default `false`) permits a self-signed or otherwise invalid certificate. |
+| `Kestrel:Endpoints:Http:Url` | `http://localhost:5117` (Development only) | The plaintext h2c endpoint, `Protocols: Http2`, from `appsettings.Development.json`; used by the TestDataGenerator and the stress harness. |
+
+Give the certificate in an override (`appsettings.Production.json` next to the executable, or environment variables)
+rather than editing the shipped `appsettings.json`, which every publish replaces. A certificate file:
+
+```json
+{
+  "Kestrel": {
+    "Endpoints": {
+      "Https": {
+        "Certificate": { "Path": "/etc/telemetry/collector.pfx" }
+      }
+    }
+  }
+}
+```
+
+with the password in the environment:
+
+```
+Kestrel__Endpoints__Https__Certificate__Password=<password>
+```
+
+A PEM certificate and key:
+
+```json
+"Certificate": { "Path": "/etc/telemetry/collector.crt", "KeyPath": "/etc/telemetry/collector.key" }
+```
+
+The Windows certificate store (the service account needs read access to the private key):
+
+```json
+"Certificate": { "Store": "My", "Location": "LocalMachine", "Subject": "collector.example.com" }
+```
+
+**TLS terminated by a proxy.** Repoint the same endpoint at plaintext and tell the transport guard it is intended;
+the proxy must forward HTTP/2 (h2c) to the collector:
+
+```
+Kestrel__Endpoints__Https__Url=http://0.0.0.0:7057
+Telemetry__Collector__AllowInsecureTransport=true
+```
+
+Don't use `ASPNETCORE_URLS` or `ASPNETCORE_HTTP_PORTS`/`HTTPS_PORTS` for the collector: Kestrel ignores them while
+`Kestrel:Endpoints` is configured.
+
+### Ingestion (`Telemetry:Ingestion`)
+
+`TelemetryIngestionOptions`.
 
 | Key | Default | Description |
 |---|---|---|
@@ -39,9 +130,9 @@ Collector and all-in-one hosts. `TelemetryIngestionOptions`.
 | `RetryBaseDelayMilliseconds` | 200 | First retry delay; doubles each attempt, with jitter. |
 | `RetryMaxDelayMilliseconds` | 5000 | Cap on the retry delay. |
 
-## Tenant resolution (`Telemetry:TenantResolution`)
+### Tenant resolution (`Telemetry:TenantResolution`)
 
-Collector and all-in-one hosts. `TenantResolutionOptions`.
+`TenantResolutionOptions`.
 
 | Key | Default | Description |
 |---|---|---|
@@ -49,9 +140,9 @@ Collector and all-in-one hosts. `TenantResolutionOptions`.
 | `NegativeCacheTtlSeconds` | 5 | How long an invalid or inactive key is cached. |
 | `LastUsedFlushIntervalSeconds` | 60 | Interval of the `api_keys.last_used_at` flush. |
 
-## Metric touch (`Telemetry:MetricTouch`)
+### Metric touch (`Telemetry:MetricTouch`)
 
-Collector and all-in-one hosts. `MetricTouchOptions`. Writes `metric_last_seen` on the relational providers (a no-op on
+`MetricTouchOptions`. Writes `metric_last_seen` on the relational providers (a no-op on
 ClickHouse, where materialized views do it).
 
 | Key | Default | Description |
@@ -59,9 +150,39 @@ ClickHouse, where materialized views do it).
 | `FlushIntervalSeconds` | 60 | Interval between flushes. |
 | `MaxBatchSize` | 4000 | Rows per batch (kept under SQL Server's lock-escalation threshold). |
 
-## Read queries (`Telemetry:Query`)
+## API
 
-API and all-in-one hosts. `QueryOptions`.
+Host: `Keryhe.Telemetry.Api.Server` (REST API, background workers and the UI). Uses `Database:Provider` and
+`ConnectionStrings:Api` above.
+
+```json
+{
+  "Telemetry": {
+    "Api": { "BasePath": "/api" },
+    "Query": { "SummaryTimeoutSeconds": 5 },
+    "Export": { "MaxConcurrent": 2 },
+    "AlertEvaluation": { "Enabled": true, "IntervalSeconds": 60 },
+    "Retention": { "Enabled": true, "IntervalSeconds": 3600 }
+  },
+  "TelemetryUi": { "BasePath": "/" },
+  "Cors": { "AllowedOrigins": ["http://localhost:4201"] }
+}
+```
+
+### Routes and authorization (`Telemetry:Api`)
+
+API host. `TelemetryApiOptions`; full detail in [src/Keryhe.Telemetry.Api/README.md](../src/Keryhe.Telemetry.Api/README.md).
+
+| Key | Default | Description |
+|---|---|---|
+| `BasePath` | `/api` | Prefix of every API route. `/` and empty are rejected. The in-repo hosts set `/telemetry/api`. |
+| `Authorization:Enabled` | false | Turns on operation and tenant authorization. |
+| `Authorization:Policies:{Read\|Admin\|Export\|ManageAlerts\|ManageSettings}` | unset | Name of a host-registered policy per operation. Export falls back to Read, ManageAlerts/ManageSettings to Admin, Read/Admin to the default policy. |
+| `Authorization:TenantMappings` | `[]` | List of `{ ClaimType, ClaimValue, Tenants }`: callers with that claim may access those tenants (names, ids or `"*"`). |
+
+### Read queries (`Telemetry:Query`)
+
+API host. `QueryOptions`.
 
 | Key | Default | Description |
 |---|---|---|
@@ -73,38 +194,27 @@ API and all-in-one hosts. `QueryOptions`.
 | `TraceHintMarginMinutes` | 1 | Margin either side of a trace-detail `?start=&end=` hint (Timescale, ClickHouse). |
 | `TraceHintEnabled` | true | `false` ignores every trace-detail time hint. |
 
-## Export (`Telemetry:Export`)
+### Export (`Telemetry:Export`)
 
-API and all-in-one hosts. `ExportOptions`.
+API host. `ExportOptions`.
 
 | Key | Default | Description |
 |---|---|---|
 | `MaxWindowDaysOverride` | unset (7 on PostgreSQL/Timescale/ClickHouse, 1 on SQL Server/MySQL) | Widest window an export may cover; wider is a `400`. |
 | `MaxConcurrent` | 2 | Exports streaming at once per API instance; beyond it a request gets `429`. |
 
-## API (`Telemetry:Api`)
+### Alert evaluation (`Telemetry:AlertEvaluation`)
 
-API and all-in-one hosts. `TelemetryApiOptions`; full detail in [src/Keryhe.Telemetry.Api/README.md](../src/Keryhe.Telemetry.Api/README.md).
-
-| Key | Default | Description |
-|---|---|---|
-| `BasePath` | `/api` | Prefix of every API route. `/` and empty are rejected. The in-repo hosts set `/telemetry/api`. |
-| `Authorization:Enabled` | false | Turns on operation and tenant authorization. |
-| `Authorization:Policies:{Read\|Admin\|Export\|ManageAlerts\|ManageSettings}` | unset | Name of a host-registered policy per operation. Export falls back to Read, ManageAlerts/ManageSettings to Admin, Read/Admin to the default policy. |
-| `Authorization:TenantMappings` | `[]` | List of `{ ClaimType, ClaimValue, Tenants }`: callers with that claim may access those tenants (names, ids or `"*"`). |
-
-## Alerting (`AlertEvaluation`)
-
-API and all-in-one hosts (`AddAlerting`). `AlertingOptions`.
+API host (`AddAlerting`). `AlertingOptions`.
 
 | Key | Default | Description |
 |---|---|---|
 | `Enabled` | true | When false the evaluation worker registers but never runs. |
 | `IntervalSeconds` | 60 | Interval between evaluation cycles. |
 
-## Retention (`Retention`)
+### Retention (`Telemetry:Retention`)
 
-API and all-in-one hosts (`AddRetention`). `RetentionOptions`. How many days to keep is not configuration: it is the
+API host (`AddRetention`). `RetentionOptions`. How many days to keep is not configuration: it is the
 `retention_settings` row, edited on the Settings page.
 
 | Key | Default | Description |
@@ -112,9 +222,9 @@ API and all-in-one hosts (`AddRetention`). `RetentionOptions`. How many days to 
 | `Enabled` | true | When false the retention worker registers but never sweeps. |
 | `IntervalSeconds` | 3600 | Interval between sweeps. |
 
-## UI (`TelemetryUi`)
+### UI (`TelemetryUi`)
 
-API and all-in-one hosts (`AddKeryheTelemetryUi`). `TelemetryUiOptions`; full detail in
+API host (`AddKeryheTelemetryUi`). `TelemetryUiOptions`; full detail in
 [src/Keryhe.Telemetry.Ui/README.md](../src/Keryhe.Telemetry.Ui/README.md). Read once at startup.
 
 | Key | Default | Description |
@@ -133,16 +243,15 @@ API and all-in-one hosts (`AddKeryheTelemetryUi`). `TelemetryUiOptions`; full de
 | `Auth:Oidc:ClientId` | unset | OIDC client id (oidc mode). |
 | `Auth:Oidc:Scope` | `openid profile` | Requested scopes (oidc mode). |
 
-## Host settings
+### CORS (`Cors`)
 
-| Key | Default | Host | Description |
-|---|---|---|---|
-| `Cors:AllowedOrigins` | `["http://localhost:4201"]` | API, all-in-one | Origins allowed to call the API from a browser. Only matters for a UI on a different origin from its API. |
-| `Kestrel:Endpoints` | per host | all | Listening ports and protocols (CLAUDE.md, "Default ports"). Don't set `ASPNETCORE_URLS` on the all-in-one host: it replaces these endpoints and breaks h2c gRPC on 5117. |
-| `Logging:LogLevel` | ASP.NET Core defaults | all | Standard .NET logging levels. |
-| `AllowedHosts` | `*` | all | Standard ASP.NET Core host filtering. |
+| Key | Default | Description |
+|---|---|---|
+| `Cors:AllowedOrigins` | `["http://localhost:4201"]` | Origins allowed to call the API from a browser. Only matters for a UI on a different origin from its API. |
 
-## Test data generator (`Generator`)
+## Other tools
+
+### Test data generator (`Generator`)
 
 `Keryhe.Telemetry.TestDataGenerator` only (`GeneratorOptions`); its [appsettings.json](../src/Keryhe.Telemetry.TestDataGenerator/appsettings.json)
 sets every value and is the working example. API keys go in User Secrets, never appsettings.

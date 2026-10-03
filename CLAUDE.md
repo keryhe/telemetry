@@ -10,21 +10,17 @@ Requires the .NET 10 SDK and Node.js (Angular 20 for the UI).
 # Build the whole .NET solution
 dotnet build Telemetry.sln
 
-# Run the all-in-one host (gRPC ingestion + REST API + Angular UI in one process)
-dotnet run --project src/Keryhe.Telemetry.Server
-
-# ...or run the two split hosts separately (scale-out deployments):
-# gRPC OTLP ingestion server (write path)
+# Run the two hosts (each in its own terminal; they share only the database):
+# gRPC OTLP ingestion server (write path; Development also listens on h2c http://localhost:5117)
 dotnet run --project src/Keryhe.Telemetry.Collector.Server
-# REST API (read path, consumed by the Angular UI)
+# REST API (read path; also serves the Angular UI)
 dotnet run --project src/Keryhe.Telemetry.Api.Server
 
 # Run the Angular UI (dev server on http://localhost:4201 — development only)
 cd src/telemetry-client && npm install && npm start
 
-# Publish the all-in-one host (also builds + bundles the Angular UI, via Keryhe.Telemetry.Ui)
-dotnet publish src/Keryhe.Telemetry.Server -c Release -o ./publish-server
-# The API-only host publishes the UI the same way:
+# Publish the hosts. The API host also builds + bundles the Angular UI, via Keryhe.Telemetry.Ui:
+dotnet publish src/Keryhe.Telemetry.Collector.Server -c Release -o ./publish-collector
 dotnet publish src/Keryhe.Telemetry.Api.Server -c Release -o ./publish
 # ...and to publish against an already-built src/telemetry-client/dist instead (the flag is on
 # Keryhe.Telemetry.Ui, not the host, but propagates transitively through the ProjectReference):
@@ -53,21 +49,27 @@ mysql telemetry < schema/MySQL-Schema.sql               # MySQL
 schema/apply-schema.sh <postgresql|timescale|sqlserver|clickhouse|mysql> [database]
 ```
 
-**Schema 3.0.x is a fresh-install schema.** There is no migration from 2.x (decision 4 of
+**Schema 3.x is a fresh-install schema.** There is no migration from 2.x (decision 4 of
 `plans/schema-simplification.md`, which explains every change below): an existing 2.x database must
-be recreated, and `schema/migrations/` no longer exists. `apply-schema.sh` only skips when the 3.0.1
-version row is already recorded. 3.0.1 over 3.0.0 adds one thing: ClickHouse's `bloom_filter` skip index on
+be recreated, and `schema/migrations/` no longer exists. `apply-schema.sh` only skips when the 3.1.0
+version row is already recorded. 3.0.1 over 3.0.0 added one thing: ClickHouse's `bloom_filter` skip index on
 `spans.trace_id` (`plans/trace-list-detail-performance.md`, Phase 5); an existing 3.0.0 ClickHouse database
 can take it with `ALTER TABLE spans ADD INDEX idx_spans_trace trace_id TYPE bloom_filter(0.01) GRANULARITY 4`
-(and `MATERIALIZE INDEX` for existing parts).
+(and `MATERIALIZE INDEX` for existing parts). 3.1.0 over 3.0.x adds `api_keys.expires_at`
+(`plans/collector-authentication.md`, decision 12), which the collector's key lookup requires; an existing 3.0.x
+database takes it with one statement per provider (UTC everywhere, so the types are chosen to be unambiguous):
+`ALTER TABLE api_keys ADD COLUMN expires_at TIMESTAMPTZ` (PostgreSQL, Timescale), `ALTER TABLE api_keys ADD
+expires_at DATETIMEOFFSET(7) NULL` (SQL Server, not `DATETIME2`), `ALTER TABLE api_keys ADD COLUMN expires_at
+DATETIME(6) NULL` (MySQL, UTC by convention), `ALTER TABLE api_keys ADD COLUMN expires_at Nullable(DateTime64(9,
+'UTC'))` (ClickHouse). Then record 3.1.0 in `schema_version`.
 
 There is one schema script per supported provider, all producing the same logical
 table/column set: `schema/PostgreSQL-Schema.sql` (plain Postgres), `schema/Timescale-Schema.sql`
 (Postgres + TimescaleDB hypertables and compression),
 `schema/SqlServer-Schema.sql`, `schema/MySQL-Schema.sql`, and `schema/ClickHouse-Schema.sql`
 (columnar MergeTree family; see the ClickHouse notes below). A schema change edits all five plus
-`TARGET_VERSION` in `apply-schema.sh`, in one commit. Production topology is the collector/API split;
-the all-in-one `Keryhe.Telemetry.Server` is for development and is not the topology that is measured.
+`TARGET_VERSION` in `apply-schema.sh`, in one commit. The collector/API split is the only topology (there is no
+all-in-one host: `plans/collector-authentication.md`, decision 16); development runs the two hosts.
 
 `tests/Keryhe.Telemetry.IntegrationTests` (xUnit) runs every provider's real
 `Add<Provider>CollectorServices`/`Add<Provider>ApiServices` registrations against real
@@ -99,8 +101,8 @@ The Angular project has `npm test` (Karma/Jasmine) but no meaningful tests are s
 
 ### Stress tests
 
-`tests/Keryhe.Telemetry.StressTests` is a manual, Docker-based harness (never part of `dotnet test`) that ingests OTLP load into each provider under both
-host topologies while headless Chromium walks the UI, then reports write/read latency, locking, resource use, slowest SQL and a data correctness check as
+`tests/Keryhe.Telemetry.StressTests` is a manual, Docker-based harness (never part of `dotnet test`) that ingests OTLP load into each provider (collector + API
+hosts, the split topology) while headless Chromium walks the UI, then reports write/read latency, locking, resource use, slowest SQL and a data correctness check as
 `result.json`, `report.html` and (for a matrix) `comparison.html`. Its README covers prerequisites, profiles, ramp criteria and how to read the report;
 the design is in `plans/stress-tests.md`. It reuses the Collector's generated gRPC stubs, which is why the three `*_service.proto` entries in the
 Collector csproj are `GrpcServices="Both"`.
@@ -110,7 +112,7 @@ Collector csproj are `GrpcServices="Both"`.
 dotnet run --project tests/Keryhe.Telemetry.StressTests -- playwright-install
 
 # Run scenarios (provider/topology/profile each take a value or "all"; runs sequentially)
-dotnet run --project tests/Keryhe.Telemetry.StressTests -- run --provider PostgreSQL --topology allinone --profile smoke
+dotnet run --project tests/Keryhe.Telemetry.StressTests -- run --provider PostgreSQL --topology split --profile smoke
 dotnet run --project tests/Keryhe.Telemetry.StressTests -- run --provider all --topology all --profile smoke
 dotnet run --project tests/Keryhe.Telemetry.StressTests -- run --provider SqlServer --scenario ramp
 # The provider's write ceiling with nothing reading (no browsers, no marker probes; stops on commit lag,
@@ -231,12 +233,13 @@ decisions are in `plans/test-data-generator-realism.md`. The shape worth knowing
 - REST API (`Keryhe.Telemetry.Api.Server`): `http://localhost:5188`, `https://localhost:7105` — also serves the UI at `/` when published
 - Angular dev server (`src/telemetry-client`): `http://localhost:4201` — **development only**
 
-`Keryhe.Telemetry.Server` (all-in-one) serves all four of the above on the same ports, via named
-Kestrel endpoints in its `appsettings.json`: `Grpc` (5117, h2c/`Http2`), `GrpcTls` (7057, `Http2`),
-`Api` (5188, `Http1`), `ApiTls` (7105, `Http1AndHttp2`). Its `launchSettings.json` deliberately sets
-**no** `applicationUrl` — `ASPNETCORE_URLS` overrides `Kestrel:Endpoints` wholesale and would
-collapse the per-endpoint `Protocols`, breaking h2c gRPC on 5117. It also omits `UseHttpsRedirection()`
-for the same reason.
+`Collector.Server` configures its endpoints as named Kestrel endpoints, not `launchSettings.json`'s
+`applicationUrl` (which `Kestrel:Endpoints` overrides, so it would be dead): `appsettings.json` has `Https`
+(7057, `Http2`, no certificate: the Collector README shows the `Certificate` override), and `appsettings.Development.json` adds `Http`
+(`http://localhost:5117`, h2c/`Http2`), the plaintext endpoint the TestDataGenerator and stress harness use. The two
+files merge by endpoint name. **Do not set `ASPNETCORE_URLS`** on it: it overrides `Kestrel:Endpoints` wholesale and
+would collapse the per-endpoint `Protocols`, breaking h2c gRPC on 5117 (and outside Development a plaintext address
+fails startup anyway, see "Collector authentication"). The collector also omits `UseHttpsRedirection()`.
 
 The API location is **runtime**, not build-time, configuration: the client fetches
 `GET /config.json` before it bootstraps (`src/telemetry-client/src/app/core/config/load-config.ts`)
@@ -260,9 +263,8 @@ without cloning `src/telemetry-client` or installing Node (see
 builds `src/telemetry-client` (`npm ci`/`npm run build`) and stages `dist/telemetry-client/browser`
 into *its own* `wwwroot` — incrementally (a stamp file plus MSBuild `Inputs`/`Outputs` skip the
 npm build once it's already current) and gracefully (a missing Node toolchain warns and packages
-an empty UI rather than failing the solution build). `Keryhe.Telemetry.Api.Server` and
-`Keryhe.Telemetry.Server` reference it via a plain `ProjectReference`; nothing else needs to know
-it exists.
+an empty UI rather than failing the solution build). `Keryhe.Telemetry.Api.Server` references it via a
+plain `ProjectReference`; nothing else needs to know it exists.
 
 The package has the same `Add*`/`Use*` split as the API and collector sides.
 `builder.Services.AddKeryheTelemetryUi(configuration, configure?)` binds `TelemetryUiOptions` from
@@ -361,14 +363,14 @@ REST API consumed by an Angular single-page application.
 | `Keryhe.Telemetry.Collector.Server` | Thin ASP.NET Core host that maps the gRPC services and runs the ingestion worker |
 | `Keryhe.Telemetry.Api` | REST API controllers, base-path routing, authorization, and read-service wiring (class library) |
 | `Keryhe.Telemetry.Api.Server` | Thin ASP.NET Core host that composes the API + OpenAPI + CORS |
-| `Keryhe.Telemetry.Server` | All-in-one host: gRPC ingestion + REST API + Angular UI in one process |
 | `Keryhe.Telemetry.Ui` | Prebuilt Angular UI, packaged as static web assets (Razor class library; no .razor/.cshtml) |
 | `Keryhe.Telemetry.Alerting` | Alert rule evaluation with pluggable evaluators and webhook delivery |
 | `Keryhe.Telemetry.TestDataGenerator` | Worker service that simulates a multi-tenant e-commerce system and emits it as OTLP: hand-built OTLP for backfill, the OpenTelemetry SDK for live (see "Test data generator") |
 | `src/telemetry-client` | Angular 20 UI source (Angular Material, ApexCharts, ngx-graph) — not part of the .sln; built by `Keryhe.Telemetry.Ui`, not by any host directly |
 
-> The former `Keryhe.Telemetry.Server` (monolithic gRPC host) and `Keryhe.Telemetry.Client`
-> (Blazor UI) have been removed. Stale `bin`/`obj` directories may remain on disk but are not
+> The former all-in-one `Keryhe.Telemetry.Server` (gRPC ingestion + REST API + UI in one process; removed
+> by `plans/collector-authentication.md`, decision 16), the older monolithic gRPC host of the same name, and
+> `Keryhe.Telemetry.Client` (Blazor UI) have been removed. Stale `bin`/`obj` directories may remain on disk but are not
 > in the solution. The stack migrated from **EF Core to Dapper** — there are no `DbContext`
 > classes anymore.
 
@@ -384,9 +386,9 @@ Angular UI (localhost:4201)
   → REST (Keryhe.Telemetry.Api.Server, /api) → controllers → I*ReadRepository (active provider, Dapper) → DB
 ```
 
-### The three composition roots
+### The two composition roots
 
-All three hosts are thin `Program.cs` shells; the real wiring lives in the class libraries,
+Both hosts are thin `Program.cs` shells; the real wiring lives in the class libraries,
 behind two matching extension pairs:
 
 - **Write side** — `AddKeryheTelemetryCollector(configuration)` / `MapKeryheTelemetryCollector()`
@@ -403,17 +405,11 @@ provider's own `Add<Provider>CollectorServices`/`Add<Provider>ApiServices` (see 
 abstraction" below), which is what lets a consumer depend on only the one provider package they
 actually use instead of all five.
 
-`Keryhe.Telemetry.Collector.Server` calls the first pair (plus its own provider registration),
-`Keryhe.Telemetry.Api.Server` the second (plus its own), and `Keryhe.Telemetry.Server` calls
-**both** plus `AddAlerting`, the SPA static-file middleware, and a single provider registration
-shared by both sides.
-
-> **All-in-one constraint.** The Npgsql-backed providers (`PostgreSQL`, `Timescale`) register a
-> singleton `NpgsqlDataSource` in *both* `Add*CollectorServices` (from `ConnectionStrings:Collector`) and
-> `Add*ApiServices` (from `ConnectionStrings:Api`). In one container the last registration silently
-> wins for both paths, so `Keryhe.Telemetry.Server` fails fast at startup
-> (`Program.EnsureSingleNpgsqlDataSource`) if the two connection strings differ. SqlServer,
-> ClickHouse, and MySql read their connection string per class and are unaffected.
+`Keryhe.Telemetry.Collector.Server` calls the first pair (plus its own provider registration) and
+`Keryhe.Telemetry.Api.Server` the second (plus its own, `AddAlerting`, `AddRetention` and the SPA). The two never
+share a process: the collector's per-endpoint authentication, plaintext-transport guard and Kestrel protocol
+requirements differ from the API's, and the Npgsql-backed providers register a process-wide `NpgsqlDataSource`
+per side that two registrations in one container would silently overwrite.
 
 ### Provider abstraction (the central pattern)
 
@@ -683,10 +679,54 @@ charted point is approximate.
 `metrics` carry a `tenant_id` column (schema 3.0.0), so the hot reads filter on it directly; the five
 data-point tables get neither `tenant_id` nor `service_name`, because `metric_id` already identifies
 exactly one tenant and service. The ingestion server
-resolves tenants by hashing the `Authorization: Bearer <key>` gRPC header against `api_keys`
-(`ITenantResolver`). The API takes the tenant from the route (`{base}/tenants/{tenantId}/...`), checks the
+resolves tenants in an authentication handler (see "Collector authentication"), by hashing the
+`Authorization: Bearer <key>` gRPC header against `api_keys` (`ITenantResolver`); the gRPC services only read the
+resulting tenant claim. The API takes the tenant from the route (`{base}/tenants/{tenantId}/...`), checks the
 caller's access in `TelemetryAuthorizationFilter` and carries it via a scoped `ITenantContext`
 (`ApiTenantContext`); read queries filter on `tenant_id`.
+
+**Collector authentication** (`Keryhe.Telemetry.Collector/Authentication`, `plans/collector-authentication.md`).
+Every OTLP export carries a per-tenant API key (`Authorization: Bearer <key>`); the check lives in the pipeline, not
+the services:
+- **Handler.** `ApiKeyAuthenticationHandler` (scheme `TelemetryAuthenticationSchemes.ApiKey` = `"KeryheTelemetryApiKey"`,
+  registered by `AddKeryheTelemetryCollector` with no default scheme) hashes the key (SHA-256, lowercase hex; the Admin
+  TUI's `ApiKeyHashing` and the test infrastructure's `ApiKeyHasher` are deliberate byte-identical copies), resolves it
+  through `ITenantResolver` and builds a principal with `TelemetryClaimTypes.TenantId`/`ApiKeyId`. **It acts only on
+  endpoints carrying `CollectorEndpointMetadata`** (added by `MapKeryheTelemetryCollector()`); on any other endpoint it
+  returns `NoResult` and records nothing, which keeps a collector co-hosted with other endpoints (unsupported) from running
+  its check on them, and `TelemetryApiStartupValidator` ignores this scheme when checking that the API has one.
+- **Enforcement.** `MapKeryheTelemetryCollector()` applies `RequireAuthorization(CollectorPolicy)` to each service
+  (authenticated by that scheme, with a tenant claim); the host calls `UseAuthentication()`/`UseAuthorization()` after
+  `UseRouting()`. A rejected call never reaches a service, so its body is never deserialized. The handler overrides
+  challenge/forbid to write a **trailers-only gRPC response** (HTTP 200, `grpc-status`, `grpc-message`): `16
+  UNAUTHENTICATED` with the reason (`missing`, `malformed`, `invalid`, `expired`), or `14 UNAVAILABLE` when the key lookup
+  threw (a bare 401 carries no message, and an unhandled lookup exception would be a 500/`UNKNOWN`, which exporters do not
+  retry, dropping data the write path would have buffered). The three `Export` methods read the tenant with
+  `TenantClaims.GetRequiredTenantId` and carry `catch (RpcException) { throw; }` ahead of their generic catch (the former
+  in-method key check had its `Unauthenticated` swallowed into an OK partial-success response).
+- **Resolution.** `ITenantResolver.ResolveAsync` returns a `TenantResolution` (`TenantId`, `ApiKeyId`, `Failure`).
+  `CachingTenantResolver` caches the `IApiKeyLookup` result itself (positive 30 s, negative 5 s), so a negative-cached key
+  keeps its reason, and compares `expires_at` against an injected `TimeProvider` on **every** resolution, cache hits
+  included, so an expiring key stops exactly at its expiry. A lookup that throws is reported `Unavailable` and never
+  cached. `IApiKeyLookup` returns the active row with `expires_at` (not filtered in SQL); ClickHouse reads `FINAL`.
+- **Observability.** `auth_failures` on `IngestionMetrics` (tags `signal`, `reason`), recorded in the challenge, once per
+  rejected request; `Debug` per request and one `Warning` per key-hash prefix per minute; the key itself is never logged,
+  only the first 8 hex characters of its hash.
+- **Transport.** `PlaintextTransportGuard` (an `IHostedLifecycleService`, bound from `Telemetry:Collector`) fails startup
+  outside Development on a plaintext TCP address (`Kestrel:Endpoints:*:Url`; `urls`/`HTTP_PORTS` only when no
+  Kestrel endpoint is configured or `preferHostingUrls` is set, since Kestrel ignores them otherwise and the aspnet container
+  image sets `ASPNETCORE_HTTP_PORTS=8080`) unless
+  `AllowInsecureTransport` is true (TLS terminated by a proxy in front); `StartingAsync` runs before Kestrel binds, and a
+  backstop on `ApplicationStarted` checks `IServerAddressesFeature` (addresses added in code) and stops the host with a
+  non-zero exit code. Unix-socket addresses are exempt.
+- **Keys.** New keys are `ktel_` + 43 base64url characters (a secret-scanning pattern; the collector does not require the
+  prefix, so older keys keep working). Optional `api_keys.expires_at` (UTC, schema 3.1.0). Rotation = create the new key,
+  roll it out, watch the old key's `last_used_at`, revoke. A revoke takes effect on a collector within
+  `PositiveCacheTtlSeconds` (30 s); on ClickHouse the revoke must be `ALTER TABLE ... UPDATE ... SETTINGS mutations_sync =
+  1`. The Collector README is the operator guide (TLS, exporter settings, SQL for MySQL/ClickHouse).
+- **Tests.** `tests/Keryhe.Telemetry.IntegrationTests/CollectorAuth` (`--filter Suite=CollectorAuth`; real gRPC over
+  `TestServer`, a fake `IApiKeyLookup`, a controllable `TimeProvider`, the ingestion channel read directly; no Docker) and
+  the per-provider `*ApiKeyLookupTests` (Testcontainers; `expires_at` an hour either side of now).
 
 **Alerting** (`Keryhe.Telemetry.Api/Alerting`): `AlertService.EvaluateAllAsync` iterates all
 tenants with enabled rules, dispatching each rule type to a registered `IAlertEvaluator`
@@ -701,7 +741,7 @@ invoked explicitly if you wire it up.
 
 **Retention** (`Keryhe.Telemetry.Api/Retention/`): the single application-level mechanism for
 telemetry retention, on every provider. `RetentionWorker`, a `BackgroundService` structurally
-mirroring `AlertEvaluationWorker`, wakes on `Retention:IntervalSeconds` (default 3600s, config only —
+mirroring `AlertEvaluationWorker`, wakes on `Telemetry:Retention:IntervalSeconds` (default 3600s, config only —
 not part of the DB row), resolves the scoped `IRetentionSettingsRepository`, reads the current windows
 via `GetSettingsAsync`, then runs `DeleteOldTracesAsync`/`DeleteOldMetricDataPointsAsync`/
 `DeleteOldLogRecordsAsync` against them. Each sweep ends with a "Retention sweep complete" log line that
@@ -896,8 +936,6 @@ There are no views and no derived-data tables; ClickHouse additionally has `trac
 Connection strings (both hosts point at the same database):
 - Ingestion server reads `ConnectionStrings:Collector` in `Keryhe.Telemetry.Collector.Server/appsettings.json`
 - API server reads `ConnectionStrings:Api` in `Keryhe.Telemetry.Api.Server/appsettings.json`
-- The all-in-one `Keryhe.Telemetry.Server` reads **both**, and requires them to be identical under
-  the Npgsql-backed providers (see the all-in-one constraint above)
 - Both select the provider via the `Database:Provider` key in the same file
 
 ### Proto Files

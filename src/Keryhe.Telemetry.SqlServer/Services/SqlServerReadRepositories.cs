@@ -40,7 +40,7 @@ internal static class SqlServerJsonAttributeHooks
 /// there is no per-connection isolation plumbing. Reads still run at <c>DEADLOCK_PRIORITY LOW</c>, so
 /// if a read does deadlock with an ingestion flush the read is the victim, and a distinct
 /// <c>Application Name</c> keeps a pooled read connection from being handed to a writer sharing the
-/// same base connection string (the all-in-one host's single-container case).
+/// same base connection string.
 /// </summary>
 internal static class SqlServerReadConnection
 {

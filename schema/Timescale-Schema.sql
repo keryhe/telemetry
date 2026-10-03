@@ -1,4 +1,4 @@
--- OpenTelemetry PostgreSQL + TimescaleDB Schema (schema 3.0.1)
+-- OpenTelemetry PostgreSQL + TimescaleDB Schema (schema 3.1.0)
 -- Supports OTLP logs, metrics, and traces as defined in opentelemetry-proto
 -- Requires the TimescaleDB extension (https://docs.timescale.com/install/latest/)
 --
@@ -47,6 +47,7 @@ CREATE TABLE api_keys (
     "is_active"   BOOLEAN      NOT NULL DEFAULT TRUE,
     "created_at"  TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
     "last_used_at" TIMESTAMPTZ,
+    "expires_at"  TIMESTAMPTZ,
     CONSTRAINT uk_api_key_hash UNIQUE ("key_hash")
 );
 CREATE INDEX idx_api_keys_tenant_id ON api_keys ("tenant_id");
@@ -469,6 +470,6 @@ ON CONFLICT ("id") DO NOTHING;
 -- =============================================================================
 -- Only reached when every statement above succeeded, so a partial apply cannot
 -- leave a false version marker for the apply-schema.sh gate.
-INSERT INTO schema_version ("version") VALUES ('3.0.1')
+INSERT INTO schema_version ("version") VALUES ('3.1.0')
 ON CONFLICT ("version") DO UPDATE
 SET "applied_at" = NOW();

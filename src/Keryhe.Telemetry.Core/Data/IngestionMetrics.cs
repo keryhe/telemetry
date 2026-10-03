@@ -25,6 +25,7 @@ public sealed class IngestionMetrics : IDisposable
     private readonly Counter<long> _recordsFlushed;
     private readonly Histogram<long> _flushBatchSize;
     private readonly Histogram<double> _commitLag;
+    private readonly Counter<long> _authFailures;
 
     // signal -> reader of that signal's gate's resident count; see RegisterResidentRecords.
     private readonly ConcurrentDictionary<string, Func<int>> _residentRecords = new();
@@ -59,6 +60,11 @@ public sealed class IngestionMetrics : IDisposable
             description: "Time from an export being enqueued to the flush that persisted it committing, " +
                           "one measurement per export, tagged by signal. The write-path health signal: " +
                           "independent of any read query, it grows when the database cannot keep up.");
+        _authFailures = _meter.CreateCounter<long>(
+            "keryhe.telemetry.ingestion.auth_failures",
+            unit: "{request}",
+            description: "Collector requests rejected by API key authentication, tagged by signal and " +
+                          "reason (missing, malformed, invalid, expired, unavailable).");
         _meter.CreateObservableGauge(
             "keryhe.telemetry.ingestion.resident_records",
             ObserveResidentRecords,
@@ -92,6 +98,13 @@ public sealed class IngestionMetrics : IDisposable
         _flushDuration.Record(milliseconds,
             new KeyValuePair<string, object?>("signal", signal),
             new KeyValuePair<string, object?>("outcome", outcome));
+
+    /// <param name="signal">"logs", "traces", "metrics", or "unknown".</param>
+    /// <param name="reason">missing, malformed, invalid, expired or unavailable.</param>
+    public void RecordAuthFailure(string signal, string reason) =>
+        _authFailures.Add(1,
+            new KeyValuePair<string, object?>("signal", signal),
+            new KeyValuePair<string, object?>("reason", reason));
 
     public void RecordFlushRetry(string signal) =>
         _flushRetries.Add(1, new KeyValuePair<string, object?>("signal", signal));

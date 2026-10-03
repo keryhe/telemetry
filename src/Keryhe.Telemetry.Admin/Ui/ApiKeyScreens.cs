@@ -80,6 +80,7 @@ public static class ApiKeyScreens
         table.AddColumn("Hash");
         table.AddColumn(createdAtHeader);
         table.AddColumn("Last used");
+        table.AddColumn("Expires (UTC)");
 
         foreach (var k in keys)
         {
@@ -89,7 +90,10 @@ public static class ApiKeyScreens
                 k.IsActive ? "[green]yes[/]" : "[red]no[/]",
                 k.HashPrefix,
                 k.CreatedAt.ToString("yyyy-MM-dd HH:mm"),
-                k.LastUsedAt?.ToString("yyyy-MM-dd HH:mm") ?? "—");
+                k.LastUsedAt?.ToString("yyyy-MM-dd HH:mm") ?? "—",
+                k.ExpiresAt is not { } at ? "never"
+                    : k.IsExpired(DateTime.UtcNow) ? $"[red]{at:yyyy-MM-dd HH:mm} (expired)[/]"
+                    : at.ToString("yyyy-MM-dd HH:mm"));
         }
 
         AnsiConsole.Write(table);
@@ -107,10 +111,12 @@ public static class ApiKeyScreens
             new TextPrompt<string>("API key name:")
                 .Validate(Validation.ValidateName));
 
+        var expiresAtUtc = PromptExpiry();
+
         var plaintextKey = ApiKeyHashing.GenerateKey();
         var hash = ApiKeyHashing.ComputeHash(plaintextKey);
 
-        await repository.CreateApiKeyAsync(tenant.Id, name.Trim(), hash, ct);
+        await repository.CreateApiKeyAsync(tenant.Id, name.Trim(), hash, expiresAtUtc, ct);
 
         AnsiConsole.WriteLine();
         var panel = new Panel(
@@ -130,6 +136,27 @@ public static class ApiKeyScreens
         // Explicit acknowledgement, not an auto-return — see plans/admin-tui.md, section 6.5.
         AnsiConsole.MarkupLine("Press Enter once you have saved it.");
         Console.ReadLine();
+    }
+
+    /// <summary>Asks when the new key should expire; null means never. Stored as UTC.</summary>
+    private static DateTime? PromptExpiry()
+    {
+        const string never = "Never expires", d30 = "30 days", d90 = "90 days", d365 = "365 days", date = "A specific date (UTC)";
+        var choice = AnsiConsole.Prompt(new SelectionPrompt<string>().Title("Expiry:").AddChoices(never, d30, d90, d365, date));
+        var now = DateTime.UtcNow;
+        switch (choice)
+        {
+            case d30: return now.AddDays(30);
+            case d90: return now.AddDays(90);
+            case d365: return now.AddDays(365);
+            case date:
+                var text = AnsiConsole.Prompt(new TextPrompt<string>("Expires at the start of (UTC, yyyy-MM-dd):")
+                    .Validate(v => DateTime.TryParseExact(v.Trim(), "yyyy-MM-dd", System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.None, out var d) && d.Date > now.Date
+                        ? Spectre.Console.ValidationResult.Success()
+                        : Spectre.Console.ValidationResult.Error("[red]Enter a future date as yyyy-MM-dd.[/]")));
+                return DateTime.SpecifyKind(DateTime.ParseExact(text.Trim(), "yyyy-MM-dd", System.Globalization.CultureInfo.InvariantCulture), DateTimeKind.Utc);
+            default: return null;
+        }
     }
 
     private static async Task RevokeAsync(IAdminRepository repository, IReadOnlyList<ApiKeyRow> activeKeys, CancellationToken ct)

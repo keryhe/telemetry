@@ -2,7 +2,7 @@ using System.Diagnostics;
 
 namespace Keryhe.Telemetry.StressTests.Orchestration;
 
-public enum HostRole { AllInOne, Collector, Api }
+public enum HostRole { Collector, Api }
 
 /// <summary>The published output directories of the hosts a run needs.</summary>
 public sealed class PublishedHosts
@@ -16,7 +16,6 @@ public sealed class PublishedHosts
 
     public static string ProjectName(HostRole role) => role switch
     {
-        HostRole.AllInOne => "Keryhe.Telemetry.Server",
         HostRole.Collector => "Keryhe.Telemetry.Collector.Server",
         _ => "Keryhe.Telemetry.Api.Server"
     };

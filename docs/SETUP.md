@@ -157,28 +157,21 @@ dotnet build Telemetry.sln
 ## 5. Run the backend and the client (in separate terminals)
 
 ```bash
-# Terminal 1 — all-in-one host (gRPC ingestion + REST API on 5117/7057 and 5188/7105)
-dotnet run --project src/Keryhe.Telemetry.Server
+# Terminal 1 — gRPC OTLP ingestion (http://localhost:5117 h2c in Development, https://localhost:7057)
+dotnet run --project src/Keryhe.Telemetry.Collector.Server
 
-# Terminal 2 — Angular dev server
+# Terminal 2 — REST API + UI (http://localhost:5188, https://localhost:7105)
+dotnet run --project src/Keryhe.Telemetry.Api.Server
+
+# Terminal 3 — Angular dev server
 cd src/telemetry-client && npm install && npm run start
-```
-
-Or run the two hosts separately instead of the all-in-one:
-
-```bash
-# Terminal 1 — gRPC ingestion server
-dotnet run --project src/Keryhe.Telemetry.Collector.Server --launch-profile "https"
-
-# Terminal 2 — REST API
-dotnet run --project src/Keryhe.Telemetry.Api.Server --launch-profile "https"
 ```
 
 Open `http://localhost:4201` in your browser.
 
 > The Angular dev server on 4201 is for **development only** — it gives you hot reload and
 > talks to the API cross-origin (hence the CORS policy in `Keryhe.Telemetry.Api.Server`).
-> For deployment, the API host serves the UI itself; see [Deploying a Single Host](#deploying-a-single-host) below.
+> For deployment, the API host serves the UI itself; see [Deploying](#deploying) below.
 
 ## 6. (Optional) Generate test data
 
@@ -188,32 +181,27 @@ dotnet run --project src/Keryhe.Telemetry.TestDataGenerator
 
 The test data generator sends synthetic traces, metrics, and logs to the server at `http://localhost:5117` on a configurable interval.
 
-## Deploying a Single Host
+## Deploying
 
-For a single-node deployment, **`Keryhe.Telemetry.Server`** is the recommended host: it runs gRPC
-OTLP ingestion, the REST API, and the compiled Angular UI in one process, so there is nothing else
-to deploy.
+The collector and the API are separate hosts, on a single node or many: `Keryhe.Telemetry.Collector.Server`
+(gRPC OTLP ingestion) and `Keryhe.Telemetry.Api.Server` (REST API, the compiled Angular UI, alerting and
+retention). They share only the database, and each reads its own connection string
+(`ConnectionStrings:Collector`, `ConnectionStrings:Api`), so they can point at different endpoints.
 
 ```bash
-dotnet publish src/Keryhe.Telemetry.Server -c Release -o ./publish-server
-./publish-server/Keryhe.Telemetry.Server
+dotnet publish src/Keryhe.Telemetry.Collector.Server -c Release -o ./publish-collector
+dotnet publish src/Keryhe.Telemetry.Api.Server -c Release -o ./publish-api
 ```
 
-It listens on the same ports as the split hosts — `5117` (h2c) and `7057` (HTTP/2) for OTLP
-ingestion, `5188` and `7105` for the API and UI — configured as named Kestrel endpoints in its
-`appsettings.json`. It reads **both** `ConnectionStrings:Api` and `ConnectionStrings:Collector`.
+The collector listens on `https://0.0.0.0:7057` (HTTP/2) and needs a TLS certificate configured on that endpoint
+(or TLS terminated by a proxy in front, with `Telemetry:Collector:AllowInsecureTransport=true`): outside Development it
+refuses to start on a plaintext address, because API keys travel in every export. See the
+[collector README](../src/Keryhe.Telemetry.Collector/README.md) for the certificate block, exporter settings and key
+lifecycle. On Windows, `install-service.bat [collector-publish-folder] [api-publish-folder]` installs both as services
+(`KeryheTelemetryCollector`, `KeryheTelemetryApi`).
 
-> **Note.** Under the `PostgreSQL` and `Timescale` providers the read and write connection strings
-> must be identical — both sides share a single `NpgsqlDataSource` in one process. The host refuses
-> to start otherwise. Use the split hosts below if you need to target separate read/write endpoints.
-
-For scale-out deployments the two hosts can still be run and scaled independently.
 `Keryhe.Telemetry.Api.Server` serves the compiled Angular UI alongside the REST API, so it also
 needs no separate web server for the SPA and no CORS configuration.
-
-```bash
-dotnet publish src/Keryhe.Telemetry.Api.Server -c Release -o ./publish
-```
 
 The Angular UI is packaged separately, as `Keryhe.Telemetry.Ui` (a NuGet package like the other
 class libraries — see the [README](../README.md#build-your-own-host) if you're composing your own
@@ -295,16 +283,18 @@ Alert rules are managed through the **Alerts** page in the UI. Each rule specifi
 - **Cooldown**: minimum minutes between repeat firings of the same rule
 
 Rules are evaluated by a background worker (`AlertEvaluationWorker`) hosted in
-`Keryhe.Telemetry.Api.Server`. It runs every `AlertEvaluation:IntervalSeconds` (default `60`),
+`Keryhe.Telemetry.Api.Server`. It runs every `Telemetry:AlertEvaluation:IntervalSeconds` (default `60`),
 iterating all tenants with enabled rules and dispatching each to its evaluator. An atomic
 fire-claim guards the cooldown so a rule fires once even across multiple instances. Configure
 it in `src/Keryhe.Telemetry.Api.Server/appsettings.json`:
 
 ```json
 {
-  "AlertEvaluation": {
-    "IntervalSeconds": 60,
-    "Enabled": true
+  "Telemetry": {
+    "AlertEvaluation": {
+      "IntervalSeconds": 60,
+      "Enabled": true
+    }
   }
 }
 ```

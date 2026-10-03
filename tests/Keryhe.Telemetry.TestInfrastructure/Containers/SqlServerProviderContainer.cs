@@ -60,7 +60,7 @@ public sealed class SqlServerProviderContainer : ProviderContainer
         }
     }
 
-    protected override async Task<long> InsertTenantAndApiKeyAsync(string tenantName, string apiKeyName, string keyHash, CancellationToken cancellationToken)
+    protected override async Task<long> InsertTenantAndApiKeyAsync(string tenantName, string apiKeyName, string keyHash, DateTime? expiresAtUtc, CancellationToken cancellationToken)
     {
         await using var conn = new SqlConnection(_connectionString);
         await conn.OpenAsync(cancellationToken);
@@ -70,10 +70,11 @@ public sealed class SqlServerProviderContainer : ProviderContainer
         var tenantId = (long)(await tenantCmd.ExecuteScalarAsync(cancellationToken))!;
 
         await using var keyCmd = new SqlCommand(
-            "INSERT INTO api_keys (tenant_id, key_hash, name) VALUES (@tenantId, @keyHash, @name)", conn);
+            "INSERT INTO api_keys (tenant_id, key_hash, name, expires_at) VALUES (@tenantId, @keyHash, @name, @expiresAt)", conn);
         keyCmd.Parameters.AddWithValue("@tenantId", tenantId);
         keyCmd.Parameters.AddWithValue("@keyHash", keyHash);
         keyCmd.Parameters.AddWithValue("@name", apiKeyName);
+        keyCmd.Parameters.Add(new SqlParameter("@expiresAt", System.Data.SqlDbType.DateTimeOffset) { Value = expiresAtUtc is { } e ? new DateTimeOffset(DateTime.SpecifyKind(e, DateTimeKind.Utc)) : DBNull.Value });
         await keyCmd.ExecuteNonQueryAsync(cancellationToken);
 
         return tenantId;

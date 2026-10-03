@@ -61,10 +61,10 @@ public class ScenarioTests
     }
 
     [Fact]
-    public void Matrix_expands_provider_topology_profile_and_all_means_every_value()
+    public void Matrix_expands_provider_profile_and_all_means_every_value()
     {
         var all = RunCommand.BuildMatrix("all", "all", "smoke", "fixed", false, null);
-        Assert.Equal(5 * 2, all.Count);
+        Assert.Equal(5, all.Count);
         Assert.Equal(all.Count, all.Select(s => s.Id).Distinct().Count());
         Assert.Contains(all, s => s.Id == "clickhouse-split-smoke");
 
@@ -75,21 +75,21 @@ public class ScenarioTests
     [Fact]
     public void Scenario_flag_picks_the_default_profile_and_rejects_a_mismatch()
     {
-        var ramp = Assert.Single(RunCommand.BuildMatrix("PostgreSQL", "allinone", "", "ramp", true, null));
+        var ramp = Assert.Single(RunCommand.BuildMatrix("PostgreSQL", "split", "", "ramp", true, null));
         Assert.True(ramp.Profile.IsRamp);
-        Assert.Throws<ArgumentException>(() => RunCommand.BuildMatrix("PostgreSQL", "allinone", "smoke", "ramp", true, null));
-        Assert.Throws<ArgumentException>(() => RunCommand.BuildMatrix("Oracle", "allinone", "smoke", "fixed", false, null));
+        Assert.Throws<ArgumentException>(() => RunCommand.BuildMatrix("PostgreSQL", "split", "smoke", "ramp", true, null));
+        Assert.Throws<ArgumentException>(() => RunCommand.BuildMatrix("Oracle", "split", "smoke", "fixed", false, null));
         Assert.Throws<ArgumentException>(() => RunCommand.BuildMatrix("PostgreSQL", "sideways", "smoke", "fixed", false, null));
 
         // profile=all with --scenario fixed leaves the ramp out; without --scenario it is included.
-        Assert.DoesNotContain(RunCommand.BuildMatrix("PostgreSQL", "allinone", "all", "fixed", true, null), s => s.Profile.IsRamp);
-        Assert.Contains(RunCommand.BuildMatrix("PostgreSQL", "allinone", "all", "fixed", false, null), s => s.Profile.IsRamp);
+        Assert.DoesNotContain(RunCommand.BuildMatrix("PostgreSQL", "split", "all", "fixed", true, null), s => s.Profile.IsRamp);
+        Assert.Contains(RunCommand.BuildMatrix("PostgreSQL", "split", "all", "fixed", false, null), s => s.Profile.IsRamp);
     }
 
     [Fact]
     public void Overrides_do_not_leak_between_scenarios()
     {
-        var specs = RunCommand.BuildMatrix("all", "allinone", "smoke", "fixed", false, 2);
+        var specs = RunCommand.BuildMatrix("all", "split", "smoke", "fixed", false, 2);
         specs[0].Profile.Load.Traces.SpansPerSecond = 1;
         Assert.All(specs.Skip(1), s => Assert.Equal(500, s.Profile.Load.Traces.SpansPerSecond));
     }
@@ -194,14 +194,14 @@ public class ScenarioTests
     [Fact]
     public void Retention_interval_override_accepts_presets_or_seconds_and_tags_the_scenario()
     {
-        var realistic = RunCommand.BuildMatrix("PostgreSQL", "allinone", "ramp", "ramp", true, null, "realistic").Single();
+        var realistic = RunCommand.BuildMatrix("PostgreSQL", "split", "ramp", "ramp", true, null, "realistic").Single();
         Assert.Equal(ScenarioProfile.RealisticRetentionIntervalSeconds, realistic.Profile.RetentionIntervalSeconds);
-        Assert.Equal("postgresql-allinone-ramp-ret3600", realistic.Id);
+        Assert.Equal("postgresql-split-ramp-ret3600", realistic.Id);
 
-        var seconds = RunCommand.BuildMatrix("PostgreSQL", "allinone", "smoke", "fixed", false, null, "120").Single();
+        var seconds = RunCommand.BuildMatrix("PostgreSQL", "split", "smoke", "fixed", false, null, "120").Single();
         Assert.Equal(120, seconds.Profile.RetentionIntervalSeconds);
-        Assert.Equal(30, RunCommand.BuildMatrix("PostgreSQL", "allinone", "smoke", "fixed", false, null).Single().Profile.RetentionIntervalSeconds);
-        Assert.Throws<ArgumentException>(() => RunCommand.BuildMatrix("PostgreSQL", "allinone", "smoke", "fixed", false, null, "hourly"));
+        Assert.Equal(30, RunCommand.BuildMatrix("PostgreSQL", "split", "smoke", "fixed", false, null).Single().Profile.RetentionIntervalSeconds);
+        Assert.Throws<ArgumentException>(() => RunCommand.BuildMatrix("PostgreSQL", "split", "smoke", "fixed", false, null, "hourly"));
     }
 
     [Fact]

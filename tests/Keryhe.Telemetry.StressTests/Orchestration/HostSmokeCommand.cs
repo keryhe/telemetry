@@ -18,7 +18,7 @@ public static class HostSmokeCommand
     public static async Task<int> RunAsync(string[] args)
     {
         var provider = "PostgreSQL";
-        var topology = HostTopology.AllInOne;
+        var topology = HostTopology.Split;
         var duration = 20;
         var retentionSeconds = 10;
         var browsers = 0;
@@ -50,7 +50,7 @@ public static class HostSmokeCommand
         Directory.CreateDirectory(outDir);
         Console.WriteLine($"Output: {outDir}");
 
-        var roles = topology == HostTopology.AllInOne ? new[] { HostRole.AllInOne } : [HostRole.Collector, HostRole.Api];
+        HostRole[] roles = [HostRole.Collector, HostRole.Api];
         Console.WriteLine(reusePublish is null ? "Publishing hosts (Release)..." : $"Reusing published hosts in {reusePublish}");
         var published = await HostPublisher.PublishAsync(repo, reusePublish ?? Path.Combine(outDir, "publish"), roles, skipIfPresent: reusePublish is not null);
 

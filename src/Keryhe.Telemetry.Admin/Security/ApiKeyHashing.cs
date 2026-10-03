@@ -6,7 +6,7 @@ namespace Keryhe.Telemetry.Admin.Security;
 
 /// <summary>
 /// DELIBERATE DUPLICATE of the hash computation in
-/// <c>Keryhe.Telemetry.Collector.Services.Helpers.ApiKeyHelper.ComputeApiKeyHash</c>. This project
+/// <c>Keryhe.Telemetry.Collector.Authentication.ApiKeyAuthenticationHandler.ComputeKeyHash</c>. This project
 /// is intentionally self-contained and references nothing, so the algorithm is copied rather than
 /// shared (see plans/admin-tui.md, sections 1 and 4.1). The two MUST stay byte-identical: SHA-256
 /// over the UTF-8 bytes of the key, hex-encoded, lowercased. If they diverge, keys issued here hash
@@ -15,6 +15,8 @@ namespace Keryhe.Telemetry.Admin.Security;
 /// </summary>
 public static class ApiKeyHashing
 {
+    public const string KeyPrefix = "ktel_";
+
     /// <summary>SHA-256 of the UTF-8 bytes of <paramref name="apiKey"/>, as 64 lowercase hex chars.</summary>
     public static string ComputeHash(string apiKey)
     {
@@ -23,14 +25,14 @@ public static class ApiKeyHashing
     }
 
     /// <summary>
-    /// Generates a new plaintext API key: 32 random bytes, base64url-encoded with padding
-    /// stripped (43 characters), no prefix. This matches the format already in use by
-    /// src/Keryhe.Telemetry.TestDataGenerator/appsettings.json's <c>OtlpHeaders</c> value — not an
-    /// invented format, see plans/admin-tui.md, section 4.2.
+    /// Generates a new plaintext API key: <c>ktel_</c> + 32 random bytes base64url-encoded with padding
+    /// stripped (43 characters). The prefix exists so leaked keys are findable by a secret scanner
+    /// (<c>ktel_[A-Za-z0-9_-]{43}</c>); the collector does not require it, so un-prefixed keys issued
+    /// earlier (e.g. the TestDataGenerator's) keep working. Collector-authentication plan, decision 13.
     /// </summary>
     public static string GenerateKey()
     {
         var bytes = RandomNumberGenerator.GetBytes(32);
-        return Base64Url.EncodeToString(bytes);
+        return KeyPrefix + Base64Url.EncodeToString(bytes);
     }
 }

@@ -7,7 +7,7 @@ using OpenTelemetry.Proto.Metrics.V1;
 using Keryhe.Telemetry.Core.Data;
 using Keryhe.Telemetry.Core;
 using Keryhe.Telemetry.Core.Models;
-using Keryhe.Telemetry.Collector.Services.Helpers;
+using Keryhe.Telemetry.Collector.Authentication;
 
 namespace Keryhe.Telemetry.Collector.Services;
 
@@ -19,13 +19,11 @@ public class MetricService : MetricsService.MetricsServiceBase
 {
     private readonly IMetricWriteRepository _metricRepository;
     private readonly ILogger<MetricService> _logger;
-    private readonly ITenantResolver _tenantResolver;
 
-    public MetricService(IMetricWriteRepository metricRepository, ILogger<MetricService> logger, ITenantResolver tenantResolver)
+    public MetricService(IMetricWriteRepository metricRepository, ILogger<MetricService> logger)
     {
         _metricRepository = metricRepository ?? throw new ArgumentNullException(nameof(metricRepository));
         _logger = logger ?? throw new ArgumentNullException(nameof(logger));
-        _tenantResolver = tenantResolver ?? throw new ArgumentNullException(nameof(tenantResolver));
     }
 
     /// <summary>
@@ -61,10 +59,8 @@ public class MetricService : MetricsService.MetricsServiceBase
         var storedDataPointCount = 0;
         try
         {
-            string? keyHash = ApiKeyHelper.GetKeyHash(context);
-            var tenantId = await _tenantResolver.ResolveTenantIdAsync(keyHash, context.CancellationToken);
-            if (tenantId <= 0)
-                throw new RpcException(new Status(StatusCode.Unauthenticated, "Invalid API key."));
+            // Authenticated by ApiKeyAuthenticationHandler before this method is entered.
+            var tenantId = TenantClaims.GetRequiredTenantId(context);
 
             _logger.LogDebug("Received metrics export request with {ResourceMetricsCount} resource metrics", 
                 request.ResourceMetrics?.Count ?? 0);
@@ -89,6 +85,11 @@ public class MetricService : MetricsService.MetricsServiceBase
             await _metricRepository.StoreMetricsBatchAsync(metrics, context.CancellationToken);
             totalDataPointCount = CalculateTotalDataPoints(metrics);
             storedDataPointCount = totalDataPointCount;
+        }
+        catch (RpcException)
+        {
+            // Never swallow a status (e.g. Unauthenticated) into an OK partial-success response.
+            throw;
         }
         catch (System.Threading.Channels.ChannelClosedException)
         {

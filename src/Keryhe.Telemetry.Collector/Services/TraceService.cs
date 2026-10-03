@@ -6,7 +6,7 @@ using OpenTelemetry.Proto.Trace.V1;
 using Keryhe.Telemetry.Core.Data;
 using Keryhe.Telemetry.Core;
 using Keryhe.Telemetry.Core.Models;
-using Keryhe.Telemetry.Collector.Services.Helpers;
+using Keryhe.Telemetry.Collector.Authentication;
 
 namespace Keryhe.Telemetry.Collector.Services;
 
@@ -18,13 +18,11 @@ public class TraceService : OpenTelemetry.Proto.Collector.Trace.V1.TraceService.
 {
     private readonly ITraceWriteRepository _traceRepository;
     private readonly ILogger<TraceService> _logger;
-    private readonly ITenantResolver _tenantResolver;
 
-    public TraceService(ITraceWriteRepository traceRepository, ILogger<TraceService> logger, ITenantResolver tenantResolver)
+    public TraceService(ITraceWriteRepository traceRepository, ILogger<TraceService> logger)
     {
         _traceRepository = traceRepository ?? throw new ArgumentNullException(nameof(traceRepository));
         _logger = logger ?? throw new ArgumentNullException(nameof(logger));
-        _tenantResolver = tenantResolver ?? throw new ArgumentNullException(nameof(tenantResolver));
     }
 
     /// <summary>
@@ -62,10 +60,8 @@ public class TraceService : OpenTelemetry.Proto.Collector.Trace.V1.TraceService.
         var totalSpanCount = 0;
         try
         {
-            string? keyHash = ApiKeyHelper.GetKeyHash(context);
-            var tenantId = await _tenantResolver.ResolveTenantIdAsync(keyHash, context.CancellationToken);
-            if (tenantId <= 0)
-                throw new RpcException(new Grpc.Core.Status(StatusCode.Unauthenticated, "Invalid API key."));
+            // Authenticated by ApiKeyAuthenticationHandler before this method is entered.
+            var tenantId = TenantClaims.GetRequiredTenantId(context);
 
             _logger.LogDebug("Received traces export request with {ResourceSpansCount} resource spans",
                 request.ResourceSpans?.Count ?? 0);
@@ -95,6 +91,11 @@ public class TraceService : OpenTelemetry.Proto.Collector.Trace.V1.TraceService.
             // accepted onto the ingestion channel -- see the honesty note on this method's doc
             // comment for what that does and does not guarantee.
             await _traceRepository.StoreTracesBatchAsync(traces, context.CancellationToken);
+        }
+        catch (RpcException)
+        {
+            // Never swallow a status (e.g. Unauthenticated) into an OK partial-success response.
+            throw;
         }
         catch (System.Threading.Channels.ChannelClosedException)
         {

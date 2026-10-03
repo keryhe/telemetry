@@ -91,8 +91,7 @@ app.UseKeryheTelemetryUi();
 // and without consulting the selected endpoint), but every other asset it serves still does, and
 // the implicit insertion would also silently move UseCors and the tenant middleware to the wrong
 // side of routing. Placed here so UseKeryheTelemetryUi's static files still run first and
-// short-circuit whatever they can actually serve, matching Keryhe.Telemetry.Server's Program.cs,
-// which already calls this explicitly in the same position.
+// short-circuit whatever they can actually serve.
 app.UseRouting();
 
 // Only ever sees API responses and the SPA fallback — UseKeryheTelemetryUi() above negotiates

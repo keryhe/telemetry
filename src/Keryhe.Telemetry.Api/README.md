@@ -53,8 +53,6 @@ It must be one or more segments of unreserved URL characters; `/` and empty are 
 the API's segments (`/traces`, `/logs`) are also UI routes. It applies to this library's controllers
 only, never to the host's own. The bundled UI follows it unless `TelemetryUi:ApiBasePath` is set.
 
-The tenant a request is about is in the route, not a header (`X-Tenant-Id` is no longer read):
-
 | Route | Notes |
 |---|---|
 | `GET {base}/capabilities` | global |
@@ -145,8 +143,8 @@ principal those schemes produce, and its challenge/forbid go through them, as wi
 plus `AllowCredentials()` with explicit origins in the host's CORS policy, and a `SameSite=None; Secure`
 cookie. In any cross-origin setup, expose the refusal header: `WithExposedHeaders("X-Telemetry-Denied")`. The in-repo hosts do not set this up.
 
-The in-repo `Keryhe.Telemetry.Server`/`Api.Server` hosts are development examples: they register no
-authentication scheme and run with authorization disabled.
+The in-repo `Api.Server` host is a development example: it registers no
+authentication scheme and runs with authorization disabled.
 
 ## Documentation
 

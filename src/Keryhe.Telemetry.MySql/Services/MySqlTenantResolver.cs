@@ -14,13 +14,14 @@ public class MySqlTenantResolver(IConfiguration configuration) : IApiKeyLookup
 {
     private readonly string _connectionString = configuration.GetConnectionString("Collector")!;
 
-    public async Task<long> LookupTenantIdAsync(string keyHash, CancellationToken cancellationToken)
+    public async Task<ApiKeyLookupResult?> LookupAsync(string keyHash, CancellationToken cancellationToken)
     {
         await using var conn = new MySqlConnection(_connectionString);
         await conn.OpenAsync(cancellationToken);
 
+        // expires_at (DATETIME(6), UTC by convention) is returned, not filtered on.
         const string selectSql = """
-            SELECT tenant_id
+            SELECT id, tenant_id, expires_at
             FROM api_keys
             WHERE key_hash = @keyHash
               AND is_active = 1
@@ -29,7 +30,13 @@ public class MySqlTenantResolver(IConfiguration configuration) : IApiKeyLookup
 
         await using var selectCmd = new MySqlCommand(selectSql, conn);
         selectCmd.Parameters.AddWithValue("@keyHash", keyHash);
-        var result = await selectCmd.ExecuteScalarAsync(cancellationToken);
-        return result is not null && result != DBNull.Value ? Convert.ToInt64(result) : 0L;
+        await using var reader = await selectCmd.ExecuteReaderAsync(cancellationToken);
+        if (!await reader.ReadAsync(cancellationToken)) return null;
+        return new ApiKeyLookupResult(reader.GetInt64(1), reader.GetInt64(0),
+            reader.IsDBNull(2) ? null : AsUtc(reader.GetDateTime(2)));
     }
+
+    /// <summary>A DATETIME(6) holds UTC by convention; the driver hands it back Unspecified, so stamp it UTC.</summary>
+    internal static DateTimeOffset AsUtc(DateTime value) =>
+        new(DateTime.SpecifyKind(value, DateTimeKind.Utc));
 }

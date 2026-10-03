@@ -102,24 +102,6 @@ public class HostOrchestrationTests
         new("PostgreSQL", "collector-cs", "api-cs", topology, Path.GetTempPath(), RetentionIntervalSeconds: 7);
 
     [Fact]
-    public void All_in_one_env_uses_named_endpoints_never_ASPNETCORE_URLS_and_repoints_TLS_endpoints()
-    {
-        var (env, grpc, api) = HostLauncher.BuildEnvironment(Options(HostTopology.AllInOne), HostRole.AllInOne);
-
-        Assert.DoesNotContain("ASPNETCORE_URLS", env.Keys);
-        Assert.All(new[] { "Grpc", "GrpcTls", "Api", "ApiTls" }, name =>
-            Assert.StartsWith("http://127.0.0.1:", env[$"Kestrel__Endpoints__{name}__Url"]));
-        Assert.Equal("Http2", env["Kestrel__Endpoints__Grpc__Protocols"]);
-        Assert.Equal(4, new[] { "Grpc", "GrpcTls", "Api", "ApiTls" }.Select(n => env[$"Kestrel__Endpoints__{n}__Url"]).Distinct().Count());
-        Assert.Equal(env["Kestrel__Endpoints__Grpc__Url"], grpc!.ToString().TrimEnd('/'));
-        Assert.Equal(env["Kestrel__Endpoints__Api__Url"], api!.ToString().TrimEnd('/'));
-        Assert.Equal("7", env["Retention__IntervalSeconds"]);
-        Assert.Equal("PostgreSQL", env["Database__Provider"]);
-        Assert.Equal("collector-cs", env["ConnectionStrings__Collector"]);
-        Assert.Equal("api-cs", env["ConnectionStrings__Api"]);
-    }
-
-    [Fact]
     public void Split_hosts_each_get_only_their_own_endpoint_and_connection_string()
     {
         var (collector, grpc, noApi) = HostLauncher.BuildEnvironment(Options(HostTopology.Split), HostRole.Collector);
@@ -127,7 +109,10 @@ public class HostOrchestrationTests
         Assert.Null(noApi);
         Assert.Contains("ConnectionStrings__Collector", collector.Keys);
         Assert.DoesNotContain("ConnectionStrings__Api", collector.Keys);
-        Assert.Equal("Http2", collector["Kestrel__Endpoints__Http__Protocols"]);
+        Assert.Equal("Http2", collector["Kestrel__Endpoints__Https__Protocols"]);
+        Assert.StartsWith("http://127.0.0.1:", collector["Kestrel__Endpoints__Https__Url"]);
+        // The plaintext endpoint is intended: without this the collector's transport guard refuses to start.
+        Assert.Equal("true", collector["Telemetry__Collector__AllowInsecureTransport"]);
 
         var (apiEnv, noGrpc, api) = HostLauncher.BuildEnvironment(Options(HostTopology.Split), HostRole.Api);
         Assert.Null(noGrpc);

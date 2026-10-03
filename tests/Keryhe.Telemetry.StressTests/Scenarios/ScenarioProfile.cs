@@ -110,7 +110,7 @@ public sealed class ScenarioProfile
     /// <summary>The built-in profiles' retention interval: a sweep every 30 s, for retention-focused runs.</summary>
     public const int StressRetentionIntervalSeconds = 30;
 
-    /// <summary>The API's own default (<c>Retention:IntervalSeconds</c>, <c>RetentionOptions</c>): one sweep at host start, then none inside a normal run.</summary>
+    /// <summary>The API's own default (<c>Telemetry:Retention:IntervalSeconds</c>, <c>RetentionOptions</c>): one sweep at host start, then none inside a normal run.</summary>
     public const int RealisticRetentionIntervalSeconds = 3600;
 
     /// <summary>

@@ -1,4 +1,4 @@
--- OpenTelemetry SQL Server Schema (SQL Server 2022) -- schema 3.0.1
+-- OpenTelemetry SQL Server Schema (SQL Server 2022) -- schema 3.1.0
 -- Supports OTLP logs, metrics, and traces as defined in opentelemetry-proto.
 --
 -- Schema 3.0.0 is a fresh-install schema: there is no upgrade path from 2.x. See
@@ -56,6 +56,7 @@ CREATE TABLE api_keys (
     is_active    BIT           NOT NULL DEFAULT 1,
     created_at   DATETIME2     NOT NULL DEFAULT SYSDATETIME(),
     last_used_at DATETIME2,
+    expires_at   DATETIMEOFFSET(7) NULL, -- UTC (written with SYSUTCDATETIME()/an offset); NOT DATETIME2, see collector-authentication decision 12
     CONSTRAINT uk_api_key_hash UNIQUE (key_hash)
 );
 CREATE INDEX idx_api_keys_tenant_id ON api_keys (tenant_id);
@@ -395,7 +396,7 @@ GO
 -- Only reached when every statement above succeeded, so a partial apply cannot
 -- leave a false version marker for the apply-schema.sh gate.
 MERGE schema_version AS target
-USING (VALUES (N'3.0.1')) AS src (version)
+USING (VALUES (N'3.1.0')) AS src (version)
 ON target.version = src.version
 WHEN MATCHED     THEN UPDATE SET applied_at = SYSDATETIME()
 WHEN NOT MATCHED THEN INSERT (version, applied_at) VALUES (src.version, SYSDATETIME());

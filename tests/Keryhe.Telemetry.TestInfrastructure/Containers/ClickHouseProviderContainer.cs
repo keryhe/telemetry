@@ -93,7 +93,7 @@ public sealed class ClickHouseProviderContainer : ProviderContainer
         }
     }
 
-    protected override async Task<long> InsertTenantAndApiKeyAsync(string tenantName, string apiKeyName, string keyHash, CancellationToken cancellationToken)
+    protected override async Task<long> InsertTenantAndApiKeyAsync(string tenantName, string apiKeyName, string keyHash, DateTime? expiresAtUtc, CancellationToken cancellationToken)
     {
         var id = Interlocked.Increment(ref _nextId);
 
@@ -105,7 +105,7 @@ public sealed class ClickHouseProviderContainer : ProviderContainer
         await tenantCmd.ExecuteNonQueryAsync(cancellationToken);
 
         var keyCmd = conn.CreateCommand();
-        keyCmd.CommandText = $"INSERT INTO api_keys (id, tenant_id, key_hash, name) VALUES ({id}, {id}, '{keyHash}', '{Escape(apiKeyName)}')";
+        keyCmd.CommandText = $"INSERT INTO api_keys (id, tenant_id, key_hash, name, expires_at) VALUES ({id}, {id}, '{keyHash}', '{Escape(apiKeyName)}', {(expiresAtUtc is { } e ? $"toDateTime64('{e.ToUniversalTime():yyyy-MM-dd HH:mm:ss}', 9, 'UTC')" : "NULL")})";
         await keyCmd.ExecuteNonQueryAsync(cancellationToken);
 
         return id;

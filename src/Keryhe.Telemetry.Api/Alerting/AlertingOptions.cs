@@ -2,12 +2,12 @@ namespace Keryhe.Telemetry.Api.Alerting;
 
 /// <summary>
 /// Options for the periodic <see cref="AlertEvaluationWorker"/>. Bound from the
-/// <c>AlertEvaluation</c> configuration section.
+/// <c>Telemetry:AlertEvaluation</c> configuration section.
 /// </summary>
 public sealed class AlertingOptions
 {
     /// <summary>Configuration section name these options bind from.</summary>
-    public const string SectionName = "AlertEvaluation";
+    public const string SectionName = "Telemetry:AlertEvaluation";
 
     /// <summary>Seconds between alert-evaluation cycles. Defaults to 60.</summary>
     public int IntervalSeconds { get; set; } = 60;

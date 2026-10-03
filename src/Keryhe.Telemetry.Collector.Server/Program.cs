@@ -43,6 +43,10 @@ public class Program
         app.UseCors();
         app.UseRouting();
 
+// API key authentication for the OTLP endpoints (MapKeryheTelemetryCollector requires the collector policy).
+app.UseAuthentication();
+app.UseAuthorization();
+
         // Map gRPC services
         app.MapKeryheTelemetryCollector();
 

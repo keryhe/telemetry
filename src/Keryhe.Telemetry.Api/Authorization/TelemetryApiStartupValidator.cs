@@ -1,3 +1,4 @@
+using Keryhe.Telemetry.Core;
 using Microsoft.AspNetCore.Authentication;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.Extensions.DependencyInjection;
@@ -40,7 +41,8 @@ internal sealed class TelemetryApiStartupValidator(
                 problems.Add($"Authorization:Policies:{key} names policy '{name}', which is not registered.");
         }
 
-        if (!(await schemes.GetAllSchemesAsync()).Any())
+        // The collector's API-key scheme is not an API scheme (a co-hosted collector must not hide a missing AddAuthentication).
+        if (!(await schemes.GetAllSchemesAsync()).Any(x => x.Name != TelemetryAuthenticationSchemes.ApiKey))
             problems.Add("no authentication scheme is registered (AddAuthentication(...)).");
 
         for (var i = 0; i < auth.TenantMappings.Count; i++)

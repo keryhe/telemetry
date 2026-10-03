@@ -24,7 +24,7 @@ if (args.Length > 0 && args[0] == "playwright-install")
 
 if (args.Length == 0 || args[0] != "load")
 {
-    Console.Error.WriteLine(Keryhe.Telemetry.StressTests.Scenarios.RunCommand.Usage + "\n       report --in <results dir> [--out <dir>]   rebuild result.json / report.html / comparison.html from a finished run\n       host-smoke [--provider <p>] [--topology allinone|split] [--duration <s>] [--retention-interval <s>] [--browsers <n>] [--browser-warmup <s>] [--browser-export] [--browser-timeout <s>] [--out <dir>]\n       playwright-install\n       load --target <grpc url> --tenant <id>:<apiKey> [--tenant ...] [--api <url>] [--profile <file>] [--duration <s>] [--marker-interval <s>] [--out <file>]");
+    Console.Error.WriteLine(Keryhe.Telemetry.StressTests.Scenarios.RunCommand.Usage + "\n       report --in <results dir> [--out <dir>]   rebuild result.json / report.html / comparison.html from a finished run\n       host-smoke [--provider <p>] [--topology split] [--duration <s>] [--retention-interval <s>] [--browsers <n>] [--browser-warmup <s>] [--browser-export] [--browser-timeout <s>] [--out <dir>]\n       playwright-install\n       load --target <grpc url> --tenant <id>:<apiKey> [--tenant ...] [--api <url>] [--profile <file>] [--duration <s>] [--marker-interval <s>] [--out <file>]");
     return 2;
 }
 

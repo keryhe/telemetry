@@ -77,7 +77,7 @@ public class ReportTests
     [Fact]
     public void Screenshots_are_linked_relative_to_the_scenario_folder()
     {
-        Assert.Equal("screenshots/u0-global.png", ScenarioAnalyzer.RelativeScreenshot("/Users/x/stress-results/run/pg-allinone-smoke/screenshots/u0-global.png"));
+        Assert.Equal("screenshots/u0-global.png", ScenarioAnalyzer.RelativeScreenshot("/Users/x/stress-results/run/pg-split-smoke/screenshots/u0-global.png"));
         Assert.Null(ScenarioAnalyzer.RelativeScreenshot(null));
     }
 
@@ -102,7 +102,7 @@ public class ReportTests
     {
         var samples = new Dictionary<HostRole, IReadOnlyList<MetricSample>>
         {
-            [HostRole.AllInOne] = [Hist("keryhe.telemetry.ingestion.gate_wait", 1, 10, 500), Hist("keryhe.telemetry.ingestion.gate_wait", 20, 10, 4), Hist("keryhe.telemetry.ingestion.gate_wait", 21, 0, 999)]
+            [HostRole.Collector] = [Hist("keryhe.telemetry.ingestion.gate_wait", 1, 10, 500), Hist("keryhe.telemetry.ingestion.gate_wait", 20, 10, 4), Hist("keryhe.telemetry.ingestion.gate_wait", 21, 0, 999)]
         };
         var stats = ScenarioAnalyzer.WriteSide(samples, T0.AddSeconds(10), T0.AddSeconds(30));
         var gate = Assert.Single(stats);
@@ -145,7 +145,7 @@ public class ReportTests
     }
 
     private static ScenarioResult Scenario(string provider = "PostgreSQL", string profile = "smoke", RampResult? ramp = null) =>
-        new(ScenarioResult.CurrentSchemaVersion, provider, "AllInOne", profile, ramp is null ? "fixed" : "ramp",
+        new(ScenarioResult.CurrentSchemaVersion, provider, "Split", profile, ramp is null ? "fixed" : "ramp",
             T0, T0.AddMinutes(3), null, new ScenarioProfile { Name = profile },
             new PhaseMarkers(T0, T0.AddSeconds(60), T0.AddSeconds(120), T0.AddSeconds(120), T0.AddSeconds(130)),
             null, [new WindowSummary("traces", 60, 30000, 29000, 0, 0, 0, 300, 0, 0, new LatencySummary(300, 5, 4, 8, 12, 20))],
@@ -187,7 +187,7 @@ public class ReportTests
         {
             foreach (var provider in new[] { "PostgreSQL", "SqlServer" })
             {
-                var folder = Path.Combine(dir, provider.ToLowerInvariant() + "-allinone-smoke");
+                var folder = Path.Combine(dir, provider.ToLowerInvariant() + "-split-smoke");
                 Directory.CreateDirectory(folder);
                 await File.WriteAllTextAsync(Path.Combine(folder, "scenario.json"), JsonSerializer.Serialize(Scenario(provider), ResultJson.Options));
             }
@@ -196,8 +196,8 @@ public class ReportTests
             Assert.Equal(["result.json", "report.html", "comparison.html"], written.Select(Path.GetFileName));
 
             var html = await File.ReadAllTextAsync(Path.Combine(dir, "report.html"));
-            Assert.Contains("PostgreSQL / AllInOne / smoke", html);
-            Assert.Contains("SqlServer / AllInOne / smoke", html);
+            Assert.Contains("PostgreSQL / Split / smoke", html);
+            Assert.Contains("SqlServer / Split / smoke", html);
             Assert.DoesNotContain("<script", html);
             Assert.DoesNotContain("http://", html.Replace("http://www.w3.org", ""));
             Assert.DoesNotContain("https://", html);
@@ -208,7 +208,7 @@ public class ReportTests
 
             var comparison = await File.ReadAllTextAsync(Path.Combine(dir, "comparison.html"));
             Assert.Contains("Achieved ingest rate", comparison);
-            Assert.Contains("<th>AllInOne</th>", comparison);
+            Assert.Contains("<th>Split</th>", comparison);
         }
         finally { Directory.Delete(dir, recursive: true); }
     }

@@ -59,7 +59,7 @@ public sealed class MySqlProviderContainer : ProviderContainer
         }
     }
 
-    protected override async Task<long> InsertTenantAndApiKeyAsync(string tenantName, string apiKeyName, string keyHash, CancellationToken cancellationToken)
+    protected override async Task<long> InsertTenantAndApiKeyAsync(string tenantName, string apiKeyName, string keyHash, DateTime? expiresAtUtc, CancellationToken cancellationToken)
     {
         await using var conn = new MySqlConnection(ConnectionString);
         await conn.OpenAsync(cancellationToken);
@@ -72,10 +72,12 @@ public sealed class MySqlProviderContainer : ProviderContainer
         var tenantId = Convert.ToInt64(await idCmd.ExecuteScalarAsync(cancellationToken));
 
         await using var keyCmd = new MySqlCommand(
-            "INSERT INTO api_keys (tenant_id, key_hash, name) VALUES (@tenantId, @keyHash, @name)", conn);
+            "INSERT INTO api_keys (tenant_id, key_hash, name, expires_at) VALUES (@tenantId, @keyHash, @name, @expiresAt)", conn);
         keyCmd.Parameters.AddWithValue("@tenantId", tenantId);
         keyCmd.Parameters.AddWithValue("@keyHash", keyHash);
         keyCmd.Parameters.AddWithValue("@name", apiKeyName);
+        // DATETIME(6) holds UTC by convention.
+        keyCmd.Parameters.AddWithValue("@expiresAt", expiresAtUtc is { } e ? DateTime.SpecifyKind(e, DateTimeKind.Unspecified) : DBNull.Value);
         await keyCmd.ExecuteNonQueryAsync(cancellationToken);
 
         return tenantId;

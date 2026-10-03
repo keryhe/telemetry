@@ -23,7 +23,7 @@ public sealed class NpgsqlAdminRepository(string connectionString) : AdminReposi
         "INSERT INTO tenants (name) VALUES (@name) RETURNING id";
 
     protected override string InsertApiKeySql =>
-        "INSERT INTO api_keys (tenant_id, key_hash, name) VALUES (@tenantId, @keyHash, @name) RETURNING id";
+        "INSERT INTO api_keys (tenant_id, key_hash, name, expires_at) VALUES (@tenantId, @keyHash, @name, @expiresAt) RETURNING id";
 
     protected override bool IsUniqueViolation(DbException ex) =>
         ex is PostgresException { SqlState: PostgresErrorCodes.UniqueViolation };

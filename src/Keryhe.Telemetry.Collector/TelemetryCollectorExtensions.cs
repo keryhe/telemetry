@@ -1,7 +1,12 @@
+using Keryhe.Telemetry.Collector;
+using Keryhe.Telemetry.Collector.Authentication;
 using Keryhe.Telemetry.Core;
 using Keryhe.Telemetry.Core.Data;
 using Keryhe.Telemetry.Core.Data.Write;
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.DependencyInjection.Extensions;
+using Microsoft.Extensions.Hosting;
 
 namespace Microsoft.Extensions.DependencyInjection;
 
@@ -44,8 +49,23 @@ public static class TelemetryCollectorServiceCollectionExtensions
         services.Configure<TenantResolutionOptions>(configuration.GetSection(TenantResolutionOptions.SectionName));
         services.AddMemoryCache();
         services.AddSingleton<ApiKeyTouchTracker>();
+        services.TryAddSingleton(TimeProvider.System);
         services.AddScoped<ITenantResolver, CachingTenantResolver>();
         services.AddHostedService<ApiKeyTouchWorker>();
+
+        // Authentication: the API key check runs in the pipeline, before the protobuf body is read. No
+        // default scheme is set here and the collector policy names its scheme explicitly; the handler
+        // acts only on endpoints carrying CollectorEndpointMetadata (see ApiKeyAuthenticationHandler).
+        services.AddAuthentication()
+            .AddScheme<ApiKeyAuthenticationOptions, ApiKeyAuthenticationHandler>(TelemetryAuthenticationSchemes.ApiKey, null);
+        services.AddAuthorization(o => o.AddPolicy(CollectorAuthorization.CollectorPolicy, p => p
+            .AddAuthenticationSchemes(TelemetryAuthenticationSchemes.ApiKey)
+            .RequireAuthenticatedUser()
+            .RequireClaim(TelemetryClaimTypes.TenantId)));
+
+        // Refuses plaintext transport outside Development (decision 3). Bound from Telemetry:Collector.
+        services.Configure<TelemetryCollectorOptions>(configuration.GetSection(TelemetryCollectorOptions.SectionName));
+        services.AddHostedService<PlaintextTransportGuard>();
 
         // metric_last_seen maintenance (list-pages-server-side plan, Phase 5, decision 27):
         // registered unconditionally on every provider, same shape as ApiKeyTouchWorker above —

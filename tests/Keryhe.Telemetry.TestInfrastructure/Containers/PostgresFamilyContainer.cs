@@ -80,7 +80,7 @@ public abstract class PostgresFamilyContainer : ProviderContainer
         await cmd.ExecuteNonQueryAsync(cancellationToken);
     }
 
-    protected override async Task<long> InsertTenantAndApiKeyAsync(string tenantName, string apiKeyName, string keyHash, CancellationToken cancellationToken)
+    protected override async Task<long> InsertTenantAndApiKeyAsync(string tenantName, string apiKeyName, string keyHash, DateTime? expiresAtUtc, CancellationToken cancellationToken)
     {
         await using var conn = new NpgsqlConnection(ConnectionString);
         await conn.OpenAsync(cancellationToken);
@@ -90,10 +90,11 @@ public abstract class PostgresFamilyContainer : ProviderContainer
         var tenantId = (long)(await tenantCmd.ExecuteScalarAsync(cancellationToken))!;
 
         await using var keyCmd = new NpgsqlCommand(
-            "INSERT INTO api_keys (tenant_id, key_hash, name) VALUES (@tenantId, @keyHash, @name)", conn);
+            "INSERT INTO api_keys (tenant_id, key_hash, name, expires_at) VALUES (@tenantId, @keyHash, @name, @expiresAt)", conn);
         keyCmd.Parameters.AddWithValue("tenantId", tenantId);
         keyCmd.Parameters.AddWithValue("keyHash", keyHash);
         keyCmd.Parameters.AddWithValue("name", apiKeyName);
+        keyCmd.Parameters.Add(new NpgsqlParameter("expiresAt", NpgsqlTypes.NpgsqlDbType.TimestampTz) { Value = expiresAtUtc is { } e ? DateTime.SpecifyKind(e, DateTimeKind.Utc) : DBNull.Value });
         await keyCmd.ExecuteNonQueryAsync(cancellationToken);
 
         return tenantId;

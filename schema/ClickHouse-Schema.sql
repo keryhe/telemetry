@@ -1,4 +1,4 @@
--- OpenTelemetry ClickHouse Schema -- schema 3.0.1
+-- OpenTelemetry ClickHouse Schema -- schema 3.1.0
 -- Supports OTLP logs, metrics, and traces as defined in opentelemetry-proto.
 --
 -- Produces the SAME LOGICAL table/column set as PostgreSQL-Schema.sql, adapted to ClickHouse's
@@ -55,7 +55,8 @@ CREATE TABLE IF NOT EXISTS api_keys
     name         String,
     is_active    UInt8 DEFAULT 1,
     created_at   DateTime64(9) DEFAULT now64(9),
-    last_used_at Nullable(DateTime64(9))
+    last_used_at Nullable(DateTime64(9)),
+    expires_at   Nullable(DateTime64(9, 'UTC'))
 )
 ENGINE = ReplacingMergeTree
 ORDER BY key_hash;
@@ -426,4 +427,4 @@ ORDER BY version;
 
 -- The schema_version row is seeded LAST, so a partial/failed apply never records a version that
 -- the apply-schema.sh version gate would wrongly treat as "already applied".
-INSERT INTO schema_version (version) VALUES ('3.0.1');
+INSERT INTO schema_version (version) VALUES ('3.1.0');

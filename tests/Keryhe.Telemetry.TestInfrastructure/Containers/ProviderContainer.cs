@@ -71,10 +71,10 @@ public abstract class ProviderContainer : IAsyncDisposable
         await ApplySchemaAsync(cancellationToken);
     }
 
-    /// <summary>Inserts one tenant and one API key (whose plaintext is given) and returns the tenant.</summary>
-    public async Task<SeededTenant> SeedTenantAsync(string tenantName, string apiKeyName, string apiKeyPlainText, CancellationToken cancellationToken = default)
+    /// <summary>Inserts one tenant and one API key (whose plaintext is given, optionally expiring at a UTC instant) and returns the tenant.</summary>
+    public async Task<SeededTenant> SeedTenantAsync(string tenantName, string apiKeyName, string apiKeyPlainText, CancellationToken cancellationToken = default, DateTime? expiresAtUtc = null)
     {
-        var id = await InsertTenantAndApiKeyAsync(tenantName, apiKeyName, ApiKeyHasher.Hash(apiKeyPlainText), cancellationToken);
+        var id = await InsertTenantAndApiKeyAsync(tenantName, apiKeyName, ApiKeyHasher.Hash(apiKeyPlainText), expiresAtUtc, cancellationToken);
         return new SeededTenant(id, tenantName, apiKeyName, apiKeyPlainText);
     }
 
@@ -87,7 +87,7 @@ public abstract class ProviderContainer : IAsyncDisposable
     /// <summary>Runs the post-start half of the diagnostic configuration and verifies the rest is in effect. Only called when <see cref="ContainerOptions.Diagnostics"/> is set.</summary>
     protected abstract Task ConfigureDiagnosticsAsync(CancellationToken cancellationToken);
 
-    protected abstract Task<long> InsertTenantAndApiKeyAsync(string tenantName, string apiKeyName, string keyHash, CancellationToken cancellationToken);
+    protected abstract Task<long> InsertTenantAndApiKeyAsync(string tenantName, string apiKeyName, string keyHash, DateTime? expiresAtUtc, CancellationToken cancellationToken);
 
     public abstract ValueTask DisposeAsync();
 

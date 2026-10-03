@@ -23,7 +23,7 @@ public static class AlertingServiceCollectionExtensions
     /// Registers alert evaluation and the background worker that drives it.
     /// </summary>
     /// <param name="configuration">Host configuration; options bind from the
-    /// <c>AlertEvaluation</c> section.</param>
+    /// <c>Telemetry:AlertEvaluation</c> section.</param>
     /// <param name="configure">Optional overrides applied after configuration binding.</param>
     public static IServiceCollection AddAlerting(
         this IServiceCollection services,

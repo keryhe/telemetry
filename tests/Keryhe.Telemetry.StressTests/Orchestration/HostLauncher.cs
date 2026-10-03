@@ -7,11 +7,11 @@ using Keryhe.Telemetry.StressTests.Observers.Process;
 
 namespace Keryhe.Telemetry.StressTests.Orchestration;
 
-public enum HostTopology { AllInOne, Split }
+public enum HostTopology { Split }
 
 /// <param name="Provider">The <c>Database:Provider</c> value.</param>
 /// <param name="CollectorConnectionString">Becomes <c>ConnectionStrings:Collector</c> (ingestion side).</param>
-/// <param name="ApiConnectionString">Becomes <c>ConnectionStrings:Api</c>. Must equal the collector string for the all-in-one host on the Npgsql-backed providers (<c>EnsureSingleNpgsqlDataSource</c>).</param>
+/// <param name="ApiConnectionString">Becomes <c>ConnectionStrings:Api</c>.</param>
 /// <param name="RunDirectory">Where each host's console output is written (<c>host-&lt;role&gt;.log</c>).</param>
 /// <param name="RetentionIntervalSeconds">Short, so a retention sweep lands inside the measured window (Decision 11). Every other worker setting stays at its default.</param>
 public sealed record HostLaunchOptions(
@@ -174,9 +174,7 @@ public static class HostLauncher
     public static async Task<HostSet> LaunchAsync(PublishedHosts published, HostLaunchOptions options, CancellationToken ct = default)
     {
         Directory.CreateDirectory(options.RunDirectory);
-        var roles = options.Topology == HostTopology.AllInOne
-            ? new[] { HostRole.AllInOne }
-            : [HostRole.Collector, HostRole.Api];
+        HostRole[] roles = [HostRole.Collector, HostRole.Api];
 
         var launched = new List<LaunchedHost>();
         try
@@ -234,7 +232,7 @@ public static class HostLauncher
         var env = new Dictionary<string, string>
         {
             ["Database__Provider"] = options.Provider,
-            ["Retention__IntervalSeconds"] = options.RetentionIntervalSeconds.ToString(),
+            ["Telemetry__Retention__IntervalSeconds"] = options.RetentionIntervalSeconds.ToString(),
             // One line per entry with a UTC timestamp, which HostLogScanner parses.
             ["Logging__Console__FormatterName"] = "simple",
             ["Logging__Console__FormatterOptions__SingleLine"] = "true",
@@ -244,9 +242,9 @@ public static class HostLauncher
         };
 
         Uri? grpc = null, api = null;
-        // Named Kestrel endpoints, never ASPNETCORE_URLS. The TLS endpoints in the all-in-one host's
-        // appsettings have no certificate outside Development, so they are repointed at plaintext
-        // ports the harness never uses rather than left to fail at startup.
+        // Named Kestrel endpoints, never ASPNETCORE_URLS. The collector's TLS endpoint has no certificate
+        // outside Development, so it is repointed at a plaintext port (its appsettings.json endpoint
+        // is named Https), and the plaintext-transport guard is told that is intended.
         void Endpoint(string name, int port, string protocols)
         {
             env[$"Kestrel__Endpoints__{name}__Url"] = $"http://127.0.0.1:{port}";
@@ -255,23 +253,11 @@ public static class HostLauncher
 
         switch (role)
         {
-            case HostRole.AllInOne:
-            {
-                var ports = PortFinder.GetFreePorts(4);
-                Endpoint("Grpc", ports[0], "Http2");
-                Endpoint("GrpcTls", ports[1], "Http2");
-                Endpoint("Api", ports[2], "Http1");
-                Endpoint("ApiTls", ports[3], "Http1");
-                grpc = new Uri($"http://127.0.0.1:{ports[0]}");
-                api = new Uri($"http://127.0.0.1:{ports[2]}");
-                env["ConnectionStrings__Collector"] = options.CollectorConnectionString;
-                env["ConnectionStrings__Api"] = options.ApiConnectionString;
-                break;
-            }
             case HostRole.Collector:
             {
                 var port = PortFinder.GetFreePorts(1)[0];
-                Endpoint("Http", port, "Http2");
+                Endpoint("Https", port, "Http2");
+                env["Telemetry__Collector__AllowInsecureTransport"] = "true";
                 grpc = new Uri($"http://127.0.0.1:{port}");
                 env["ConnectionStrings__Collector"] = options.CollectorConnectionString;
                 break;

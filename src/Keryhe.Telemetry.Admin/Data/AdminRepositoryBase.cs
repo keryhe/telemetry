@@ -18,6 +18,9 @@ public abstract class AdminRepositoryBase : IAdminRepository
     /// <summary>Must return the new row's id, e.g. via <c>RETURNING id</c> or <c>OUTPUT INSERTED.id</c>.</summary>
     protected abstract string InsertApiKeySql { get; }
 
+    /// <summary>SQL expression yielding <c>api_keys.expires_at</c> as a UTC <see cref="DateTime"/>.</summary>
+    protected virtual string ExpiresAtSelect => "expires_at";
+
     /// <summary>True if <paramref name="ex"/> is this provider's unique-constraint violation.</summary>
     protected abstract bool IsUniqueViolation(DbException ex);
 
@@ -70,9 +73,9 @@ public abstract class AdminRepositoryBase : IAdminRepository
     {
         await using var conn = await OpenConnectionAsync(ct);
         var rows = await conn.QueryAsync<ApiKeyQueryRow>(new CommandDefinition(
-            """
+            $"""
             SELECT id AS Id, name AS Name, is_active AS IsActive, created_at AS CreatedAt,
-                   last_used_at AS LastUsedAt, key_hash AS KeyHash
+                   last_used_at AS LastUsedAt, key_hash AS KeyHash, {ExpiresAtSelect} AS ExpiresAt
             FROM api_keys
             WHERE tenant_id = @tenantId
             ORDER BY created_at DESC
@@ -81,15 +84,15 @@ public abstract class AdminRepositoryBase : IAdminRepository
             cancellationToken: ct));
 
         return rows
-            .Select(r => new ApiKeyRow(r.Id, r.Name, r.IsActive, r.CreatedAt, r.LastUsedAt, r.KeyHash))
+            .Select(r => new ApiKeyRow(r.Id, r.Name, r.IsActive, r.CreatedAt, r.LastUsedAt, r.KeyHash, r.ExpiresAt))
             .ToList();
     }
 
-    public async Task<long> CreateApiKeyAsync(long tenantId, string name, string keyHash, CancellationToken ct)
+    public async Task<long> CreateApiKeyAsync(long tenantId, string name, string keyHash, DateTime? expiresAtUtc, CancellationToken ct)
     {
         await using var conn = await OpenConnectionAsync(ct);
         return await conn.ExecuteScalarAsync<long>(new CommandDefinition(
-            InsertApiKeySql, new { tenantId, name, keyHash }, cancellationToken: ct));
+            InsertApiKeySql, new { tenantId, name, keyHash, expiresAt = expiresAtUtc }, cancellationToken: ct));
     }
 
     public async Task<bool> SetApiKeyActiveAsync(long apiKeyId, bool active, CancellationToken ct)
@@ -129,5 +132,6 @@ public abstract class AdminRepositoryBase : IAdminRepository
         public DateTime CreatedAt { get; set; }
         public DateTime? LastUsedAt { get; set; }
         public string KeyHash { get; set; } = null!;
+        public DateTime? ExpiresAt { get; set; }
     }
 }

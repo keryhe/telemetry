@@ -16,15 +16,26 @@ public class TenantResolver(IConfiguration configuration) : IApiKeyLookup
 {
     private readonly string _connectionString = configuration.GetConnectionString("Collector")!;
 
-    public async Task<long> LookupTenantIdAsync(string keyHash, CancellationToken cancellationToken)
+    public async Task<ApiKeyLookupResult?> LookupAsync(string keyHash, CancellationToken cancellationToken)
     {
         await using var conn = new ClickHouseConnection(_connectionString);
         await conn.OpenAsync(cancellationToken);
 
-        var tenantId = await conn.ExecuteScalarAsync<long?>(new CommandDefinition(
-            "SELECT tenant_id FROM api_keys WHERE key_hash = @keyHash AND is_active = 1 LIMIT 1",
+        // FINAL: the table is tiny, and without it a replaced or mutated row (a revoke, an expiry) can
+        // stay visible until a merge, which would break the revocation-latency promise.
+        var row = await conn.QueryFirstOrDefaultAsync<KeyRow>(new CommandDefinition(
+            "SELECT id AS Id, tenant_id AS TenantId, expires_at AS ExpiresAt FROM api_keys FINAL WHERE key_hash = @keyHash AND is_active = 1 LIMIT 1",
             new { keyHash }, cancellationToken: cancellationToken));
 
-        return tenantId is > 0 ? tenantId.Value : 0;
+        if (row is not { TenantId: > 0 } r) return null;
+        DateTimeOffset? expires = r.ExpiresAt is { } at ? new DateTimeOffset(DateTime.SpecifyKind(at, DateTimeKind.Utc)) : null;
+        return new ApiKeyLookupResult(r.TenantId, r.Id, expires);
+    }
+
+    private sealed class KeyRow
+    {
+        public long Id { get; set; }
+        public long TenantId { get; set; }
+        public DateTime? ExpiresAt { get; set; }
     }
 }

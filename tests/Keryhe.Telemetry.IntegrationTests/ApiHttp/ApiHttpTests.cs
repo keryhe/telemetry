@@ -418,7 +418,7 @@ public class ApiHttpTests
         var root = new DirectoryInfo(AppContext.BaseDirectory);
         while (root is not null && !File.Exists(Path.Combine(root.FullName, "Telemetry.sln"))) root = root.Parent;
         Assert.NotNull(root);
-        foreach (var host in new[] { "Keryhe.Telemetry.Server", "Keryhe.Telemetry.Api.Server" })
+        foreach (var host in new[] { "Keryhe.Telemetry.Api.Server" })
         {
             var config = new Microsoft.Extensions.Configuration.ConfigurationBuilder()
                 .AddJsonFile(Path.Combine(root.FullName, "src", host, "appsettings.json")).Build();

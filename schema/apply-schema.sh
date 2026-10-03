@@ -26,7 +26,9 @@
 # Schema 3.0.x is a FRESH-INSTALL schema: there is no migration from 2.x (schema-simplification
 # plan, decision 4). An existing 2.x database must be recreated; the full schema scripts are not
 # written to be re-applied on top of another version. This runner skips the apply only when the
-# 3.0.1 version row is already recorded (3.0.1 over 3.0.0 only adds a ClickHouse skip index on spans.trace_id: recreate or ALTER TABLE spans ADD INDEX it).
+# 3.1.0 version row is already recorded. 3.1.0 over 3.0.x adds api_keys.expires_at (collector-authentication plan, decision 12);
+# an existing 3.0.x database takes it with the one ALTER TABLE api_keys ADD per provider in CLAUDE.md.
+# (3.0.1 over 3.0.0 added a ClickHouse skip index on spans.trace_id: ALTER TABLE spans ADD INDEX it.)
 
 set -euo pipefail
 
@@ -36,7 +38,7 @@ PROVIDER="${1:-}"
 DATABASE="${2:-telemetry}"
 
 # Target version must match the value written by the schema scripts.
-TARGET_VERSION="3.0.1"
+TARGET_VERSION="3.1.0"
 
 if [[ -z "$PROVIDER" ]]; then
     echo "usage: $0 <postgresql|timescale|sqlserver|clickhouse|mysql> [database]" >&2

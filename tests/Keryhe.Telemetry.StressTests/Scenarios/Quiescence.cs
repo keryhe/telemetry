@@ -23,7 +23,7 @@ public sealed class QuiescenceTracker(TimeSpan stableFor)
 
 public sealed record QuiesceResult(bool Reached, double WaitedSeconds, double TimeoutSeconds, double? ResidentAtEnd);
 
-/// <summary>Reads the ingestion instruments off the hosts' EventPipe stores. The collector (or all-in-one) host carries them; an API-only host has none.</summary>
+/// <summary>Reads the ingestion instruments off the hosts' EventPipe stores. The collector host carries them; an API-only host has none.</summary>
 public static class HostMetricsQuery
 {
     private const string Prefix = "keryhe.telemetry.ingestion.";

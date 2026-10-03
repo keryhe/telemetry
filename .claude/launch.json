@@ -9,9 +9,15 @@
       "cwd": "src/telemetry-client"
     },
     {
-      "name": "telemetry-server",
+      "name": "telemetry-collector",
       "runtimeExecutable": "dotnet",
-      "runtimeArgs": ["run", "--project", "src/Keryhe.Telemetry.Server"],
+      "runtimeArgs": ["run", "--project", "src/Keryhe.Telemetry.Collector.Server"],
+      "port": 5117
+    },
+    {
+      "name": "telemetry-api",
+      "runtimeExecutable": "dotnet",
+      "runtimeArgs": ["run", "--project", "src/Keryhe.Telemetry.Api.Server"],
       "port": 5188
     }
   ]

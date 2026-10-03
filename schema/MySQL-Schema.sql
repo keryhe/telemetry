@@ -1,4 +1,4 @@
--- OpenTelemetry MySQL Schema (MySQL 8.0+) -- schema 3.0.1
+-- OpenTelemetry MySQL Schema (MySQL 8.0+) -- schema 3.1.0
 -- Supports OTLP logs, metrics, and traces as defined in opentelemetry-proto. MySQL 8 only: no
 -- MariaDB compatibility is maintained.
 --
@@ -44,6 +44,7 @@ CREATE TABLE api_keys (
     is_active    TINYINT(1)   NOT NULL DEFAULT 1,
     created_at   DATETIME(6)  NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
     last_used_at DATETIME(6),
+    expires_at   DATETIME(6) NULL, -- UTC by convention (UTC_TIMESTAMP(6)); read with SpecifyKind(Utc)
     CONSTRAINT uk_api_key_hash UNIQUE (key_hash),
     CONSTRAINT fk_api_keys_tenants FOREIGN KEY (tenant_id) REFERENCES tenants (id) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
@@ -375,7 +376,7 @@ VALUES (1, 90, 90, 180);
 -- Only inserted when every statement above succeeded, so a partial apply cannot
 -- leave a false version marker for the apply-schema.sh gate.
 INSERT INTO schema_version (version, applied_at)
-VALUES ('3.0.1', CURRENT_TIMESTAMP(6))
+VALUES ('3.1.0', CURRENT_TIMESTAMP(6))
 ON DUPLICATE KEY UPDATE applied_at = CURRENT_TIMESTAMP(6);
 
 -- =============================================================================

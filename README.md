@@ -32,9 +32,8 @@ read/write implementation and is selected by the host at startup.
 | `Keryhe.Telemetry.Core` | Domain interfaces and models shared across projects |
 | `Keryhe.Telemetry.Data` | Provider-agnostic write repositories, ingestion channel + background worker, Dapper read-repository bases |
 | `Keryhe.Telemetry.PostgreSQL` / `.Timescale` / `.SqlServer` / `.MySql` / `.ClickHouse` | Per-provider read/write implementations |
-| `Keryhe.Telemetry.Collector` / `.Collector.Server` | gRPC OTLP ingestion (class library + thin host) |
+| `Keryhe.Telemetry.Collector` / `.Collector.Server` | gRPC OTLP ingestion with per-tenant API key authentication (class library + thin host) |
 | `Keryhe.Telemetry.Api` / `.Api.Server` | REST API controllers and tenant middleware (class library + thin host) |
-| `Keryhe.Telemetry.Server` | All-in-one host: gRPC ingestion, REST API, and the Angular UI in a single process |
 | `Keryhe.Telemetry.Ui` | Prebuilt Angular UI, packaged as static web assets — see [Build your own host](#build-your-own-host) below |
 | `Keryhe.Telemetry.Alerting` | Alert rule evaluators, webhook delivery, periodic evaluation worker |
 | `Keryhe.Telemetry.TestDataGenerator` | Worker service that simulates a multi-tenant e-commerce system and emits realistic traces, logs and metrics (24h backfill, then live) |
@@ -56,9 +55,10 @@ dotnet user-secrets --project src/Keryhe.Telemetry.Api.Server \
 dotnet user-secrets --project src/Keryhe.Telemetry.Collector.Server \
   set "ConnectionStrings:Collector" "Host=localhost;Port=5432;Database=telemetry;Username=postgres;Password=<password>"
 
-# 3. Build and run the all-in-one host
+# 3. Build and run the two hosts (each in its own terminal): gRPC ingestion, then the REST API + UI
 dotnet build Telemetry.sln
-dotnet run --project src/Keryhe.Telemetry.Server
+dotnet run --project src/Keryhe.Telemetry.Collector.Server
+dotnet run --project src/Keryhe.Telemetry.Api.Server
 
 # 4. Run the Angular dev server
 cd src/telemetry-client && npm install && npm start
@@ -138,8 +138,8 @@ The Dashboard's error-rate thresholds are configurable the same way, under
 
 Add `Keryhe.Telemetry.Collector` (plus `AddKeryheTelemetryCollector()`/`MapKeryheTelemetryCollector()`
 and the matching `Add<Provider>CollectorServices(configuration)` call, e.g.
-`AddTimescaleCollectorServices`) the same way if your host should also ingest OTLP, mirroring
-what `Keryhe.Telemetry.Server` does internally. Pin the UI and API packages to the same version —
+`AddTimescaleCollectorServices`) the same way if your host should also ingest OTLP, running it
+as its own service (see [the collector README](src/Keryhe.Telemetry.Collector/README.md)). Pin the UI and API packages to the same version —
 they ship in lockstep, and a mismatch fails silently (a field goes missing from a rendered page)
 rather than with an error.
 

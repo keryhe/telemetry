@@ -8,7 +8,7 @@ using Keryhe.Telemetry.Core;
 using Keryhe.Telemetry.Core.Models;
 using System.Security.Cryptography;
 using System.Text;
-using Keryhe.Telemetry.Collector.Services.Helpers;
+using Keryhe.Telemetry.Collector.Authentication;
 
 namespace Keryhe.Telemetry.Collector.Services;
 
@@ -20,13 +20,11 @@ public class LogService : OpenTelemetry.Proto.Collector.Logs.V1.LogsService.Logs
 {
     private readonly ILogWriteRepository _logRepository;
     private readonly ILogger<LogService> _logger;
-    private readonly ITenantResolver _tenantResolver;
 
-    public LogService(ILogWriteRepository logRepository, ILogger<LogService> logger, ITenantResolver tenantResolver)
+    public LogService(ILogWriteRepository logRepository, ILogger<LogService> logger)
     {
         _logRepository = logRepository ?? throw new ArgumentNullException(nameof(logRepository));
         _logger = logger ?? throw new ArgumentNullException(nameof(logger));
-        _tenantResolver = tenantResolver ?? throw new ArgumentNullException(nameof(tenantResolver));
     }
 
     /// <summary>
@@ -59,10 +57,8 @@ public class LogService : OpenTelemetry.Proto.Collector.Logs.V1.LogsService.Logs
         var storedLogCount = 0;
         try
         {
-            string? keyHash = ApiKeyHelper.GetKeyHash(context);
-            var tenantId = await _tenantResolver.ResolveTenantIdAsync(keyHash, context.CancellationToken);
-            if (tenantId <= 0)
-                throw new RpcException(new Status(StatusCode.Unauthenticated, "Invalid API key."));
+            // Authenticated by ApiKeyAuthenticationHandler before this method is entered.
+            var tenantId = TenantClaims.GetRequiredTenantId(context);
 
             _logger.LogDebug("Received logs export request with {ResourceLogsCount} resource logs", request.ResourceLogs?.Count ?? 0);
 
@@ -85,6 +81,11 @@ public class LogService : OpenTelemetry.Proto.Collector.Logs.V1.LogsService.Logs
             // Store log records using the repository
             await _logRepository.StoreLogRecordsBatchAsync(logRecords, context.CancellationToken);
             storedLogCount = logRecords.Count;
+        }
+        catch (RpcException)
+        {
+            // Never swallow a status (e.g. Unauthenticated) into an OK partial-success response.
+            throw;
         }
         catch (System.Threading.Channels.ChannelClosedException)
         {

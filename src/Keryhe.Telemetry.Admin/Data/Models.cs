@@ -8,8 +8,12 @@ public sealed record ApiKeyRow(
     bool IsActive,
     DateTime CreatedAt,
     DateTime? LastUsedAt,
-    string KeyHash)
+    string KeyHash,
+    DateTime? ExpiresAt = null)
 {
+    /// <summary><see cref="ExpiresAt"/> is UTC (collector-authentication plan, decision 12) and has passed.</summary>
+    public bool IsExpired(DateTime utcNow) => ExpiresAt is { } at && at <= utcNow;
+
     /// <summary>First 8 characters of the full hash — enough to correlate a row with a log line,
     /// never the full 64. See plans/admin-tui.md, section 6.4.</summary>
     public string HashPrefix => KeyHash.Length >= 8 ? KeyHash[..8] : KeyHash;

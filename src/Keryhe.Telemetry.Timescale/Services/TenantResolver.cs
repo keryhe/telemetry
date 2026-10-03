@@ -12,12 +12,13 @@ namespace Keryhe.Telemetry.Timescale.Services;
 /// </summary>
 public class TenantResolver(NpgsqlDataSource dataSource) : IApiKeyLookup
 {
-    public async Task<long> LookupTenantIdAsync(string keyHash, CancellationToken cancellationToken)
+    public async Task<ApiKeyLookupResult?> LookupAsync(string keyHash, CancellationToken cancellationToken)
     {
         await using var conn = await dataSource.OpenConnectionAsync(cancellationToken);
 
+        // expires_at is returned, not filtered on: CachingTenantResolver compares it on every resolution.
         const string selectSql = """
-            SELECT tenant_id
+            SELECT id, tenant_id, expires_at
             FROM api_keys
             WHERE key_hash = $1
               AND is_active = TRUE
@@ -26,7 +27,9 @@ public class TenantResolver(NpgsqlDataSource dataSource) : IApiKeyLookup
 
         await using var selectCmd = new NpgsqlCommand(selectSql, conn);
         selectCmd.Parameters.AddWithValue(NpgsqlDbType.Text, keyHash);
-        var result = await selectCmd.ExecuteScalarAsync(cancellationToken);
-        return result is long id ? id : 0L;
+        await using var reader = await selectCmd.ExecuteReaderAsync(cancellationToken);
+        if (!await reader.ReadAsync(cancellationToken)) return null;
+        DateTimeOffset? expires = reader.IsDBNull(2) ? null : new DateTimeOffset(reader.GetFieldValue<DateTime>(2), TimeSpan.Zero);
+        return new ApiKeyLookupResult(reader.GetInt64(1), reader.GetInt64(0), expires);
     }
 }

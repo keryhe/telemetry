@@ -14,7 +14,7 @@ namespace Keryhe.Telemetry.StressTests.Scenarios;
 public static class RunCommand
 {
     public const string Usage =
-        "run [--provider <PostgreSQL|Timescale|SqlServer|MySql|ClickHouse|all>] [--topology <allinone|split|all>]\n" +
+        "run [--provider <PostgreSQL|Timescale|SqlServer|MySql|ClickHouse|all>] [--topology <split|all>]\n" +
         "    [--profile <smoke|standard|soak|ramp|all|path.json>] [--scenario <fixed|ramp>] [--out <dir>] [--reuse-publish <dir>]\n" +
         "    [--browsers <n>]   override the profile's browser users (0 = none)\n" +
         "    [--db-cpuset <cpus>]   pin the database container to these CPUs of the Docker VM (e.g. 0-3); recorded in the report\n" +
@@ -23,7 +23,7 @@ public static class RunCommand
 
     public static async Task<int> RunAsync(string[] args)
     {
-        string provider = "PostgreSQL", topology = "allinone", profile = "", scenario = "fixed";
+        string provider = "PostgreSQL", topology = "split", profile = "", scenario = "fixed";
         string? outDir = null, reusePublish = null;
         int? browsers = null;
         string? retentionInterval = null, dbCpuset = null;
@@ -69,9 +69,7 @@ public static class RunCommand
         Console.WriteLine($"Output: {outDir}");
         Console.WriteLine($"Matrix: {specs.Count} scenario(s), run sequentially: {string.Join(", ", specs.Select(s => s.Id))}");
 
-        var roles = specs.Any(s => s.Topology == HostTopology.Split) && specs.Any(s => s.Topology == HostTopology.AllInOne)
-            ? new[] { HostRole.AllInOne, HostRole.Collector, HostRole.Api }
-            : specs.Any(s => s.Topology == HostTopology.Split) ? [HostRole.Collector, HostRole.Api] : [HostRole.AllInOne];
+        HostRole[] roles = [HostRole.Collector, HostRole.Api];
         Console.WriteLine(reusePublish is null ? "Publishing hosts (Release)..." : $"Reusing published hosts in {reusePublish}");
         var published = await HostPublisher.PublishAsync(repo, reusePublish ?? Path.Combine(outDir, "publish"), roles, skipIfPresent: reusePublish is not null);
 
@@ -106,9 +104,9 @@ public static class RunCommand
                ?? throw new ArgumentException($"Unknown provider '{provider}' (expected {string.Join(", ", ProviderContainerFactory.ProviderNames)} or all).")];
 
         var topologies = topology.Equals("all", StringComparison.OrdinalIgnoreCase)
-            ? [HostTopology.AllInOne, HostTopology.Split]
+            ? [HostTopology.Split]
             : Enum.TryParse<HostTopology>(topology, ignoreCase: true, out var t) ? new[] { t }
-            : throw new ArgumentException($"Unknown topology '{topology}' (expected allinone, split or all).");
+            : throw new ArgumentException($"Unknown topology '{topology}' (expected split or all).");
 
         if (!scenario.Equals("fixed", StringComparison.OrdinalIgnoreCase) && !scenario.Equals("ramp", StringComparison.OrdinalIgnoreCase))
             throw new ArgumentException($"Unknown scenario '{scenario}' (expected fixed or ramp).");

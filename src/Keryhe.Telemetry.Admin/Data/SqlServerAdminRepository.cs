@@ -18,7 +18,10 @@ public sealed class SqlServerAdminRepository(string connectionString) : AdminRep
         "INSERT INTO tenants (name) OUTPUT INSERTED.id VALUES (@name)";
 
     protected override string InsertApiKeySql =>
-        "INSERT INTO api_keys (tenant_id, key_hash, name) OUTPUT INSERTED.id VALUES (@tenantId, @keyHash, @name)";
+        "INSERT INTO api_keys (tenant_id, key_hash, name, expires_at) OUTPUT INSERTED.id VALUES (@tenantId, @keyHash, @name, @expiresAt)";
+
+    // expires_at is DATETIMEOFFSET holding UTC; read it as a UTC datetime2 so every provider yields a UTC DateTime.
+    protected override string ExpiresAtSelect => "CAST(SWITCHOFFSET(expires_at, 0) AS DATETIME2)";
 
     // 2627 = PK/unique index violation, 2601 = duplicate key on a unique index. Both surface here
     // because uk_tenant_name is declared as a UNIQUE constraint, which SQL Server backs with a

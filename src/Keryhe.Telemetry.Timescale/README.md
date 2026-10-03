@@ -28,8 +28,6 @@ Configuration:
 - `Database:Provider` — must be `Timescale`.
 - `ConnectionStrings:Collector` / `ConnectionStrings:Api` — Npgsql connection strings, e.g.
   `Host=localhost;Port=5432;Database=telemetry;Username=postgres;Password=<password>`.
-- In the all-in-one host (`Keryhe.Telemetry.Server`), the write and read connection strings must
-  be identical — the underlying `NpgsqlDataSource` is a process-wide singleton.
 
 Apply `schema/Timescale-Schema.sql` (or `schema/apply-schema.sh timescale`) before first use. It
 sets up hypertables on the metric data-point tables and `log_records`, compression starting at 7
