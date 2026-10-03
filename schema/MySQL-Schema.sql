@@ -1,4 +1,4 @@
--- OpenTelemetry MySQL Schema (MySQL 8.0+) -- schema 3.0.0
+-- OpenTelemetry MySQL Schema (MySQL 8.0+) -- schema 3.0.1
 -- Supports OTLP logs, metrics, and traces as defined in opentelemetry-proto. MySQL 8 only: no
 -- MariaDB compatibility is maintained.
 --
@@ -375,7 +375,7 @@ VALUES (1, 90, 90, 180);
 -- Only inserted when every statement above succeeded, so a partial apply cannot
 -- leave a false version marker for the apply-schema.sh gate.
 INSERT INTO schema_version (version, applied_at)
-VALUES ('3.0.0', CURRENT_TIMESTAMP(6))
+VALUES ('3.0.1', CURRENT_TIMESTAMP(6))
 ON DUPLICATE KEY UPDATE applied_at = CURRENT_TIMESTAMP(6);
 
 -- =============================================================================

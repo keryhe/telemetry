@@ -168,12 +168,6 @@
 
       <mat-card class="tab-card">
         <mat-card-content>
-          @if (newSinceCount() > 0) {
-            <div class="new-since-banner" (click)="resetAsOf()">
-              <mat-icon>refresh</mat-icon>
-              {{ newSinceCount() | number }} new trace{{ newSinceCount() === 1 ? '' : 's' }} since this view loaded — click to refresh
-            </div>
-          }
           @if (displayRows().length === 0 && !loading() && !pageLoading()) {
             <app-empty-state icon="account_tree" message="No traces found" hint="Try adjusting the time range or filters" />
           } @else {
@@ -225,7 +219,7 @@
               <tr mat-header-row *matHeaderRowDef="displayedColumns"></tr>
               <tr mat-row *matRowDef="let row; columns: displayedColumns"
                   class="clickable-row"
-                  (click)="navigate(row.traceIdHex)"></tr>
+                  (click)="navigate(row.traceIdHex, row.traceStartTime, row.traceEndTime)"></tr>
             </table>
 
             <mat-paginator

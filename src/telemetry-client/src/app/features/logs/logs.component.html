@@ -186,12 +186,6 @@
 
   <mat-card>
     <mat-card-content class="table-content">
-      @if (newSinceCount() > 0) {
-        <div class="new-since-banner" (click)="resetAsOf()">
-          <mat-icon>refresh</mat-icon>
-          {{ newSinceCount() | number }} new log{{ newSinceCount() === 1 ? '' : 's' }} since this view loaded — click to refresh
-        </div>
-      }
       @if (displayRows().length === 0 && !loading() && !rowsLoading()) {
         @if (traceFilterActive()) {
           <app-empty-state icon="receipt_long" message="No logs found for this trace" hint="Clear the trace ID from the search box to search by time range" />

@@ -1,4 +1,4 @@
--- OpenTelemetry PostgreSQL Schema (plain PostgreSQL, no TimescaleDB) -- schema 3.0.0
+-- OpenTelemetry PostgreSQL Schema (plain PostgreSQL, no TimescaleDB) -- schema 3.0.1
 -- Supports OTLP logs, metrics, and traces as defined in opentelemetry-proto
 -- Targets a vanilla PostgreSQL instance WITHOUT the timescaledb extension.
 --
@@ -365,6 +365,6 @@ ON CONFLICT ("id") DO NOTHING;
 -- =============================================================================
 -- Only reached when every statement above succeeded, so a partial apply cannot
 -- leave a false version marker for the apply-schema.sh gate.
-INSERT INTO schema_version ("version") VALUES ('3.0.0')
+INSERT INTO schema_version ("version") VALUES ('3.0.1')
 ON CONFLICT ("version") DO UPDATE
 SET "applied_at" = NOW();

@@ -5,4 +5,7 @@ namespace Keryhe.Telemetry.IntegrationTests.Tests;
 
 [Collection(ProviderNames.Timescale)]
 [Trait("Provider", ProviderNames.Timescale)]
-public sealed class TimescaleTracePhase3Tests(TimescaleFixture fixture) : TracePhase3TestsBase(fixture);
+public sealed class TimescaleTracePhase3Tests(TimescaleFixture fixture) : TracePhase3TestsBase(fixture)
+{
+    protected override bool HonorsStartHint => true;
+}

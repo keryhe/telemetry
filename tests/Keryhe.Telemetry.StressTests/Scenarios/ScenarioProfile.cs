@@ -142,6 +142,29 @@ public sealed class ScenarioProfile
 
     public RampProfile? Ramp { get; set; }
 
+    /// <summary>
+    /// Days of backdated history sent (through the real OTLP path) before the warm-up, so reads run over a table with history (many
+    /// Timescale chunks, many ClickHouse partitions) instead of the minutes a run itself produces. 0 = none (trace-list-detail-performance
+    /// plan, Phase 0). Seeded spans are ledgered as current, so the correctness check still balances. The report records the parameters:
+    /// a run with history is never comparable with one without.
+    /// </summary>
+    public int SeedDays { get; set; }
+
+    /// <summary>Spans per day of seeded history, across all tenants.</summary>
+    public int SeedSpansPerDay { get; set; } = 20_000;
+
+    /// <summary>Sizes (spans) of the large traces seeded for the first tenant, to probe trace detail on big traces. Used only with <see cref="SeedDays"/>.</summary>
+    public List<int> SeedLargeTraces { get; set; } = [1000, 5000, 20000];
+
+    /// <summary>Applies <c>--seed-days</c>/<c>--seed-spans-per-day</c> and tags the name, so seeded and unseeded results land in different folders.</summary>
+    public void ApplySeed(int days, int? spansPerDay)
+    {
+        if (days is < 1 or > 60) throw new ArgumentException("--seed-days must be 1 to 60 (the default trace retention is 90 days, and the seed must stay inside it).");
+        SeedDays = days;
+        if (spansPerDay is { } n) SeedSpansPerDay = n > 0 ? n : throw new ArgumentException("--seed-spans-per-day must be positive.");
+        Name = $"{Name}-seed{days}d";
+    }
+
     public bool IsRamp => Ramp is not null;
 
     public static IReadOnlyList<string> Builtin { get; } = ["smoke", "standard", "soak", "ramp", "ramp-write-only"];

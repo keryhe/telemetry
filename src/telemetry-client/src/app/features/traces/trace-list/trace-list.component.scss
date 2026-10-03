@@ -147,25 +147,6 @@
   }
 }
 
-.new-since-banner {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 8px 12px;
-  margin-bottom: 8px;
-  font-size: 13px;
-  cursor: pointer;
-  color: var(--mat-sys-on-primary-container);
-  background: var(--mat-sys-primary-container);
-  border-radius: 6px;
-
-  mat-icon {
-    font-size: 18px;
-    width: 18px;
-    height: 18px;
-  }
-}
-
 .search-limit-message {
   display: flex;
   align-items: center;

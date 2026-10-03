@@ -140,17 +140,27 @@ public class OtlpLoadToolTests
     }
 
     [Fact]
-    public async Task Rate_controller_fires_on_schedule_even_when_the_callback_is_slow()
+    public async Task Rate_controller_is_open_loop_catches_up_after_a_stall_and_reports_the_lateness()
     {
-        // The callback blocks 20ms per tick against a 10ms schedule; a closed-loop sender would manage
-        // ~50/s. Open-loop still fires the scheduled count -- it just reports each tick's lateness.
+        // One tick stalls the scheduler for 100ms (ten ticks' worth at 100/s); every other callback is instant. A closed-loop
+        // sender would lose those ten ticks for good. The open-loop controller catches up from the clock and reports how late
+        // the delayed ticks were. (An earlier version made EVERY callback sleep 20ms and asserted at least 90 of 100 ticks
+        // fired: a synchronous scheduler cannot do that, and the test passed only when a catch-up batch happened to overrun
+        // the window, which depended on timing.)
         var controller = new RateController(100);
         var count = 0;
         var maxLag = TimeSpan.Zero;
         using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(1));
-        await controller.RunAsync((_, lag) => { Interlocked.Increment(ref count); if (lag > maxLag) maxLag = lag; Thread.Sleep(20); }, cts.Token);
-        Assert.True(count + controller.SkippedTicks >= 90, $"fired {count}, skipped {controller.SkippedTicks}");
-        Assert.True(maxLag > TimeSpan.FromMilliseconds(50));
+        await controller.RunAsync((_, lag) =>
+        {
+            if (lag > maxLag) maxLag = lag;
+            if (Interlocked.Increment(ref count) == 1) Thread.Sleep(100);
+        }, cts.Token);
+
+        // 100 are scheduled in the second. The slack (80, not 100) covers a loaded machine stalling the scheduler thread near
+        // the end of the window; the ten delayed by the stall must not be among the missing.
+        Assert.True(count + controller.SkippedTicks >= 80, $"fired {count}, skipped {controller.SkippedTicks}");
+        Assert.True(maxLag > TimeSpan.FromMilliseconds(50), $"max lag {maxLag.TotalMilliseconds:F0} ms");
     }
 
     [Fact]

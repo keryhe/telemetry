@@ -8,6 +8,9 @@ namespace Keryhe.Telemetry.TestInfrastructure.Containers;
 /// the real <c>schema/*.sql</c> script, and seed tenants + API keys. Shared by the integration
 /// tests' provider fixtures and the stress harness.
 /// </summary>
+/// <summary>A database container's state as Docker reports it. <see cref="Status"/> is <c>running</c>, <c>exited</c>, <c>restarting</c> ... or <c>unknown</c>.</summary>
+public sealed record ContainerOutcome(string Status, int? ExitCode, bool? OomKilled, string? Error);
+
 public abstract class ProviderContainer : IAsyncDisposable
 {
     public abstract string ProviderName { get; }
@@ -29,6 +32,32 @@ public abstract class ProviderContainer : IAsyncDisposable
     }
 
     protected abstract Task<(string Stdout, string Stderr)> ReadLogsAsync(DateTime since, CancellationToken cancellationToken);
+
+    /// <summary>
+    /// What Docker says about the container now (<c>docker inspect</c>): whether the database is still running and, if it is not, why. A
+    /// database that falls over under overload (ClickHouse at the memory limit) refuses connections for everyone, and the harness reports
+    /// that as a finding about the database, with this, instead of as a failure of the run.
+    /// </summary>
+    public async Task<ContainerOutcome> InspectAsync(CancellationToken cancellationToken = default)
+    {
+        try
+        {
+            var info = new System.Diagnostics.ProcessStartInfo("docker",
+                ["inspect", "--format", "{{.State.Status}} {{.State.ExitCode}} {{.State.OOMKilled}}", ContainerId])
+            { RedirectStandardOutput = true, RedirectStandardError = true };
+            using var process = System.Diagnostics.Process.Start(info)!;
+            var output = (await process.StandardOutput.ReadToEndAsync(cancellationToken)).Trim();
+            await process.WaitForExitAsync(cancellationToken);
+            var parts = output.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+            if (process.ExitCode != 0 || parts.Length < 3)
+                return new ContainerOutcome("unknown", null, null, (await process.StandardError.ReadToEndAsync(cancellationToken)).Trim());
+            return new ContainerOutcome(parts[0], int.TryParse(parts[1], out var code) ? code : null, bool.TryParse(parts[2], out var oom) ? oom : null, null);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            return new ContainerOutcome("unknown", null, null, ex.Message);
+        }
+    }
 
     public ContainerOptions Options { get; private set; } = ContainerOptions.Default;
 

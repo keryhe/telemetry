@@ -23,10 +23,10 @@
 #   CLICKHOUSE_HOST=localhost schema/apply-schema.sh clickhouse
 #   MYSQL_HOST=localhost MYSQL_USER=root MYSQL_PWD=secret schema/apply-schema.sh mysql
 #
-# Schema 3.0.0 is a FRESH-INSTALL schema: there is no migration from 2.x (schema-simplification
+# Schema 3.0.x is a FRESH-INSTALL schema: there is no migration from 2.x (schema-simplification
 # plan, decision 4). An existing 2.x database must be recreated; the full schema scripts are not
 # written to be re-applied on top of another version. This runner skips the apply only when the
-# 3.0.0 version row is already recorded.
+# 3.0.1 version row is already recorded (3.0.1 over 3.0.0 only adds a ClickHouse skip index on spans.trace_id: recreate or ALTER TABLE spans ADD INDEX it).
 
 set -euo pipefail
 
@@ -36,7 +36,7 @@ PROVIDER="${1:-}"
 DATABASE="${2:-telemetry}"
 
 # Target version must match the value written by the schema scripts.
-TARGET_VERSION="3.0.0"
+TARGET_VERSION="3.0.1"
 
 if [[ -z "$PROVIDER" ]]; then
     echo "usage: $0 <postgresql|timescale|sqlserver|clickhouse|mysql> [database]" >&2

@@ -39,8 +39,6 @@ import { downloadCsv, downloadJson, downloadBlob, copyPermalink, fileStamp } fro
 
 const BUCKET_COUNT = 60;
 const STATE_KEY = 'state.logs';
-/** How often the "new since" banner's summary re-poll runs, while the tab is visible (decision: "poll every 30s"). */
-const NEW_SINCE_POLL_MS = 30_000;
 /** Default number of attribute keys / values per key the faceting sidebar shows (raised via "show more"). */
 const FACET_KEY_LIMIT = 15;
 const FACET_VALUE_LIMIT = 8;
@@ -116,7 +114,6 @@ export class LogsComponent implements OnDestroy {
   private pageSub?: Subscription;
   private summarySub?: Subscription;
   private facetsSub?: Subscription;
-  private newSincePollHandle?: ReturnType<typeof setInterval>;
 
   /**
    * Trace-id mode — a search-box query that is exactly one trace id, whether typed or arrived via
@@ -211,9 +208,6 @@ export class LogsComponent implements OnDestroy {
     const s = this.summary();
     return s ? s.buckets.reduce((a, b) => a + b.warn, 0) : 0;
   });
-
-  /** "N new since …" banner — hidden while trace-filtered or before the first summary lands. */
-  protected newSinceCount = computed(() => this.traceFilterActive() ? 0 : (this.summary()?.newSinceAsOf ?? 0));
 
   /**
    * Search window limit, explained inline next to the search box (search is unindexed on every
@@ -363,15 +357,9 @@ export class LogsComponent implements OnDestroy {
         facetsCollapsed: this.facetsCollapsed(),
       });
     });
-
-    // "New since" banner: re-poll the summary every 30s while the tab is visible.
-    this.newSincePollHandle = setInterval(() => {
-      if (document.visibilityState === 'visible' && !this.traceFilterActive()) this.pollSummary();
-    }, NEW_SINCE_POLL_MS);
   }
 
   ngOnDestroy(): void {
-    if (this.newSincePollHandle) clearInterval(this.newSincePollHandle);
     this.pageSub?.unsubscribe();
     this.summarySub?.unsubscribe();
     this.facetsSub?.unsubscribe();
@@ -403,14 +391,6 @@ export class LogsComponent implements OnDestroy {
     this.pageSub = this.api.getLogPage({ ...this.currentFilter(), size: this.pageSize(), nav: 'first' }).subscribe({
       next: (result) => { this.page.set(result); this.pageLoading.set(false); },
       error: () => this.pageLoading.set(false),
-    });
-  }
-
-  /** Re-polls only the summary, pinned on the query's existing `asOf`, for the "new since" banner. */
-  private pollSummary(): void {
-    const asOf = this.summary()?.asOf ?? this.page()?.asOf;
-    this.api.getLogSummary({ ...this.currentFilter(), asOf, bucketCount: BUCKET_COUNT }).subscribe({
-      next: (result) => this.summary.set(result),
     });
   }
 
@@ -545,18 +525,6 @@ export class LogsComponent implements OnDestroy {
   /** Drops the trace id from the search box, returning to the time-range-bound list. */
   protected clearTrace(): void {
     this.onSearchChange('');
-  }
-
-  /**
-   * Clicking the "new since" banner resets `asOf` to now and returns to the first page. The
-   * placeholder value here is overwritten within the same tick by reloadAll()'s own summary
-   * response (currentFilter() carries no asOf, so the server resolves a fresh one) — it only
-   * needs to zero the banner count optimistically, not be a real, usable asOf itself.
-   */
-  protected resetAsOf(): void {
-    this.summary.set(this.summary() ? { ...this.summary()!, asOf: new Date().toISOString(), newSinceAsOf: 0 } : null);
-    this.pageIndex.set(0);
-    this.reloadAll();
   }
 
   // =========================================================================

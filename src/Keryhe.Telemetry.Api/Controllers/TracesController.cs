@@ -1,5 +1,6 @@
 using System.Text.Json;
 using Keryhe.Telemetry.Api.Export;
+using Keryhe.Telemetry.Api.Models;
 using Keryhe.Telemetry.Core;
 using Keryhe.Telemetry.Core.Data.Read;
 using Keryhe.Telemetry.Core.Models;
@@ -147,14 +148,22 @@ public class TracesController : ControllerBase
         return RawSearchWindowGuard.Check(_capabilities, hasRawSearchFilter, isExempt, end - start);
     }
 
-    // GET /api/traces/{traceId}/spans
+    // GET /api/traces/{traceId}/spans?start=&end=
+    /// <summary>
+    /// The trace's spans, with each distinct resource and instrumentation scope listed once (<see cref="TraceDetailResponse"/>).
+    /// <c>start</c> and <c>end</c> are optional and used together: the trace's extent as the list returns it
+    /// (<c>traceStartTime</c>/<c>traceEndTime</c>), which lets a provider that cannot seek a trace id (Timescale, ClickHouse) read only
+    /// that range. With either one missing the read is unbounded and the trace whole.
+    /// </summary>
     [HttpGet("{traceId}/spans")]
-    public async Task<ActionResult<List<SpanModel>>> GetSpans(string traceId, CancellationToken ct = default)
+    public async Task<ActionResult<TraceDetailResponse>> GetSpans(
+        string traceId, [FromQuery] DateTime? start = null, [FromQuery] DateTime? end = null, CancellationToken ct = default)
     {
-        var spans = await _traces.GetTraceByIdAsync(traceId, ct);
+        TraceTimeHint? hint = start.HasValue && end.HasValue && start.Value <= end.Value ? new TraceTimeHint(start.Value, end.Value) : null;
+        var spans = await _traces.GetTraceByIdAsync(traceId, hint, ct);
         if (spans.Count == 0)
             return NotFound();
-        return Ok(spans);
+        return Ok(TraceDetailResponse.From(spans));
     }
 
     // GET /api/traces/dependencies?start=&end=

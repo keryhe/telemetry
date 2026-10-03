@@ -60,7 +60,6 @@ interface LogSummaryDto {
   buckets: LogSummaryBucketDto[];
   total: number;
   totalIsLowerBound: boolean;
-  newSinceAsOf: number;
   asOf: string;
 }
 
@@ -69,7 +68,6 @@ export interface LogSummaryResult {
   buckets: LogSummaryBucket[];
   total: number;
   totalIsLowerBound: boolean;
-  newSinceAsOf: number;
   asOf: string;
 }
 
@@ -114,7 +112,7 @@ export class LogsApiService {
     return this.http.get<LogRecord[]>(this.base, { params });
   }
 
-  /** Chart/stat-card summary — the "new since" count and per-severity bucket counts (decisions 3, 37). */
+  /** Chart/stat-card summary — the per-severity bucket counts (decisions 3, 37). */
   getLogSummary(query: LogSummaryQuery): Observable<LogSummaryResult> {
     let params = this.filterParams(query).set('bucketCount', query.bucketCount ?? 60);
     return this.http.get<LogSummaryDto>(`${this.base}/summary`, { params }).pipe(
@@ -126,7 +124,6 @@ export class LogsApiService {
         })),
         total: dto.total,
         totalIsLowerBound: dto.totalIsLowerBound,
-        newSinceAsOf: dto.newSinceAsOf,
         asOf: dto.asOf,
       }))
     );

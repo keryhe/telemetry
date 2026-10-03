@@ -76,14 +76,15 @@ public abstract class TracePhase3TestsBase : IAsyncLifetime
     }
 
     private async Task<TraceSummaryResult> SummaryAsync(
-        string? service = null, string mode = "all", DateTime? start = null, DateTime? end = null, double? minDurationMs = null)
+        string? service = null, string mode = "all", DateTime? start = null, DateTime? end = null, double? minDurationMs = null,
+        DateTime? asOf = null)
     {
         using var scope = Scope();
         return await scope.ServiceProvider.GetRequiredService<ITraceReadRepository>().GetTraceSummaryAsync(new TraceSummaryQuery
         {
             Start = start ?? WindowStart.AddMinutes(-1),
             End = end ?? WindowStart.AddHours(1),
-            Service = service, Mode = mode, BucketCount = 4, AsOf = FutureAsOf(), MinDurationMs = minDurationMs
+            Service = service, Mode = mode, BucketCount = 4, AsOf = asOf ?? FutureAsOf(), MinDurationMs = minDurationMs
         });
     }
 
@@ -286,6 +287,333 @@ public abstract class TracePhase3TestsBase : IAsyncLifetime
         Assert.Equal(4, summary.ListTotal);
     }
 
+    /// <summary>
+    /// <c>listTotal</c> rides along with the inbound rows of the single summary pass; with no inbound anchor at all
+    /// there is no row to carry it, and the separate count must still report every anchor.
+    /// </summary>
+    [Fact]
+    public async Task Summary_WithNoInboundAnchors_StillReportsTheAllKindsListTotal()
+    {
+        await FlushAsync(
+            Span(NewTraceId(), "svc-a", "client-op", SpanKind.CLIENT, WindowStart, 10),
+            Span(NewTraceId(), "svc-a", "internal-op", SpanKind.INTERNAL, WindowStart.AddSeconds(1), 10));
+
+        var summary = await SummaryAsync();
+        Assert.Equal(0, summary.RequestCount);
+        Assert.Equal(0, summary.Summary.Count);
+        Assert.Equal(2, summary.ListTotal);
+
+        var empty = await SummaryAsync(start: WindowStart.AddDays(2), end: WindowStart.AddDays(2).AddHours(1));
+        Assert.Equal(0, empty.ListTotal);
+    }
+
+    /// <summary>
+    /// The summary is pinned on <c>asOf</c> like the page (3.0.1): the chart, the cards and <c>listTotal</c> describe the
+    /// same traces the pinned list can show, so a trace that arrives after the pin is in none of them. Negative
+    /// control: a pin past its arrival includes it everywhere.
+    /// </summary>
+    [Fact]
+    public async Task Summary_IsPinnedOnAsOf_ChartCardsAndTotalExcludeLateArrivals()
+    {
+        var baseline = Enumerable.Range(0, 3).Select(i => Span(NewTraceId(), "svc-a", "base", SpanKind.SERVER, WindowStart.AddSeconds(i), 40)).ToArray();
+        await FlushAsync(baseline);
+
+        // Same PostgreSQL/Timescale 5-second pin margin as the other pin tests.
+        await Task.Delay(TimeSpan.FromSeconds(6));
+        var asOf = (await PageAsync(useDbAsOf: true)).AsOf;
+
+        await FlushAsync(Enumerable.Range(0, 2).Select(i => Span(NewTraceId(), "svc-a", "late", SpanKind.SERVER, WindowStart.AddSeconds(10 + i), 40)));
+
+        var pinned = await SummaryAsync(asOf: asOf);
+        Assert.Equal(asOf, pinned.AsOf);
+        Assert.Equal(3, pinned.ListTotal);
+        Assert.Equal(3, pinned.RequestCount);
+        Assert.Equal(3, pinned.Summary.Count);
+        Assert.Equal(3, pinned.Buckets.Sum(b => b.Count));
+
+        var unpinned = await SummaryAsync(asOf: FutureAsOf());
+        Assert.Equal(5, unpinned.ListTotal);
+        Assert.Equal(5, unpinned.RequestCount);
+        Assert.Equal(5, unpinned.Buckets.Sum(b => b.Count));
+    }
+
+    // ---------------------------------------------------------------------------------------------
+    // Sliced paging (trace-list-detail-performance plan, Phase 4): the page is read from slices of the
+    // window instead of ranking all of it, and must agree with the anchor DEFINITION for every nav,
+    // filter, page size and slice width. The expected rows are computed here in LINQ from the seeded
+    // spans, independently of any SQL.
+    // ---------------------------------------------------------------------------------------------
+
+    private sealed record ExpectedTrace(string TraceId, string AnchorSpanId, long AnchorStart, string Service, string Name, long DurationNs, bool HasError, int SpanCount);
+
+    /// <summary>The anchor definition (CLAUDE.md, "Trace anchors"), restated over in-memory spans.</summary>
+    private List<ExpectedTrace> ExpectedAnchors(
+        IReadOnlyList<SpanModel> spans, DateTime windowStart, DateTime windowEnd,
+        string? service = null, string? operation = null, string mode = "all", double minDurationMs = 500, string? needle = null)
+    {
+        var startNs = SeededDataBuilder.ToUnixNano(windowStart);
+        var endNs = SeededDataBuilder.ToUnixNano(windowEnd);
+        var fromNs = startNs - 5 * 60_000_000_000L;
+        string ServiceOf(SpanModel s) => (string)s.Resource.Attributes["service.name"];
+
+        var result = new List<ExpectedTrace>();
+        foreach (var trace in spans.GroupBy(s => s.TraceIdHex))
+        {
+            var inScope = trace.Where(s => s.StartTimeUnixNano >= fromNs && s.StartTimeUnixNano <= endNs
+                                           && (service == null || ServiceOf(s) == service)).ToList();
+            if (inScope.Count == 0) continue;
+            var anchor = inScope.OrderBy(s => s.StartTimeUnixNano).First();
+            if (anchor.StartTimeUnixNano < startNs) continue;
+            var duration = anchor.EndTimeUnixNano - anchor.StartTimeUnixNano;
+            var hasError = inScope.Any(s => s.StatusCode == SpanStatusCode.ERROR);
+            if (operation != null && anchor.Name != operation) continue;
+            if (mode == "errors" && !hasError) continue;
+            if (mode == "slow" && duration < (long)(minDurationMs * 1_000_000)) continue;
+            if (needle != null && !trace.Any(s => s.StartTimeUnixNano >= fromNs && s.StartTimeUnixNano <= endNs
+                                                  && s.Name.Contains(needle, StringComparison.OrdinalIgnoreCase))) continue;
+            var spanCount = trace.Where(s => service == null || ServiceOf(s) == service).Select(s => s.SpanIdHex).Distinct().Count();
+            result.Add(new ExpectedTrace(trace.Key, anchor.SpanIdHex, anchor.StartTimeUnixNano, ServiceOf(anchor), anchor.Name, duration, hasError, spanCount));
+        }
+        return result;
+    }
+
+    [Fact]
+    public async Task SlicedPaging_MatchesTheAnchorDefinition_ForEveryNavFilterPageSizeAndSliceWidth()
+    {
+        var rng = new Random(7);
+        var windowStart = WindowStart;
+        var windowEnd = WindowStart.AddMinutes(10);
+        var services = new[] { "svc-a", "svc-b", "svc-c" };
+        var spans = new List<SpanModel>();
+        for (var t = 0; t < 90; t++)
+        {
+            var traceId = NewTraceId();
+            // Starts range from before the look-back margin (excluded) through the margin (excluded, anchored earlier) to the
+            // window's end; every ninth trace starts on a whole second shared with others (ties across traces).
+            var traceStart = windowStart.AddSeconds(-720 + rng.NextDouble() * 1320);
+            if (t % 9 == 0) traceStart = windowStart.AddSeconds(Math.Floor(rng.NextDouble() * 600));
+            var spanCount = 1 + rng.Next(5);
+            SpanModel? first = null;
+            for (var k = 0; k < spanCount; k++)
+            {
+                var svc = services[rng.Next(services.Length)];
+                var offset = k == 0 ? 0 : rng.NextDouble() * 20;
+                var duration = k == 0 && t % 5 == 0 ? 800 : 10 + rng.Next(300);
+                var name = k == 2 && t % 4 == 0 ? $"needle-{k}" : $"op-{svc}-{rng.Next(3)}";
+                var status = rng.NextDouble() < 0.12 ? SpanStatusCode.ERROR : SpanStatusCode.OK;
+                var kind = k == 0 ? SpanKind.SERVER : SpanKind.CLIENT;
+                // A tie with the trace's first span: identical in everything observable, so which row is the anchor does not matter.
+                if (t % 7 == 0 && k == 1 && first is not null)
+                {
+                    svc = (string)first.Resource.Attributes["service.name"];
+                    offset = 0; duration = (int)((first.EndTimeUnixNano - first.StartTimeUnixNano) / 1_000_000);
+                    name = first.Name; status = first.StatusCode; kind = first.Kind;
+                }
+                var span = Span(traceId, svc, name, kind, traceStart.AddSeconds(offset), duration, parent: k == 0 ? null : first!.SpanIdHex, status: status);
+                first ??= span;
+                spans.Add(span);
+            }
+        }
+        await FlushAsync(spans);
+        var spansById = spans.ToDictionary(s => s.SpanIdHex);
+        // One pin for the whole test: a cursor carries a hash of the filter including asOf.
+        var pin = FutureAsOf();
+
+        var filters = new (string Name, string? Service, string? Operation, string Mode, string? Search)[]
+        {
+            ("all", null, null, "all", null),
+            ("service", "svc-b", null, "all", null),
+            ("operation", "svc-a", "op-svc-a-1", "all", null),
+            ("slow", null, null, "slow", null),
+            ("slow+service", "svc-c", null, "slow", null),
+            ("errors", null, null, "errors", null),
+            ("errors+service", "svc-a", null, "errors", null),
+            ("search", null, null, "all", "needle"),
+        };
+
+        foreach (var (sliceSeconds, growth) in new[] { (2, 4), (1, 2) })
+        {
+            using var provider = _fixture.CreateServices(new Dictionary<string, string?>
+            {
+                ["Telemetry:Query:PageSliceSeconds"] = sliceSeconds.ToString(),
+                ["Telemetry:Query:PageSliceGrowth"] = growth.ToString(),
+            });
+            using var scope = provider.CreateScope();
+            var repo = scope.ServiceProvider.GetRequiredService<ITraceReadRepository>();
+
+            foreach (var f in filters)
+            {
+                var expected = ExpectedAnchors(spans, windowStart, windowEnd, f.Service, f.Operation, f.Mode, 500, f.Search)
+                    .ToDictionary(e => e.TraceId);
+                Assert.NotEmpty(expected); // a vacuous comparison would prove nothing
+
+                foreach (var size in new[] { 7, 50 })
+                {
+                    string Context(string nav) => $"slice={sliceSeconds}s x{growth}, filter={f.Name}, size={size}, {nav}";
+                    TraceQuery Q(string nav, string? cursor = null) => new()
+                    {
+                        Start = windowStart, End = windowEnd, Service = f.Service, Operation = f.Operation, Mode = f.Mode, Search = f.Search,
+                        MinDurationMs = f.Mode == "slow" ? 500 : null, Size = size, Nav = nav, Cursor = cursor, AsOf = pin,
+                    };
+
+                    // Forward: first, then next until the end.
+                    var forward = new List<TraceInfo>();
+                    var page = await repo.GetTracePageAsync(Q("first"));
+                    forward.AddRange(page.Items);
+                    for (var guard = 0; page.NextCursor != null && guard < 100; guard++)
+                    {
+                        page = await repo.GetTracePageAsync(Q("next", page.NextCursor));
+                        forward.AddRange(page.Items);
+                    }
+
+                    // Backward: last, then prev until the start; pages are prepended to restore the descending order.
+                    var backward = new List<TraceInfo>();
+                    page = await repo.GetTracePageAsync(Q("last"));
+                    backward.InsertRange(0, page.Items);
+                    for (var guard = 0; page.PrevCursor != null && guard < 100; guard++)
+                    {
+                        page = await repo.GetTracePageAsync(Q("prev", page.PrevCursor));
+                        backward.InsertRange(0, page.Items);
+                    }
+
+                    foreach (var (direction, items) in new[] { ("forward", forward), ("backward", backward) })
+                    {
+                        var ctx = Context(direction);
+                        Assert.True(expected.Count == items.Count, $"{ctx}: expected {expected.Count} traces, got {items.Count}");
+                        Assert.Equal(expected.Keys.Order(), items.Select(i => i.TraceIdHex).Order());
+
+                        long previousStart = long.MaxValue;
+                        foreach (var item in items)
+                        {
+                            var e = expected[item.TraceIdHex];
+                            var anchorStart = spansById[item.DisplaySpanIdHex!].StartTimeUnixNano;
+                            Assert.True(anchorStart <= previousStart, $"{ctx}: rows are not in descending anchor-start order");
+                            previousStart = anchorStart;
+                            Assert.True(e.AnchorStart == anchorStart, $"{ctx}: trace {item.TraceIdHex} anchored on a span starting at {anchorStart}, expected {e.AnchorStart}");
+                            Assert.Equal(e.Service, item.ServiceName);
+                            Assert.Equal(e.Name, item.RootOperationName);
+                            Assert.Equal(TimeSpan.FromTicks(e.DurationNs / 100), item.TraceDuration);
+                            Assert.True(e.HasError == item.HasErrors, $"{ctx}: trace {item.TraceIdHex} error flag");
+                            Assert.True(e.SpanCount == item.SpanCount, $"{ctx}: trace {item.TraceIdHex} span count {item.SpanCount}, expected {e.SpanCount}");
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // ---------------------------------------------------------------------------------------------
+    // Trace detail (trace-list-detail-performance plan, Phase 6): the start-time hint and the shared resources/scopes.
+    // ---------------------------------------------------------------------------------------------
+
+    /// <summary>Whether this provider reads only the range of a trace-time hint (Timescale's chunks, ClickHouse's partitions); the others ignore it.</summary>
+    protected virtual bool HonorsStartHint => false;
+
+    private async Task<List<SpanModel>> DetailAsync(string traceId, TraceTimeHint? hint, IReadOnlyDictionary<string, string?>? config = null)
+    {
+        if (config is null)
+        {
+            using var scope = Scope();
+            return await scope.ServiceProvider.GetRequiredService<ITraceReadRepository>().GetTraceByIdAsync(traceId, hint);
+        }
+        using var provider = _fixture.CreateServices(config);
+        using var configured = provider.CreateScope();
+        return await configured.ServiceProvider.GetRequiredService<ITraceReadRepository>().GetTraceByIdAsync(traceId, hint);
+    }
+
+    [Fact]
+    public async Task DetailHint_ReturnsTheSameSpansAsTheUnhintedRead()
+    {
+        var traceId = NewTraceId();
+        var rootId = NewSpanId();
+        await FlushAsync(
+            Span(traceId, "svc-a", "root", SpanKind.SERVER, WindowStart, 400, spanId: rootId),
+            Span(traceId, "svc-b", "child-1", SpanKind.CLIENT, WindowStart.AddMilliseconds(20), 100, parent: rootId),
+            Span(traceId, "svc-b", "child-2", SpanKind.SERVER, WindowStart.AddMilliseconds(30), 50, parent: rootId),
+            Span(traceId, "svc-a", "late-child", SpanKind.INTERNAL, WindowStart.AddSeconds(90), 5, parent: rootId));
+
+        var unhinted = await DetailAsync(traceId, null);
+        // The extent the trace list returns: the earliest start and the latest end.
+        var hinted = await DetailAsync(traceId, new TraceTimeHint(WindowStart, WindowStart.AddSeconds(90).AddMilliseconds(5)));
+
+        Assert.Equal(4, unhinted.Count);
+        Assert.Equal(unhinted.Select(x => x.SpanIdHex), hinted.Select(x => x.SpanIdHex));
+    }
+
+    [Fact]
+    public async Task DetailHint_ThatMissesTheTrace_FallsBackToTheUnboundedRead()
+    {
+        var traceId = NewTraceId();
+        await FlushAsync(Span(traceId, "svc-a", "root", SpanKind.SERVER, WindowStart, 400));
+
+        // Three days off: any bounded read around it finds nothing, and the trace must still come back.
+        var spans = await DetailAsync(traceId, new TraceTimeHint(WindowStart.AddDays(3), WindowStart.AddDays(3).AddSeconds(1)));
+        Assert.Equal("root", Assert.Single(spans).Name);
+    }
+
+    [Fact]
+    public async Task DetailHint_BoundsTheRead_WhereAProviderHonoursIt_SoASpanFarBeyondTheHintedExtentIsNotReturned()
+    {
+        var traceId = NewTraceId();
+        var rootId = NewSpanId();
+        await FlushAsync(
+            Span(traceId, "svc-a", "root", SpanKind.SERVER, WindowStart, 400, spanId: rootId),
+            Span(traceId, "svc-a", "inside-the-margin", SpanKind.INTERNAL, WindowStart.AddSeconds(30), 5, parent: rootId),
+            Span(traceId, "svc-a", "two-hours-later", SpanKind.INTERNAL, WindowStart.AddHours(2), 5, parent: rootId));
+        // The extent the list had when it was read: the root alone, 400 ms.
+        var hint = new TraceTimeHint(WindowStart, WindowStart.AddMilliseconds(400));
+
+        // Without a hint the trace is whole on every provider.
+        Assert.Equal(3, (await DetailAsync(traceId, null)).Count);
+
+        // With the hint, a bounded provider reads [start - 1 min, end + 1 min]: the span 30 s after the end is inside the margin and
+        // comes back, the one two hours later is the documented limit of a hint (a span that arrived after the list was read). The
+        // other providers ignore the hint and return all three: that is the negative control.
+        var hinted = await DetailAsync(traceId, hint);
+        Assert.Equal(HonorsStartHint ? 2 : 3, hinted.Count);
+        Assert.Contains(hinted, x => x.Name == "inside-the-margin");
+    }
+
+    [Fact]
+    public async Task DetailSpans_ShareOneInstancePerResourceAndScope_AndTheResponseListsEachOnce()
+    {
+        var traceId = NewTraceId();
+        var rootId = NewSpanId();
+        var spans = new List<SpanModel> { Span(traceId, "svc-a", "root", SpanKind.SERVER, WindowStart, 400, spanId: rootId) };
+        var combos = new[] { ("svc-a", "lib-a"), ("svc-b", "lib-a"), ("svc-b", "lib-b"), ("svc-c", "lib-b"), ("svc-c", "lib-b") };
+        for (var i = 1; i <= 30; i++)
+        {
+            var (service, library) = combos[(i - 1) % combos.Length];
+            var child = Span(traceId, service, $"child-{i}", SpanKind.CLIENT, WindowStart.AddMilliseconds(10 * i), 20, parent: rootId);
+            child.InstrumentationScope = SeededDataBuilder.Scope(library);
+            child.Resource.Attributes["k8s.pod.annotations"] = new string('x', 2000); // a large resource, repeated per span in the old shape
+            spans.Add(child);
+        }
+        await FlushAsync(spans);
+
+        var detail = await DetailAsync(traceId, null);
+        Assert.Equal(31, detail.Count);
+        // Four resources however many spans refer to them: the root's plain svc-a, and svc-a/svc-b/svc-c with the annotation
+        // the children carry (a resource is its attributes, so the root's svc-a is a different resource from child-1's).
+        Assert.Equal(4, detail.Select(x => x.Resource).Distinct(ReferenceEqualityComparer.Instance).Count());
+        Assert.Equal(3, detail.Select(x => x.InstrumentationScope).Distinct(ReferenceEqualityComparer.Instance).Count()); // phase0, lib-a, lib-b
+
+        var response = Keryhe.Telemetry.Api.Models.TraceDetailResponse.From(detail);
+        Assert.Equal(4, response.Resources.Count);
+        Assert.Equal(3, response.Scopes.Count);
+        Assert.Equal(31, response.Spans.Count);
+        for (var i = 0; i < detail.Count; i++)
+        {
+            Assert.Same(detail[i].Resource, response.Resources[response.Spans[i].ResourceIndex]);
+            Assert.Same(detail[i].InstrumentationScope, response.Scopes[response.Spans[i].ScopeIndex]);
+        }
+
+        // The point of it: the repeated attributes are sent once.
+        var shared = System.Text.Json.JsonSerializer.Serialize(response).Length;
+        var perSpan = System.Text.Json.JsonSerializer.Serialize(detail).Length;
+        Assert.True(shared < perSpan / 3, $"shared {shared} bytes vs per-span {perSpan} bytes");
+    }
+
     [Fact]
     public async Task RedeliveredBatch_IsStoredAgain_ButTheRowCountAndTraceDetailCountEachSpanOnce()
     {
@@ -370,9 +698,9 @@ public abstract class TracePhase3TestsBase : IAsyncLifetime
         Assert.Null(last.NextCursor);
     }
 
-    /// <summary>A trace whose event time is inside the pinned window but which arrives after `asOf` is excluded from a page while "new since" counts it (mirrors LogPhase2TestsBase's identical check).</summary>
+    /// <summary>A trace whose event time is inside the pinned window but which arrives after `asOf` is excluded from a pinned page and included once a fresh pin passes it (mirrors LogPhase2TestsBase's identical check).</summary>
     [Fact]
-    public async Task Pin_ExcludesLateArrivals_From_Page_But_NewSinceAsOf_Counts_Them()
+    public async Task Pin_ExcludesLateArrivals_From_Page()
     {
         var windowEnd = WindowStart.AddMinutes(30);
         var baseline = SeededDataBuilder.BasicTraceWindow(_fixture.TenantId, WindowStart, traceCount: 30);
@@ -396,9 +724,6 @@ public abstract class TracePhase3TestsBase : IAsyncLifetime
 
         var pinnedPage = await repo.GetTracePageAsync(new TraceQuery { Start = WindowStart, End = windowEnd, Size = 500, AsOf = asOf, Mode = "all" });
         Assert.Equal(baselineTraceCount, pinnedPage.Items.Count);
-
-        var summary = await repo.GetTraceSummaryAsync(new TraceSummaryQuery { Start = WindowStart, End = windowEnd, AsOf = asOf, BucketCount = 1, Mode = "all" });
-        Assert.Equal(lateTraceCount, summary.NewSinceAsOf);
 
         await Task.Delay(TimeSpan.FromSeconds(6));
         var laterPage = await repo.GetTracePageAsync(new TraceQuery { Start = WindowStart, End = windowEnd, Size = 500, Mode = "all" });

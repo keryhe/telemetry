@@ -132,7 +132,11 @@
             }
           </div>
         </div>
-        @for (node of flatTree(); track node.spanIdHex) {
+        <div class="span-rows" #spanRows>
+        @if (windowed()) {
+          <div class="rows-spacer" [style.height.px]="rowWindow().topPad"></div>
+        }
+        @for (node of windowRows(); track node.spanIdHex) {
           <div class="span-row"
                [attr.data-span-id]="node.spanIdHex"
                [class.selected]="selectedSpan()?.spanIdHex === node.spanIdHex"
@@ -330,6 +334,10 @@
             </div>
           }
         }
+        @if (windowed()) {
+          <div class="rows-spacer" [style.height.px]="rowWindow().bottomPad"></div>
+        }
+        </div>
       </mat-card-content>
       }
 

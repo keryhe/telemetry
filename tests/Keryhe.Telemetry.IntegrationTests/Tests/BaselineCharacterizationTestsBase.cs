@@ -111,7 +111,10 @@ public abstract class BaselineCharacterizationTestsBase : IAsyncLifetime
             Start = WindowStart.AddMinutes(-1),
             End = WindowStart.AddHours(1),
             BucketCount = 24,
-            Mode = "all"
+            Mode = "all",
+            // The summary is pinned like the page (3.0.1); a future pin keeps this about the aggregates, not
+            // PostgreSQL/Timescale's 5-second "now minus 5s" margin (the pin has its own tests).
+            AsOf = DateTime.UtcNow.AddMinutes(5)
         });
 
         var expectedRootCount = spans.Count(s => s.ParentSpanIdHex == null);
@@ -120,13 +123,7 @@ public abstract class BaselineCharacterizationTestsBase : IAsyncLifetime
         Assert.Equal("raw", summary.Source);
         Assert.Equal(expectedRootCount, summary.Summary.Count);
         Assert.Equal(expectedErrorCount, summary.Summary.ErrorCount);
-        // ListTotal is NOT asserted here: it is pinned on asOf <= created_at (decision 3), and
-        // PostgreSQL/Timescale resolve asOf as "now minus 5 seconds" to cover the transaction-start
-        // race (see DapperReadRepository.ResolveAsOfAsync) -- rows flushed moments ago in this fast
-        // test can still have created_at > asOf, undercounting ListTotal exactly like the "new since"
-        // pin race. That race is exercised deliberately (with the matching delay) by
-        // TracePhase3TestsBase's Pin_ExcludesLateArrivals test; this characterization test only
-        // pins down the unpinned Summary aggregate.
+        Assert.Equal(expectedRootCount, summary.ListTotal);
         Assert.True(summary.Summary.P50Ms > 0);
         Assert.True(summary.Summary.P95Ms >= summary.Summary.P50Ms);
         Assert.True(summary.Summary.P99Ms >= summary.Summary.P95Ms);

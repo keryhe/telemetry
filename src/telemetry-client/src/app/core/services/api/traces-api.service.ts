@@ -3,7 +3,9 @@ import { HttpClient, HttpParams } from '@angular/common/http';
 import { Observable } from 'rxjs';
 import { map } from 'rxjs/operators';
 import { APP_CONFIG } from '../../config/app-config';
-import { OperationStats, ServiceDependency, ServiceStats, SpanModel, TraceInfo } from '../../models/trace.models';
+import {
+  InstrumentationScopeModel, OperationStats, ResourceModel, ServiceDependency, ServiceStats, SpanModel, TraceInfo,
+} from '../../models/trace.models';
 import { TimeBucket } from '../../../shared/utils/chart.utils';
 
 /** Filter shape shared by summary/page (list-pages-server-side plan, Phase 3 Target API). */
@@ -52,6 +54,13 @@ export interface TraceWindowSummary {
   p99Ms: number;
 }
 
+/** `GET /api/traces/{id}/spans`: spans plus the distinct resources and scopes they refer to by index. */
+interface TraceDetailDto {
+  resources: ResourceModel[];
+  scopes: InstrumentationScopeModel[];
+  spans: (Omit<SpanModel, 'resource' | 'instrumentationScope'> & { resourceIndex: number; scopeIndex: number })[];
+}
+
 interface TraceSummaryDto {
   source: 'rollup' | 'raw';
   buckets: (TimeBucket & { timestamp: string })[];
@@ -61,7 +70,6 @@ interface TraceSummaryDto {
   listTotal: number;
   requestCount: number;
   totalIsLowerBound: boolean;
-  newSinceAsOf: number;
   asOf: string;
 }
 
@@ -74,7 +82,6 @@ export interface TraceSummaryResult {
   listTotal: number;
   requestCount: number;
   totalIsLowerBound: boolean;
-  newSinceAsOf: number;
   asOf: string;
 }
 
@@ -105,7 +112,6 @@ export class TracesApiService {
         listTotal: dto.listTotal,
         requestCount: dto.requestCount,
         totalIsLowerBound: dto.totalIsLowerBound,
-        newSinceAsOf: dto.newSinceAsOf,
         asOf: dto.asOf,
       }))
     );
@@ -128,8 +134,23 @@ export class TracesApiService {
     return this.http.get<TraceInfo[]>(`${this.base}/samples`, { params });
   }
 
-  getSpans(traceId: string): Observable<SpanModel[]> {
-    return this.http.get<SpanModel[]>(`${this.base}/${traceId}/spans`);
+  /**
+   * The trace's spans. `start` and `end` are the trace's extent as the list returned it (`traceStartTime`/`traceEndTime`): they
+   * only let a provider that cannot seek a trace id (Timescale, ClickHouse) read that range, so both are optional and a deep link
+   * without them still works (the read is then unbounded and the trace whole).
+   */
+  getSpans(traceId: string, start?: string, end?: string): Observable<SpanModel[]> {
+    const params = start && end ? new HttpParams().set('start', start).set('end', end) : undefined;
+    return this.http.get<TraceDetailDto>(`${this.base}/${traceId}/spans`, { params }).pipe(
+      map((dto) => {
+        // Each distinct resource and scope arrives once; hand every span a reference to its own, as the components expect.
+        return dto.spans.map(({ resourceIndex, scopeIndex, ...span }) => ({
+          ...span,
+          resource: dto.resources[resourceIndex],
+          instrumentationScope: dto.scopes[scopeIndex],
+        }));
+      })
+    );
   }
 
   getDependencies(start?: Date, end?: Date): Observable<ServiceDependency[]> {

@@ -94,6 +94,10 @@ public class ClickHouseTraceReadRepository(IConfiguration configuration, ITenant
     /// has no trace-id seek, so a by-trace read is narrowed with tenant and time bounds taken from this
     /// small index first. Null when the index has no row for the traces (nothing to narrow with).
     /// </summary>
+    // The trace's extent from the list stands in for the trace_index lookup (one round trip fewer): [start - margin, end + margin].
+    protected override (long Min, long Max)? HintedTraceTimeBounds(long startHintNano, long endHintNano)
+        => (startHintNano - TraceHintMarginNanos, endHintNano + TraceHintMarginNanos);
+
     protected override async Task<(long Min, long Max)?> ResolveTraceTimeBoundsAsync(
         DbConnection conn, IReadOnlyList<string> traceIds, CancellationToken ct)
     {
@@ -127,17 +131,26 @@ public class ClickHouseTraceReadRepository(IConfiguration configuration, ITenant
     /// same-named column in WHERE, so aliasing <c>argMin(service_name, ...)</c> as <c>service_name</c>
     /// would turn the service filter into an aggregate.
     /// </summary>
-    protected override string AnchorsSql(bool hasService, bool pinAsOf, bool includeFirstCreated = false)
+    protected override bool SupportsSeekAnchors => false;
+
+    // No join to the reference tables: they are ReplacingMergeTree, read by id in their own queries (ReferenceRowsSql).
+    protected override bool JoinsReferenceRows => false;
+
+    // The reference tables are ReplacingMergeTree: an id can exist twice until a merge, so the lookup collapses duplicates
+    // with LIMIT 1 BY id. The filter must be on the raw table (not on the ResourcesTable/ScopesTable subquery, which would
+    // collapse the whole table first and only then filter it).
+    protected override string ReferenceRowsSql(bool resources, string columns, string idPredicate)
+        => $"SELECT r.id AS Id, {columns} FROM {(resources ? "resources" : "instrumentation_scopes")} r WHERE {idPredicate} LIMIT 1 BY r.id";
+
+    protected override string AnchorsSql(bool hasService, bool pinAsOf, bool errorsOnly = false)
     {
         var service = hasService ? " AND service_name = @service" : "";
         var pin = pinAsOf ? " AND created_at <= @asOf" : "";
-        var firstCreated = includeFirstCreated ? ", min(created_at) AS first_created_at" : "";
-        var outerFirstCreated = includeFirstCreated ? ", first_created_at" : "";
         const string earliest = "tuple(start_time_unix_nano, id)";
         return $"""
             (
                 SELECT trace_id, anchor_span_pk, anchor_span_id, anchor_service AS service_name, root_name, anchor_kind,
-                       anchor_start, anchor_end, anchor_created_at, has_error{outerFirstCreated}
+                       anchor_start, anchor_end, anchor_created_at, has_error
                 FROM (
                     SELECT trace_id,
                            argMin(id, {earliest}) AS anchor_span_pk,
@@ -148,7 +161,7 @@ public class ClickHouseTraceReadRepository(IConfiguration configuration, ITenant
                            min(start_time_unix_nano) AS anchor_start,
                            argMin(end_time_unix_nano, {earliest}) AS anchor_end,
                            argMin(created_at, {earliest}) AS anchor_created_at,
-                           max(status_code = 'ERROR') AS has_error{firstCreated}
+                           max(status_code = 'ERROR') AS has_error
                     FROM spans
                     WHERE tenant_id = @tenantId
                       AND start_time_unix_nano >= @anchorFrom AND start_time_unix_nano <= @end{service}{pin}

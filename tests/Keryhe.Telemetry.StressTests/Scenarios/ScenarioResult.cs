@@ -29,6 +29,14 @@ public sealed record RampStepResult(
 public sealed record RampResult(
     IReadOnlyList<RampStepResult> Steps, int? LastSustainedStep, int? TrippedStep, IReadOnlyList<string> TrippedCriteria, bool ReachedMaxSteps);
 
+/// <summary>
+/// The database stopped answering during the run (it refused connections after the ramp, from the harness's observers and the collector
+/// alike). That is a finding about the database under overload, not a failure of the harness: <see cref="ContainerStatus"/>,
+/// <see cref="ExitCode"/> and <see cref="OomKilled"/> are what Docker reported, and the DB-dependent steps after it (the database
+/// observation and the correctness check) were skipped. Everything measured before it stands.
+/// </summary>
+public sealed record DatabaseOutage(string Message, string ContainerStatus, int? ExitCode, bool? OomKilled);
+
 /// <summary>Everything one scenario measured (stress-test plan, Phase 6). <see cref="Correctness"/> compares <see cref="Load"/>'s ledger with the database; Phase 8 folds these into the report.</summary>
 /// <param name="LogPinOffsetMs">
 /// The provider's declared <c>asOf</c> back-off, read from <c>GET /api/capabilities</c> at the start of the scenario: the constant part of every
@@ -42,7 +50,9 @@ public sealed record ScenarioResult(
     RampResult? Ramp, QuiesceResult? Quiesce,
     TourResults? Tour, string? BrowserError,
     DatabaseObservation? Database, CorrectnessResult? Correctness, IReadOnlyList<HostResult> Hosts,
-    double? LogPinOffsetMs = null)
+    double? LogPinOffsetMs = null,
+    HistorySeedResult? Seed = null, IReadOnlyList<DetailProbeResult>? DetailProbes = null,
+    DatabaseOutage? Outage = null)
 {
     /// <summary>
     /// 2 (database-performance plan, Phase 0): pin-adjusted lag criteria and <c>lag_absolute</c>, maybe-landed export accounting, provider

@@ -8,7 +8,7 @@ public sealed class TraceShaper(LoadProfile profile, Topology topology, Random r
 {
     private readonly TraceLoad _load = profile.Traces;
 
-    private sealed class Node
+    internal sealed class Node
     {
         public required Span Span;
         public required int Depth;
@@ -65,7 +65,86 @@ public sealed class TraceShaper(LoadProfile profile, Topology topology, Random r
             rng.NextDouble() < profile.Time.RedeliveryFraction);
     }
 
-    private List<Node> BuildTrace(ServiceInfo[] services, long baseNanos)
+    /// <summary>
+    /// One export of whole traces starting at <paramref name="baseNanos"/> (history seeding): like <see cref="Next"/> but with a fixed start
+    /// instead of the profile's time shaping, so it is ledgered as current. Each trace's id and start go into <paramref name="remember"/>
+    /// when given, for the old-trace detail probe.
+    /// </summary>
+    public Payload<ExportTraceServiceRequest> NextAt(long baseNanos, List<SeededTrace>? remember)
+    {
+        var tenantIndex = topology.PickTenant(rng);
+        var services = topology.ServicesByTenant[tenantIndex];
+        var target = profile.Transport.RecordsPerExport;
+        var byService = new Dictionary<string, ScopeSpans>();
+        long spanCount = 0;
+        while (spanCount < target)
+        {
+            // A little spread inside the export so its traces do not all start in the same nanosecond.
+            var spans = BuildTrace(services, baseNanos + (long)(rng.NextDouble() * 1_000_000_000));
+            remember?.Add(new SeededTrace(tenantIndex, topology.Tenants[tenantIndex].Id, ToHex(spans[0].Span.TraceId),
+                (long)spans.Min(n => n.Span.StartTimeUnixNano), (long)spans.Max(n => n.Span.EndTimeUnixNano), spans.Count, "history"));
+            remember = null; // one per export is plenty
+            foreach (var node in spans)
+            {
+                if (!byService.TryGetValue(node.Service.Name, out var scope))
+                {
+                    scope = new ScopeSpans { Scope = topology.Scope };
+                    byService[node.Service.Name] = scope;
+                }
+                scope.Spans.Add(node.Span);
+            }
+            spanCount += spans.Count;
+        }
+        var request = new ExportTraceServiceRequest();
+        foreach (var service in services.Where(sv => byService.ContainsKey(sv.Name)))
+        {
+            var rs = new ResourceSpans { Resource = service.Resource };
+            rs.ScopeSpans.Add(byService[service.Name]);
+            request.ResourceSpans.Add(rs);
+        }
+        return new Payload<ExportTraceServiceRequest>(request, tenantIndex, (int)spanCount,
+            [new LedgerEntry("spans", RecordAge.Current, spanCount, false, Dedups: _load.RedeliveryCollapses)], false);
+    }
+
+    /// <summary>
+    /// One trace of exactly <paramref name="spanCount"/> spans for <paramref name="tenantIndex"/>, split into exports of at most
+    /// <paramref name="chunkSpans"/> spans (all carrying the same trace id), plus the <see cref="SeededTrace"/> to probe it by.
+    /// Wide and moderately deep: a few levels with many children, the shape of a fan-out batch job.
+    /// </summary>
+    public (List<Payload<ExportTraceServiceRequest>> Chunks, SeededTrace Trace) BuildLargeTrace(int tenantIndex, long baseNanos, int spanCount, int chunkSpans)
+    {
+        var largeLoad = new LoadProfile { Seed = profile.Seed, Traces = new TraceLoad
+        {
+            SpansPerTrace = new IntRange(spanCount, spanCount), MaxDepth = 6, FanOut = 60,
+            ErrorRate = profile.Traces.ErrorRate, AttributeCount = profile.Traces.AttributeCount,
+            AttributeCardinality = profile.Traces.AttributeCardinality, EventsPerSpan = profile.Traces.EventsPerSpan, LinksPerSpan = profile.Traces.LinksPerSpan,
+        } };
+        var services = topology.ServicesByTenant[tenantIndex];
+        var nodes = new TraceShaper(largeLoad, topology, rng).BuildTrace(services, baseNanos);
+
+        var chunks = new List<Payload<ExportTraceServiceRequest>>();
+        for (var from = 0; from < nodes.Count; from += chunkSpans)
+        {
+            var slice = nodes.Skip(from).Take(chunkSpans).ToList();
+            var request = new ExportTraceServiceRequest();
+            foreach (var group in slice.GroupBy(n => n.Service.Name))
+            {
+                var rs = new ResourceSpans { Resource = group.First().Service.Resource };
+                var scope = new ScopeSpans { Scope = topology.Scope };
+                foreach (var node in group) scope.Spans.Add(node.Span);
+                rs.ScopeSpans.Add(scope);
+                request.ResourceSpans.Add(rs);
+            }
+            chunks.Add(new Payload<ExportTraceServiceRequest>(request, tenantIndex, slice.Count, [new LedgerEntry("spans", RecordAge.Current, slice.Count, false, Dedups: _load.RedeliveryCollapses)], false));
+        }
+        var first = nodes[0].Span;
+        return (chunks, new SeededTrace(tenantIndex, topology.Tenants[tenantIndex].Id, ToHex(first.TraceId),
+            (long)nodes.Min(n => n.Span.StartTimeUnixNano), (long)nodes.Max(n => n.Span.EndTimeUnixNano), nodes.Count, "large"));
+    }
+
+    private static string ToHex(ByteString id) => Convert.ToHexString(id.ToByteArray()).ToLowerInvariant();
+
+    internal List<Node> BuildTrace(ServiceInfo[] services, long baseNanos)
     {
         var count = Math.Max(1, _load.SpansPerTrace.Sample(rng));
         var traceId = Topology.RandomId(rng, 16);

@@ -1,4 +1,4 @@
--- OpenTelemetry SQL Server Schema (SQL Server 2022) -- schema 3.0.0
+-- OpenTelemetry SQL Server Schema (SQL Server 2022) -- schema 3.0.1
 -- Supports OTLP logs, metrics, and traces as defined in opentelemetry-proto.
 --
 -- Schema 3.0.0 is a fresh-install schema: there is no upgrade path from 2.x. See
@@ -395,7 +395,7 @@ GO
 -- Only reached when every statement above succeeded, so a partial apply cannot
 -- leave a false version marker for the apply-schema.sh gate.
 MERGE schema_version AS target
-USING (VALUES (N'3.0.0')) AS src (version)
+USING (VALUES (N'3.0.1')) AS src (version)
 ON target.version = src.version
 WHEN MATCHED     THEN UPDATE SET applied_at = SYSDATETIME()
 WHEN NOT MATCHED THEN INSERT (version, applied_at) VALUES (src.version, SYSDATETIME());

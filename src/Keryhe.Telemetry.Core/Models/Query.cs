@@ -64,7 +64,7 @@ public sealed class LogSummaryBucket
     public long Fatal { get; init; }
 }
 
-/// <summary><c>GET /api/logs/summary</c>'s response (Target API): <c>{ source, buckets[], total, totalIsLowerBound, newSinceAsOf }</c>.</summary>
+/// <summary><c>GET /api/logs/summary</c>'s response (Target API): <c>{ source, buckets[], total, totalIsLowerBound, asOf }</c>.</summary>
 public sealed class LogSummaryResult
 {
     /// <summary>Always <c>"raw"</c> since schema 3.0.0 (there are no rollup tables); kept so the client contract is unchanged.</summary>
@@ -72,7 +72,6 @@ public sealed class LogSummaryResult
     public List<LogSummaryBucket> Buckets { get; init; } = [];
     public long Total { get; init; }
     public bool TotalIsLowerBound { get; init; }
-    public long NewSinceAsOf { get; init; }
     public DateTime AsOf { get; init; }
 }
 
@@ -204,7 +203,6 @@ public sealed class TraceSummaryResult
     /// <summary>The cards' population: inbound-request anchors only -- kind SERVER/CONSUMER (decision 12).</summary>
     public long RequestCount { get; init; }
     public bool TotalIsLowerBound { get; init; }
-    public long NewSinceAsOf { get; init; }
     public DateTime AsOf { get; init; }
 }
 

@@ -60,6 +60,9 @@ public class SpanLinkModel
 // TRACE QUERY RESULT CLASSES
 // =============================================================================
 
+/// <summary>A trace's extent (its earliest span start and latest span end), as the trace list returns it; see <c>ITraceReadRepository.GetTraceByIdAsync</c>.</summary>
+public readonly record struct TraceTimeHint(DateTime Start, DateTime End);
+
 public class TraceInfo
 {
     public string TraceIdHex { get; set; } = null!;

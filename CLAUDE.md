@@ -53,10 +53,13 @@ mysql telemetry < schema/MySQL-Schema.sql               # MySQL
 schema/apply-schema.sh <postgresql|timescale|sqlserver|clickhouse|mysql> [database]
 ```
 
-**Schema 3.0.0 is a fresh-install schema.** There is no migration from 2.x (decision 4 of
+**Schema 3.0.x is a fresh-install schema.** There is no migration from 2.x (decision 4 of
 `plans/schema-simplification.md`, which explains every change below): an existing 2.x database must
-be recreated, and `schema/migrations/` no longer exists. `apply-schema.sh` only skips when the 3.0.0
-version row is already recorded.
+be recreated, and `schema/migrations/` no longer exists. `apply-schema.sh` only skips when the 3.0.1
+version row is already recorded. 3.0.1 over 3.0.0 adds one thing: ClickHouse's `bloom_filter` skip index on
+`spans.trace_id` (`plans/trace-list-detail-performance.md`, Phase 5); an existing 3.0.0 ClickHouse database
+can take it with `ALTER TABLE spans ADD INDEX idx_spans_trace trace_id TYPE bloom_filter(0.01) GRANULARITY 4`
+(and `MATERIALIZE INDEX` for existing parts).
 
 There is one schema script per supported provider, all producing the same logical
 table/column set: `schema/PostgreSQL-Schema.sql` (plain Postgres), `schema/Timescale-Schema.sql`
@@ -118,6 +121,14 @@ dotnet run --project tests/Keryhe.Telemetry.StressTests -- run --provider SqlSer
 dotnet run --project tests/Keryhe.Telemetry.StressTests -- report --in stress-results/<timestamp>
 ```
 
+`--seed-days <n>` (1-60) with `--seed-spans-per-day <n>` sends backdated history through the real OTLP path before the warm-up (so the spans table
+holds many Timescale chunks / ClickHouse partitions) plus three large traces (1,000/5,000/20,000 spans) for the first tenant, ledgers them as current
+(the correctness check still balances), tags the profile name (`...-seed14d`), and after quiesce probes trace detail for them with and without the
+`?start=&end=` hint (the report's "History seed" section). A run with history is not comparable with one without. A database that stops answering under
+overload (ClickHouse is OOM-killed at its 8 GB limit above about 21,000 records/s on the reference machine) is recorded as a `DatabaseOutage` finding
+(`docker inspect`: status, exit code, OOM-killed) and the steps that need it are skipped; the scenario still ends `error: none`. Removing the database
+container at the end is logged, not fatal. Any other `OperationCanceledException` is reported with its exception, never as "Cancelled." (that is Ctrl-C only).
+
 The write path it measures is instrumented on `IngestionMetrics` (see "Write path decoupling" below), including `commit_lag` (enqueue to commit), the
 signal a write-only ramp stops on because it does not depend on any read query; `RetentionWorker`'s "Retention sweep complete" log
 line carries the sweep's elapsed milliseconds for the same reason. The report lists every API route's server-side latency apart from the write
@@ -125,6 +136,17 @@ instruments, the comparison page pairs each write-only ramp with its full ramp (
 "a re-delivered span collapses" flag follows the schema under test (true on 2.x, false on 3.0.0, read from `apply-schema.sh`'s `TARGET_VERSION`).
 `--db-cpuset <cpus>` pins the database container to CPUs of the Docker VM and the report says what the database shared CPUs with; pointing the
 harness at a database on another machine is not supported yet.
+
+### Query benchmark (lab)
+
+`tests/Keryhe.Telemetry.IntegrationTests/Tests/TraceQueryBench.cs` is an opt-in benchmark (a no-op unless
+`TRACE_BENCH_OUT` is set) that seeds a stress-harness-sized volume (default 60,000 traces of ~10 spans over six hours;
+`TRACE_BENCH_TRACES`) into each provider's container and times the repository's real trace queries (summary, first/next/last
+page, errors, slow, search, operation, samples, detail with and without the start hint) to one table. It is for attributing
+a query change quickly; the stress harness remains the measure of record because it carries concurrent ingest and reads.
+**Run providers one at a time** (xUnit starts every provider's collection in parallel, which contaminates the timings):
+`TRACE_BENCH_OUT=/tmp/b.txt TRACE_BENCH_LABEL=x dotnet test tests/Keryhe.Telemetry.IntegrationTests --no-build --filter "Provider=PostgreSQL&FullyQualifiedName~TraceQueryBench"`,
+once per provider. `TRACE_BENCH_SQL=<file>` additionally times raw SQL variants (separated by `-- ### name`) over the same data.
 
 ### Test data generator
 
@@ -385,9 +407,11 @@ unchanged):
   partitioned by day, so a tenant/service/time window prunes partitions and granules. `trace_index` (an
   `AggregatingMergeTree` fed by a materialized view from `spans`, one row per tenant/trace/day) holds
   each trace's min/max start: trace detail and a trace-list page's follow-up query read it for time
-  bounds first (`ResolveTraceTimeBoundsAsync`), then read `spans` with tenant and time bounds, instead
-  of scanning for a trace id. `log_records` has one `bloom_filter` skip index on `trace_id` for
-  logs-by-trace. Where null carries no meaning the column is non-`Nullable` with an empty default
+  bounds first (`ResolveTraceTimeBoundsAsync`, or the caller's start-time hint when it has one, see "Trace
+  detail"), then read `spans` with tenant and time bounds, instead of scanning for a trace id. `spans` and
+  `log_records` each have one `bloom_filter` skip index on `trace_id` (logs-by-trace; trace detail, schema 3.0.1),
+  which prune the granules inside those bounds: the sort key has no trace-id seek, so a bounded read otherwise
+  reads at least one granule per service. Where null carries no meaning the column is non-`Nullable` with an empty default
   (`parent_span_id`, `trace_state`, `status_message`, `event_name`, log `trace_id`/`span_id`,
   `service_name`) and the read repositories map `''` back to null.
 - **Writes go through `ClickHouseBulkCopy`** (async batched insert), one long-lived instance
@@ -478,7 +502,7 @@ encoding `(sort key, tiebreak id)`, never a page number, so a page never shifts 
 inserts. Every summary/page request pins on **`asOf`**: a database-clock value (`ResolveAsOfAsync`,
 `DatabaseClockNowExpr`) resolved once per fresh query and echoed back opaquely thereafter — never
 parsed or recomputed by the caller — so paging through a window stays stable even as new rows keep
-arriving, and the "new since" banner counts exactly what `asOf` excluded. A summary/count query
+arriving. (There is no "new since" banner or poll: removed by `plans/trace-list-detail-performance.md` Phase 1, so a list refreshes only when the user re-applies the time range.) A summary/count query
 that risks running long (an unindexed scan, a `COUNT(*)` over a large filtered set) goes through
 **`TimedQuery.RunAsync`**, which enforces `Telemetry:Query:SummaryTimeoutSeconds` (default 5) and
 returns a lower-bound/"≥ N" result instead of blocking the request indefinitely — `GetLogSummaryAsync`/
@@ -689,11 +713,35 @@ with `'`.
 
 **Trace anchors** (schema-simplification plan, decisions 9-18; replaces the 2.x rollup tables, `RollupWorker`,
 `orphan_roots` and root-based anchoring, all of which are gone). Every trace-list read — summary, page,
-samples, export — derives one **anchor** row per trace in `TraceReadRepositoryBase.AnchorsSql`: the trace's
-**earliest span in scope** (ranked by `(start, id)`), where scope is the selected service's own spans when a
-service is selected (any span kind) and the whole trace's otherwise. A trace without a root, or whose root
-arrives late, simply anchors on whatever its earliest span is at the time of the query (relational:
-`ROW_NUMBER()`/`MAX() OVER (PARTITION BY trace_id)`; ClickHouse: `GROUP BY trace_id` with `argMin`).
+samples, export — is defined by one **anchor** per trace: the trace's **earliest span in scope** (ranked by
+`(start, id)`), where scope is the selected service's own spans when a service is selected (any span kind) and
+the whole trace's otherwise. A trace without a root, or whose root arrives late, simply anchors on whatever its
+earliest span is at the time of the query. That definition is expressed in three SQL shapes
+(`plans/trace-list-detail-performance.md` measured each; the lab benchmark is `TraceQueryBench`, below):
+- **`AnchorsSql`, a whole window** (summary, `listTotal`, the `last` page, export, errors mode). Unscoped, and in
+  errors mode, it is a hash aggregate joined back to the anchor span (`GROUP BY trace_id` for the earliest start and
+  error flag, then the span read by `(trace_id, span_id)`; a tie on start keeps the lowest `id`), which was 2x
+  (PostgreSQL, SQL Server) to 5x (MySQL) faster than a window function. With a service selected the narrow
+  `(tenant, service, start)` index range makes the `ROW_NUMBER()`/`MAX() OVER (PARTITION BY trace_id)` form
+  faster, so that form is used. ClickHouse: `GROUP BY trace_id` with `argMin`. In errors mode (`errorsOnly`) the
+  group is restricted to traces with an ERROR span in scope found through the errors index
+  (`trace_id IN (SELECT ... status_code = 'ERROR')`), so errors mode never ranks the traces that cannot qualify
+  (about 100x faster).
+- **`SeekAnchorsSql`, a range of start times** (the trace-list page, slow mode, the slowest-traces samples; every
+  relational provider, `SupportsSeekAnchors`). A span is its trace's anchor when `NOT EXISTS` an earlier in-scope span
+  of the same trace at or after the look-back start, checked by one `(trace_id, span_id)` seek per candidate. The
+  cost follows the candidates, not the window, so a page reads **slices**: `FetchSlicedAnchorPageAsync` starts at
+  `Telemetry:Query:PageSliceSeconds` (default 2) of trace start times from the page's edge (the newest for first/next,
+  the cursor forward for prev), widens by `PageSliceGrowth` (default 4) until it has `size + 1` anchors, and takes the
+  whole remainder once the next slice would cover half of it (bounding a rare search or operation filter). Slices are
+  disjoint, so rows concatenate in the final order, and every filter and the keyset predicate apply to each slice
+  unchanged. Slow mode filters on the anchor's own duration (a few percent of spans), so it reads the whole range in one
+  pass. The anchor's error flag is not computed per candidate; the page reads it for its own rows in the follow-up query
+  (`ErrorScope`: service, look-back range, pin). A first page went from 190-770 ms (PostgreSQL) and 574-3,800 ms (MySQL)
+  to 4-15 ms. The `last` page still ranks the whole window (it needs the exact count).
+  `SlicedPaging_MatchesTheAnchorDefinition_...` checks every nav, filter, page size and slice width against the
+  definition restated in LINQ over the seeded spans, and was negative-controlled.
+- ClickHouse has no `(trace_id)` seek, so it reads whole-window anchors for pages too (`SupportsSeekAnchors` false).
 - **Duration is the anchor span's own** `end - start` everywhere — the row, the `mode=slow` filter, the summary
   percentiles and latency heatmap. The row's service, operation, kind and `DisplaySpanIdHex` are the anchor's;
   the error flag is "any span in scope has ERROR" (so `mode=errors` is that flag); the span count is exact,
@@ -710,10 +758,34 @@ arrives late, simply anchors on whatever its earliest span is at the time of the
   window is excluded from it rather than anchored on a later span. A trace that began before the margin is
   anchored on its earliest span inside it (accepted).
 - **`asOf` pins the span set before ranking** (`created_at <= @asOf` inside the derived table), so a root that
-  arrives after the pin is not the anchor within a pinned query and becomes the anchor on the next fresh one;
-  the "new since" count is traces whose earliest in-scope `created_at` is after the pin (computed over the
-  unpinned set).
+  arrives after the pin is not the anchor within a pinned query and becomes the anchor on the next fresh one. The
+  summary is pinned like the page (3.0.1): the chart, the cards, `listTotal` and the list describe the same traces,
+  from ONE pass over the anchors (the inbound rows, with `listTotal` carried by a window count taken before the
+  inbound filter; a separate count only when no inbound anchor came back). The chart therefore leaves out the last
+  `AsOfBackoffSeconds` (5 s on PostgreSQL/Timescale, 0 elsewhere). There is no "new since" banner or poll on the trace
+  list or the logs page (removed in the same plan): a list refreshes when the user re-applies the time range.
 - `Source` on the summary responses is always `"raw"` (the field stays so the client contract is unchanged).
+
+**Trace detail** (`GET /api/traces/{traceId}/spans?start=`, `TraceDetailResponse`): the response lists each distinct
+resource and instrumentation scope once and the spans refer to them by `resourceIndex`/`scopeIndex` (a span used to
+carry its own copy of its resource attributes, so a trace of thousands of spans repeated a few large attribute sets
+thousands of times: 3.9x smaller on a 31-span test trace with large resources). The repository hands every span of a resource the same instance, parsing each distinct resource's and scope's attribute
+JSON once. On the relational providers the span query keeps its single plain join to the reference tables (one round
+trip, one trace probe); three alternatives were measured and rejected: three round trips (+40-60% per detail), one
+batched statement with the reference selects as `IN (SELECT ... FROM spans WHERE <trace>)` sub-selects (the trace
+predicate runs three times: a hypertable probes every chunk three times, and SQL Server's plan degraded under
+concurrency, 32 -> 180 ms p95 in the stress run), and `ROW_NUMBER()` to send each resource's attributes once (the
+windows sort every row: a 20,000-span trace 551 ms on SQL Server). ClickHouse reads the reference rows in their own
+queries (`JoinsReferenceRows` false; `ReferenceRowsSql` filters the raw table before `LIMIT 1 BY id`). The optional `start` and `end` (used
+together) are the trace's extent, which the list rows and dashboard widgets already carry (`traceStartTime`/`traceEndTime`)
+and pass in the link (`?start=&end=`; a log's timestamp is NOT such a hint, so log links do not pass one). Timescale and
+ClickHouse use them (`HintedTraceTimeBounds`): `[start - margin, end + margin]` (`Telemetry:Query:TraceHintMarginMinutes`,
+default 1; `Telemetry:Query:TraceHintEnabled=false` ignores every hint) replaces a probe of every chunk (Timescale) or the `trace_index` round trip (ClickHouse); PostgreSQL, SQL Server and
+MySQL seek `(trace_id, span_id)` and ignore it. The range is the trace's own extent on purpose: a first version bounded only
+the start (`[start - 5 min, start + 24 h]`), and under live ingestion the stress run showed Timescale detail 16 -> 29 ms (a wide
+range on the chunk being written gives the planner a time-index path it misjudges from stale statistics). A hint that finds
+nothing falls back to the unbounded read (a wrong hint is never a 404). A span that arrived after the list was read and lies
+beyond the margin is missing from a hinted read, which is the limit of a hint; an unhinted read is always whole.
 
 ### Database
 

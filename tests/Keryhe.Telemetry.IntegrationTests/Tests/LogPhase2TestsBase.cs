@@ -92,11 +92,11 @@ public abstract class LogPhase2TestsBase : IAsyncLifetime
 
     /// <summary>
     /// A row whose event time falls inside the pinned window but which is ingested after `asOf` is
-    /// captured must not appear on any page, while the "new since" count picks it up (decision 3,
-    /// Verification item 4).
+    /// captured must not appear on any page, and appears once a fresh pin passes its created_at
+    /// (decision 3, Verification item 4).
     /// </summary>
     [Fact]
-    public async Task Pin_ExcludesLateArrivals_From_Page_But_NewSinceAsOf_Counts_Them()
+    public async Task Pin_ExcludesLateArrivals_From_Page()
     {
         var windowEnd = WindowStart.AddMinutes(30);
         var baseline = SeededDataBuilder.BasicLogWindow(_fixture.TenantId, WindowStart, count: 100);
@@ -124,9 +124,6 @@ public abstract class LogPhase2TestsBase : IAsyncLifetime
 
         var pinnedPage = await repo.GetLogPageAsync(new LogQuery { Start = WindowStart, End = windowEnd, Size = 500, AsOf = asOf });
         Assert.Equal(baseline.Count, pinnedPage.Items.Count);
-
-        var summary = await repo.GetLogSummaryAsync(new LogSummaryQuery { Start = WindowStart, End = windowEnd, AsOf = asOf, BucketCount = 1 });
-        Assert.Equal(late.Count, summary.NewSinceAsOf);
 
         // Once asOf naturally advances past the late rows' own created_at (every page is pinned by
         // construction — decision 3 has no "unpinned" mode), a freshly captured asOf includes them.

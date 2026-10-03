@@ -79,10 +79,15 @@ public static class HtmlReportWriter
         var h = s.Headline;
         sb.Append("<h2 id=\"").Append(E(s.Id)).Append("\">").Append(E(r.Provider)).Append(" / ").Append(E(r.Topology)).Append(" / ").Append(E(r.Profile)).Append(" <span class=\"muted\">(").Append(E(r.Kind)).Append(")</span></h2>");
         if (r.Error is not null) sb.Append("<p class=\"bad\">Scenario failed: ").Append(E(r.Error.Split('\n')[0])).Append("</p>");
+        if (r.Outage is { } outage)
+            sb.Append("<p class=\"bad\">The database stopped answering after the run: ").Append(E(outage.Message)).Append(" (container ").Append(E(outage.ContainerStatus))
+              .Append(", exit ").Append(E(outage.ExitCode?.ToString() ?? "?")).Append(", OOM-killed ").Append(E(outage.OomKilled?.ToString() ?? "?"))
+              .Append("). Everything measured before it stands; the database observation and the correctness check were skipped.</p>");
 
         if (r.ProfileUsed.WriteOnly) sb.Append("<p class=\"keyline\">Write-only run: no browsers and no marker probes, so nothing read the database. The ramp judged drops, gate wait, client export latency/errors and commit lag only.</p>");
         CpuSeparation(sb, s, run);
         Summary(sb, s);
+        HistorySeed(sb, r);
 
         sb.Append("<h3>Timelines</h3><p class=\"keyline\">All charts share one x-axis (time since warm-up began). Vertical lines: grey = phase boundary, orange dashed = retention sweep, blue dotted = ramp step. Hover a line for its label.</p>");
         Charts(sb, s, "Write-side timelines", [
@@ -113,6 +118,22 @@ public static class HtmlReportWriter
         ReadSide(sb, s);
         DatabaseSection(sb, s);
         Artifacts(sb, s);
+    }
+
+    /// <summary>The history seed step and the trace-detail probe over what it sent (trace-list-detail-performance plan, Phase 0).</summary>
+    private static void HistorySeed(StringBuilder sb, ScenarioResult r)
+    {
+        if (r.Seed is not { } seed) return;
+        sb.Append("<h3>History seed</h3><p class=\"keyline\">").Append(seed.Days).Append(" day(s) of backdated traces at ").Append(seed.SpansPerDay.ToString("N0"))
+          .Append(" spans/day, sent before the warm-up: ").Append(seed.SpansSent.ToString("N0")).Append(" spans accepted, ").Append(seed.SpansFailed.ToString("N0"))
+          .Append(" failed, in ").Append(seed.Seconds.ToString("N0")).Append(" s. A run with history is not comparable with one without.</p>");
+        if (r.DetailProbes is not { Count: > 0 } probes) return;
+        sb.Append("<table><thead><tr><th class=\"l\">Seeded traces</th><th>Spans</th><th>Start hint</th><th>Runs</th><th>Errors</th><th>p50 ms</th><th>p95 ms</th><th>max ms</th><th>Avg KB</th></tr></thead><tbody>");
+        foreach (var p in probes)
+            sb.Append("<tr><td class=\"l\">").Append(E(p.Kind)).Append("</td><td>").Append(p.Spans.ToString("N0")).Append("</td><td>").Append(p.Hinted ? "yes" : "no")
+              .Append("</td><td>").Append(p.Runs).Append("</td><td>").Append(p.Errors).Append("</td><td>").Append(p.P50Ms.ToString("N0")).Append("</td><td>")
+              .Append(p.P95Ms.ToString("N0")).Append("</td><td>").Append(p.MaxMs.ToString("N0")).Append("</td><td>").Append((p.AvgBytes / 1024).ToString("N0")).Append("</td></tr>");
+        sb.Append("</tbody></table><p class=\"muted\">Trace detail (<code>GET /api/traces/{id}/spans</code>) as the client saw it, after the run: the same traces without and with the time hint (<code>?start=&amp;end=</code>) the trace list passes.</p>");
     }
 
     /// <summary>What the database shared CPUs with (schema-simplification plan, Phase 1 item 6): the numbers past about x6-x8 mean nothing without it.</summary>

@@ -54,14 +54,30 @@ public abstract class ProviderFixture : IAsyncLifetime
     public async Task InitializeAsync()
     {
         await Container.StartAsync();
+        Services = BuildServices(null);
 
-        var configuration = new ConfigurationBuilder()
-            .AddInMemoryCollection(new Dictionary<string, string?>
-            {
-                ["ConnectionStrings:Collector"] = CollectorConnectionString,
-                ["ConnectionStrings:Api"] = ApiConnectionString
-            })
-            .Build();
+        var tenant = await Container.SeedTenantAsync("phase0-tenant", "phase0-key", ApiKeyPlainText);
+        TenantId = tenant.Id;
+        TenantContext.SetTenantId(TenantId);
+    }
+
+    /// <summary>
+    /// A second provider over the same test database with extra configuration (for example a narrow
+    /// <c>Telemetry:Query:PageSliceSeconds</c>), for a test that needs a repository configured differently from the shared
+    /// <see cref="Services"/>. The caller disposes it. Shares <see cref="TenantContext"/>.
+    /// </summary>
+    public ServiceProvider CreateServices(IReadOnlyDictionary<string, string?> overrides) => BuildServices(overrides);
+
+    private ServiceProvider BuildServices(IReadOnlyDictionary<string, string?>? overrides)
+    {
+        var settings = new Dictionary<string, string?>
+        {
+            ["ConnectionStrings:Collector"] = CollectorConnectionString,
+            ["ConnectionStrings:Api"] = ApiConnectionString
+        };
+        if (overrides is not null)
+            foreach (var (key, value) in overrides) settings[key] = value;
+        var configuration = new ConfigurationBuilder().AddInMemoryCollection(settings).Build();
 
         var services = new ServiceCollection();
         services.AddLogging();
@@ -89,11 +105,7 @@ public abstract class ProviderFixture : IAsyncLifetime
 
         AddProviderServices(services, configuration);
 
-        Services = services.BuildServiceProvider(new ServiceProviderOptions { ValidateScopes = true });
-
-        var tenant = await Container.SeedTenantAsync("phase0-tenant", "phase0-key", ApiKeyPlainText);
-        TenantId = tenant.Id;
-        TenantContext.SetTenantId(TenantId);
+        return services.BuildServiceProvider(new ServiceProviderOptions { ValidateScopes = true });
     }
 
     public async Task DisposeAsync()

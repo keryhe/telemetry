@@ -18,7 +18,18 @@ namespace Keryhe.Telemetry.Timescale.Services;
 // =============================================================================
 
 public sealed class TimescaleTraceReadRepository(NpgsqlDataSource dataSource, ITenantContext tenantContext, IConfiguration configuration)
-    : PostgreSqlTraceReadRepository(dataSource, tenantContext, configuration);
+    : PostgreSqlTraceReadRepository(dataSource, tenantContext, configuration)
+{
+    /// <summary>
+    /// A hypertable cannot seek a trace id across chunks: <c>idx_spans_trace_span</c> exists per chunk, so a by-trace read
+    /// probes every chunk (and every compressed one) however few spans match. With the trace's start time the read is bounded
+    /// to <c>[start - margin, end + margin]</c> and constraint exclusion skips the rest. The range is the trace's own extent, not an
+    /// open-ended window: a wide range on a chunk that is still being written gave the planner a time-index path it misjudged from stale
+    /// statistics (stress run: 16 -> 29 ms). Plain PostgreSQL has one index and needs none of this.
+    /// </summary>
+    protected override (long Min, long Max)? HintedTraceTimeBounds(long startHintNano, long endHintNano)
+        => (startHintNano - TraceHintMarginNanos, endHintNano + TraceHintMarginNanos);
+}
 
 public sealed class TimescaleMetricReadRepository(NpgsqlDataSource dataSource, ITenantContext tenantContext, IConfiguration configuration)
     : PostgreSqlMetricReadRepository(dataSource, tenantContext, configuration);

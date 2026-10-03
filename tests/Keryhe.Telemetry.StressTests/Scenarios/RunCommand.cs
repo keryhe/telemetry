@@ -18,7 +18,8 @@ public static class RunCommand
         "    [--profile <smoke|standard|soak|ramp|all|path.json>] [--scenario <fixed|ramp>] [--out <dir>] [--reuse-publish <dir>]\n" +
         "    [--browsers <n>]   override the profile's browser users (0 = none)\n" +
         "    [--db-cpuset <cpus>]   pin the database container to these CPUs of the Docker VM (e.g. 0-3); recorded in the report\n" +
-        "    [--retention-interval <stress|realistic|seconds>]   override the profile's retention interval (stress = 30 s, realistic = 3600 s)";
+        "    [--retention-interval <stress|realistic|seconds>]   override the profile's retention interval (stress = 30 s, realistic = 3600 s)\n" +
+        "    [--seed-days <n>] [--seed-spans-per-day <n>]   send n days (1-60) of backdated history, plus large traces, before the warm-up; recorded in the report";
 
     public static async Task<int> RunAsync(string[] args)
     {
@@ -26,6 +27,7 @@ public static class RunCommand
         string? outDir = null, reusePublish = null;
         int? browsers = null;
         string? retentionInterval = null, dbCpuset = null;
+        int? seedDays = null, seedSpansPerDay = null;
         var scenarioGiven = false;
         for (var i = 0; i < args.Length; i++)
         {
@@ -41,12 +43,18 @@ public static class RunCommand
                 case "--browsers": browsers = int.Parse(Next()); break;
                 case "--retention-interval": retentionInterval = Next(); break;
                 case "--db-cpuset": dbCpuset = Next(); break;
+                case "--seed-days": seedDays = int.Parse(Next()); break;
+                case "--seed-spans-per-day": seedSpansPerDay = int.Parse(Next()); break;
                 default: Console.Error.WriteLine($"unknown argument {args[i]}\n{Usage}"); return 2;
             }
         }
 
         List<ScenarioSpec> specs;
-        try { specs = BuildMatrix(provider, topology, profile, scenario, scenarioGiven, browsers, retentionInterval, dbCpuset); }
+        try
+        {
+            specs = BuildMatrix(provider, topology, profile, scenario, scenarioGiven, browsers, retentionInterval, dbCpuset);
+            if (seedDays is { } days) foreach (var spec in specs) spec.Profile.ApplySeed(days, seedSpansPerDay);
+        }
         catch (Exception ex) when (ex is ArgumentException or FileNotFoundException or InvalidDataException)
         {
             Console.Error.WriteLine(ex.Message);
@@ -134,6 +142,8 @@ public static class RunCommand
     {
         var lines = new List<string> { $"=== {r.Provider} / {r.Topology} / {r.Profile} ({r.Kind}) — {(r.FinishedAt - r.StartedAt).TotalMinutes:F1} min ===" };
         if (r.Error is not null) lines.Add("  FAILED: " + r.Error.Split('\n')[0]);
+        if (r.Outage is { } outage)
+            lines.Add($"  DATABASE UNAVAILABLE after the run: {outage.Message} (container {outage.ContainerStatus}, exit {outage.ExitCode?.ToString() ?? "?"}, OOM-killed {outage.OomKilled?.ToString() ?? "?"})");
 
         foreach (var w in r.MeasuredWindow)
             lines.Add($"  {w.Signal,-8} offered {w.OfferedPerSecond,8:F0}/s acked {w.AckedPerSecond,8:F0}/s not-sent {w.NotSentRecords} failed exports {w.ExportsFailed} export p50/p95/p99 {w.Latency.P50Ms:F0}/{w.Latency.P95Ms:F0}/{w.Latency.P99Ms:F0} ms");

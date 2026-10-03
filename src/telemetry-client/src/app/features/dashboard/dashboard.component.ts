@@ -311,8 +311,11 @@ export class DashboardComponent {
     });
   }
 
-  protected navigateToTrace(traceId: string, spanId?: string | null): void {
-    this.router.navigate(['/traces', traceId], spanId ? { queryParams: { span: spanId } } : undefined);
+  protected navigateToTrace(traceId: string, spanId?: string | null, start?: string, end?: string): void {
+    const queryParams: Record<string, string> = {};
+    if (spanId) queryParams['span'] = spanId;
+    if (start && end) { queryParams['start'] = start; queryParams['end'] = end; } // lets the detail read be bounded (Timescale, ClickHouse)
+    this.router.navigate(['/traces', traceId], Object.keys(queryParams).length ? { queryParams } : undefined);
   }
 
   protected durationMs(trace: TraceInfo): number {

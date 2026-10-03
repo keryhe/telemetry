@@ -183,14 +183,12 @@ public abstract class LogReadRepositoryBase : DapperReadRepository, ILogReadRepo
         if (timedOut)
         {
             var cappedTotal = await GetCappedTotalAsync(conn, query.Service, query.MinSeverity, parsed, startNano, endNano, cancellationToken);
-            var newSinceCapped = await CountNewSinceAsOfAsync(conn, query.Start, query.End, query.Service, query.MinSeverity, parsed, asOf, cancellationToken);
             return new LogSummaryResult
             {
                 Source = "raw",
                 Buckets = [],
                 Total = cappedTotal,
                 TotalIsLowerBound = true,
-                NewSinceAsOf = newSinceCapped,
                 AsOf = asOf
             };
         }
@@ -216,7 +214,6 @@ public abstract class LogReadRepositoryBase : DapperReadRepository, ILogReadRepo
         }
 
         var total = buckets.Sum(b => b.Trace + b.Debug + b.Info + b.Warn + b.Error + b.Fatal);
-        var newSince = await CountNewSinceAsOfAsync(conn, query.Start, query.End, query.Service, query.MinSeverity, parsed, asOf, cancellationToken);
 
         return new LogSummaryResult
         {
@@ -224,7 +221,6 @@ public abstract class LogReadRepositoryBase : DapperReadRepository, ILogReadRepo
             Buckets = buckets,
             Total = total,
             TotalIsLowerBound = false,
-            NewSinceAsOf = newSince,
             AsOf = asOf
         };
     }
@@ -248,23 +244,6 @@ public abstract class LogReadRepositoryBase : DapperReadRepository, ILogReadRepo
             """;
         parameters.Add("limit", cap + 1);
         parameters.Add("offset", 0);
-        return await conn.ExecuteScalarAsync<long>(new CommandDefinition(sql, parameters, cancellationToken: cancellationToken));
-    }
-
-    private async Task<long> CountNewSinceAsOfAsync(
-        System.Data.Common.DbConnection conn, DateTime start, DateTime end, string? service, int? minSeverity,
-        ParsedSearchQuery parsed, DateTime asOf, CancellationToken cancellationToken)
-    {
-        var startNano = TimeConversion.DateTimeToUnixNano(start);
-        var endNano = TimeConversion.DateTimeToUnixNano(end);
-        var (clauses, parameters) = BuildFilterClauses(service, minSeverity, parsed, startNano, endNano);
-        clauses.Add("lr.created_at > @asOf");
-        parameters.Add("asOf", asOf);
-        var where = string.Join(" AND ", clauses);
-        var sql = $"""
-            SELECT COUNT(*) FROM log_records lr
-            WHERE lr.tenant_id = @tenantId AND {where}
-            """;
         return await conn.ExecuteScalarAsync<long>(new CommandDefinition(sql, parameters, cancellationToken: cancellationToken));
     }
 

@@ -51,7 +51,7 @@ public abstract class PlanSurveyBase : IAsyncLifetime
         var repo = scope.ServiceProvider.GetRequiredService<ITraceReadRepository>();
         string Anchors(bool service, bool pin) => (string)repo.GetType()
             .GetMethod("AnchorsSql", BindingFlags.Instance | BindingFlags.NonPublic)!
-            .Invoke(repo, [service, pin, false])!;
+            .Invoke(repo, [service, pin])!;
 
         // The last 1000 s of 60,000 s of data: a selective window, the shape a real trace-list page asks for.
         var start = SeededDataBuilder.ToUnixNano(WindowStart.AddSeconds(59_000));

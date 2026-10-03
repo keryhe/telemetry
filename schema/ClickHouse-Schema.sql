@@ -1,4 +1,4 @@
--- OpenTelemetry ClickHouse Schema -- schema 3.0.0
+-- OpenTelemetry ClickHouse Schema -- schema 3.0.1
 -- Supports OTLP logs, metrics, and traces as defined in opentelemetry-proto.
 --
 -- Produces the SAME LOGICAL table/column set as PostgreSQL-Schema.sql, adapted to ClickHouse's
@@ -124,7 +124,11 @@ CREATE TABLE IF NOT EXISTS spans
     created_at               DateTime64(9) DEFAULT now64(9),
     attributes_json          Nullable(String),
     events_json              Nullable(String),
-    links_json               Nullable(String)
+    links_json               Nullable(String),
+    -- Trace detail (3.0.1). The sort key has no trace-id seek, so a by-trace read -- even bounded by trace_index to the trace's
+    -- time -- reads at least one 8192-row granule of every service in that range (about 143,000 rows per call under the stress
+    -- harness). This skips the granules whose trace ids cannot match, the same index log_records carries for logs-by-trace.
+    INDEX idx_spans_trace trace_id TYPE bloom_filter(0.01) GRANULARITY 4
 )
 ENGINE = MergeTree
 PARTITION BY toYYYYMMDD(fromUnixTimestamp64Nano(start_time_unix_nano))
@@ -422,4 +426,4 @@ ORDER BY version;
 
 -- The schema_version row is seeded LAST, so a partial/failed apply never records a version that
 -- the apply-schema.sh version gate would wrongly treat as "already applied".
-INSERT INTO schema_version (version) VALUES ('3.0.0');
+INSERT INTO schema_version (version) VALUES ('3.0.1');

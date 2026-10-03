@@ -57,6 +57,10 @@ mat-card-header {
   flex-shrink: 0;
 }
 
+// The windowed rows container (see ROW_HEIGHT in the component): the browser must not "anchor" the scroll position to a row
+// whose spacer just changed height, or scrolling would fight the window.
+.span-rows { overflow-anchor: none; }
+
 .span-row {
   display: flex;
   height: 34px;

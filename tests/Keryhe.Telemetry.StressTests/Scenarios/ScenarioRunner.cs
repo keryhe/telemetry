@@ -39,6 +39,9 @@ public static class ScenarioRunner
         DatabaseObservation? database = null;
         CorrectnessResult? correctness = null;
         double? logPinOffsetMs = null;
+        HistorySeedResult? seed = null;
+        IReadOnlyList<DetailProbeResult>? detailProbes = null;
+        DatabaseOutage? outage = null;
         var hostResults = new List<HostResult>();
 
         try
@@ -49,7 +52,11 @@ public static class ScenarioRunner
             log($"[{spec.Id}] schema {schemaVersion ?? "unknown"}: re-delivered spans {(profile.Load.Traces.RedeliveryCollapses ? "collapse" : "are stored again")}");
 
             log($"[{spec.Id}] starting {spec.Provider} container");
-            await using var db = ProviderContainerFactory.Create(spec.Provider);
+            var db = ProviderContainerFactory.Create(spec.Provider);
+            // Removing the database container is cleanup, not part of the measurement: a container that was OOM-killed under overload can take
+            // longer to remove than Testcontainers waits, and that timeout (a TaskCanceledException) used to surface as the scenario's error
+            // ("Cancelled.") with every result already in hand. It is logged instead, and Ryuk removes the leftover container.
+            await using var dbDisposal = new ForgivingDisposal(db, m => log($"[{spec.Id}] {m}"));
             await db.StartAsync(new ContainerOptions(Diagnostics: true, CpuLimit: profile.ContainerCpus,
                 MemoryLimitBytes: (long)(profile.ContainerMemoryGb * ContainerOptions.Gigabyte), CpusetCpus: profile.DatabaseCpuset), ct);
             var tenants = await TenantSeeder.SeedAsync(db, profile.Tenants);
@@ -69,6 +76,13 @@ public static class ScenarioRunner
                 TimeSpan.FromSeconds(profile.MarkerIntervalSeconds), TimeSpan.FromMilliseconds(100), TimeSpan.FromSeconds(60));
             // A write-only run reads nothing: no marker probe (its polling is a read) and, via Validate, no browsers.
             if (profile.WriteOnly) log($"[{spec.Id}] write-only: no browsers, no marker probes");
+
+            // History first (before any load or browser): backdated traces and a few large ones, so reads run over a table with history.
+            if (profile.SeedDays > 0)
+            {
+                seed = await HistorySeeder.RunAsync(generator.Exporter, generator.Topology, profile.Load, profile.SeedDays, profile.SeedSpansPerDay,
+                    profile.SeedLargeTraces, m => log($"[{spec.Id}] {m}"), ct);
+            }
 
             using var runCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
             var loadTask = generator.RunAsync(runCts.Token);
@@ -135,13 +149,33 @@ public static class ScenarioRunner
             phases = phases with { QuiesceEnd = DateTimeOffset.UtcNow };
             log($"[{spec.Id}] quiesce {(quiesce.Reached ? "reached" : "TIMED OUT")} after {quiesce.WaitedSeconds:F0}s");
 
-            // Correctness (Phase 7): the sent ledger against the database, while the hosts are still up and the sweep can still run.
-            correctness = await CorrectnessRunner.RunAsync(observers, load.Ledger, hosts, phases.QuiesceEnd!.Value, profile, m => log($"[{spec.Id}] {m}"), ct);
-            log($"[{spec.Id}] correctness: {correctness.Mismatches} mismatched cell(s), backdated {correctness.Backdated.Outcome}");
+            // Trace detail for the seeded traces (old, and large), with and without the start hint: after quiesce, so everything is committed.
+            if (seed is not null)
+            {
+                detailProbes = await DetailProbe.RunAsync(http, seed, ct);
+                foreach (var p in detailProbes)
+                    log($"[{spec.Id}] detail {p.Kind} ({p.Spans:N0} spans) {(p.Hinted ? "hinted" : "unhinted")}: p50 {p.P50Ms:F0} ms, p95 {p.P95Ms:F0} ms, {p.AvgBytes / 1024:N0} KB, {p.Errors} error(s)");
+            }
 
-            database = await observers.StopAsync(cancellationToken: ct);
-            foreach (var (name, content) in database.Locks.Artifacts)
-                await File.WriteAllTextAsync(Path.Combine(directory, name), content, ct);
+            // Correctness (Phase 7) and the database observation: both need the database to answer. A database that fell over under overload
+            // (it refuses connections) is a finding about the database: record what Docker says and go on to shut the hosts down.
+            try
+            {
+                // Correctness (Phase 7): the sent ledger against the database, while the hosts are still up and the sweep can still run.
+                correctness = await CorrectnessRunner.RunAsync(observers, load.Ledger, hosts, phases.QuiesceEnd!.Value, profile, m => log($"[{spec.Id}] {m}"), ct);
+                log($"[{spec.Id}] correctness: {correctness.Mismatches} mismatched cell(s), backdated {correctness.Backdated.Outcome}");
+
+                database = await observers.StopAsync(cancellationToken: ct);
+                foreach (var (name, content) in database.Locks.Artifacts)
+                    await File.WriteAllTextAsync(Path.Combine(directory, name), content, ct);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException || !ct.IsCancellationRequested)
+            {
+                var state = await db.InspectAsync(CancellationToken.None);
+                if (!IsConnectionRefused(ex) && state.Status == "running") throw; // the database is up: this is a real failure, with its own cause
+                outage = new DatabaseOutage(ex.GetBaseException().Message, state.Status, state.ExitCode, state.OomKilled);
+                log($"[{spec.Id}] DATABASE UNAVAILABLE after the run: {outage.Message} (container {state.Status}, exit {state.ExitCode?.ToString() ?? "?"}, OOM-killed {state.OomKilled?.ToString() ?? "?"}); skipping the database observation and the correctness check");
+            }
 
             log($"[{spec.Id}] shutting hosts down");
             var shutdowns = await hosts.StopAsync();
@@ -157,15 +191,38 @@ public static class ScenarioRunner
         }
         catch (Exception ex)
         {
-            error = ex is OperationCanceledException ? "Cancelled." : ex.ToString();
+            // "Cancelled." only when the run itself was cancelled (Ctrl-C). Any other OperationCanceledException -- an HttpClient timeout
+            // against an overloaded host or database raises a TaskCanceledException -- is a failure with a cause, and its stack says where.
+            error = ex is OperationCanceledException && ct.IsCancellationRequested ? "Cancelled." : ex.ToString();
             log($"[{spec.Id}] FAILED: {ex.Message}");
         }
 
         var result = new ScenarioResult(ScenarioResult.CurrentSchemaVersion, spec.Provider, spec.Topology.ToString(), profile.Name,
             profile.IsRamp ? "ramp" : "fixed", startedAt, DateTimeOffset.UtcNow, error, profile, phases,
-            load, measured, markers, ramp, quiesce, tourResults, browserError, database, correctness, hostResults, logPinOffsetMs);
+            load, measured, markers, ramp, quiesce, tourResults, browserError, database, correctness, hostResults, logPinOffsetMs, seed, detailProbes, outage);
         await File.WriteAllTextAsync(Path.Combine(directory, "scenario.json"), JsonSerializer.Serialize(result, ResultJson.Options), CancellationToken.None);
         return result;
+    }
+
+    /// <summary>Disposes a database container, logging (not throwing) a failure to remove it.</summary>
+    private sealed class ForgivingDisposal(ProviderContainer container, Action<string> log) : IAsyncDisposable
+    {
+        public async ValueTask DisposeAsync()
+        {
+            try { await container.DisposeAsync(); }
+            catch (Exception ex)
+            {
+                log($"removing the database container failed (left for Ryuk to remove): {ex.GetType().Name}: {ex.Message.Split('\n')[0]}");
+            }
+        }
+    }
+
+    /// <summary>A refused connection anywhere in the exception chain: the server is not listening.</summary>
+    private static bool IsConnectionRefused(Exception ex)
+    {
+        for (var e = ex; e is not null; e = e.InnerException)
+            if (e is System.Net.Sockets.SocketException { SocketErrorCode: System.Net.Sockets.SocketError.ConnectionRefused }) return true;
+        return false;
     }
 
     private static Task<PlaywrightTour> StartTourAsync(HostSet hosts, IReadOnlyList<SeededTenant> tenants, ScenarioProfile profile, string directory, CancellationToken ct) =>

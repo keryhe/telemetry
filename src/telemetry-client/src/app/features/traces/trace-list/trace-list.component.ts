@@ -59,8 +59,6 @@ type ChartView = 'volume' | 'latency';
 
 const BUCKET_COUNT = 60;
 const STATE_KEY = 'state.traces';
-/** How often the "new since" banner's summary re-poll runs, while the tab is visible (same cadence as logs). */
-const NEW_SINCE_POLL_MS = 30_000;
 /** Explains the "request traces" population behind the chart and stat cards (decision 13). */
 const REQUEST_TRACES_TOOLTIP =
   'Traces whose anchor span is an incoming request (SERVER or CONSUMER kind). Background and client-rooted traces are excluded.';
@@ -114,7 +112,6 @@ export class TraceListComponent implements OnDestroy {
   protected page = signal<TracePageResult | null>(null);
   private pageSub?: Subscription;
   private summarySub?: Subscription;
-  private newSincePollHandle?: ReturnType<typeof setInterval>;
 
   protected capabilities = this.capabilitiesService.capabilities;
 
@@ -161,9 +158,6 @@ export class TraceListComponent implements OnDestroy {
 
   protected effectiveTotal = computed(() => this.summary()?.listTotal ?? 0);
   protected totalIsLowerBound = computed(() => this.summary()?.totalIsLowerBound ?? false);
-
-  /** "N new since …" banner. */
-  protected newSinceCount = computed(() => this.summary()?.newSinceAsOf ?? 0);
 
   /**
    * Search window limit, explained inline next to the search box: shown when a raw search filter
@@ -391,15 +385,9 @@ export class TraceListComponent implements OnDestroy {
         this.buildLatencyBubbles(s?.latencyBuckets ?? []);
       });
     });
-
-    // "New since" banner: re-poll the summary every 30s while the tab is visible.
-    this.newSincePollHandle = setInterval(() => {
-      if (document.visibilityState === 'visible') this.pollSummary();
-    }, NEW_SINCE_POLL_MS);
   }
 
   ngOnDestroy(): void {
-    if (this.newSincePollHandle) clearInterval(this.newSincePollHandle);
     this.pageSub?.unsubscribe();
     this.summarySub?.unsubscribe();
   }
@@ -434,14 +422,6 @@ export class TraceListComponent implements OnDestroy {
     this.pageSub = this.api.getTracePage({ ...this.currentFilter(), size: this.pageSize(), nav: 'first' }).subscribe({
       next: (result) => { this.page.set(result); this.pageLoading.set(false); },
       error: () => this.pageLoading.set(false),
-    });
-  }
-
-  /** Re-polls only the summary, pinned on the query's existing `asOf`, for the "new since" banner. */
-  private pollSummary(): void {
-    const asOf = this.summary()?.asOf ?? this.page()?.asOf;
-    this.api.getTraceSummary({ ...this.currentFilter(), asOf, bucketCount: BUCKET_COUNT }).subscribe({
-      next: (result) => this.summary.set(result),
     });
   }
 
@@ -625,8 +605,9 @@ export class TraceListComponent implements OnDestroy {
     });
   }
 
-  protected navigate(traceId: string): void {
-    this.router.navigate(['/traces', traceId]);
+  /** `start` and `end` are the trace's own extent from the row, passed on so the detail read can be bounded (Timescale, ClickHouse). */
+  protected navigate(traceId: string, start?: string, end?: string): void {
+    this.router.navigate(['/traces', traceId], start && end ? { queryParams: { start, end } } : undefined);
   }
 
   /**
@@ -673,13 +654,6 @@ export class TraceListComponent implements OnDestroy {
       next: (result) => { this.page.set(result); this.pageLoading.set(false); },
       error: () => this.pageLoading.set(false),
     });
-  }
-
-  /** Clicking the "new since" banner resets `asOf` to now and returns to the first page. */
-  protected resetAsOf(): void {
-    this.summary.set(this.summary() ? { ...this.summary()!, asOf: new Date().toISOString(), newSinceAsOf: 0 } : null);
-    this.pageIndex.set(0);
-    this.reloadAll();
   }
 
   // =========================================================================
