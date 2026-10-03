@@ -9,7 +9,10 @@ A self-hosted OpenTelemetry (OTLP) ingestion and visualization platform for trac
 - **REST API**: ASP.NET Core Web API (`Keryhe.Telemetry.Api`) with Swagger support
 - **Multiple Database Providers**: Choose between plain PostgreSQL, PostgreSQL + TimescaleDB, SQL Server, MySQL, or ClickHouse (columnar/OLAP)
 - **Trace Correlation**: Links logs and metrics to traces via trace and span IDs
-- **Built-in Analytics**: Pre-configured views for service maps, trace summaries, and log analysis
+- **Built-in Analytics**: Service maps, trace summaries and latency heatmaps, and log severity analysis, computed on demand from the raw data
+- **Multi-tenant**: Every OTLP export carries a per-tenant API key (hashed in the database, optional expiry); the REST API is scoped by tenant and supports pluggable authorization
+- **Export and retention**: Stream logs, traces and metrics as NDJSON or CSV; retention windows are editable in the UI and enforced by a background sweep
+- **Admin tool**: A console app (`Keryhe.Telemetry.Admin`) for creating tenants and API keys
 - **Alerting**: Rule-based alerts (metric threshold, error rate, slow traces, log severity spikes) with configurable cooldowns and webhook delivery
 
 ## Architecture
@@ -29,15 +32,15 @@ read/write implementation and is selected by the host at startup.
 
 | Project | Role |
 |---------|------|
-| `Keryhe.Telemetry.Core` | Domain interfaces and models shared across projects |
-| `Keryhe.Telemetry.Data` | Provider-agnostic write repositories, ingestion channel + background worker, Dapper read-repository bases |
+| `Keryhe.Telemetry.Core` | Domain interfaces and models, plus the provider-agnostic write repositories, ingestion channel + background worker and Dapper read-repository bases |
 | `Keryhe.Telemetry.PostgreSQL` / `.Timescale` / `.SqlServer` / `.MySql` / `.ClickHouse` | Per-provider read/write implementations |
 | `Keryhe.Telemetry.Collector` / `.Collector.Server` | gRPC OTLP ingestion with per-tenant API key authentication (class library + thin host) |
-| `Keryhe.Telemetry.Api` / `.Api.Server` | REST API controllers and tenant middleware (class library + thin host) |
+| `Keryhe.Telemetry.Api` / `.Api.Server` | REST API controllers, base-path routing and authorization, alert evaluation (rules, webhooks, periodic worker) and retention sweeps (class library + thin host) |
 | `Keryhe.Telemetry.Ui` | Prebuilt Angular UI, packaged as static web assets — see [Build your own host](#build-your-own-host) below |
-| `Keryhe.Telemetry.Alerting` | Alert rule evaluators, webhook delivery, periodic evaluation worker |
+| `Keryhe.Telemetry.Admin` | Console tool for tenants and API keys (PostgreSQL, Timescale, SQL Server) |
 | `Keryhe.Telemetry.TestDataGenerator` | Worker service that simulates a multi-tenant e-commerce system and emits realistic traces, logs and metrics (24h backfill, then live) |
-| `src/telemetry-client` | Angular 20 SPA source (Dashboard, Traces, Metrics, Logs, Alerts) — built into `Keryhe.Telemetry.Ui`, not part of the .sln |
+| `src/telemetry-client` | Angular 20 SPA source (Dashboard, Traces, Metrics, Logs, Alerts, Settings) — built into `Keryhe.Telemetry.Ui`, not part of the .sln |
+| `tests/` | Docker-based per-provider integration tests, a stress-test harness and the test data generator's tests — see [Testing](#testing) |
 
 See [CLAUDE.md](CLAUDE.md) for a deeper architectural walkthrough (composition roots, ingestion
 pipeline, multi-tenancy, provider-specific caveats).
@@ -60,16 +63,22 @@ dotnet build Telemetry.sln
 dotnet run --project src/Keryhe.Telemetry.Collector.Server
 dotnet run --project src/Keryhe.Telemetry.Api.Server
 
-# 4. Run the Angular dev server
+# 4. Create a tenant and an API key (console tool; its connection string goes in its own user secrets)
+dotnet user-secrets --project src/Keryhe.Telemetry.Admin \
+  set "ConnectionStrings:Admin" "Host=localhost;Port=5432;Database=telemetry;Username=postgres;Password=<password>"
+dotnet run --project src/Keryhe.Telemetry.Admin
+
+# 5. Run the Angular dev server
 cd src/telemetry-client && npm install && npm start
 ```
 
 Open `http://localhost:4201`. Ingestion requires an `Authorization: Bearer <key>` header on
-every OTLP request — see [Configure an API key](docs/SETUP.md#3-configure-an-api-key-for-the-authorization-header)
-in the full setup guide.
+every OTLP request — see [Configure an API key](docs/SETUP.md#3-create-a-tenant-and-an-api-key)
+in the full setup guide. In Development the collector also listens on plaintext `http://localhost:5117`;
+outside Development it requires TLS (`https://…:7057`), because keys travel in every export.
 
 For other database providers (TimescaleDB, SQL Server, MySQL, ClickHouse), Docker recipes,
-running the split hosts, deploying to production, the full schema reference, and alerting
+running the two hosts, deploying to production, the full schema reference, and alerting
 configuration, see **[docs/SETUP.md](docs/SETUP.md)**. Every configuration key and its default is
 listed in **[docs/CONFIGURATION.md](docs/CONFIGURATION.md)**.
 
@@ -82,29 +91,33 @@ combine it with an existing application, or change what gets exposed.
 
 ```xml
 <ItemGroup>
-  <PackageReference Include="Keryhe.Telemetry.Api" Version="1.2.1" />
-  <PackageReference Include="Keryhe.Telemetry.Ui" Version="1.2.1" />
+  <PackageReference Include="Keryhe.Telemetry.Api" Version="1.3.0" />
+  <PackageReference Include="Keryhe.Telemetry.Ui" Version="1.3.0" />
   <!-- Plus exactly one provider package, matching Database:Provider below: -->
-  <PackageReference Include="Keryhe.Telemetry.Timescale" Version="1.2.1" />
+  <PackageReference Include="Keryhe.Telemetry.Timescale" Version="1.3.0" />
 </ItemGroup>
 ```
 
 ```csharp
 var builder = WebApplication.CreateBuilder(args);
 
-builder.Services.AddKeryheTelemetryApi(builder.Configuration); // controllers, tenant context
+builder.Services.AddKeryheTelemetryApi(builder.Configuration); // controllers, tenant context, authorization
 builder.Services.AddKeryheTelemetryUi(builder.Configuration);  // binds the TelemetryUi section
 builder.Services.AddTimescaleApiServices(builder.Configuration); // reads ConnectionStrings:Api
 
 var app = builder.Build();
 
-// Before any tenant-scoped middleware, and paired with an explicit UseRouting() call right after
-// it — see CLAUDE.md's "UI hosting" section for why that second part matters.
+// Paired with an explicit UseRouting() call right after it — see CLAUDE.md's "UI hosting" section
+// for why that second part matters.
 app.UseKeryheTelemetryUi();
 app.UseRouting();
 
-app.UseKeryheTelemetryApi();
-app.MapControllers();
+// Register your own authentication scheme and policies when you enable
+// Telemetry:Api:Authorization; with it off these are no-ops.
+app.UseAuthentication();
+app.UseAuthorization();
+
+app.MapKeryheTelemetryApi();   // replaces MapControllers(); also gives unknown API paths a JSON 404
 app.MapKeryheTelemetryUiFallback();
 
 app.Run();
@@ -136,12 +149,37 @@ The Dashboard's error-rate thresholds are configurable the same way, under
 `TelemetryUi:HealthThresholds`; see
 [the UI package README](src/Keryhe.Telemetry.Ui/README.md#health-thresholds).
 
+The API is mounted under `Telemetry:Api:BasePath` (default `/api`) and its authorization is configured
+under `Telemetry:Api:Authorization` (off by default); see
+[the API package README](src/Keryhe.Telemetry.Api/README.md) and
+[docs/CONFIGURATION.md](docs/CONFIGURATION.md).
+
 Add `Keryhe.Telemetry.Collector` (plus `AddKeryheTelemetryCollector()`/`MapKeryheTelemetryCollector()`
 and the matching `Add<Provider>CollectorServices(configuration)` call, e.g.
 `AddTimescaleCollectorServices`) the same way if your host should also ingest OTLP, running it
 as its own service (see [the collector README](src/Keryhe.Telemetry.Collector/README.md)). Pin the UI and API packages to the same version —
 they ship in lockstep, and a mismatch fails silently (a field goes missing from a rendered page)
 rather than with an error.
+
+## Testing
+
+```bash
+# Integration tests: every provider against real Testcontainers databases (requires Docker)
+dotnet test tests/Keryhe.Telemetry.IntegrationTests
+dotnet test tests/Keryhe.Telemetry.IntegrationTests --filter Provider=SqlServer   # one provider
+
+# Test data generator simulation tests (no database or Docker)
+dotnet test tests/Keryhe.Telemetry.TestDataGenerator.Tests
+```
+
+`tests/Keryhe.Telemetry.StressTests` is a manual, Docker-based load harness (never part of `dotnet test`);
+see [its README](tests/Keryhe.Telemetry.StressTests/README.md).
+
+## Documentation
+
+- [docs/SETUP.md](docs/SETUP.md) — full setup, per-provider schema, deployment, alerting and retention
+- [docs/CONFIGURATION.md](docs/CONFIGURATION.md) — every configuration key and its default
+- [CLAUDE.md](CLAUDE.md) — architecture and implementation notes
 
 ## License
 

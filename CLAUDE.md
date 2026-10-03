@@ -1,6 +1,8 @@
 # CLAUDE.md
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+For end-user setup see [README.md](README.md) and [docs/SETUP.md](docs/SETUP.md); every configuration key and
+its default is in [docs/CONFIGURATION.md](docs/CONFIGURATION.md).
 
 ## Commands
 
@@ -16,12 +18,19 @@ dotnet run --project src/Keryhe.Telemetry.Collector.Server
 # REST API (read path; also serves the Angular UI)
 dotnet run --project src/Keryhe.Telemetry.Api.Server
 
+# Create tenants and API keys (PostgreSQL/Timescale/SqlServer; MySQL and ClickHouse use SQL, see docs/SETUP.md).
+# Needs ConnectionStrings:Admin in its user secrets. scripts/new-api-key.sh (or New-ApiKey.ps1) only generates a
+# key + hash for a manual INSERT.
+dotnet run --project src/Keryhe.Telemetry.Admin
+
 # Run the Angular UI (dev server on http://localhost:4201 — development only)
 cd src/telemetry-client && npm install && npm start
 
 # Publish the hosts. The API host also builds + bundles the Angular UI, via Keryhe.Telemetry.Ui:
 dotnet publish src/Keryhe.Telemetry.Collector.Server -c Release -o ./publish-collector
 dotnet publish src/Keryhe.Telemetry.Api.Server -c Release -o ./publish
+# Windows: install-service.bat [collector-publish-folder] [api-publish-folder] installs both as services
+# (KeryheTelemetryCollector, KeryheTelemetryApi); defaults are publish-collector and publish-api.
 # ...and to publish against an already-built src/telemetry-client/dist instead (the flag is on
 # Keryhe.Telemetry.Ui, not the host, but propagates transitively through the ProjectReference):
 dotnet publish src/Keryhe.Telemetry.Api.Server -c Release -p:BuildSpa=false
@@ -230,7 +239,7 @@ decisions are in `plans/test-data-generator-realism.md`. The shape worth knowing
 ### Default ports
 
 - gRPC ingestion (`Keryhe.Telemetry.Collector.Server`): `http://localhost:5117` (h2c), `https://localhost:7057` (HTTP/2)
-- REST API (`Keryhe.Telemetry.Api.Server`): `http://localhost:5188`, `https://localhost:7105` — also serves the UI at `/` when published
+- REST API (`Keryhe.Telemetry.Api.Server`): `http://localhost:5188`, `https://localhost:7105` — also serves the UI. As shipped its `appsettings.json` sets `Telemetry:Api:BasePath=/telemetry/api` and `TelemetryUi:BasePath=/telemetry` (the options' defaults are `/api` and `/`), so the UI is at `http://localhost:5188/telemetry`
 - Angular dev server (`src/telemetry-client`): `http://localhost:4201` — **development only**
 
 `Collector.Server` configures its endpoints as named Kestrel endpoints, not `launchSettings.json`'s
@@ -352,8 +361,7 @@ REST API consumed by an Angular single-page application.
 
 | Project | Role |
 |---------|------|
-| `Keryhe.Telemetry.Core` | Domain interfaces and models shared across projects (no infrastructure deps) |
-| `Keryhe.Telemetry.Data` | Provider-agnostic pieces: thin write repositories, ingestion channel + worker, Dapper read repository bases, helpers |
+| `Keryhe.Telemetry.Core` | Domain interfaces and models shared across projects, plus the provider-agnostic pieces in `Core/Data`: thin write repositories, ingestion channel + worker, caches, Dapper read repository bases, helpers. There is no separate `Data` project |
 | `Keryhe.Telemetry.PostgreSQL` | Plain-Postgres provider implementation (Npgsql + Dapper) |
 | `Keryhe.Telemetry.Timescale` | TimescaleDB provider implementation |
 | `Keryhe.Telemetry.SqlServer` | SQL Server provider implementation (Microsoft.Data.SqlClient + Dapper) |
@@ -361,12 +369,13 @@ REST API consumed by an Angular single-page application.
 | `Keryhe.Telemetry.MySql` | MySQL provider implementation (MySqlConnector + Dapper) |
 | `Keryhe.Telemetry.Collector` | gRPC services + OpenTelemetry proto files → generated stubs (class library) |
 | `Keryhe.Telemetry.Collector.Server` | Thin ASP.NET Core host that maps the gRPC services and runs the ingestion worker |
-| `Keryhe.Telemetry.Api` | REST API controllers, base-path routing, authorization, and read-service wiring (class library) |
+| `Keryhe.Telemetry.Api` | REST API controllers, base-path routing, authorization, read-service wiring, alerting (`Api/Alerting`: evaluators, webhooks, `AlertEvaluationWorker`) and retention (`Api/Retention`) (class library) |
 | `Keryhe.Telemetry.Api.Server` | Thin ASP.NET Core host that composes the API + OpenAPI + CORS |
 | `Keryhe.Telemetry.Ui` | Prebuilt Angular UI, packaged as static web assets (Razor class library; no .razor/.cshtml) |
-| `Keryhe.Telemetry.Alerting` | Alert rule evaluation with pluggable evaluators and webhook delivery |
+| `Keryhe.Telemetry.Admin` | Console (Spectre.Console) admin tool for tenants and API keys (create with optional expiry, list, deactivate, delete); PostgreSQL, Timescale and SqlServer only (see "Admin tool") |
 | `Keryhe.Telemetry.TestDataGenerator` | Worker service that simulates a multi-tenant e-commerce system and emits it as OTLP: hand-built OTLP for backfill, the OpenTelemetry SDK for live (see "Test data generator") |
 | `src/telemetry-client` | Angular 20 UI source (Angular Material, ApexCharts, ngx-graph) — not part of the .sln; built by `Keryhe.Telemetry.Ui`, not by any host directly |
+| `tests/Keryhe.Telemetry.IntegrationTests`, `.TestInfrastructure`, `.StressTests`, `.TestDataGenerator.Tests` | Docker-backed per-provider integration tests, the shared container/seeding infrastructure, the manual stress harness, and the generator's simulation tests (see "Commands") |
 
 > The former all-in-one `Keryhe.Telemetry.Server` (gRPC ingestion + REST API + UI in one process; removed
 > by `plans/collector-authentication.md`, decision 16), the older monolithic gRPC host of the same name, and
@@ -379,7 +388,7 @@ REST API consumed by an Angular single-page application.
 ```
 OpenTelemetry SDKs (any language)
   → OTLP gRPC (port 5117) → Keryhe.Telemetry.Collector (LogService/TraceService/MetricService)
-  → thin write repos (Data) enqueue → TelemetryIngestionChannel (gated on resident record/span count)
+  → thin write repos (Core/Data) enqueue → TelemetryIngestionChannel (gated on resident record/span count)
   → TelemetryIngestionWorker (background) → ITelemetryBulkWriter (active provider) → DB
 
 Angular UI (localhost:4201)
@@ -461,7 +470,8 @@ unchanged):
   mutations); see "Retention".
 - **Control-plane is best-effort.** Alert-rule CRUD uses `ALTER TABLE ... UPDATE` mutations and
   `TryClaimFireAsync` is NON-ATOMIC (read-check-then-update), so under concurrent evaluators a
-  rule could double-fire. Acceptable because no host currently drives scheduled evaluation.
+  rule could double-fire. Acceptable because evaluation is a single `AlertEvaluationWorker` per API host
+  (see "Alerting"); only several API instances evaluating at once could double-fire.
 - **The anchors derived table is a `GROUP BY trace_id`** with `argMin` over `(start, id)` (see "Trace
   anchors"). ClickHouse resolves a SELECT alias over a same-named column in WHERE, so the aggregates are
   computed under non-colliding aliases in an inner query and renamed outside it.
@@ -483,7 +493,7 @@ DUPLICATE KEY UPDATE col = new.col` alias form.
 
 ### Key Patterns
 
-**Write path decoupling — `TelemetryIngestionChannel`** (Data, singleton): three unbounded
+**Write path decoupling — `TelemetryIngestionChannel`** (Core/Data, singleton): three unbounded
 `System.Threading.Channels` (one per signal type, `SingleReader = false`). Backpressure is not the
 channel's own capacity but a paired `RecordCountGate` per signal, bounding resident RECORDS (spans,
 not traces, for the trace signal) rather than resident batches — an OTLP export's size is entirely
@@ -735,9 +745,20 @@ tenants with enabled rules, dispatching each rule type to a registered `IAlertEv
 reads `ILogReadRepository.GetLogSummaryAsync` — the same summary path the traces/logs list pages use
 (see "Trace anchors" below), not a bespoke scan; `SlowTraceEvaluator` therefore counts inbound trace
 anchors whose own duration is over the threshold, the same duration the trace list shows. An atomic `TryClaimFireAsync` (UPDATE with cooldown check) prevents duplicate fires under
-load balancing. The API's `AlertsController` handles rule CRUD via `IAlertRuleRepository`. Note: no
-host currently registers a background worker that drives `EvaluateAllAsync` — evaluation must be
-invoked explicitly if you wire it up.
+load balancing. The API's `AlertsController` handles rule CRUD via `IAlertRuleRepository`. Evaluation is driven
+by `AlertEvaluationWorker` (a `BackgroundService` in `Api/Alerting`, registered by `AddAlerting(configuration)`,
+which `Api.Server` calls): it wakes every `Telemetry:AlertEvaluation:IntervalSeconds` (default 60), creates a DI
+scope and calls `IAlertService.EvaluateAllAsync`; `Telemetry:AlertEvaluation:Enabled=false` turns the loop off
+while leaving rule CRUD available.
+
+**Admin tool** (`src/Keryhe.Telemetry.Admin`, in the .sln): an interactive Spectre.Console console app, not a host.
+Menus for tenants and API keys: create a tenant, create a key (shows the plaintext `ktel_...` key once, stores
+only its SHA-256 hash through `Security/ApiKeyHashing`, optional expiry of 30/90/365 days or a UTC date), list keys,
+activate/deactivate (the revoke) and delete them. It talks to the database directly through `IAdminRepository` (`NpgsqlAdminRepository` for
+PostgreSQL/Timescale, `SqlServerAdminRepository`); MySql and ClickHouse are rejected at startup with an explicit
+message (use SQL, see docs/SETUP.md). `Database:Provider` comes from its `appsettings.json` and
+`ConnectionStrings:Admin` from its own User Secrets or the `ConnectionStrings__Admin` environment variable
+(none ships in appsettings). A revoke reaches a running collector within `PositiveCacheTtlSeconds` (30 s).
 
 **Retention** (`Keryhe.Telemetry.Api/Retention/`): the single application-level mechanism for
 telemetry retention, on every provider. `RetentionWorker`, a `BackgroundService` structurally
