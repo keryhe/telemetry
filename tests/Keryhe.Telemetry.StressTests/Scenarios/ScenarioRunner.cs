@@ -237,7 +237,6 @@ public static class ScenarioRunner
         try
         {
             using var request = new HttpRequestMessage(HttpMethod.Get, "api/capabilities");
-            request.Headers.Add("X-Tenant-Id", tenantId.ToString());
             using var response = await api.SendAsync(request, ct);
             if (!response.IsSuccessStatusCode) return null;
             using var doc = await JsonDocument.ParseAsync(await response.Content.ReadAsStreamAsync(ct), cancellationToken: ct);

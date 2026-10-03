@@ -68,6 +68,9 @@ public class ReportTests
     [InlineData("traces/{id}/spans", "traces/{}/spans")]
     [InlineData("api/metrics/by-name/{name}", "metrics/by-name/{}")]
     [InlineData("/api/Logs/page?x=1", "logs/page")]
+    [InlineData("api/tenants/{tenantId:long:min(1)}/Traces/{traceId}/spans", "traces/{}/spans")]
+    [InlineData("/api/tenants/7/logs/page?x=1", "logs/page")]
+    [InlineData("api/tenants", "tenants")]
     public void Server_routes_and_client_templates_meet_on_one_key(string route, string key) =>
         Assert.Equal(key, ScenarioAnalyzer.EndpointKey(route));
 

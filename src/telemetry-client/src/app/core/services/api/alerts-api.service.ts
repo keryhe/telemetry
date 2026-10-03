@@ -2,12 +2,17 @@ import { Injectable, inject } from '@angular/core';
 import { HttpClient, HttpParams } from '@angular/common/http';
 import { Observable } from 'rxjs';
 import { APP_CONFIG } from '../../config/app-config';
+import { TenantService } from '../tenant.service';
+import { tenantApiUrl } from './tenant-api-url';
 import { AlertEvent, AlertRule } from '../../models/alert.models';
 
 @Injectable({ providedIn: 'root' })
 export class AlertsApiService {
   private readonly http = inject(HttpClient);
-  private readonly base = `${inject(APP_CONFIG).apiUrl}/alerts`;
+  private readonly tenant = inject(TenantService);
+  private readonly apiUrl = inject(APP_CONFIG).apiUrl;
+  /** Resolved per call: the tenant is the route's, and changes with it. */
+  private get base(): string { return `${tenantApiUrl(this.apiUrl, this.tenant.requireTenantId())}/alerts`; }
 
   getRules(): Observable<AlertRule[]> {
     return this.http.get<AlertRule[]>(`${this.base}/rules`);

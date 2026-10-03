@@ -23,44 +23,46 @@ public static class TourPlan
     private const string NextPage = "button.mat-mdc-paginator-navigation-next:not([disabled])";
     private const int PagesToTurn = 3;
 
-    public static IReadOnlyList<TourStep> Build(string window, TourOptions options, TourData data)
+    public static IReadOnlyList<TourStep> Build(string window, TourOptions options, TourData data, long tenantId)
     {
+        // Tenant pages live under t/{tenantId}/ (a tenant-less URL would redirect there and cost every step a hop).
+        var t = $"t/{tenantId}/";
         string Range(string extra = "") => $"range={window}{extra}";
         string Q(string text) => $"&q={Uri.EscapeDataString(text)}";
         var steps = new List<TourStep>
         {
-            new("dashboard", "dashboard", [Cards, Chart], $"dashboard?{Range()}"),
+            new("dashboard", "dashboard", [Cards, Chart], $"{t}dashboard?{Range()}"),
 
-            new("traces", "traces", [Cards, Rows, Chart], $"traces?{Range()}"),
-            new("traces:errors", "traces", [Cards, Rows], $"traces?{Range("&mode=errors")}"),
-            new("traces:slow", "traces", [Cards, Rows], $"traces?{Range("&mode=slow")}"),
-            new("traces:search", "traces", [Cards, Rows], $"traces?{Range(Q(options.FreeText))}"),
-            new("traces:attribute-search", "traces", [Cards, Rows], $"traces?{Range(Q(options.KeyValue))}"),
+            new("traces", "traces", [Cards, Rows, Chart], $"{t}traces?{Range()}"),
+            new("traces:errors", "traces", [Cards, Rows], $"{t}traces?{Range("&mode=errors")}"),
+            new("traces:slow", "traces", [Cards, Rows], $"{t}traces?{Range("&mode=slow")}"),
+            new("traces:search", "traces", [Cards, Rows], $"{t}traces?{Range(Q(options.FreeText))}"),
+            new("traces:attribute-search", "traces", [Cards, Rows], $"{t}traces?{Range(Q(options.KeyValue))}"),
         };
 
-        steps.Add(Navigate("traces:list", "traces", $"traces?{Range()}", [Cards, Rows]));
+        steps.Add(Navigate("traces:list", "traces", $"{t}traces?{Range()}", [Cards, Rows]));
         for (var i = 1; i <= PagesToTurn; i++)
             steps.Add(Click($"traces:next-{i}", "traces", NextPage, [Rows]));
         steps.Add(new("trace-detail", "trace-detail", ["app-trace-waterfall, .waterfall, svg, mat-card"], Act: OpenFirstRow));
 
-        steps.Add(new("metrics", "metrics", [Cards, Rows], $"metrics?{Range()}"));
+        steps.Add(new("metrics", "metrics", [Cards, Rows], $"{t}metrics?{Range()}"));
         if (data.Service is not null)
-            steps.Add(new("metrics:service", "metrics", [Cards, Rows], $"metrics?{Range($"&service={Uri.EscapeDataString(data.Service)}")}"));
+            steps.Add(new("metrics:service", "metrics", [Cards, Rows], $"{t}metrics?{Range($"&service={Uri.EscapeDataString(data.Service)}")}"));
         // Metric detail is reached by clicking through the list, never by deep link: OTel metric names contain dots,
         // and a hard load of /metrics/<dotted.name> is answered 404 by the UI host's "nonfile" fallback route.
         if (data.HistogramMetric is not null)
         {
-            steps.AddRange(Detail("histogram", data.HistogramMetric, Range));
+            steps.AddRange(Detail("histogram", data.HistogramMetric, Range, t));
             steps.Add(Click("metric-detail:histogram-group-all", "metric-detail", "mat-button-toggle:has-text('All') button", [Chart], requiresApi: false));
         }
         if (data.SumMetric is not null)
-            steps.AddRange(Detail("sum", data.SumMetric, Range));
+            steps.AddRange(Detail("sum", data.SumMetric, Range, t));
 
-        steps.Add(new("logs", "logs", [Cards, Rows], $"logs?{Range()}"));
-        steps.Add(new("logs:min-severity", "logs", [Cards, Rows], $"logs?{Range("&severity=13")}"));
-        steps.Add(new("logs:search", "logs", [Cards, Rows], $"logs?{Range(Q(options.FreeText))}"));
-        steps.Add(new("logs:attribute-search", "logs", [Cards, Rows], $"logs?{Range(Q(options.KeyValue))}"));
-        steps.Add(Navigate("logs:list", "logs", $"logs?{Range()}", [Cards, Rows]));
+        steps.Add(new("logs", "logs", [Cards, Rows], $"{t}logs?{Range()}"));
+        steps.Add(new("logs:min-severity", "logs", [Cards, Rows], $"{t}logs?{Range("&severity=13")}"));
+        steps.Add(new("logs:search", "logs", [Cards, Rows], $"{t}logs?{Range(Q(options.FreeText))}"));
+        steps.Add(new("logs:attribute-search", "logs", [Cards, Rows], $"{t}logs?{Range(Q(options.KeyValue))}"));
+        steps.Add(Navigate("logs:list", "logs", $"{t}logs?{Range()}", [Cards, Rows]));
         // The fields sidebar starts collapsed: open it, then open the first field's values.
         steps.Add(Click("logs:facets-open", "logs", "button:has(.fields-toggle-icon)", [".facet-key, .facet-empty"], requiresApi: false));
         steps.Add(Click("logs:facet-values", "logs", ".facet-key", [".facet-value"], requiresApi: false));
@@ -68,23 +70,23 @@ public static class TourPlan
             steps.Add(Click($"logs:next-{i}", "logs", NextPage, [Rows]));
         steps.Add(Click("logs:context", "logs", "tr.log-row", ["tr.detail-row .ctx-val, tr.detail-row"], requiresApi: false));
 
-        steps.Add(new("alerts", "alerts", ["mat-card, table, app-empty-state"], "alerts"));
+        steps.Add(new("alerts", "alerts", ["mat-card, table, app-empty-state"], $"{t}alerts"));
         steps.Add(new("settings", "settings", ["mat-form-field"], "settings"));
 
         if (options.Export)
         {
-            steps.Add(Navigate("export:traces-page", "traces", $"traces?{Range()}", [Cards, Rows]));
+            steps.Add(Navigate("export:traces-page", "traces", $"{t}traces?{Range()}", [Cards, Rows]));
             steps.Add(Export("export:traces"));
-            steps.Add(Navigate("export:logs-page", "logs", $"logs?{Range()}", [Cards, Rows]));
+            steps.Add(Navigate("export:logs-page", "logs", $"{t}logs?{Range()}", [Cards, Rows]));
             steps.Add(Export("export:logs"));
         }
         return steps;
     }
 
     /// <summary>Filters the catalog to one metric, then opens it from the list, as a user would.</summary>
-    private static IEnumerable<TourStep> Detail(string kind, string metric, Func<string, string> range)
+    private static IEnumerable<TourStep> Detail(string kind, string metric, Func<string, string> range, string t)
     {
-        yield return new TourStep($"metrics:find-{kind}", "metrics", [Rows], $"metrics?{range($"&q={Uri.EscapeDataString(metric)}")}");
+        yield return new TourStep($"metrics:find-{kind}", "metrics", [Rows], $"{t}metrics?{range($"&q={Uri.EscapeDataString(metric)}")}");
         yield return new TourStep($"metric-detail:{kind}", "metric-detail", [Cards, Chart],
             Act: p => p.Locator($"a.metric-link:text-is('{metric}')").First.ClickAsync());
     }

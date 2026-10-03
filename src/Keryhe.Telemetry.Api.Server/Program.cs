@@ -99,12 +99,16 @@ app.UseRouting();
 // .br/.gz for the packaged SPA itself and short-circuits before this middleware runs.
 app.UseResponseCompression();
 
-// CORS before tenant middleware so OPTIONS preflight requests pass through.
+// CORS before authentication so OPTIONS preflight requests pass through.
 app.UseCors("Angular");
 
-app.UseKeryheTelemetryApi();
+// Authentication/authorization middleware. This development host registers no authentication
+// scheme, so these are no-ops here; a consumer host registers its own scheme and policies (see the
+// Api README). The library authorizes its own actions, so nothing is required on the endpoints.
+app.UseAuthentication();
+app.UseAuthorization();
 
-app.MapControllers();
+app.MapKeryheTelemetryApi();
 
 // Anything not matched by an api/* controller or a real file is an Angular
 // client-side route (/traces/:id, /metrics/:name, ...) — serve the SPA shell so

@@ -13,6 +13,9 @@ public class BrowserTourTests
     [InlineData("http://h/api/metrics/labels/http.server.duration?x=1", "metrics/labels/{name}")]
     [InlineData("http://h/api/logs/context?id=7", "logs/context")]
     [InlineData("/api/alerts/rules/42", "alerts/rules/{n}")]
+    [InlineData("http://h/api/tenants/3/traces/summary?start=1", "traces/summary")]
+    [InlineData("/api/tenants/12/alerts/rules/42", "alerts/rules/{n}")]
+    [InlineData("/api/tenants", "tenants")]
     public void Api_urls_become_stable_templates(string url, string template) =>
         Assert.Equal(template, ApiRequestNormalizer.Template(url));
 
@@ -40,7 +43,7 @@ public class BrowserTourTests
     [Fact]
     public void Plan_covers_every_page_in_order_and_deep_links_the_window()
     {
-        var steps = TourPlan.Build("6h", new TourOptions(), Full);
+        var steps = TourPlan.Build("6h", new TourOptions(), Full, 1);
         var names = steps.Select(s => s.Name).ToList();
 
         Assert.Equal("dashboard", names[0]);
@@ -53,21 +56,21 @@ public class BrowserTourTests
         Assert.All(steps.Where(s => s.RelativeUrl is not null && s.Page is not ("alerts" or "settings")),
             s => Assert.Contains("range=6h", s.RelativeUrl));
         Assert.All(steps, s => Assert.True((s.RelativeUrl is null) ^ (s.Act is null), s.Name));
-        Assert.Contains(steps, s => s.RelativeUrl == "traces?range=6h&mode=errors");
-        Assert.Contains(steps, s => s.RelativeUrl == "traces?range=6h&mode=slow");
-        Assert.Contains(steps, s => s.RelativeUrl == "logs?range=6h&severity=13");
+        Assert.Contains(steps, s => s.RelativeUrl == "t/1/traces?range=6h&mode=errors");
+        Assert.Contains(steps, s => s.RelativeUrl == "t/1/traces?range=6h&mode=slow");
+        Assert.Contains(steps, s => s.RelativeUrl == "t/1/logs?range=6h&severity=13");
         // Dotted metric names are never deep-linked (the UI host 404s them); the detail is opened from a filtered list.
-        Assert.Contains(steps, s => s.RelativeUrl == "metrics?range=6h&q=latency.ms");
-        Assert.DoesNotContain(steps, s => s.RelativeUrl?.StartsWith("metrics/") == true);
+        Assert.Contains(steps, s => s.RelativeUrl == "t/1/metrics?range=6h&q=latency.ms");
+        Assert.DoesNotContain(steps, s => s.RelativeUrl?.StartsWith("t/1/metrics/") == true);
         Assert.Contains(steps, s => s.Name == "metric-detail:histogram" && s.Act is not null);
-        Assert.Contains(steps, s => s.RelativeUrl == "traces?range=6h&q=attr.k0%3Av1");
+        Assert.Contains(steps, s => s.RelativeUrl == "t/1/traces?range=6h&q=attr.k0%3Av1");
     }
 
     [Fact]
     public void Exports_are_off_by_default_and_on_when_asked()
     {
-        Assert.DoesNotContain(TourPlan.Build("1h", new TourOptions(), Full), s => s.Name.StartsWith("export:"));
-        var on = TourPlan.Build("1h", new TourOptions { Export = true }, Full);
+        Assert.DoesNotContain(TourPlan.Build("1h", new TourOptions(), Full, 1), s => s.Name.StartsWith("export:"));
+        var on = TourPlan.Build("1h", new TourOptions { Export = true }, Full, 1);
         Assert.Contains(on, s => s.Name == "export:traces");
         Assert.Contains(on, s => s.Name == "export:logs");
     }
@@ -75,7 +78,7 @@ public class BrowserTourTests
     [Fact]
     public void Undiscovered_metrics_and_service_are_left_out_of_the_plan()
     {
-        var names = TourPlan.Build("1h", new TourOptions(), new TourData(null, null, null)).Select(s => s.Name).ToList();
+        var names = TourPlan.Build("1h", new TourOptions(), new TourData(null, null, null), 1).Select(s => s.Name).ToList();
         Assert.DoesNotContain(names, n => n.StartsWith("metric-detail"));
         Assert.DoesNotContain("metrics:service", names);
         Assert.Contains("metrics", names);

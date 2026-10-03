@@ -177,3 +177,25 @@
   // data below it. `text-align` is kept here for any non-sort-header numeric column.
   th.num { text-align: right; }
 }
+
+/* The summary timed out: stands in for the chart card (same look as the metric detail page's timeout banner). */
+.timeout-banner {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin: 16px 0;
+  padding: 10px 12px;
+  border-radius: 4px;
+  background: rgba(255, 152, 0, 0.12);
+  color: var(--mat-sys-on-surface);
+  font-size: 13px;
+  line-height: 20px;
+
+  mat-icon {
+    color: #FF9800;
+    flex-shrink: 0;
+    font-size: 20px;
+    width: 20px;
+    height: 20px;
+  }
+}

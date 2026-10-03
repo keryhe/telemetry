@@ -3,6 +3,8 @@ import { HttpClient, HttpParams } from '@angular/common/http';
 import { Observable } from 'rxjs';
 import { map } from 'rxjs/operators';
 import { APP_CONFIG } from '../../config/app-config';
+import { TenantService } from '../tenant.service';
+import { tenantApiUrl } from './tenant-api-url';
 import {
   InstrumentationScopeModel, OperationStats, ResourceModel, ServiceDependency, ServiceStats, SpanModel, TraceInfo,
 } from '../../models/trace.models';
@@ -54,7 +56,7 @@ export interface TraceWindowSummary {
   p99Ms: number;
 }
 
-/** `GET /api/traces/{id}/spans`: spans plus the distinct resources and scopes they refer to by index. */
+/** `GET /api/tenants/{tenantId}/traces/{id}/spans`: spans plus the distinct resources and scopes they refer to by index. */
 interface TraceDetailDto {
   resources: ResourceModel[];
   scopes: InstrumentationScopeModel[];
@@ -70,6 +72,7 @@ interface TraceSummaryDto {
   listTotal: number;
   requestCount: number;
   totalIsLowerBound: boolean;
+  timedOut: boolean;
   asOf: string;
 }
 
@@ -82,6 +85,8 @@ export interface TraceSummaryResult {
   listTotal: number;
   requestCount: number;
   totalIsLowerBound: boolean;
+  /** The server's anchor scan ran out of time: buckets/summary/services/latencyBuckets are empty (not "no traces") and listTotal is a capped count. */
+  timedOut: boolean;
   asOf: string;
 }
 
@@ -95,7 +100,10 @@ export interface TracePageResult {
 @Injectable({ providedIn: 'root' })
 export class TracesApiService {
   private readonly http = inject(HttpClient);
-  private readonly base = `${inject(APP_CONFIG).apiUrl}/traces`;
+  private readonly tenant = inject(TenantService);
+  private readonly apiUrl = inject(APP_CONFIG).apiUrl;
+  /** Resolved per call: the tenant is the route's, and changes with it. */
+  private get base(): string { return `${tenantApiUrl(this.apiUrl, this.tenant.requireTenantId())}/traces`; }
 
   /** Chart/stat-card summary — volume/error/duration buckets, per-service RED stats, the latency heatmap, and listTotal/requestCount (decision 13). */
   getTraceSummary(query: TraceSummaryQuery): Observable<TraceSummaryResult> {
@@ -112,6 +120,7 @@ export class TracesApiService {
         listTotal: dto.listTotal,
         requestCount: dto.requestCount,
         totalIsLowerBound: dto.totalIsLowerBound,
+        timedOut: dto.timedOut ?? false,
         asOf: dto.asOf,
       }))
     );
@@ -186,7 +195,7 @@ export class TracesApiService {
   /**
    * Streaming export (list-pages-server-side plan, Phase 8): one trace-summary row per trace, same
    * filters as {@link getTraceSummary}/{@link getTracePage}. Fetched as a Blob so the
-   * `X-Tenant-Id` interceptor still runs — see `downloadBlob`'s doc comment.
+   * auth interceptor still runs — see `downloadBlob`'s doc comment.
    */
   getTraceExport(query: TraceListFilter, format: 'ndjson' | 'csv'): Observable<Blob> {
     const params = this.filterParams(query).set('format', format);

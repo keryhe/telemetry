@@ -5,12 +5,14 @@ using Keryhe.Telemetry.Core;
 using Keryhe.Telemetry.Core.Data.Read;
 using Keryhe.Telemetry.Core.Models;
 using Microsoft.AspNetCore.Http;
+using Keryhe.Telemetry.Api.Authorization;
 using Microsoft.AspNetCore.Mvc;
 
 namespace Keryhe.Telemetry.Api.Controllers;
 
 [ApiController]
-[Route("api/traces")]
+[TenantScoped]
+[Route("traces")]
 public class TracesController : ControllerBase
 {
     private readonly ITraceReadRepository _traces;
@@ -24,7 +26,8 @@ public class TracesController : ControllerBase
         _exportGate = exportGate;
     }
 
-    // GET /api/traces/summary?start=&end=&asOf=&mode=&service=&operation=&minDurationMs=&maxDurationMs=&q=&bucketCount=&latencyDurationRows=
+    // GET /api/tenants/{tenantId}/traces/summary?start=&end=&asOf=&mode=&service=&operation=&minDurationMs=&maxDurationMs=&q=&bucketCount=&latencyDurationRows=
+    [TelemetryOperation(TelemetryOperation.Read)]
     [HttpGet("summary")]
     public async Task<ActionResult<TraceSummaryResult>> GetSummary(
         [FromQuery] DateTime start,
@@ -64,7 +67,8 @@ public class TracesController : ControllerBase
         return Ok(result);
     }
 
-    // GET /api/traces/page?start=&end=&asOf=&mode=&service=&operation=&minDurationMs=&maxDurationMs=&q=&size=&cursor=&nav=
+    // GET /api/tenants/{tenantId}/traces/page?start=&end=&asOf=&mode=&service=&operation=&minDurationMs=&maxDurationMs=&q=&size=&cursor=&nav=
+    [TelemetryOperation(TelemetryOperation.Read)]
     [HttpGet("page")]
     public async Task<ActionResult<TracePageResult>> GetPage(
         [FromQuery] DateTime start,
@@ -113,7 +117,8 @@ public class TracesController : ControllerBase
         }
     }
 
-    // GET /api/traces/samples?start=&end=&kind=errors|slowest&limit=
+    // GET /api/tenants/{tenantId}/traces/samples?start=&end=&kind=errors|slowest&limit=
+    [TelemetryOperation(TelemetryOperation.Read)]
     [HttpGet("samples")]
     public async Task<ActionResult<List<TraceInfo>>> GetSamples(
         [FromQuery] DateTime start,
@@ -148,13 +153,14 @@ public class TracesController : ControllerBase
         return RawSearchWindowGuard.Check(_capabilities, hasRawSearchFilter, isExempt, end - start);
     }
 
-    // GET /api/traces/{traceId}/spans?start=&end=
+    // GET /api/tenants/{tenantId}/traces/{traceId}/spans?start=&end=
     /// <summary>
     /// The trace's spans, with each distinct resource and instrumentation scope listed once (<see cref="TraceDetailResponse"/>).
     /// <c>start</c> and <c>end</c> are optional and used together: the trace's extent as the list returns it
     /// (<c>traceStartTime</c>/<c>traceEndTime</c>), which lets a provider that cannot seek a trace id (Timescale, ClickHouse) read only
     /// that range. With either one missing the read is unbounded and the trace whole.
     /// </summary>
+    [TelemetryOperation(TelemetryOperation.Read)]
     [HttpGet("{traceId}/spans")]
     public async Task<ActionResult<TraceDetailResponse>> GetSpans(
         string traceId, [FromQuery] DateTime? start = null, [FromQuery] DateTime? end = null, CancellationToken ct = default)
@@ -166,7 +172,8 @@ public class TracesController : ControllerBase
         return Ok(TraceDetailResponse.From(spans));
     }
 
-    // GET /api/traces/dependencies?start=&end=
+    // GET /api/tenants/{tenantId}/traces/dependencies?start=&end=
+    [TelemetryOperation(TelemetryOperation.Read)]
     [HttpGet("dependencies")]
     public async Task<ActionResult<List<ServiceDependency>>> GetDependencies(
         [FromQuery] DateTime? start,
@@ -177,7 +184,8 @@ public class TracesController : ControllerBase
         return Ok(deps);
     }
 
-    // GET /api/traces/operations?service=&start=&end=
+    // GET /api/tenants/{tenantId}/traces/operations?service=&start=&end=
+    [TelemetryOperation(TelemetryOperation.Read)]
     [HttpGet("operations")]
     public async Task<ActionResult<Dictionary<string, int>>> GetOperationCounts(
         [FromQuery] string service,
@@ -191,8 +199,9 @@ public class TracesController : ControllerBase
         return Ok(counts);
     }
 
-    // GET /api/traces/operations/stats?service=&start=&end=
+    // GET /api/tenants/{tenantId}/traces/operations/stats?service=&start=&end=
     // Per-operation RED metrics (rate, error%, p50/p95/p99, avg) for the Analytics tab.
+    [TelemetryOperation(TelemetryOperation.Read)]
     [HttpGet("operations/stats")]
     public async Task<ActionResult<List<OperationStats>>> GetOperationStats(
         [FromQuery] string service,
@@ -206,7 +215,8 @@ public class TracesController : ControllerBase
         return Ok(stats);
     }
 
-    // GET /api/traces/latencies?service=&start=&end=
+    // GET /api/tenants/{tenantId}/traces/latencies?service=&start=&end=
+    [TelemetryOperation(TelemetryOperation.Read)]
     [HttpGet("latencies")]
     public async Task<ActionResult<Dictionary<string, double>>> GetAverageLatencies(
         [FromQuery] string service,
@@ -221,12 +231,13 @@ public class TracesController : ControllerBase
     }
 
     /// <summary>
-    /// GET /api/traces/export?start=&end=&mode=&service=&operation=&minDurationMs=&maxDurationMs=&q=&format=ndjson|csv
+    /// GET /api/tenants/{tenantId}/traces/export?start=&end=&mode=&service=&operation=&minDurationMs=&maxDurationMs=&q=&format=ndjson|csv
     /// Phase 8 (list-pages-server-side plan, decision 17): one trace-summary row per trace, same
     /// filters as <see cref="GetSummary"/>/<see cref="GetPage"/>, streamed with no row cap.
     /// Span-level export is out of scope (Target API/plan text). Same window/concurrency limits as
     /// the logs export — see <see cref="LogsController.GetExport"/>'s doc comment.
     /// </summary>
+    [TelemetryOperation(TelemetryOperation.Export)]
     [HttpGet("export")]
     public async Task<IActionResult> GetExport(
         [FromQuery] DateTime start,

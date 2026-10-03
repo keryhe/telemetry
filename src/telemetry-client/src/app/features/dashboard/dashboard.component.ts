@@ -1,3 +1,4 @@
+import { TenantService } from '../../core/services/tenant.service';
 import { Component, DestroyRef, OnInit, computed, effect, inject, signal, untracked } from '@angular/core';
 import { DatePipe, DecimalPipe, PercentPipe } from '@angular/common';
 import { Router, RouterLink } from '@angular/router';
@@ -31,6 +32,7 @@ import {
   formatDuration, parseDotnetTimespan, PERCENTILE_COLORS, timeRangeZoom,
 } from '../../shared/utils/chart.utils';
 import { loadPageState, savePageState } from '../../shared/utils/page-state';
+import { SUMMARY_TIMEOUT_TOOLTIP } from '../../shared/utils/summary-total';
 import {
   HEALTH_THRESHOLDS_TOKEN, HealthColor, classifyErrorRate,
 } from '../../shared/config/health-thresholds';
@@ -59,6 +61,7 @@ export class DashboardComponent {
   private readonly timeRange = inject(TimeRangeService);
   private readonly theme = inject(ThemeService);
   private readonly router = inject(Router);
+  protected readonly tenant = inject(TenantService);
   private readonly destroyRef = inject(DestroyRef);
   private readonly thresholds = inject(HEALTH_THRESHOLDS_TOKEN);
 
@@ -89,6 +92,13 @@ export class DashboardComponent {
   private logHistogram = signal<LogBucket[]>([]);
   /** Per-service RED stats — comes from the same `/overview` fetch as `traceHistogram`, not a separate request. */
   protected serviceStats = signal<ServiceStats[]>([]);
+  /**
+   * The trace/log summary ran past the server's time budget, so `traceHistogram`/`serviceStats` (or `logHistogram`) are
+   * empty for want of data, not because nothing happened: the cards and charts they back say so instead of showing 0.
+   */
+  protected traceSummaryTimedOut = signal(false);
+  protected logSummaryTimedOut = signal(false);
+  protected readonly summaryTimeoutTooltip = SUMMARY_TIMEOUT_TOOLTIP;
 
   protected totalTraces = computed(() => this.traceHistogram().reduce((a, b) => a + b.count, 0));
   protected errorTraces = computed(() => this.traceHistogram().reduce((a, b) => a + b.errorCount, 0));
@@ -223,6 +233,8 @@ export class DashboardComponent {
       next: ({ summary, recentErrors, slowest, logSummary }) => {
         this.traceHistogram.set(summary.buckets);
         this.serviceStats.set(summary.services);
+        this.traceSummaryTimedOut.set(summary.timedOut);
+        this.logSummaryTimedOut.set(logSummary.timedOut);
         this.recentErrors.set(recentErrors);
         this.slowTraces.set(slowest);
         this.logHistogram.set(logSummary.buckets);
@@ -315,7 +327,7 @@ export class DashboardComponent {
     const queryParams: Record<string, string> = {};
     if (spanId) queryParams['span'] = spanId;
     if (start && end) { queryParams['start'] = start; queryParams['end'] = end; } // lets the detail read be bounded (Timescale, ClickHouse)
-    this.router.navigate(['/traces', traceId], Object.keys(queryParams).length ? { queryParams } : undefined);
+    this.router.navigate(this.tenant.link('traces', traceId), Object.keys(queryParams).length ? { queryParams } : undefined);
   }
 
   protected durationMs(trace: TraceInfo): number {

@@ -5,12 +5,14 @@ using Keryhe.Telemetry.Core.Data;
 using Keryhe.Telemetry.Core.Data.Read;
 using Keryhe.Telemetry.Core.Models;
 using Microsoft.AspNetCore.Http;
+using Keryhe.Telemetry.Api.Authorization;
 using Microsoft.AspNetCore.Mvc;
 
 namespace Keryhe.Telemetry.Api.Controllers;
 
 [ApiController]
-[Route("api/logs")]
+[TenantScoped]
+[Route("logs")]
 public class LogsController : ControllerBase
 {
     private readonly ILogReadRepository _logs;
@@ -24,7 +26,8 @@ public class LogsController : ControllerBase
         _exportGate = exportGate;
     }
 
-    // GET /api/logs?start=&end=
+    // GET /api/tenants/{tenantId}/logs?start=&end=
+    [TelemetryOperation(TelemetryOperation.Read)]
     [HttpGet]
     public async Task<ActionResult<IEnumerable<LogRecordModel>>> GetLogs(
         [FromQuery] DateTime start,
@@ -35,7 +38,8 @@ public class LogsController : ControllerBase
         return Ok(logs);
     }
 
-    // GET /api/logs/summary?start=&end=&asOf=&service=&minSeverity=&q=&bucketCount=
+    // GET /api/tenants/{tenantId}/logs/summary?start=&end=&asOf=&service=&minSeverity=&q=&bucketCount=
+    [TelemetryOperation(TelemetryOperation.Read)]
     [HttpGet("summary")]
     public async Task<ActionResult<LogSummaryResult>> GetSummary(
         [FromQuery] DateTime start,
@@ -67,7 +71,8 @@ public class LogsController : ControllerBase
         return Ok(result);
     }
 
-    // GET /api/logs/page?start=&end=&asOf=&service=&minSeverity=&q=&size=&cursor=&nav=
+    // GET /api/tenants/{tenantId}/logs/page?start=&end=&asOf=&service=&minSeverity=&q=&size=&cursor=&nav=
+    [TelemetryOperation(TelemetryOperation.Read)]
     [HttpGet("page")]
     public async Task<ActionResult<LogPageResult>> GetPage(
         [FromQuery] DateTime start,
@@ -110,7 +115,8 @@ public class LogsController : ControllerBase
         }
     }
 
-    // GET /api/logs/facets?start=&end=&service=&minSeverity=&q=&keys=&valueLimit=
+    // GET /api/tenants/{tenantId}/logs/facets?start=&end=&service=&minSeverity=&q=&keys=&valueLimit=
+    [TelemetryOperation(TelemetryOperation.Read)]
     [HttpGet("facets")]
     public async Task<ActionResult<LogFacetsResult>> GetFacets(
         [FromQuery] DateTime start,
@@ -155,7 +161,8 @@ public class LogsController : ControllerBase
         return RawSearchWindowGuard.Check(_capabilities, hasRawSearchFilter, isExempt, end - start);
     }
 
-    // GET /api/logs/by-trace/{traceId}
+    // GET /api/tenants/{tenantId}/logs/by-trace/{traceId}
+    [TelemetryOperation(TelemetryOperation.Read)]
     [HttpGet("by-trace/{traceId}")]
     public async Task<ActionResult<IEnumerable<LogRecordModel>>> GetLogsByTrace(
         string traceId,
@@ -165,8 +172,9 @@ public class LogsController : ControllerBase
         return Ok(logs);
     }
 
-    // GET /api/logs/context?anchor=<timeUnixNano>&service=&before=&after=
+    // GET /api/tenants/{tenantId}/logs/context?anchor=<timeUnixNano>&service=&before=&after=
     // The N log records before/after the anchor timestamp for the same service, ignoring list filters.
+    [TelemetryOperation(TelemetryOperation.Read)]
     [HttpGet("context")]
     public async Task<ActionResult<IEnumerable<LogRecordModel>>> GetContext(
         [FromQuery] long anchor,
@@ -180,7 +188,7 @@ public class LogsController : ControllerBase
     }
 
     /// <summary>
-    /// GET /api/logs/export?start=&end=&service=&minSeverity=&q=&format=ndjson|csv
+    /// GET /api/tenants/{tenantId}/logs/export?start=&end=&service=&minSeverity=&q=&format=ndjson|csv
     /// Phase 8 (list-pages-server-side plan, decision 17): full records, same filters as
     /// <see cref="GetSummary"/>/<see cref="GetPage"/>, streamed with no row cap. Bounded to
     /// <see cref="ProviderCapabilities.ExportMaxWindowDays"/> (400 beyond it) and
@@ -188,6 +196,7 @@ public class LogsController : ControllerBase
     /// MVC to <c>HttpContext.RequestAborted</c>, which is what propagates a client disconnect down
     /// into the repository's own cancellation-aware read.
     /// </summary>
+    [TelemetryOperation(TelemetryOperation.Export)]
     [HttpGet("export")]
     public async Task<IActionResult> GetExport(
         [FromQuery] DateTime start,

@@ -183,6 +183,48 @@ decisions are in `plans/test-data-generator-realism.md`. The shape worth knowing
   and the simulation is deterministic, so the ids repeat). Truncate the hot tables first (leave the
   reference tables alone: the host's `ResourceScopeCache` would then point at rows that no longer exist).
 
+### API base path, routes and authorization
+
+`Keryhe.Telemetry.Api` is meant to be mounted inside a consumer's host
+(`plans/api-base-path-authorization.md`; the full consumer setup is its README). The shape worth knowing:
+
+- **Base path.** `Telemetry:Api:BasePath` (`TelemetryApiOptions`, default `/api`; `/`/empty rejected at startup)
+  prefixes every route. Controllers declare only their own segment (`[Route("traces")]`); `TelemetryApiConvention`
+  (an `IApplicationModelConvention`, this assembly's controllers only) adds the base path, plus
+  `tenants/{tenantId:long:min(1)}` for `[TenantScoped]` controllers (`Traces`, `Logs`, `Metrics`, `Resources`,
+  `Alerts`; `Capabilities`, `Tenants`, `Settings` are global) and the authorization filter.
+  `MapKeryheTelemetryApi()` (replaces `MapControllers()`) also maps `{base}/{**rest}` to a JSON 404 so an unknown API
+  path is not the SPA shell. `UseKeryheTelemetryApi()` is an `[Obsolete]` no-op: `TenantMiddleware` and `X-Tenant-Id`
+  are gone, the tenant is the route's `tenantId`.
+- **Authorization** (`Telemetry:Api:Authorization`, off by default). `TelemetryAuthorizationFilter` calls
+  `IAuthorizationService` with `TelemetryOperationRequirement` (each action carries exactly one
+  `[TelemetryOperation]`: Read/Export/ManageAlerts/ManageSettings, never inferred from the HTTP method; a test
+  enumerates every action) and, on tenant routes, `TenantAccessRequirement`, resource `TelemetryResource(tenantId)`.
+  Built-in handlers: `PolicyMappedOperationHandler` (operation -> a host-registered policy by name; Export falls back
+  to Read, ManageAlerts/ManageSettings to Admin, Read/Admin to the default policy) and
+  `ClaimMappedTenantAccessHandler` (`TenantMappings`: claim -> tenant names/ids/`"*"`, names resolved through
+  `ITenantCatalogRepository`, cached 30 s). A consumer adds ordinary handlers (`context.Fail()` narrows). 401 when
+  unauthenticated, 403 otherwise (a tenant refusal adds `X-Telemetry-Denied: tenant`, which the UI's
+  "no access to this tenant" keys on; an operation refusal does not); a `POST/PUT/DELETE` without a *bearer* token
+  needs `X-Telemetry-Client: 1` (CSRF; Basic/Negotiate do not exempt, browsers send those unprompted). A policy that
+  names `AuthenticationSchemes` is authenticated through `IPolicyEvaluator` first (`TelemetryPolicyResolver` maps the
+  operation to its policy), as the ASP.NET authorization middleware does.
+  `TelemetryApiStartupValidator` fails startup on undefined policies, no authentication scheme, malformed mappings, or
+  nothing able to grant tenant access, and warns when unauthenticated outside Development / Admin unset.
+  `AlertService.EvaluateAllAsync` sets `ITenantContext` directly, outside any request, so the filter never applies to it.
+- **The in-repo hosts are development examples** with no sign-in: they call `UseAuthentication()`/`UseAuthorization()`
+  (no-ops without a scheme) and `MapKeryheTelemetryApi()` and run with authorization disabled. The HTTP behaviour is tested
+  in-process by `tests/Keryhe.Telemetry.IntegrationTests/ApiHttp` (`--filter Suite=ApiHttp`; `TestServer`, fake
+  repositories, a header-driven test scheme, no Docker). A route whose repository is not faked answers 500 once it
+  clears authorization, which those tests read as "authorized".
+- **The UI** follows the API: with `TelemetryUi:ApiBasePath` unset it takes `Telemetry:Api:BasePath`. Its pages are at
+  `/t/:tenantId/...` (`tenantRouteGuard` sets `TenantService.routeTenantId` before the page exists; localStorage keeps
+  only "last used", used by the redirects of the old tenant-less URLs); API services build URLs with
+  `tenantApiUrl(apiUrl, tenantId)`. `TelemetryUi:Auth` (`cookie` default, or `oidc` via `angular-auth-oidc-client`,
+  imported on demand) reaches the SPA in `config.json`; `authInterceptor` (API URLs only) adds `X-Telemetry-Client`,
+  the bearer token or credentials, handles 401 (sign in) and 403 on a tenant route ("no access to this tenant").
+  `downloadBlob` stays a fetch so that interceptor runs for exports.
+
 ### Default ports
 
 - gRPC ingestion (`Keryhe.Telemetry.Collector.Server`): `http://localhost:5117` (h2c), `https://localhost:7057` (HTTP/2)
@@ -242,8 +284,8 @@ host that sets nothing sees exactly what it always has. `config.json` also carri
 `TelemetryUi:HealthThresholds` overrides for the Dashboard's error-rate bands, only the keys
 that are set (the defaults live in `health-thresholds.ts`, merged over in `main.ts` by
 `resolveHealthThresholds`; `TelemetryUiOptions.Validate()` fails startup on a bad value). It must
-run before the tenant middleware,
-so UI asset requests — `config.json` included — skip scoped tenant resolution, and it also
+run before authentication,
+so UI asset requests — `config.json` included — are public, and it also
 negotiates `.br`/`.gz` variants that the SDK generates automatically at the *host's* publish
 (`Keryhe.Telemetry.Ui` itself has no compressed variants — `MapStaticAssets()` would give that
 negotiation for free but can't be re-rooted for a referenced class library's assets, so
@@ -288,8 +330,8 @@ pre-selects an endpoint before the UI's own static-file middleware runs, and `Us
 correctly defers to an already-selected endpoint rather than serving. The shell itself is no longer
 exposed to this (it is written from memory, ahead of routing, without consulting the selected
 endpoint — which is what retired the old `net::ERR_CONTENT_DECODING_FAILED` symptom on `/`), but
-every other asset still is, and the implicit insertion also silently moves `UseCors` and the tenant
-middleware to the wrong side of routing.
+every other asset still is, and the implicit insertion also silently moves `UseCors` and
+`UseAuthentication`/`UseAuthorization` to the wrong side of routing.
 
 Because static web assets flow through a plain `ProjectReference` at *build* time, not only at
 publish, `dotnet run --project src/Keryhe.Telemetry.Api.Server` now serves the UI too — unlike the
@@ -317,7 +359,7 @@ REST API consumed by an Angular single-page application.
 | `Keryhe.Telemetry.MySql` | MySQL provider implementation (MySqlConnector + Dapper) |
 | `Keryhe.Telemetry.Collector` | gRPC services + OpenTelemetry proto files → generated stubs (class library) |
 | `Keryhe.Telemetry.Collector.Server` | Thin ASP.NET Core host that maps the gRPC services and runs the ingestion worker |
-| `Keryhe.Telemetry.Api` | REST API controllers, tenant middleware, and read-service wiring (class library) |
+| `Keryhe.Telemetry.Api` | REST API controllers, base-path routing, authorization, and read-service wiring (class library) |
 | `Keryhe.Telemetry.Api.Server` | Thin ASP.NET Core host that composes the API + OpenAPI + CORS |
 | `Keryhe.Telemetry.Server` | All-in-one host: gRPC ingestion + REST API + Angular UI in one process |
 | `Keryhe.Telemetry.Ui` | Prebuilt Angular UI, packaged as static web assets (Razor class library; no .razor/.cshtml) |
@@ -642,8 +684,9 @@ charted point is approximate.
 data-point tables get neither `tenant_id` nor `service_name`, because `metric_id` already identifies
 exactly one tenant and service. The ingestion server
 resolves tenants by hashing the `Authorization: Bearer <key>` gRPC header against `api_keys`
-(`ITenantResolver`). The API resolves the tenant in `TenantMiddleware` and carries it via a
-scoped `ITenantContext` (`ApiTenantContext`); read queries filter on `tenant_id`.
+(`ITenantResolver`). The API takes the tenant from the route (`{base}/tenants/{tenantId}/...`), checks the
+caller's access in `TelemetryAuthorizationFilter` and carries it via a scoped `ITenantContext`
+(`ApiTenantContext`); read queries filter on `tenant_id`.
 
 **Alerting** (`Keryhe.Telemetry.Api/Alerting`): `AlertService.EvaluateAllAsync` iterates all
 tenants with enabled rules, dispatching each rule type to a registered `IAlertEvaluator`

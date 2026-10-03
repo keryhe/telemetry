@@ -3,7 +3,10 @@ using System.Text.RegularExpressions;
 
 namespace Keryhe.Telemetry.StressTests.Browser;
 
-/// <summary>Turns a captured <c>/api</c> URL into a stable template and pulls the summary markers out of a response body. Pure.</summary>
+/// <summary>
+/// Turns a captured <c>/api</c> URL into a stable template and pulls the summary markers out of a response body. Pure.
+/// Assumes the API is mounted at the literal <c>/api/</c> (the default <c>Telemetry:Api:BasePath</c>); the harness's hosts run with it.
+/// </summary>
 public static partial class ApiRequestNormalizer
 {
     [GeneratedRegex("^[0-9a-fA-F]{32}$")]
@@ -14,7 +17,7 @@ public static partial class ApiRequestNormalizer
 
     /// <summary>
     /// <c>/telemetry/../api/traces/4bf9...c1/spans?x=1</c> becomes <c>traces/{id}/spans</c>: everything before <c>api/</c> and the query
-    /// string are dropped, trace ids and numbers become <c>{id}</c>/<c>{n}</c>, and the metric name after <c>by-name</c> or <c>labels</c> becomes <c>{name}</c>.
+    /// string are dropped (so is a <c>tenants/{n}/</c> prefix), trace ids and numbers become <c>{id}</c>/<c>{n}</c>, and the metric name after <c>by-name</c> or <c>labels</c> becomes <c>{name}</c>.
     /// </summary>
     public static string Template(string url)
     {
@@ -22,6 +25,8 @@ public static partial class ApiRequestNormalizer
         var at = path.IndexOf("/api/", StringComparison.Ordinal);
         if (at >= 0) path = path[(at + 5)..];
         var segments = path.Trim('/').Split('/', StringSplitOptions.RemoveEmptyEntries).ToArray();
+        // tenants/{n}/traces/summary is traces/summary: one tenant's numbers must not split into a row per tenant.
+        if (segments.Length >= 3 && segments[0] == "tenants" && Digits().IsMatch(segments[1])) segments = segments[2..];
         for (var i = 0; i < segments.Length; i++)
         {
             if (Hex32().IsMatch(segments[i])) segments[i] = "{id}";

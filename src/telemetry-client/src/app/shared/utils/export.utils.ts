@@ -27,11 +27,11 @@ export function downloadText(filename: string, text: string, mime: string): void
 
 /**
  * Trigger a client-side download of an already-fetched Blob (list-pages-server-side plan, Phase 8:
- * the server-side streaming `/api/*\/export` endpoints). Used instead of a plain `<a href=url>`
- * navigation because the export endpoints are tenant-scoped through the `X-Tenant-Id` header
- * (`tenant.interceptor.ts`), which only `HttpClient` requests carry — a bare navigation would hit
- * the API with no tenant header at all. Each export API method fetches the response as a Blob
- * through `HttpClient` (so the interceptor chain runs) and hands it to this helper to save.
+ * the server-side streaming `/api/tenants/{id}/*\/export` endpoints). Used instead of a plain
+ * `<a href=url>` navigation so the auth interceptor runs: in `oidc` mode the API needs a bearer token,
+ * which a browser navigation cannot attach, and one code path for both auth modes is simpler than a
+ * link in one and a fetch in the other. Each export API method fetches the response as a Blob
+ * through `HttpClient` and hands it to this helper to save.
  */
 export function downloadBlob(filename: string, blob: Blob): void {
   const url = URL.createObjectURL(blob);

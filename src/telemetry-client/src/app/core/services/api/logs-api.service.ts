@@ -3,6 +3,8 @@ import { HttpClient, HttpParams } from '@angular/common/http';
 import { Observable } from 'rxjs';
 import { map } from 'rxjs/operators';
 import { APP_CONFIG } from '../../config/app-config';
+import { TenantService } from '../tenant.service';
+import { tenantApiUrl } from './tenant-api-url';
 import { LogRecord } from '../../models/log.models';
 
 /** Filter shape shared by summary/page/facets (list-pages-server-side plan, Phase 2 Target API). */
@@ -60,6 +62,7 @@ interface LogSummaryDto {
   buckets: LogSummaryBucketDto[];
   total: number;
   totalIsLowerBound: boolean;
+  timedOut: boolean;
   asOf: string;
 }
 
@@ -68,6 +71,8 @@ export interface LogSummaryResult {
   buckets: LogSummaryBucket[];
   total: number;
   totalIsLowerBound: boolean;
+  /** The server's histogram ran out of time: buckets is empty (not "no logs") and total is a capped count. */
+  timedOut: boolean;
   asOf: string;
 }
 
@@ -103,7 +108,10 @@ export interface LogFacetsResult {
 @Injectable({ providedIn: 'root' })
 export class LogsApiService {
   private readonly http = inject(HttpClient);
-  private readonly base = `${inject(APP_CONFIG).apiUrl}/logs`;
+  private readonly tenant = inject(TenantService);
+  private readonly apiUrl = inject(APP_CONFIG).apiUrl;
+  /** Resolved per call: the tenant is the route's, and changes with it. */
+  private get base(): string { return `${tenantApiUrl(this.apiUrl, this.tenant.requireTenantId())}/logs`; }
 
   getLogs(start: Date, end: Date): Observable<LogRecord[]> {
     const params = new HttpParams()
@@ -124,6 +132,7 @@ export class LogsApiService {
         })),
         total: dto.total,
         totalIsLowerBound: dto.totalIsLowerBound,
+        timedOut: dto.timedOut ?? false,
         asOf: dto.asOf,
       }))
     );
@@ -158,7 +167,7 @@ export class LogsApiService {
   /**
    * Streaming export (list-pages-server-side plan, Phase 8): the same filters as
    * {@link getLogSummary}/{@link getLogPage} (minus `asOf`/paging — export has no row cap), fetched
-   * as a Blob so the `X-Tenant-Id` interceptor still runs (see `downloadBlob`'s doc comment). The
+   * as a Blob so the auth interceptor still runs (see `downloadBlob`'s doc comment). The
    * caller (logs.component.ts's Export menu) hands the result straight to `downloadBlob`.
    */
   getLogExport(query: LogFilter, format: 'ndjson' | 'csv'): Observable<Blob> {

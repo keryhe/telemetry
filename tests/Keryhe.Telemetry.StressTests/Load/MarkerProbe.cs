@@ -186,8 +186,7 @@ public sealed class MarkerProbe(
     {
         var start = Uri.EscapeDataString(sentAt.AddMinutes(-1).UtcDateTime.ToString("o"));
         var end = Uri.EscapeDataString(DateTimeOffset.UtcNow.AddMinutes(1).UtcDateTime.ToString("o"));
-        using var request = new HttpRequestMessage(HttpMethod.Get, $"api/logs/page?start={start}&end={end}&q={Uri.EscapeDataString(marker)}&size=1");
-        request.Headers.Add("X-Tenant-Id", tenantId.ToString());
+        using var request = new HttpRequestMessage(HttpMethod.Get, $"api/tenants/{tenantId}/logs/page?start={start}&end={end}&q={Uri.EscapeDataString(marker)}&size=1");
         using var response = await api.SendAsync(request, ct);
         if (!response.IsSuccessStatusCode) return false;
         using var doc = await JsonDocument.ParseAsync(await response.Content.ReadAsStreamAsync(ct), cancellationToken: ct);
@@ -196,8 +195,7 @@ public sealed class MarkerProbe(
 
     private async Task<bool> TraceVisibleAsync(long tenantId, string traceIdHex, CancellationToken ct)
     {
-        using var request = new HttpRequestMessage(HttpMethod.Get, $"api/traces/{traceIdHex}/spans");
-        request.Headers.Add("X-Tenant-Id", tenantId.ToString());
+        using var request = new HttpRequestMessage(HttpMethod.Get, $"api/tenants/{tenantId}/traces/{traceIdHex}/spans");
         using var response = await api.SendAsync(request, ct);
         return response.StatusCode == HttpStatusCode.OK;
     }

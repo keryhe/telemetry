@@ -5,16 +5,17 @@
 <app-page-header>
   <!-- Stats -->
   <div class="stat-grid">
-    <app-stat-card label="Traces" icon="account_tree" [value]="effectiveTotal() | number" />
+    <app-stat-card label="Traces" icon="account_tree" [value]="totalLabel()"
+                   [matTooltip]="totalIsLowerBound() ? 'At least this many: the exact total timed out.' : ''" />
     <app-stat-card label="Request Errors" icon="error"
-                   [value]="errorCount() | number" [color]="errorCount() > 0 ? 'error' : 'default'"
-                   [matTooltip]="requestTracesTooltip" />
+                   [value]="errorCountLabel()" [color]="errorCount() > 0 ? 'error' : 'default'"
+                   [matTooltip]="summaryTimedOut() ? summaryTimeoutTooltip : requestTracesTooltip" />
     <app-stat-card label="Request Error Rate" icon="percent"
                    [value]="errorRate()" [color]="errorCount() > 0 ? 'error' : 'default'"
-                   [matTooltip]="requestTracesTooltip" />
+                   [matTooltip]="summaryTimedOut() ? summaryTimeoutTooltip : requestTracesTooltip" />
     <app-stat-card label="p50 Request Duration" icon="timer"
                    [value]="avgDuration()"
-                   [matTooltip]="requestTracesTooltip" />
+                   [matTooltip]="summaryTimedOut() ? summaryTimeoutTooltip : requestTracesTooltip" />
   </div>
 
   <!-- Filters -->
@@ -91,7 +92,7 @@
     </button>
 
     <button mat-icon-button [matMenuTriggerFor]="exportMenu" matTooltip="Export current page's traces"
-            [disabled]="effectiveTotal() === 0">
+            [disabled]="effectiveTotal() === 0 && !totalIsLowerBound()">
       <mat-icon>download</mat-icon>
     </button>
     <mat-menu #exportMenu="matMenu">
@@ -117,8 +118,21 @@
   <mat-tab-group [selectedIndex]="selectedTab()" (selectedIndexChange)="selectedTab.set($event)">
     <!-- Traces Table -->
     <mat-tab label="Traces">
-      <!-- Trace volume / latency chart -->
-      @if (traceChartOptions().series) {
+      <!-- Trace volume / latency chart (or why there is none) -->
+      @if (summaryTimedOut()) {
+        <div class="timeout-banner">
+          <mat-icon>hourglass_disabled</mat-icon>
+          <span>
+            Summarizing this time range took too long, so the request cards and charts are unavailable.
+            @if (totalIsLowerBound() && effectiveTotal() > 0) {
+              There are at least {{ effectiveTotal() | number }} traces.
+            } @else if (totalIsLowerBound()) {
+              The total could not be counted in time either.
+            }
+            Narrow the time range or select a service. The trace list below is complete.
+          </span>
+        </div>
+      } @else if (traceChartOptions().series) {
         <mat-card class="chart-card">
           <mat-card-content>
             <div class="chart-header">
@@ -171,10 +185,14 @@
           @if (displayRows().length === 0 && !loading() && !pageLoading()) {
             <app-empty-state icon="account_tree" message="No traces found" hint="Try adjusting the time range or filters" />
           } @else {
-            @if (totalIsLowerBound()) {
+            @if (totalIsLowerBound() && !summaryTimedOut()) {
               <div class="capped-notice">
                 <mat-icon>info</mat-icon>
-                Showing at least {{ effectiveTotal() | number }} traces — the exact total timed out. Narrow the time range for an exact count.
+                @if (effectiveTotal() > 0) {
+                  Showing at least {{ effectiveTotal() | number }} traces — the exact total timed out. Narrow the time range for an exact count.
+                } @else {
+                  The total timed out. Narrow the time range for an exact count.
+                }
               </div>
             }
             <table mat-table [dataSource]="displayRows()" class="full-width">
@@ -223,7 +241,7 @@
             </table>
 
             <mat-paginator
-              [length]="effectiveTotal()"
+              [length]="paginatorLength()"
               [pageSize]="pageSize()"
               [pageIndex]="pageIndex()"
               [pageSizeOptions]="pageSizeOptions"

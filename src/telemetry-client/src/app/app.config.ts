@@ -6,7 +6,7 @@ import { MatPaginatorIntl } from '@angular/material/paginator';
 
 import { routes } from './app.routes';
 import { BrandedTitleStrategy } from './core/title/branded-title-strategy';
-import { tenantInterceptor } from './core/interceptors/tenant.interceptor';
+import { authInterceptor } from './core/interceptors/auth.interceptor';
 import { timezoneInterceptor } from './core/interceptors/timezone.interceptor';
 import { GroupedPaginatorIntl } from './shared/utils/paginator-intl';
 
@@ -14,7 +14,7 @@ export const appConfig: ApplicationConfig = {
   providers: [
     provideZoneChangeDetection({ eventCoalescing: true }),
     provideRouter(routes, withComponentInputBinding()),
-    provideHttpClient(withInterceptors([tenantInterceptor, timezoneInterceptor])),
+    provideHttpClient(withInterceptors([authInterceptor, timezoneInterceptor])),
     provideAnimationsAsync(),
     // Prepends the configured brand name to every route's browser-tab title — see
     // BrandedTitleStrategy for why this replaces Angular's DefaultTitleStrategy rather than

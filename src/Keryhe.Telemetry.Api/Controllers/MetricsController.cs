@@ -3,12 +3,14 @@ using Keryhe.Telemetry.Core;
 using Keryhe.Telemetry.Core.Data.Read;
 using Keryhe.Telemetry.Core.Models;
 using Microsoft.AspNetCore.Http;
+using Keryhe.Telemetry.Api.Authorization;
 using Microsoft.AspNetCore.Mvc;
 
 namespace Keryhe.Telemetry.Api.Controllers;
 
 [ApiController]
-[Route("api/metrics")]
+[TenantScoped]
+[Route("metrics")]
 public class MetricsController : ControllerBase
 {
     private readonly IMetricReadRepository _metrics;
@@ -23,12 +25,13 @@ public class MetricsController : ControllerBase
     }
 
     /// <summary>
-    /// GET /api/metrics/catalog?start=&end=&q=&service=&type=&groupBy=name|instance&size=&cursor=&nav=
+    /// GET /api/tenants/{tenantId}/metrics/catalog?start=&end=&q=&service=&type=&groupBy=name|instance&size=&cursor=&nav=
     /// Phase 5 (list-pages-server-side plan): replaces the former unbounded-with-a-cap
     /// <c>GET /api/metrics</c> (removed — its only caller, the metrics list page, now calls this).
     /// <c>start</c>/<c>end</c> are required — every "seen in range" check runs against them
     /// (decision 27).
     /// </summary>
+    [TelemetryOperation(TelemetryOperation.Read)]
     [HttpGet("catalog")]
     public async Task<ActionResult<MetricCatalogPage>> GetMetricCatalog(
         [FromQuery] DateTime start,
@@ -62,8 +65,9 @@ public class MetricsController : ControllerBase
         return Ok(page);
     }
 
-    // GET /api/metrics/summary?start=&end=
+    // GET /api/tenants/{tenantId}/metrics/summary?start=&end=
     // True unique-metric-name-per-type counts over the full unbounded range, unaffected by the /api/metrics limit cap.
+    [TelemetryOperation(TelemetryOperation.Read)]
     [HttpGet("summary")]
     public async Task<ActionResult<MetricsSummary>> GetMetricsSummary(
         [FromQuery] DateTime? start,
@@ -74,7 +78,8 @@ public class MetricsController : ControllerBase
         return Ok(summary);
     }
 
-    // GET /api/metrics/by-name/{name}
+    // GET /api/tenants/{tenantId}/metrics/by-name/{name}
+    [TelemetryOperation(TelemetryOperation.Read)]
     [HttpGet("by-name/{name}")]
     public async Task<ActionResult<List<MetricInfo>>> GetMetricsByName(string name, CancellationToken ct = default)
     {
@@ -82,7 +87,8 @@ public class MetricsController : ControllerBase
         return Ok(metrics);
     }
 
-    // GET /api/metrics/labels/{name}?start=&end=
+    // GET /api/tenants/{tenantId}/metrics/labels/{name}?start=&end=
+    [TelemetryOperation(TelemetryOperation.Read)]
     [HttpGet("labels/{name}")]
     public async Task<ActionResult<MetricLabelsResult>> GetMetricLabels(
         string name,
@@ -95,11 +101,12 @@ public class MetricsController : ControllerBase
     }
 
     /// <summary>
-    /// GET /api/metrics/series?metricName=&start=&end=&metricId=&labelFilter=key:value&q=&points=&top=
+    /// GET /api/tenants/{tenantId}/metrics/series?metricName=&start=&end=&metricId=&labelFilter=key:value&q=&points=&top=
     /// Phase 4 (list-pages-server-side plan): replaces the former <c>series</c>/<c>series-grouped</c>
     /// pair with one database-bucketed endpoint. <c>start</c>/<c>end</c> are required — every bucket
     /// is computed against them (decision 21).
     /// </summary>
+    [TelemetryOperation(TelemetryOperation.Read)]
     [HttpGet("series")]
     public async Task<ActionResult<MetricSeriesResult>> GetMetricSeries(
         [FromQuery] string metricName,
@@ -134,13 +141,14 @@ public class MetricsController : ControllerBase
     }
 
     /// <summary>
-    /// GET /api/metrics/exemplars?metricName=&start=&end=&metricId=&labelFilter=key:value&q=&size=&cursor=&nav=
+    /// GET /api/tenants/{tenantId}/metrics/exemplars?metricName=&start=&end=&metricId=&labelFilter=key:value&q=&size=&cursor=&nav=
     /// Analytics tier (<see cref="ProviderCapabilities.ExemplarPaging"/>): real keyset paging —
     /// <c>cursor</c>/<c>nav</c> are honored and the response carries <c>nextCursor</c>/
     /// <c>prevCursor</c>/<c>total</c>/<c>totalIsLowerBound</c>. Standard tier: the newest 500,
     /// <c>capped</c> flagged, no cursor (decision 26). <c>end</c> is the pin the exemplar scan
     /// itself uses, not a server-echoed clock value (see the repository's own doc comment).
     /// </summary>
+    [TelemetryOperation(TelemetryOperation.Read)]
     [HttpGet("exemplars")]
     public async Task<ActionResult<MetricExemplarPage>> GetMetricExemplars(
         [FromQuery] string metricName,
@@ -177,13 +185,14 @@ public class MetricsController : ControllerBase
     }
 
     /// <summary>
-    /// GET /api/metrics/export?metricName=&start=&end=&metricId=&labelFilter=key:value&q=&points=&format=ndjson|csv
+    /// GET /api/tenants/{tenantId}/metrics/export?metricName=&start=&end=&metricId=&labelFilter=key:value&q=&points=&format=ndjson|csv
     /// Phase 8 (list-pages-server-side plan, decision 29): one row per <c>(display series,
     /// bucket)</c>, reusing <c>/series</c>'s bucketing (<c>points</c>/<c>groupBy</c> behave the
     /// same) but with every series included — no top-N/"other" split, unlike <see cref="GetMetricSeries"/>.
     /// Same window/concurrency limits as the logs/traces exports — see
     /// <see cref="LogsController.GetExport"/>'s doc comment.
     /// </summary>
+    [TelemetryOperation(TelemetryOperation.Export)]
     [HttpGet("export")]
     public async Task<IActionResult> GetExport(
         [FromQuery] string metricName,

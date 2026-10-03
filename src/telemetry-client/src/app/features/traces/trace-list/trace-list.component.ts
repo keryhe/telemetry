@@ -1,4 +1,5 @@
-import { Component, NgZone, computed, effect, inject, signal, untracked, OnDestroy } from '@angular/core';
+import { TenantService } from '../../../core/services/tenant.service';
+import { Component, LOCALE_ID, NgZone, computed, effect, inject, signal, untracked, OnDestroy } from '@angular/core';
 import { DatePipe, DecimalPipe, LowerCasePipe } from '@angular/common';
 import { Router } from '@angular/router';
 import { MatButtonToggleModule } from '@angular/material/button-toggle';
@@ -9,7 +10,7 @@ import { MatIconModule } from '@angular/material/icon';
 import { MatInputModule } from '@angular/material/input';
 import { MatProgressBarModule } from '@angular/material/progress-bar';
 import { MatSelectModule } from '@angular/material/select';
-import { MatPaginatorModule, PageEvent } from '@angular/material/paginator';
+import { MatPaginatorIntl, MatPaginatorModule, PageEvent } from '@angular/material/paginator';
 import { MatSort, MatSortModule, Sort } from '@angular/material/sort';
 import { MatTableModule } from '@angular/material/table';
 import { MatTabsModule } from '@angular/material/tabs';
@@ -24,6 +25,8 @@ import { Subscription } from 'rxjs';
 import type { ApexOptions } from 'ng-apexcharts';
 
 import { TracesApiService, TraceLatencyBucket, TraceSummaryResult, TracePageResult } from '../../../core/services/api/traces-api.service';
+import { GroupedPaginatorIntl, lowerBoundTotalLabel } from '../../../shared/utils/paginator-intl';
+import { SUMMARY_TIMEOUT_TOOLTIP, formatSummaryTotal } from '../../../shared/utils/summary-total';
 import { ResourcesApiService } from '../../../core/services/api/resources-api.service';
 import { TimeRangeService } from '../../../core/services/time-range.service';
 import { ThemeService } from '../../../core/services/theme.service';
@@ -81,6 +84,8 @@ const ERROR_TIERS: { max: number; color: string; label: string }[] = [
     MatDialogModule, MatMenuModule, NgxGraphModule, NgApexchartsModule,
     StatCardComponent, EmptyStateComponent, PageHeaderComponent,
   ],
+  // Its own paginator intl, so a lower-bound total can print "of 10,000+" without touching other pages' paginators.
+  providers: [{ provide: MatPaginatorIntl, useClass: GroupedPaginatorIntl }],
   templateUrl: './trace-list.component.html',
   styleUrl: './trace-list.component.scss',
 })
@@ -90,6 +95,7 @@ export class TraceListComponent implements OnDestroy {
   private readonly timeRange = inject(TimeRangeService);
   private readonly theme = inject(ThemeService);
   private readonly router = inject(Router);
+  protected readonly tenant = inject(TenantService);
   private readonly dialog = inject(MatDialog);
   private readonly urlState = inject(UrlStateService);
   private readonly zone = inject(NgZone);
@@ -158,6 +164,23 @@ export class TraceListComponent implements OnDestroy {
 
   protected effectiveTotal = computed(() => this.summary()?.listTotal ?? 0);
   protected totalIsLowerBound = computed(() => this.summary()?.totalIsLowerBound ?? false);
+  private readonly paginatorIntl = inject(MatPaginatorIntl) as GroupedPaginatorIntl;
+  /** The Traces card: exact, "10,000+" when capped, "—" when even the capped count timed out. */
+  protected totalLabel = computed(() => formatSummaryTotal(this.effectiveTotal(), this.totalIsLowerBound(), this.locale));
+  /**
+   * The paginator's length. A capped total would stop "next" at the cap (or at once, when the total is unknown), so it
+   * is stretched to one row past the current page while the server still offers a next page.
+   */
+  protected paginatorLength = computed(() => {
+    const total = this.effectiveTotal();
+    if (!this.totalIsLowerBound()) return total;
+    const shown = this.pageIndex() * this.pageSize() + this.displayRows().length;
+    return Math.max(total, shown + (this.page()?.nextCursor ? 1 : 0));
+  });
+  /** The server's anchor scan ran out of time: the request cards and charts have no data (which is not "zero"). */
+  protected summaryTimedOut = computed(() => this.summary()?.timedOut ?? false);
+  protected readonly summaryTimeoutTooltip = SUMMARY_TIMEOUT_TOOLTIP;
+  private readonly locale = inject(LOCALE_ID);
 
   /**
    * Search window limit, explained inline next to the search box: shown when a raw search filter
@@ -175,7 +198,10 @@ export class TraceListComponent implements OnDestroy {
   });
 
   protected errorCount = computed(() => this.summary()?.summary.errorCount ?? 0);
+  protected errorCountLabel = computed(() =>
+    this.summaryTimedOut() ? '—' : formatSummaryTotal(this.errorCount(), false, this.locale));
   protected errorRate = computed(() => {
+    if (this.summaryTimedOut()) return '—';
     const s = this.summary()?.summary;
     if (!s || s.count === 0) return '0%';
     return ((s.errorCount / s.count) * 100).toFixed(1) + '%';
@@ -304,6 +330,12 @@ export class TraceListComponent implements OnDestroy {
   }
 
   constructor() {
+    // "of 10,000+" / "of many" while the total is only a lower bound (see paginatorLength).
+    effect(() => {
+      this.paginatorIntl.totalOverride = this.totalIsLowerBound() ? lowerBoundTotalLabel(this.effectiveTotal(), this.locale) : null;
+      this.paginatorIntl.changes.next();
+    });
+
     // Slide relative preset windows to "now" on (re)entry so navigating back refreshes.
     this.timeRange.refreshRelativeWindow();
 
@@ -607,7 +639,7 @@ export class TraceListComponent implements OnDestroy {
 
   /** `start` and `end` are the trace's own extent from the row, passed on so the detail read can be bounded (Timescale, ClickHouse). */
   protected navigate(traceId: string, start?: string, end?: string): void {
-    this.router.navigate(['/traces', traceId], start && end ? { queryParams: { start, end } } : undefined);
+    this.router.navigate(this.tenant.link('traces', traceId), start && end ? { queryParams: { start, end } } : undefined);
   }
 
   /**

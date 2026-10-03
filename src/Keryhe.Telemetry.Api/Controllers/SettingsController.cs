@@ -1,11 +1,12 @@
 using Keryhe.Telemetry.Core;
 using Keryhe.Telemetry.Core.Models;
+using Keryhe.Telemetry.Api.Authorization;
 using Microsoft.AspNetCore.Mvc;
 
 namespace Keryhe.Telemetry.Api.Controllers;
 
 [ApiController]
-[Route("api/settings")]
+[Route("settings")]
 public class SettingsController : ControllerBase
 {
     // Upper bound on any *RetentionDays field. Not a technical limit — it exists so a typo
@@ -21,6 +22,7 @@ public class SettingsController : ControllerBase
     }
 
     // GET /api/settings/retention
+    [TelemetryOperation(TelemetryOperation.Read)]
     [HttpGet("retention")]
     public async Task<ActionResult<RetentionSettings>> GetRetentionSettings(CancellationToken ct = default)
     {
@@ -29,6 +31,7 @@ public class SettingsController : ControllerBase
     }
 
     // PUT /api/settings/retention
+    [TelemetryOperation(TelemetryOperation.ManageSettings)]
     [HttpPut("retention")]
     public async Task<ActionResult<RetentionSettings>> UpdateRetentionSettings(
         [FromBody] RetentionSettings settings,

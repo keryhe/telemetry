@@ -70,8 +70,16 @@ public sealed class LogSummaryResult
     /// <summary>Always <c>"raw"</c> since schema 3.0.0 (there are no rollup tables); kept so the client contract is unchanged.</summary>
     public string Source { get; init; } = "raw";
     public List<LogSummaryBucket> Buckets { get; init; } = [];
+
+    /// <summary>
+    /// Exact unless <see cref="TotalIsLowerBound"/>. After a timeout it is a capped count (<see cref="TimedOut"/>): exact
+    /// below the cap, the cap itself (lower bound) above it, and 0 (lower bound) when the capped count ran out of time too.
+    /// </summary>
     public long Total { get; init; }
     public bool TotalIsLowerBound { get; init; }
+
+    /// <summary>The histogram did not finish within <c>Telemetry:Query:SummaryTimeoutSeconds</c>: <see cref="Buckets"/> is empty.</summary>
+    public bool TimedOut { get; init; }
     public DateTime AsOf { get; init; }
 }
 
@@ -202,7 +210,19 @@ public sealed class TraceSummaryResult
 
     /// <summary>The cards' population: inbound-request anchors only -- kind SERVER/CONSUMER (decision 12).</summary>
     public long RequestCount { get; init; }
+
+    /// <summary>
+    /// <see cref="ListTotal"/> is a lower bound: after a timeout it is a capped count, the cap itself when there are more
+    /// anchors than that, or 0 when the capped count ran out of time too.
+    /// </summary>
     public bool TotalIsLowerBound { get; init; }
+
+    /// <summary>
+    /// The anchor scan did not finish within <c>Telemetry:Query:SummaryTimeoutSeconds</c>: <see cref="Buckets"/>,
+    /// <see cref="Summary"/>, <see cref="Services"/> and <see cref="LatencyBuckets"/> are empty and <see cref="RequestCount"/>
+    /// is 0, so a reader must not present them as "no traces". <see cref="ListTotal"/> is the capped count.
+    /// </summary>
+    public bool TimedOut { get; init; }
     public DateTime AsOf { get; init; }
 }
 

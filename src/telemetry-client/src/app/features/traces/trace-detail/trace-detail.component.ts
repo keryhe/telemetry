@@ -1,3 +1,4 @@
+import { TenantService } from '../../../core/services/tenant.service';
 import {
   Component, ElementRef, HostListener, Input, OnDestroy, OnInit, computed, effect, inject, signal, untracked, viewChild,
 } from '@angular/core';
@@ -173,6 +174,7 @@ export class TraceDetailComponent implements OnInit, OnDestroy {
   private readonly title = inject(Title);
   private readonly dialog = inject(MatDialog);
   private readonly urlState = inject(UrlStateService);
+  protected readonly tenant = inject(TenantService);
 
   protected copied = signal(false);
   protected linkCopied = signal(false);

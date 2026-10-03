@@ -7,7 +7,7 @@
 <app-page-header>
   <!-- Breadcrumb -->
   <div class="breadcrumb">
-    <a mat-button routerLink="/traces"><mat-icon>arrow_back</mat-icon> Traces</a>
+    <a mat-button [routerLink]="tenant.link('traces')"><mat-icon>arrow_back</mat-icon> Traces</a>
     <span class="mono">{{ id | slice:0:32 }}</span>
     <button mat-icon-button [matTooltip]="copied() ? 'Copied!' : 'Copy trace ID'" (click)="copyTraceId()">
       <mat-icon>{{ copied() ? 'check' : 'content_copy' }}</mat-icon>
@@ -17,7 +17,7 @@
         {{ nanoToDate(rootStartNano()) | date:'MM/dd/yyyy, h:mm:ss a' }}
       </span>
     }
-    <a mat-stroked-button class="view-logs" [routerLink]="['/logs']" [queryParams]="{ q: id }">
+    <a mat-stroked-button class="view-logs" [routerLink]="tenant.link('logs')" [queryParams]="{ q: id }">
       <mat-icon>receipt_long</mat-icon> View Logs
     </a>
   </div>
@@ -326,7 +326,7 @@
                 @for (link of node.links; track link.linkedSpanIdHex) {
                   <div class="link-row">
                     <mat-icon class="link-icon">link</mat-icon>
-                    <a class="mono" [routerLink]="['/traces', link.linkedTraceIdHex]">{{ link.linkedTraceIdHex }}</a>
+                    <a class="mono" [routerLink]="tenant.link('traces', link.linkedTraceIdHex)">{{ link.linkedTraceIdHex }}</a>
                     <span class="link-span">Span: {{ link.linkedSpanIdHex }}</span>
                   </div>
                 }

@@ -27,7 +27,6 @@ public static class TourDiscovery
             try
             {
                 using var request = new HttpRequestMessage(HttpMethod.Get, path);
-                request.Headers.Add("X-Tenant-Id", tenantId.ToString());
                 using var response = await api.SendAsync(request, cancellationToken);
                 if (!response.IsSuccessStatusCode) return null;
                 using var doc = await JsonDocument.ParseAsync(await response.Content.ReadAsStreamAsync(cancellationToken), cancellationToken: cancellationToken);
@@ -40,13 +39,13 @@ public static class TourDiscovery
         var range = $"start={Uri.EscapeDataString(end.AddDays(-7).ToString("O"))}&end={Uri.EscapeDataString(end.ToString("O"))}";
 
         string? service = null;
-        if (await GetAsync("api/resources/services") is { ValueKind: JsonValueKind.Array } services && services.GetArrayLength() > 0)
+        if (await GetAsync($"api/tenants/{tenantId}/resources/services") is { ValueKind: JsonValueKind.Array } services && services.GetArrayLength() > 0)
             // The marker probe's own service ("stress.marker") is not the workload under test.
             service = services.EnumerateArray().Select(e => e.GetString()).FirstOrDefault(n => n is not null && !n.StartsWith("stress.", StringComparison.Ordinal));
 
         async Task<string?> MetricAsync(string type)
         {
-            if (await GetAsync($"api/metrics/catalog?{range}&type={type}&groupBy=name&size=1") is not { ValueKind: JsonValueKind.Object } page) return null;
+            if (await GetAsync($"api/tenants/{tenantId}/metrics/catalog?{range}&type={type}&groupBy=name&size=1") is not { ValueKind: JsonValueKind.Object } page) return null;
             foreach (var p in page.EnumerateObject())
                 if (p.NameEquals("names") && p.Value.ValueKind == JsonValueKind.Array && p.Value.GetArrayLength() > 0)
                     foreach (var n in p.Value[0].EnumerateObject())

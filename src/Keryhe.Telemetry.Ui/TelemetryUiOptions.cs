@@ -29,9 +29,9 @@ public sealed partial class TelemetryUiOptions
     /// must <em>forward</em> the prefix (<c>proxy_pass http://app;</c>), not strip it
     /// (<c>proxy_pass http://app/;</c>) — the value is baked into the served HTML at startup, so it
     /// cannot be recovered per request from <c>PathBase</c>.</item>
-    /// <item>It moves the UI only. The API's controllers are routed at <c>api/*</c> on the origin
-    /// root regardless, so <see cref="ApiBasePath"/> is a separate setting and keeps its own
-    /// default — set it too if your deployment moves the API as well.</item>
+    /// <item>It moves the UI only. The API's location is its own setting
+    /// (<c>Telemetry:Api:BasePath</c>, default <c>/api</c>), which <see cref="ApiBasePath"/> follows
+    /// unless set explicitly.</item>
     /// <item>Once it is non-empty, the origin root stops being served: <c>GET /</c> returns 404,
     /// and so does every other path outside the prefix. That is the point — it is what lets another
     /// app own <c>/</c>.</item>
@@ -53,9 +53,11 @@ public sealed partial class TelemetryUiOptions
     /// than baked into the compiled bundle, which is what makes one published bundle usable by
     /// any host regardless of where it mounts the API.
     ///
-    /// Independent of <see cref="BasePath"/>, and deliberately not derived from it: the API's own
-    /// controllers are routed at the origin root, so a deployment that moves only the UI leaves
-    /// this default correct.
+    /// Independent of <see cref="BasePath"/>, and deliberately not derived from it: a deployment that
+    /// moves only the UI leaves the API where it was. When <c>TelemetryUi:ApiBasePath</c> is not set,
+    /// <c>AddKeryheTelemetryUi</c> takes <c>Telemetry:Api:BasePath</c> (the API's own base path) if
+    /// present, else <c>/api</c>; an explicit value, including an absolute URL for a different origin,
+    /// always wins.
     /// </summary>
     public string ApiBasePath { get; set; } = "/api";
 
@@ -79,13 +81,23 @@ public sealed partial class TelemetryUiOptions
     public HealthThresholdOptions HealthThresholds { get; set; } = new();
 
     /// <summary>
+    /// How the UI authenticates to the API. See <see cref="AuthOptions"/>. Sent to the browser in
+    /// <c>config.json</c> only when something is set.
+    /// </summary>
+    public AuthOptions Auth { get; set; } = new();
+
+    /// <summary>
     /// Validates the settings that can be checked without knowing the SPA's defaults. Called at
     /// startup so a bad deployment fails there, rather than being ignored silently in each
     /// browser.
     /// </summary>
     /// <exception cref="InvalidOperationException">A health threshold is out of range, or a
     /// <c>Warn</c> is not below its <c>Critical</c>.</exception>
-    internal void Validate() => HealthThresholds.Validate();
+    internal void Validate()
+    {
+        HealthThresholds.Validate();
+        Auth.Validate();
+    }
 
     /// <summary>
     /// Reduces <see cref="BasePath"/> to one of exactly two shapes — <c>""</c> for the origin root,
@@ -191,4 +203,86 @@ public sealed class HealthBandOptions
 
     /// <summary>The value at or above which the card is coloured as an error.</summary>
     public double? Critical { get; set; }
+}
+
+/// <summary>
+/// The <c>TelemetryUi:Auth</c> section. <c>cookie</c> (default): the host owns sign-in and requests
+/// carry its cookie; the SPA holds no tokens and only redirects to <see cref="LoginUrl"/> on a 401.
+/// <c>oidc</c>: for bearer-only deployments the SPA signs in itself (authorization code + PKCE) against
+/// <see cref="Oidc"/> and sends the access token to the API.
+/// </summary>
+public sealed class AuthOptions
+{
+    public const string CookieMode = "cookie";
+    public const string OidcMode = "oidc";
+
+    /// <summary><c>cookie</c> (default) or <c>oidc</c>.</summary>
+    public string Mode { get; set; } = CookieMode;
+
+    /// <summary>Where the SPA sends a signed-out user (<c>cookie</c> mode); gets a <c>returnUrl</c> query parameter.</summary>
+    public string? LoginUrl { get; set; }
+
+    /// <summary>Target of the header's "Sign out" item (<c>cookie</c> mode). The OIDC end-session endpoint is used in <c>oidc</c> mode.</summary>
+    public string? LogoutUrl { get; set; }
+
+    /// <summary>Send credentials (cookies) on cross-origin API calls. The API host's CORS policy then needs <c>AllowCredentials()</c> with explicit origins.</summary>
+    public bool IncludeCredentials { get; set; }
+
+    /// <summary>Settings for <c>oidc</c> mode.</summary>
+    public OidcOptions Oidc { get; set; } = new();
+
+    internal bool IsDefault =>
+        Mode == CookieMode && string.IsNullOrWhiteSpace(LoginUrl) && string.IsNullOrWhiteSpace(LogoutUrl) && !IncludeCredentials;
+
+    internal void Validate()
+    {
+        if (Mode is not (CookieMode or OidcMode))
+            throw new InvalidOperationException($"{TelemetryUiOptions.SectionName}:Auth:Mode '{Mode}' must be '{CookieMode}' or '{OidcMode}'.");
+
+        CheckUrl(nameof(LoginUrl), LoginUrl);
+        CheckUrl(nameof(LogoutUrl), LogoutUrl);
+
+        if (Mode == OidcMode)
+        {
+            if (!Uri.TryCreate(Oidc.Authority, UriKind.Absolute, out var authority) || authority.Scheme != Uri.UriSchemeHttps)
+                throw new InvalidOperationException($"{TelemetryUiOptions.SectionName}:Auth:Oidc:Authority must be an absolute https URL in '{OidcMode}' mode.");
+            if (string.IsNullOrWhiteSpace(Oidc.ClientId))
+                throw new InvalidOperationException($"{TelemetryUiOptions.SectionName}:Auth:Oidc:ClientId is required in '{OidcMode}' mode.");
+        }
+    }
+
+    // Relative ("/account/login") or absolute http(s); anything else (javascript:, data:) is refused
+    // because the SPA navigates to these values.
+    private static void CheckUrl(string name, string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value)) return;
+        var ok = value.StartsWith('/') && !value.StartsWith("//")
+            || Uri.TryCreate(value, UriKind.Absolute, out var u) && (u.Scheme == Uri.UriSchemeHttp || u.Scheme == Uri.UriSchemeHttps);
+        if (!ok)
+            throw new InvalidOperationException($"{TelemetryUiOptions.SectionName}:Auth:{name} '{value}' must be a relative path starting with '/' or an absolute http(s) URL.");
+    }
+
+    internal Dictionary<string, object>? ToConfigPayload()
+    {
+        if (IsDefault && Mode == CookieMode) return null;
+        var auth = new Dictionary<string, object> { ["mode"] = Mode, ["includeCredentials"] = IncludeCredentials };
+        if (!string.IsNullOrWhiteSpace(LoginUrl)) auth["loginUrl"] = LoginUrl;
+        if (!string.IsNullOrWhiteSpace(LogoutUrl)) auth["logoutUrl"] = LogoutUrl;
+        if (Mode == OidcMode)
+            auth["oidc"] = new Dictionary<string, object>
+            {
+                ["authority"] = Oidc.Authority!,
+                ["clientId"] = Oidc.ClientId!,
+                ["scope"] = Oidc.Scope,
+            };
+        return auth;
+    }
+}
+
+/// <summary>Registration values for <c>oidc</c> mode: an SPA client (public, authorization code + PKCE).</summary>
+public sealed class OidcOptions
+{
+    public string? Authority { get; set; }
+    public string? ClientId { get; set; }
+    public string Scope { get; set; } = "openid profile";
 }

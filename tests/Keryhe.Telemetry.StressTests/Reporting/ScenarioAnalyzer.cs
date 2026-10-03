@@ -125,7 +125,11 @@ public static class ScenarioAnalyzer
     {
         var path = route.Split('?')[0].Trim('/');
         if (path.StartsWith("api/", StringComparison.OrdinalIgnoreCase)) path = path[4..];
-        return string.Join('/', path.Split(Sep, StringSplitOptions.RemoveEmptyEntries)
+        var segments = path.Split(Sep, StringSplitOptions.RemoveEmptyEntries);
+        // The tenant segment (a route template "{tenantId:long:min(1)}" on the server, a number in the browser) is not part of the endpoint.
+        if (segments.Length >= 3 && segments[0].Equals("tenants", StringComparison.OrdinalIgnoreCase)
+            && (segments[1].StartsWith('{') || long.TryParse(segments[1], out _))) segments = segments[2..];
+        return string.Join('/', segments
             .Select(seg => seg.StartsWith('{') && seg.EndsWith('}') ? "{}" : seg.ToLowerInvariant()));
     }
 

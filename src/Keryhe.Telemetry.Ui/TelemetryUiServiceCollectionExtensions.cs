@@ -33,6 +33,13 @@ public static class TelemetryUiServiceCollectionExtensions
         IConfiguration configuration,
         Action<TelemetryUiOptions>? configure = null)
     {
+        // Follow the API's own base path unless TelemetryUi:ApiBasePath is set. Registered before the
+        // section binding, so an explicit value overrides it. Read through configuration, not a type
+        // reference, which keeps this package independent of Keryhe.Telemetry.Api.
+        var apiBasePath = configuration["Telemetry:Api:BasePath"];
+        if (configuration[$"{TelemetryUiOptions.SectionName}:ApiBasePath"] is null && !string.IsNullOrWhiteSpace(apiBasePath))
+            services.Configure<TelemetryUiOptions>(o => o.ApiBasePath = "/" + apiBasePath.Trim().Trim('/'));
+
         services.Configure<TelemetryUiOptions>(configuration.GetSection(TelemetryUiOptions.SectionName));
         if (configure is not null)
             services.Configure(configure);

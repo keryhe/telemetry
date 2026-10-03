@@ -8,30 +8,31 @@
     <app-stat-card
       label="Avg Trace Duration"
       icon="timer"
-      [value]="formatDuration(avgDurationMs())"
-      [sparklineOptions]="durationSparkline()"
-      matTooltip="Duration of each trace's entry span (its earliest span), not the whole trace's wall time." />
+      [value]="traceSummaryTimedOut() ? '—' : formatDuration(avgDurationMs())"
+      [sparklineOptions]="traceSummaryTimedOut() ? null : durationSparkline()"
+      [matTooltip]="traceSummaryTimedOut() ? summaryTimeoutTooltip : 'Duration of each trace\'s entry span (its earliest span), not the whole trace\'s wall time.'" />
     <app-stat-card
       label="Traces/sec"
       icon="account_tree"
-      [value]="tracesPerSecond() | number: '1.0-2'"
-      [sparklineOptions]="tracesSparkline()"
-      matTooltip="Traces started per second, by entry span. Not limited to HTTP — covers any OTLP trace (queue consumers, jobs, etc.)." />
+      [value]="traceSummaryTimedOut() ? '—' : (tracesPerSecond() | number: '1.0-2')"
+      [sparklineOptions]="traceSummaryTimedOut() ? null : tracesSparkline()"
+      [matTooltip]="traceSummaryTimedOut() ? summaryTimeoutTooltip : 'Traces started per second, by entry span. Not limited to HTTP — covers any OTLP trace (queue consumers, jobs, etc.).'" />
     <app-stat-card
       label="Error Rate"
       icon="percent"
-      [value]="(errorRate() | percent: '1.1-1') ?? '0%'"
-      [color]="errorRateColor()"
-      [sparklineOptions]="errorRateSparkline()" />
+      [value]="traceSummaryTimedOut() ? '—' : ((errorRate() | percent: '1.1-1') ?? '0%')"
+      [color]="traceSummaryTimedOut() ? 'default' : errorRateColor()"
+      [sparklineOptions]="traceSummaryTimedOut() ? null : errorRateSparkline()"
+      [matTooltip]="traceSummaryTimedOut() ? summaryTimeoutTooltip : ''" />
     <app-stat-card
       label="Error Logs"
       icon="article"
-      [value]="logErrorCount() | number"
-      [sparklineOptions]="logErrorSparkline()"
+      [value]="logSummaryTimedOut() ? '—' : (logErrorCount() | number)"
+      [sparklineOptions]="logSummaryTimedOut() ? null : logErrorSparkline()"
       [clickable]="true"
-      routerLink="/logs"
+      [routerLink]="tenant.link('logs')"
       [queryParams]="{ severity: 17 }"
-      matTooltip="Error + Fatal log records in this window. Click to view them on the Logs page." />
+      [matTooltip]="logSummaryTimedOut() ? summaryTimeoutTooltip : 'Error + Fatal log records in this window. Click to view them on the Logs page.'" />
     <app-stat-card label="Services" icon="cloud" [value]="serviceCount() | number" />
   </div>
 
@@ -63,6 +64,22 @@
 </app-page-header>
 
 <div class="page-container">
+  @if (traceSummaryTimedOut() || logSummaryTimedOut()) {
+    <div class="timeout-banner">
+      <mat-icon>hourglass_disabled</mat-icon>
+      <span>
+        Summarizing this time range took too long, so
+        @if (traceSummaryTimedOut() && logSummaryTimedOut()) {
+          the trace and log cards, the charts and Service Health are unavailable.
+        } @else if (traceSummaryTimedOut()) {
+          the trace cards, the charts and Service Health are unavailable.
+        } @else {
+          the Error Logs card is unavailable.
+        }
+        Narrow the time range or select a service.
+      </span>
+    </div>
+  }
   <!--
     12-column responsive grid (dashboard.component.scss). Undeclared widgets default to full
     width at every tier — that's deliberate: a future Service Health (Phase 5) or Custom Metrics
@@ -73,7 +90,9 @@
     <mat-card class="dashboard-widget widget-trace-volume">
       <mat-card-header><mat-card-title>Trace Volume</mat-card-title></mat-card-header>
       <mat-card-content>
-        @if (traceChartOptions().series) {
+        @if (traceSummaryTimedOut()) {
+          <app-empty-state icon="hourglass_disabled" message="Timed out" hint="Narrow the time range or select a service" />
+        } @else if (traceChartOptions().series) {
           <apx-chart
             [series]="traceChartOptions().series!"
             [chart]="traceChartOptions().chart!"
@@ -95,7 +114,9 @@
         </mat-card-title>
       </mat-card-header>
       <mat-card-content>
-        @if (latencyChartOptions().series) {
+        @if (traceSummaryTimedOut()) {
+          <app-empty-state icon="hourglass_disabled" message="Timed out" hint="Narrow the time range or select a service" />
+        } @else if (latencyChartOptions().series) {
           <apx-chart
             [series]="latencyChartOptions().series!"
             [chart]="latencyChartOptions().chart!"
@@ -176,10 +197,14 @@
     <mat-card class="dashboard-widget widget-full widget-service-health">
       <mat-card-header><mat-card-title>Service Health</mat-card-title></mat-card-header>
       <mat-card-content>
-        <app-service-health-table
-          [services]="serviceStats()"
-          [activeService]="selectedService()"
-          (rowClick)="onServiceRowClick($event)" />
+        @if (traceSummaryTimedOut()) {
+          <app-empty-state icon="hourglass_disabled" message="Timed out" hint="Narrow the time range or select a service" />
+        } @else {
+          <app-service-health-table
+            [services]="serviceStats()"
+            [activeService]="selectedService()"
+            (rowClick)="onServiceRowClick($event)" />
+        }
       </mat-card-content>
     </mat-card>
   </div>

@@ -1,3 +1,4 @@
+import { TenantService } from '../../../core/services/tenant.service';
 import {
   AfterViewInit, Component, ElementRef, Input, OnDestroy, OnInit, ViewChild,
   computed, effect, inject, signal, untracked,
@@ -140,6 +141,7 @@ export class MetricDetailComponent implements OnInit, AfterViewInit, OnDestroy {
   private readonly theme = inject(ThemeService);
   private readonly title = inject(Title);
   private readonly urlState = inject(UrlStateService);
+  protected readonly tenant = inject(TenantService);
   private readonly capabilitiesService = inject(CapabilitiesService);
 
   protected capabilities = this.capabilitiesService.capabilities;

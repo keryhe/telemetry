@@ -7,6 +7,23 @@ export type HealthThresholdOverrides = {
 };
 
 /**
+ * How the UI authenticates to the API (`TelemetryUi:Auth` on the host). `cookie`: the host owns
+ * sign-in and requests carry its cookie; the SPA holds no tokens. `oidc`: the SPA signs in itself
+ * (authorization code + PKCE) and sends the access token to the API.
+ */
+export interface AuthConfig {
+  mode: 'cookie' | 'oidc';
+  /** `cookie` mode: where a 401 sends the user, with a `returnUrl` query parameter. */
+  loginUrl?: string;
+  /** `cookie` mode: the target of the header's "Sign out" item. */
+  logoutUrl?: string;
+  /** Send credentials (cookies) on API calls: for an API on another origin. */
+  includeCredentials: boolean;
+  /** Present in `oidc` mode. */
+  oidc?: { authority: string; clientId: string; scope: string };
+}
+
+/**
  * Deployment-specific settings the UI reads at startup rather than at build time.
  *
  * The distinction matters because the compiled bundle ships as a NuGet package
@@ -45,6 +62,9 @@ export interface AppConfig {
    * it is deliberately not part of {@link DEFAULT_APP_CONFIG}.
    */
   healthThresholds?: HealthThresholdOverrides;
+
+  /** Authentication to the API; the host sends it only when something is configured. */
+  auth: AuthConfig;
 }
 
 /**
@@ -55,6 +75,7 @@ export const DEFAULT_APP_CONFIG: AppConfig = {
   apiUrl: '/api',
   brandName: 'Sentinel',
   brandTagline: 'OpenTelemetry Visualization',
+  auth: { mode: 'cookie', includeCredentials: false },
 };
 
 /**

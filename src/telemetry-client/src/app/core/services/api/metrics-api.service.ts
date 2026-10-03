@@ -2,6 +2,8 @@ import { Injectable, inject } from '@angular/core';
 import { HttpClient, HttpParams } from '@angular/common/http';
 import { Observable } from 'rxjs';
 import { APP_CONFIG } from '../../config/app-config';
+import { TenantService } from '../tenant.service';
+import { tenantApiUrl } from './tenant-api-url';
 import {
   MetricCatalogPage,
   MetricCatalogQueryParams,
@@ -16,7 +18,10 @@ import {
 @Injectable({ providedIn: 'root' })
 export class MetricsApiService {
   private readonly http = inject(HttpClient);
-  private readonly base = `${inject(APP_CONFIG).apiUrl}/metrics`;
+  private readonly tenant = inject(TenantService);
+  private readonly apiUrl = inject(APP_CONFIG).apiUrl;
+  /** Resolved per call: the tenant is the route's, and changes with it. */
+  private get base(): string { return `${tenantApiUrl(this.apiUrl, this.tenant.requireTenantId())}/metrics`; }
 
   /** Server-paged metrics catalog (Phase 5): replaces the former unbounded getAllMetrics call. */
   getCatalog(p: MetricCatalogQueryParams): Observable<MetricCatalogPage> {
@@ -73,7 +78,7 @@ export class MetricsApiService {
    * Streaming export (list-pages-server-side plan, Phase 8, decision 29): one row per (display
    * series, bucket) — every series, no top-N/"other" split, unlike {@link getSeries}. Takes the
    * same query shape as `/series` (`top` doesn't apply to export, so it's the one field of
-   * {@link MetricSeriesQueryParams} this method ignores). Fetched as a Blob so the `X-Tenant-Id`
+   * {@link MetricSeriesQueryParams} this method ignores). Fetched as a Blob so the auth
    * interceptor still runs — see `downloadBlob`'s doc comment.
    */
   getSeriesExport(p: MetricSeriesQueryParams, format: 'ndjson' | 'csv'): Observable<Blob> {

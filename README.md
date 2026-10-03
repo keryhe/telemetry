@@ -70,7 +70,8 @@ in the full setup guide.
 
 For other database providers (TimescaleDB, SQL Server, MySQL, ClickHouse), Docker recipes,
 running the split hosts, deploying to production, the full schema reference, and alerting
-configuration, see **[docs/SETUP.md](docs/SETUP.md)**.
+configuration, see **[docs/SETUP.md](docs/SETUP.md)**. Every configuration key and its default is
+listed in **[docs/CONFIGURATION.md](docs/CONFIGURATION.md)**.
 
 ## Build your own host
 

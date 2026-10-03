@@ -1,4 +1,4 @@
-import { AppConfig, DEFAULT_APP_CONFIG } from './app-config';
+import { AppConfig, AuthConfig, DEFAULT_APP_CONFIG } from './app-config';
 
 /**
  * Relative, so it resolves against `<base href>` and keeps working if the UI is ever mounted
@@ -69,10 +69,48 @@ function normalize(config: Partial<AppConfig>): Partial<AppConfig> {
     normalized.healthThresholds = config.healthThresholds;
   }
 
+  if (config.auth !== undefined) {
+    normalized.auth = normalizeAuth(config.auth);
+  }
+
   normalizeText(config, normalized, 'brandName');
   normalizeText(config, normalized, 'brandTagline');
 
   return normalized;
+}
+
+/**
+ * Validates the `auth` block. An unusable one falls back to cookie mode (the host owns sign-in),
+ * which is what a deployment without the block gets; `oidc` without an authority and client id is
+ * unusable, so it is not half-enabled.
+ */
+function normalizeAuth(raw: unknown): AuthConfig {
+  const fallback = DEFAULT_APP_CONFIG.auth;
+  if (raw === null || typeof raw !== 'object') {
+    console.warn('[config] Ignoring invalid auth; using cookie mode.');
+    return fallback;
+  }
+  const a = raw as Partial<AuthConfig>;
+  const text = (v: unknown) => (typeof v === 'string' && v.trim() !== '' ? v.trim() : undefined);
+  const auth: AuthConfig = {
+    mode: 'cookie',
+    includeCredentials: a.includeCredentials === true,
+    loginUrl: text(a.loginUrl),
+    logoutUrl: text(a.logoutUrl),
+  };
+  if (a.mode === 'oidc') {
+    const authority = text(a.oidc?.authority);
+    const clientId = text(a.oidc?.clientId);
+    if (authority && clientId) {
+      auth.mode = 'oidc';
+      auth.oidc = { authority, clientId, scope: text(a.oidc?.scope) ?? 'openid profile' };
+    } else {
+      console.warn('[config] auth.mode is oidc but authority/clientId are missing; using cookie mode.');
+    }
+  } else if (a.mode !== undefined && a.mode !== 'cookie') {
+    console.warn(`[config] Ignoring unknown auth.mode '${String(a.mode)}'; using cookie mode.`);
+  }
+  return auth;
 }
 
 /** Shared trim-or-warn-and-fall-back handling for the two plain-text branding fields. */

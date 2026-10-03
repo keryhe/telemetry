@@ -13,9 +13,12 @@
   }
 
   <div class="stat-grid">
-    <app-stat-card label="Total Logs" icon="article" [value]="effectiveTotal()" />
-    <app-stat-card label="Errors" icon="error" [value]="errorCount()" [color]="errorCount() > 0 ? 'error' : 'default'" />
-    <app-stat-card label="Warnings" icon="warning" [value]="warnCount()" [color]="warnCount() > 0 ? 'warn' : 'default'" />
+    <app-stat-card label="Total Logs" icon="article" [value]="totalLabel()"
+                   [matTooltip]="totalIsLowerBound() ? 'At least this many: the exact total timed out.' : ''" />
+    <app-stat-card label="Errors" icon="error" [value]="summaryTimedOut() ? '—' : errorCount()" [color]="errorCount() > 0 ? 'error' : 'default'"
+                   [matTooltip]="summaryTimedOut() ? summaryTimeoutTooltip : ''" />
+    <app-stat-card label="Warnings" icon="warning" [value]="summaryTimedOut() ? '—' : warnCount()" [color]="warnCount() > 0 ? 'warn' : 'default'"
+                   [matTooltip]="summaryTimedOut() ? summaryTimeoutTooltip : ''" />
     <app-stat-card label="Services" icon="cloud" [value]="services().length" />
   </div>
 
@@ -71,7 +74,7 @@
     </button>
 
     <button mat-icon-button [matMenuTriggerFor]="exportMenu" matTooltip="Export filtered logs"
-            [disabled]="effectiveTotal() === 0">
+            [disabled]="effectiveTotal() === 0 && !totalIsLowerBound()">
       <mat-icon>download</mat-icon>
     </button>
     <mat-menu #exportMenu="matMenu">
@@ -167,7 +170,15 @@
     </aside>
 
     <div class="logs-main">
-  @if (chartOptions().series && !traceFilterActive()) {
+  @if (summaryTimedOut()) {
+    <div class="timeout-banner">
+      <mat-icon>hourglass_disabled</mat-icon>
+      <span>
+        Summarizing this time range took too long, so the severity cards and the chart are unavailable.
+        Narrow the time range or select a service. The log list below is complete.
+      </span>
+    </div>
+  } @else if (chartOptions().series && !traceFilterActive()) {
     <mat-card class="chart-card">
       <mat-card-content>
         <apx-chart
@@ -196,7 +207,11 @@
         @if (totalIsLowerBound()) {
           <div class="capped-notice">
             <mat-icon>info</mat-icon>
-            Showing an approximate total (≥ {{ effectiveTotal() | number }}) — the exact count timed out. Narrow the time range for an exact total.
+            @if (effectiveTotal() > 0) {
+              Showing an approximate total (≥ {{ effectiveTotal() | number }}) — the exact count timed out. Narrow the time range for an exact total.
+            } @else {
+              The total timed out. Narrow the time range for an exact total.
+            }
           </div>
         }
         <table mat-table [dataSource]="displayRows()" multiTemplateDataRows class="full-width log-table">
@@ -241,7 +256,7 @@
                     @if (l.traceIdHex) {
                       <div class="ctx-item">
                         <span class="ctx-key">Trace ID</span>
-                        <a class="ctx-val mono" [routerLink]="['/traces', l.traceIdHex]">{{ l.traceIdHex }}</a>
+                        <a class="ctx-val mono" [routerLink]="tenant.link('traces', l.traceIdHex)">{{ l.traceIdHex }}</a>
                       </div>
                     }
                     @if (l.eventName) {
@@ -371,7 +386,7 @@
         </table>
 
         <mat-paginator
-          [length]="effectiveTotal()"
+          [length]="paginatorLength()"
           [pageSize]="pageSize()"
           [pageIndex]="pageIndex()"
           [pageSizeOptions]="pageSizeOptions"

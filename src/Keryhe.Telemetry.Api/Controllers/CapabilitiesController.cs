@@ -1,4 +1,5 @@
 using Keryhe.Telemetry.Core;
+using Keryhe.Telemetry.Api.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.Configuration;
 
@@ -11,10 +12,11 @@ namespace Keryhe.Telemetry.Api.Controllers;
 /// client at startup.
 /// </summary>
 [ApiController]
-[Route("api/capabilities")]
+[Route("capabilities")]
 public class CapabilitiesController(ProviderCapabilities capabilities, IConfiguration configuration) : ControllerBase
 {
     // GET /api/capabilities
+    [TelemetryOperation(TelemetryOperation.Read)]
     [HttpGet]
     public ActionResult<CapabilitiesDto> GetCapabilities()
     {

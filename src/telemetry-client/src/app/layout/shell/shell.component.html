@@ -7,7 +7,7 @@
     }
 
     <mat-icon class="app-icon">sensors</mat-icon>
-    <a class="app-title-block" routerLink="/dashboard" matTooltip="Dashboard">
+    <a class="app-title-block" [routerLink]="navLink(navItems[0])" matTooltip="Dashboard">
       <span class="app-title">{{ brand.brandName }}</span>
       <span class="app-subtitle">{{ brand.brandTagline }}</span>
     </a>
@@ -32,6 +32,11 @@
 
       <div class="toolbar-controls-secondary">
         <app-time-range-picker />
+        @if (authService.canSignOut) {
+          <button mat-icon-button matTooltip="Sign out" aria-label="Sign out" (click)="authService.signOut()">
+            <mat-icon>logout</mat-icon>
+          </button>
+        }
       </div>
     </div>
   </mat-toolbar>
@@ -43,15 +48,15 @@
       [opened]="!(isCompact$ | async)"
       class="sidenav">
       <nav class="nav-rail">
-        @for (item of navItems; track item.route) {
+        @for (item of navItems; track item.path) {
           <a class="nav-item"
              matRipple
              [matTooltip]="item.label"
              matTooltipPosition="right"
-             [routerLink]="item.route"
+             [routerLink]="navLink(item)"
              routerLinkActive="active-link"
              [routerLinkActiveOptions]="{
-               paths: item.route === '/dashboard' ? 'exact' : 'subset',
+               paths: item.path === 'dashboard' ? 'exact' : 'subset',
                queryParams: 'ignored',
                matrixParams: 'ignored',
                fragment: 'ignored'
@@ -65,8 +70,16 @@
 
     <mat-sidenav-content>
       <main class="content">
-        @for (key of [outletKey()]; track key) {
-          <router-outlet />
+        @if (authService.notSignedIn()) {
+          <app-empty-state icon="login" message="You are not signed in"
+            hint="Sign in, then reload this page." />
+        } @else if (tenantService.noAccess()) {
+          <app-empty-state icon="lock" message="No access to this tenant"
+            hint="Choose another tenant from the Tenant selector above." />
+        } @else {
+          @for (key of [outletKey()]; track key) {
+            <router-outlet />
+          }
         }
       </main>
     </mat-sidenav-content>

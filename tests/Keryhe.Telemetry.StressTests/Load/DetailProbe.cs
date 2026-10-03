@@ -37,12 +37,11 @@ public static class DetailProbe
         long bytes = 0;
         foreach (var trace in traces)
         {
-            var url = $"api/traces/{trace.TraceIdHex}/spans"
+            var url = $"api/tenants/{trace.TenantId}/traces/{trace.TraceIdHex}/spans"
                       + (hinted ? $"?start={Uri.EscapeDataString(ToIso(trace.StartUnixNano))}&end={Uri.EscapeDataString(ToIso(trace.EndUnixNano))}" : "");
             for (var i = 0; i < runsPerTrace; i++)
             {
                 using var request = new HttpRequestMessage(HttpMethod.Get, url);
-                request.Headers.Add("X-Tenant-Id", trace.TenantId.ToString());
                 var started = Stopwatch.GetTimestamp();
                 try
                 {

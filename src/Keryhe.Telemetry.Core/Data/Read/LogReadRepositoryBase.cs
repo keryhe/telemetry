@@ -182,13 +182,14 @@ public abstract class LogReadRepositoryBase : DapperReadRepository, ILogReadRepo
 
         if (timedOut)
         {
-            var cappedTotal = await GetCappedTotalAsync(conn, query.Service, query.MinSeverity, parsed, startNano, endNano, cancellationToken);
+            var (cappedTotal, cappedIsLowerBound) = await GetCappedTotalAsync(conn, query.Service, query.MinSeverity, parsed, startNano, endNano, cancellationToken);
             return new LogSummaryResult
             {
                 Source = "raw",
                 Buckets = [],
                 Total = cappedTotal,
-                TotalIsLowerBound = true,
+                TotalIsLowerBound = cappedIsLowerBound,
+                TimedOut = true,
                 AsOf = asOf
             };
         }
@@ -225,8 +226,12 @@ public abstract class LogReadRepositoryBase : DapperReadRepository, ILogReadRepo
         };
     }
 
-    /// <summary>Capped-count fallback (ports the retired <c>QueryLogRecordsAsync</c>'s capped-subquery-count shape) for when the raw summary times out.</summary>
-    private async Task<long> GetCappedTotalAsync(
+    /// <summary>
+    /// Capped-count fallback (ports the retired <c>QueryLogRecordsAsync</c>'s capped-subquery-count shape) for when the raw
+    /// summary times out: exact below the cap, the cap flagged as a lower bound above it. It has its own
+    /// <c>SummaryTimeoutSeconds</c> budget; when that runs out too the total is unknown, reported as a lower bound of 0.
+    /// </summary>
+    private async Task<(long Total, bool IsLowerBound)> GetCappedTotalAsync(
         System.Data.Common.DbConnection conn, string? service, int? minSeverity, ParsedSearchQuery parsed,
         long startNano, long endNano, CancellationToken cancellationToken)
     {
@@ -244,7 +249,12 @@ public abstract class LogReadRepositoryBase : DapperReadRepository, ILogReadRepo
             """;
         parameters.Add("limit", cap + 1);
         parameters.Add("offset", 0);
-        return await conn.ExecuteScalarAsync<long>(new CommandDefinition(sql, parameters, cancellationToken: cancellationToken));
+        var (count, timedOut) = await TimedQuery.RunAsync(
+            async (timeoutSeconds, ct) => await conn.ExecuteScalarAsync<long>(new CommandDefinition(
+                sql, parameters, commandTimeout: timeoutSeconds, cancellationToken: ct)),
+            _summaryTimeoutSeconds, cancellationToken);
+        if (timedOut) return (0, true);
+        return count > cap ? (cap, true) : (count, false);
     }
 
     // =========================================================================

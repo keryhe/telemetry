@@ -1,3 +1,4 @@
+import { TenantService } from '../../../core/services/tenant.service';
 import { Component, computed, effect, inject, signal, untracked, OnDestroy } from '@angular/core';
 import { DatePipe, DecimalPipe } from '@angular/common';
 import { Router } from '@angular/router';
@@ -51,6 +52,7 @@ export class MetricListComponent implements OnDestroy {
   private readonly resourcesApi = inject(ResourcesApiService);
   private readonly timeRange = inject(TimeRangeService);
   private readonly router = inject(Router);
+  protected readonly tenant = inject(TenantService);
   private readonly urlState = inject(UrlStateService);
 
   private readonly saved = loadPageState(STATE_KEY, {
@@ -254,7 +256,7 @@ export class MetricListComponent implements OnDestroy {
   }
 
   protected navigate(name: string): void {
-    this.router.navigate(['/metrics', encodeURIComponent(name)]);
+    this.router.navigate(this.tenant.link('metrics', encodeURIComponent(name)));
   }
 
   protected submitSearch(): void { this.searchText.set(this.searchInput().trim()); }

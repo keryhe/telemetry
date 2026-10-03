@@ -18,10 +18,17 @@ loadAppConfig()
     // that is itself a moment after bootstrap, not before it.
     document.title = config.brandName;
 
-    return bootstrapApplication(App, {
+    // `oidc` mode only: the sign-in client is imported on demand so a cookie-mode deployment never
+    // downloads it. Its initializer holds bootstrap until the user is signed in.
+    const oidcProviders = config.auth.mode === 'oidc'
+      ? import('./app/core/auth/oidc-providers').then((m) => m.provideOidcAuth(config))
+      : Promise.resolve([]);
+
+    return oidcProviders.then((oidc) => bootstrapApplication(App, {
       ...appConfig,
       providers: [
         ...appConfig.providers,
+        ...oidc,
         { provide: APP_CONFIG, useValue: config },
         // The built-in thresholds with whatever the host configured merged over them.
         {
@@ -29,6 +36,6 @@ loadAppConfig()
           useValue: resolveHealthThresholds(config.healthThresholds, HEALTH_THRESHOLDS),
         },
       ],
-    });
+    }));
   })
   .catch((err) => console.error(err));

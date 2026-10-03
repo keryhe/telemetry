@@ -1,11 +1,13 @@
 using Keryhe.Telemetry.Core;
 using Keryhe.Telemetry.Core.Models;
+using Keryhe.Telemetry.Api.Authorization;
 using Microsoft.AspNetCore.Mvc;
 
 namespace Keryhe.Telemetry.Api.Controllers;
 
 [ApiController]
-[Route("api/alerts")]
+[TenantScoped]
+[Route("alerts")]
 public class AlertsController : ControllerBase
 {
     private readonly IAlertRuleRepository _alerts;
@@ -15,7 +17,8 @@ public class AlertsController : ControllerBase
         _alerts = alerts;
     }
 
-    // GET /api/alerts/rules
+    // GET /api/tenants/{tenantId}/alerts/rules
+    [TelemetryOperation(TelemetryOperation.Read)]
     [HttpGet("rules")]
     public async Task<ActionResult<List<AlertRule>>> GetAllRules(CancellationToken ct = default)
     {
@@ -23,7 +26,8 @@ public class AlertsController : ControllerBase
         return Ok(rules);
     }
 
-    // POST /api/alerts/rules
+    // POST /api/tenants/{tenantId}/alerts/rules
+    [TelemetryOperation(TelemetryOperation.ManageAlerts)]
     [HttpPost("rules")]
     public async Task<ActionResult<AlertRule>> CreateRule(
         [FromBody] AlertRule rule,
@@ -33,7 +37,8 @@ public class AlertsController : ControllerBase
         return CreatedAtAction(nameof(GetAllRules), created);
     }
 
-    // PUT /api/alerts/rules/{id}
+    // PUT /api/tenants/{tenantId}/alerts/rules/{id}
+    [TelemetryOperation(TelemetryOperation.ManageAlerts)]
     [HttpPut("rules/{id:int}")]
     public async Task<ActionResult<AlertRule>> UpdateRule(
         int id,
@@ -45,7 +50,8 @@ public class AlertsController : ControllerBase
         return Ok(updated);
     }
 
-    // DELETE /api/alerts/rules/{id}
+    // DELETE /api/tenants/{tenantId}/alerts/rules/{id}
+    [TelemetryOperation(TelemetryOperation.ManageAlerts)]
     [HttpDelete("rules/{id:int}")]
     public async Task<IActionResult> DeleteRule(int id, CancellationToken ct = default)
     {
@@ -53,7 +59,8 @@ public class AlertsController : ControllerBase
         return NoContent();
     }
 
-    // GET /api/alerts/events?limit=50
+    // GET /api/tenants/{tenantId}/alerts/events?limit=50
+    [TelemetryOperation(TelemetryOperation.Read)]
     [HttpGet("events")]
     public async Task<ActionResult<List<AlertEvent>>> GetRecentEvents(
         [FromQuery] int limit = 50,

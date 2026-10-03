@@ -538,16 +538,20 @@ public abstract class TraceReadRepositoryBase : DapperReadRepository, ITraceRead
 
         if (timedOut || fetched == null)
         {
-            // The scan did not finish in time: report a capped count of the paginator's population.
-            var (cappedTotal, _) = await GetListTotalAsync(conn, query, parsed, startNano, endNano, asOf, cancellationToken, skipExact: true);
-            return new TraceSummaryResult { Source = "raw", Buckets = [], ListTotal = cappedTotal, TotalIsLowerBound = true, AsOf = asOf };
+            // The scan did not finish in time: no chart or card data, only a capped count of the paginator's population.
+            var (cappedTotal, cappedIsLowerBound) = await GetListTotalAsync(conn, query, parsed, startNano, endNano, asOf, cancellationToken, skipExact: true);
+            return new TraceSummaryResult
+            {
+                Source = "raw", Buckets = [], ListTotal = cappedTotal, TotalIsLowerBound = cappedIsLowerBound, TimedOut = true, AsOf = asOf
+            };
         }
 
         var rows = fetched.Rows;
         // listTotal counts every anchor (all kinds); it rides along with the inbound rows, and is only
         // counted separately when no inbound anchor came back to carry it.
-        var listTotal = fetched.TotalAll
-            ?? (await GetListTotalAsync(conn, query, parsed, startNano, endNano, asOf, cancellationToken)).Total;
+        var (listTotal, listTotalIsLowerBound) = fetched.TotalAll is { } totalAll
+            ? (totalAll, false)
+            : await GetListTotalAsync(conn, query, parsed, startNano, endNano, asOf, cancellationToken);
 
         var bucketCount = Math.Clamp(query.BucketCount, 1, 500);
         var startTicks = query.Start.Ticks;
@@ -616,7 +620,7 @@ public abstract class TraceReadRepositoryBase : DapperReadRepository, ITraceRead
             LatencyBuckets = BuildLatencyBucketsFromRows(rows, query),
             RequestCount = rows.Count,
             ListTotal = listTotal,
-            TotalIsLowerBound = false,
+            TotalIsLowerBound = listTotalIsLowerBound,
             AsOf = asOf,
         };
     }
@@ -670,7 +674,12 @@ public abstract class TraceReadRepositoryBase : DapperReadRepository, ITraceRead
         return result;
     }
 
-    /// <summary><c>listTotal</c>: an exact (or capped, on timeout) count of every anchor matching the filter (all kinds), as of the pin.</summary>
+    /// <summary>
+    /// <c>listTotal</c>: an exact count of every anchor matching the filter (all kinds), as of the pin; on timeout (or
+    /// <paramref name="skipExact"/>) a count capped at <see cref="CappedTotalLimit"/>, which is still exact below the cap.
+    /// The capped count has its own <c>SummaryTimeoutSeconds</c> budget (it ranks the same window, so it can be as slow as
+    /// the query that just timed out); when that runs out too the total is unknown and reported as a lower bound of 0.
+    /// </summary>
     private async Task<(long Total, bool IsLowerBound)> GetListTotalAsync(
         System.Data.Common.DbConnection conn, TraceSummaryQuery query, ParsedSearchQuery parsed,
         long startNano, long endNano, DateTime asOf, CancellationToken cancellationToken, bool skipExact = false)
@@ -703,11 +712,18 @@ public abstract class TraceReadRepositoryBase : DapperReadRepository, ITraceRead
             ) capped
             """;
         var cappedParams = new DynamicParameters(parameters);
-        cappedParams.Add("limit", 10_001);
+        cappedParams.Add("limit", CappedTotalLimit + 1);
         cappedParams.Add("offset", 0);
-        var capped = await conn.ExecuteScalarAsync<long>(new CommandDefinition(cappedSql, cappedParams, cancellationToken: cancellationToken));
-        return (capped, true);
+        var (capped, cappedTimedOut) = await TimedQuery.RunAsync(
+            async (timeoutSeconds, ct) => await conn.ExecuteScalarAsync<long>(new CommandDefinition(
+                cappedSql, cappedParams, commandTimeout: timeoutSeconds, cancellationToken: ct)),
+            _summaryTimeoutSeconds, cancellationToken);
+        if (cappedTimedOut) return (0, true);
+        return capped > CappedTotalLimit ? (CappedTotalLimit, true) : (capped, false);
     }
+
+    /// <summary>The capped count's cap: past it the total is reported as this value, flagged as a lower bound.</summary>
+    private const int CappedTotalLimit = 10_000;
 
     // =========================================================================
     // PAGE (keyset paging)

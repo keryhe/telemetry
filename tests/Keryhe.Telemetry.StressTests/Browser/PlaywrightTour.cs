@@ -92,7 +92,7 @@ public sealed class PlaywrightTour : IAsyncDisposable
         for (var loop = 0; !ct.IsCancellationRequested; loop++)
         {
             var window = _options.Windows[loop % _options.Windows.Count];
-            foreach (var step in TourPlan.Build(window, _options, user.Data))
+            foreach (var step in TourPlan.Build(window, _options, user.Data, user.Tenant.Id))
             {
                 if (ct.IsCancellationRequested) break;
                 try { _results.Enqueue(await RunStepAsync(user, page, watcher, step, window)); }

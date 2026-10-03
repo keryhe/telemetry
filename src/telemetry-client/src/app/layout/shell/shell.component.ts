@@ -10,6 +10,8 @@ import { MatSidenav, MatSidenavModule } from '@angular/material/sidenav';
 import { MatToolbarModule } from '@angular/material/toolbar';
 import { MatTooltipModule } from '@angular/material/tooltip';
 import { Router, RouterLink, RouterLinkActive, RouterOutlet } from '@angular/router';
+import { AuthService } from '../../core/auth/auth.service';
+import { EmptyStateComponent } from '../../shared/components/empty-state/empty-state.component';
 import { map } from 'rxjs/operators';
 import { APP_CONFIG } from '../../core/config/app-config';
 import { ThemeService } from '../../core/services/theme.service';
@@ -22,15 +24,18 @@ import { FormsModule } from '@angular/forms';
 interface NavItem {
   label: string;
   icon: string;
-  route: string;
+  /** Path segment under `/t/{tenant}/`, or the whole path for a global page. */
+  path: string;
+  /** A global page (no tenant in its URL). */
+  global?: boolean;
 }
 
 /** Query params that name something belonging to one tenant, dropped on a tenant switch. */
-const TENANT_SCOPED_QUERY_PARAMS = ['service', 'op', 'q', 'severity', 'page', 'span'];
+const TENANT_SCOPED_QUERY_PARAMS = ['service', 'op', 'q', 'severity', 'page', 'span', 'cursor', 'asOf'];
 /** The time-range params — the only ones carried from a detail page back to its list. */
 const TIME_RANGE_QUERY_PARAMS = ['range', 'from', 'to'];
 /** Detail routes whose item belongs to one tenant, mapped to the list page to fall back to. */
-const DETAIL_ROUTE_PARENTS: Record<string, string> = { traces: '/traces', metrics: '/metrics' };
+const DETAIL_ROUTE_PARENTS: Record<string, string> = { traces: 'traces', metrics: 'metrics' };
 
 /**
  * Width at which the shell switches to its compact layout (drawer instead of a permanent rail).
@@ -66,7 +71,7 @@ const COMPACT_QUERY = '(max-width: 599.98px)';
     RouterOutlet, RouterLink, RouterLinkActive,
     MatSidenavModule, MatToolbarModule, MatRippleModule,
     MatIconModule, MatButtonModule, MatTooltipModule,
-    MatSelectModule, MatFormFieldModule,
+    MatSelectModule, MatFormFieldModule, EmptyStateComponent,
     TimeRangePickerComponent,
   ],
   templateUrl: './shell.component.html',
@@ -78,6 +83,7 @@ export class ShellComponent {
   // constructor to run at startup and apply the persisted theme class to <body> immediately.
   private readonly themeService = inject(ThemeService);
   protected readonly tenantService = inject(TenantService);
+  protected readonly authService = inject(AuthService);
   private readonly router = inject(Router);
 
   /**
@@ -109,38 +115,41 @@ export class ShellComponent {
   }
 
   protected readonly navItems: NavItem[] = [
-    { label: 'Dashboard', icon: 'dashboard', route: '/dashboard' },
-    { label: 'Logs', icon: 'article', route: '/logs' },
-    { label: 'Traces', icon: 'account_tree', route: '/traces' },
-    { label: 'Metrics', icon: 'bar_chart', route: '/metrics' },
-    { label: 'Alerts', icon: 'notifications', route: '/alerts' },
-    { label: 'Settings', icon: 'settings', route: '/settings' },
+    { label: 'Dashboard', icon: 'dashboard', path: 'dashboard' },
+    { label: 'Logs', icon: 'article', path: 'logs' },
+    { label: 'Traces', icon: 'account_tree', path: 'traces' },
+    { label: 'Metrics', icon: 'bar_chart', path: 'metrics' },
+    { label: 'Alerts', icon: 'notifications', path: 'alerts' },
+    { label: 'Settings', icon: 'settings', path: '/settings', global: true },
   ];
+
+  /** Router commands for a nav item: under the current tenant, or the global path. */
+  protected navLink(item: NavItem): (string | number)[] {
+    if (item.global) return [item.path];
+    return this.tenantService.effectiveTenantId() === null ? ['/'] : this.tenantService.link(item.path);
+  }
 
   protected selectTenant(tenant: Tenant): void {
     if (tenant.id === this.tenantService.selectedTenant()?.id) return;
-    this.tenantService.selectTenant(tenant);
+    this.tenantService.setLastUsed(tenant.id);
     resetTenantScopedPageState();
 
-    // Drop the old tenant's filters from the URL, and leave a detail page (its trace/metric belongs
-    // to the old tenant) for its list. Only then recreate the page, so the new component reads the
-    // cleaned URL rather than the stale one.
+    // On a tenant page: the same section under the new tenant, dropping the old tenant's filters and
+    // paging state, and leaving a detail page (its trace/metric belongs to the old tenant) for its
+    // list. Time range is kept. Elsewhere (settings) there is nothing to navigate.
     const tree = this.router.parseUrl(this.router.url);
     const segments = tree.root.children['primary']?.segments.map((s) => s.path) ?? [];
-    const parent = segments.length > 1 ? DETAIL_ROUTE_PARENTS[segments[0]] : undefined;
-    let target;
-    if (parent) {
-      const params = Object.fromEntries(
-        Object.entries(tree.queryParams).filter(([k]) => TIME_RANGE_QUERY_PARAMS.includes(k)));
-      target = this.router.createUrlTree([parent], { queryParams: params });
-    } else {
-      for (const key of TENANT_SCOPED_QUERY_PARAMS) delete tree.queryParams[key];
-      target = tree;
-    }
-    // Leaving for the list page already constructs a fresh component; staying on the same route
-    // reuses the current one, so recreate the outlet to rebuild it.
-    this.router.navigateByUrl(target, { replaceUrl: true })
-      .finally(() => { if (!parent) this.outletKey.update((k) => k + 1); });
+    if (segments[0] !== 't' || segments.length < 3) return;
+    const section = segments[2];
+    const parent = segments.length > 3 ? DETAIL_ROUTE_PARENTS[section] : undefined;
+    const rest = parent ? [parent] : segments.slice(2);
+    const params = parent
+      ? Object.fromEntries(Object.entries(tree.queryParams).filter(([k]) => TIME_RANGE_QUERY_PARAMS.includes(k)))
+      : Object.fromEntries(Object.entries(tree.queryParams).filter(([k]) => !TENANT_SCOPED_QUERY_PARAMS.includes(k)));
+    // The route's tenant changes but its components are reused (same route config), so recreate the
+    // outlet to rebuild the page for the new tenant.
+    this.router.navigate(['/t', tenant.id, ...rest], { queryParams: params, replaceUrl: true })
+      .finally(() => this.outletKey.update((k) => k + 1));
   }
 
   protected compareTenants(a: Tenant | null, b: Tenant | null): boolean {

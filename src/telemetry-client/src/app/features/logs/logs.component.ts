@@ -1,4 +1,5 @@
-import { Component, computed, effect, inject, signal, untracked, OnDestroy } from '@angular/core';
+import { TenantService } from '../../core/services/tenant.service';
+import { Component, LOCALE_ID, computed, effect, inject, signal, untracked, OnDestroy } from '@angular/core';
 import { DatePipe, DecimalPipe, SlicePipe, PercentPipe } from '@angular/common';
 import { RouterLink } from '@angular/router';
 import { Subscription } from 'rxjs';
@@ -10,7 +11,7 @@ import { MatProgressBarModule } from '@angular/material/progress-bar';
 import { MatSelectModule } from '@angular/material/select';
 import { MatTableModule } from '@angular/material/table';
 import { MatButtonModule } from '@angular/material/button';
-import { MatPaginatorModule, PageEvent } from '@angular/material/paginator';
+import { MatPaginatorIntl, MatPaginatorModule, PageEvent } from '@angular/material/paginator';
 import { MatChipsModule } from '@angular/material/chips';
 import { MatTooltipModule } from '@angular/material/tooltip';
 import { MatDialog, MatDialogModule } from '@angular/material/dialog';
@@ -20,6 +21,8 @@ import type { ApexOptions } from 'ng-apexcharts';
 import { FormsModule } from '@angular/forms';
 
 import { LogsApiService, LogSummaryResult, LogPageResult, LogFacetsResult } from '../../core/services/api/logs-api.service';
+import { GroupedPaginatorIntl, lowerBoundTotalLabel } from '../../shared/utils/paginator-intl';
+import { SUMMARY_TIMEOUT_TOOLTIP, formatSummaryTotal } from '../../shared/utils/summary-total';
 import { ResourcesApiService } from '../../core/services/api/resources-api.service';
 import { TimeRangeService } from '../../core/services/time-range.service';
 import { ThemeService } from '../../core/services/theme.service';
@@ -86,6 +89,8 @@ function inferFacetType(values: { value: string }[]): FacetValueType {
     MatMenuModule, MatTooltipModule, NgApexchartsModule,
     StatCardComponent, EmptyStateComponent, PageHeaderComponent,
   ],
+  // Its own paginator intl, so a lower-bound total can print "of 10,000+" without touching other pages' paginators.
+  providers: [{ provide: MatPaginatorIntl, useClass: GroupedPaginatorIntl }],
   templateUrl: './logs.component.html',
   styleUrl: './logs.component.scss',
 })
@@ -96,6 +101,7 @@ export class LogsComponent implements OnDestroy {
   private readonly theme = inject(ThemeService);
   private readonly dialog = inject(MatDialog);
   private readonly urlState = inject(UrlStateService);
+  protected readonly tenant = inject(TenantService);
   private readonly capabilitiesService = inject(CapabilitiesService);
 
   private readonly saved = loadPageState(STATE_KEY, {
@@ -197,6 +203,20 @@ export class LogsComponent implements OnDestroy {
 
   protected effectiveTotal = computed(() => this.traceFilterActive() ? this.traceLogs().length : (this.summary()?.total ?? 0));
   protected totalIsLowerBound = computed(() => !this.traceFilterActive() && (this.summary()?.totalIsLowerBound ?? false));
+  /** The server's histogram ran out of time: the severity cards and the chart have no data (which is not "zero"). */
+  protected summaryTimedOut = computed(() => !this.traceFilterActive() && (this.summary()?.timedOut ?? false));
+  protected readonly summaryTimeoutTooltip = SUMMARY_TIMEOUT_TOOLTIP;
+  private readonly locale = inject(LOCALE_ID);
+  /** The paginator's length; a capped total is stretched past the current page while the server offers a next page (as on the trace list). */
+  protected paginatorLength = computed(() => {
+    const total = this.effectiveTotal();
+    if (!this.totalIsLowerBound()) return total;
+    const shown = this.pageIndex() * this.pageSize() + (this.page()?.items.length ?? 0);
+    return Math.max(total, shown + (this.page()?.nextCursor ? 1 : 0));
+  });
+  private readonly paginatorIntl = inject(MatPaginatorIntl) as GroupedPaginatorIntl;
+  /** The Total Logs card: exact, "10,000+" when capped, "—" when even the capped count timed out. */
+  protected totalLabel = computed(() => formatSummaryTotal(this.effectiveTotal(), this.totalIsLowerBound(), this.locale));
 
   protected errorCount = computed(() => {
     if (this.traceFilterActive()) return this.traceLogs().filter((l) => (l.severityNumber ?? 0) >= 17).length;
@@ -284,6 +304,12 @@ export class LogsComponent implements OnDestroy {
   protected readonly getTimestamp = getTimestamp;
 
   constructor() {
+    // "of 10,000+" / "of many" while the total is only a lower bound (see paginatorLength).
+    effect(() => {
+      this.paginatorIntl.totalOverride = this.totalIsLowerBound() ? lowerBoundTotalLabel(this.effectiveTotal(), this.locale) : null;
+      this.paginatorIntl.changes.next();
+    });
+
     // Slide relative preset windows to "now" on (re)entry so navigating back refreshes.
     this.timeRange.refreshRelativeWindow();
 
