@@ -103,6 +103,8 @@ export interface LogFacet {
 export interface LogFacetsResult {
   sampleSize: number;
   facets: LogFacet[];
+  /** The sample scan timed out: `facets` is empty because the answer is unknown, not because there are none. */
+  timedOut: boolean;
 }
 
 @Injectable({ providedIn: 'root' })

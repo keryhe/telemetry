@@ -220,6 +220,76 @@ public abstract class MetricPhase4TestsBase : IAsyncLifetime
         Assert.All(valued, p => Assert.Equal(0.2, p.Rate!.Value, precision: 6)); // 2 obs / 10s
     }
 
+    /// <summary>
+    /// A re-delivered metric batch stores every data point a second time: the five data-point tables are plain
+    /// append targets since schema 3.0.0 (decision 7 — no unique key, no foreign keys), so reads must tolerate the
+    /// repeat. Both windows here open AFTER the stream's first point, so the duplicated row is the one the
+    /// cumulative loaders read as the stream's pre-window BASELINE. The totals are asserted, not just the absence
+    /// of a throw: a baseline that went missing would make the first in-window increase unknowable and drop its
+    /// bucket entirely, and a duplicate counted twice would inflate the deltas.
+    ///
+    /// <b>Scope.</b> This passes both before and after <c>ToDictionaryNewest</c> replaced the baseline lookup's
+    /// plain <c>ToDictionary</c>, and that was measured on all five providers, not assumed: every provider's
+    /// "last point per stream" SQL collapses appended duplicates before C# sees them (<c>ROW_NUMBER() ... WHERE
+    /// rn = 1</c>, or <c>argMax</c> + <c>GROUP BY</c> on ClickHouse), which was also confirmed directly against
+    /// MySQL including a deliberately spilled window sort. So re-delivery is NOT what produced the
+    /// <c>metrics/series</c> 500s in the 3.0.1 stress ramp; this test guards the end-to-end append-duplication
+    /// invariant, and <c>DuplicateBaselineRowTests</c> is the negative-controlled test of the guard itself.
+    /// </summary>
+    [Fact]
+    public async Task RedeliveredCumulativeBatch_DuplicatesTheBaselineRow_StillReadsCorrectDeltas()
+    {
+        // Service names unique to this test, deliberately: the fixture's ResetAsync truncates `metrics` but keeps
+        // the process-lifetime ResourceScopeCache (see PostgreSqlFixture.ResetAsync), so a test that reuses another
+        // test's metric identity (resource + name + type + scope) hands whichever runs second a cached metric id
+        // whose catalog row has been truncated away, and its series read comes back null.
+        var counter = SeededDataBuilder.CumulativeCounterSeries(
+            _fixture.TenantId, WindowStart, [15, 30, 45], intervalSeconds: 15, serviceName: "redelivered-rate-svc");
+        var histogram = SeededDataBuilder.CumulativeHistogramSeries(
+            _fixture.TenantId, WindowStart, [(2, 200), (4, 300)], intervalSeconds: 10, serviceName: "redelivered-latency-svc");
+        using (var writeScope = Scope())
+        {
+            var writer = writeScope.ServiceProvider.GetRequiredService<ITelemetryBulkWriter>();
+            // Twice, as a retried OTLP export would arrive.
+            await writer.FlushMetricsAsync([counter, histogram]);
+            await writer.FlushMetricsAsync([counter, histogram]);
+        }
+
+        using var readScope = Scope();
+        var repo = readScope.ServiceProvider.GetRequiredService<IMetricReadRepository>();
+
+        // Window opens at +20s, so the (duplicated) +15s point is the baseline and +30s/+45s are in-window.
+        var sum = await repo.GetMetricSeriesAsync(new MetricSeriesQuery
+        {
+            MetricName = "correctness.requests.cumulative",
+            Start = WindowStart.AddSeconds(20),
+            End = WindowStart.AddSeconds(60),
+            Points = 40
+        });
+
+        Assert.NotNull(sum);
+        var sumSeries = Assert.Single(sum!.Series);
+        var sumPoints = sumSeries.Points.Where(p => p.Value.HasValue).ToList();
+        Assert.Equal(2, sumPoints.Count);                                    // +30s and +45s
+        Assert.Equal(30, sumPoints.Sum(p => p.Value!.Value));                // (30-15) + (45-30)
+        Assert.All(sumPoints, p => Assert.Equal(1.0, p.Rate!.Value, precision: 6));
+
+        // Same shape for the histogram: baseline is the (duplicated) +10s point, +20s is in-window.
+        var distribution = await repo.GetMetricSeriesAsync(new MetricSeriesQuery
+        {
+            MetricName = "correctness.latency.cumulative",
+            Start = WindowStart.AddSeconds(15),
+            End = WindowStart.AddSeconds(30),
+            Points = 15
+        });
+
+        Assert.NotNull(distribution);
+        var histogramSeries = Assert.Single(distribution!.Series);
+        var histogramPoints = histogramSeries.Points.Where(p => p.Count is > 0).ToList();
+        Assert.Equal(2, histogramPoints.Sum(p => p.Count!.Value));           // 4 - 2
+        Assert.Equal(100, histogramPoints.Sum(p => p.Sum!.Value), precision: 6); // 300 - 200
+    }
+
     [Fact]
     public async Task HistogramDelta_MergesBucketCountsAndSumsCount()
     {

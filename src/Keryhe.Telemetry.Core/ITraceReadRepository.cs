@@ -36,8 +36,12 @@ public interface ITraceReadRepository
     /// <summary>Keyset-paged trace rows for the traces list page (decision 1), anchored on each trace's earliest span in scope (decision 10), pinned on <see cref="TraceQuery.AsOf"/> (decision 3).</summary>
     Task<TracePageResult> GetTracePageAsync(TraceQuery query, CancellationToken cancellationToken = default);
 
-    /// <summary>The dashboard's Recent Errors/Slowest Traces widgets — newest errors or the slowest anchors, over the unfiltered population.</summary>
-    Task<List<TraceInfo>> GetTraceSamplesAsync(TraceSamplesQuery query, CancellationToken cancellationToken = default);
+    /// <summary>
+    /// The dashboard's Recent Errors/Slowest Traces widgets — newest errors or the slowest anchors, over the unfiltered
+    /// population. Bounded by <c>SummaryTimeoutSeconds</c> like the summaries (it derives anchors over the whole
+    /// window); on timeout the result is empty and flagged <see cref="TraceSamplesResult.TimedOut"/>.
+    /// </summary>
+    Task<TraceSamplesResult> GetTraceSamplesAsync(TraceSamplesQuery query, CancellationToken cancellationToken = default);
 
     // Analysis operations
     Task<List<ServiceDependency>> GetServiceDependenciesAsync(DateTime? startTime = null, DateTime? endTime = null, CancellationToken cancellationToken = default);

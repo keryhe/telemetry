@@ -15,6 +15,8 @@ public sealed class ProcessMetricsListener : IAsyncDisposable
     public static readonly string[] DefaultMeters =
     [
         "Keryhe.Telemetry.Ingestion",
+        // query_timeouts: summary-class reads that ran out of their budget, by exception type (TimedQuery).
+        "Keryhe.Telemetry.Query",
         "Microsoft.AspNetCore.Hosting",
         "Microsoft.AspNetCore.Server.Kestrel",
         "Grpc.AspNetCore.Server",

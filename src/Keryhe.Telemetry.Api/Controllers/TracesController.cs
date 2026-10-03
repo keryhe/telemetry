@@ -137,8 +137,15 @@ public class TracesController : ControllerBase
             Kind = kind,
             Limit = limit
         }, ct);
-        return Ok(result);
+        if (result.TimedOut) Response.Headers[TimedOutHeader] = "true";
+        return Ok(result.Items);
     }
+
+    /// <summary>
+    /// Set on <c>samples</c> when the anchor scan ran out of time: the (empty) array means "unknown", not "none". A header
+    /// rather than a body field so the response stays the bare array existing consumers read.
+    /// </summary>
+    public const string TimedOutHeader = "X-Telemetry-Timed-Out";
 
     /// <summary>
     /// Decision 39's standard-tier raw-search-window guard. A trace-id-shaped <c>q</c> and

@@ -105,9 +105,9 @@ public abstract class TraceQueryBenchBase(ProviderFixture fixture) : IAsyncLifet
             await Time($"operation page {w}", async () =>
                 (await repo.GetTracePageAsync(new TraceQuery { Start = start, End = end, AsOf = asOf, Size = 100, Service = "order-service", Operation = "POST /orders" })).Items.Count.ToString());
             await Time($"samples errors {w}", async () =>
-                (await repo.GetTraceSamplesAsync(new TraceSamplesQuery { Start = start, End = end, Kind = "errors", Limit = 5 })).Count.ToString());
+                (await repo.GetTraceSamplesAsync(new TraceSamplesQuery { Start = start, End = end, Kind = "errors", Limit = 5 })).Items.Count.ToString());
             await Time($"samples slowest {w}", async () =>
-                (await repo.GetTraceSamplesAsync(new TraceSamplesQuery { Start = start, End = end, Kind = "slowest", Limit = 5 })).Count.ToString());
+                (await repo.GetTraceSamplesAsync(new TraceSamplesQuery { Start = start, End = end, Kind = "slowest", Limit = 5 })).Items.Count.ToString());
         }
 
         // Detail: 25 traces spread across the whole retention (old ones included), one timing = all 25 lookups.

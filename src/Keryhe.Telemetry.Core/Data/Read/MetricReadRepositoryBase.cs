@@ -298,7 +298,7 @@ public abstract class MetricReadRepositoryBase : DapperReadRepository, IMetricRe
                 break;
             case "last":
                 forward = false;
-                var lastCount = await TryGetExactCatalogInstanceCountAsync(conn, baseWhere, parameters, cancellationToken);
+                var lastCount = await TryGetExactCatalogInstanceCountAsync(baseWhere, parameters, cancellationToken);
                 requestedSize = lastCount.HasValue ? KeysetCursor.LastPageRowCount(lastCount.Value, size) : size;
                 rows = await FetchCatalogInstancePageAsync(conn, baseWhere, "", parameters, requestedSize, descending: false, cancellationToken);
                 break;
@@ -387,8 +387,11 @@ public abstract class MetricReadRepositoryBase : DapperReadRepository, IMetricRe
     /// </summary>
     protected virtual string CatalogQuerySettingsClause => "";
 
-    private async Task<long?> TryGetExactCatalogInstanceCountAsync(DbConnection conn, string where, DynamicParameters parameters, CancellationToken cancellationToken)
+    private async Task<long?> TryGetExactCatalogInstanceCountAsync(string where, DynamicParameters parameters, CancellationToken cancellationToken)
     {
+        // On its own pooled connection, not the caller's: the caller keeps using its connection for the page itself,
+        // and a count that times out leaves the connection it ran on aborted mid-statement (see TimedQuery).
+        await using var conn = await OpenConnectionAsync(cancellationToken);
         var (result, timedOut) = await TimedQuery.RunAsync(
             async (timeoutSeconds, ct) => await conn.ExecuteScalarAsync<long>(new CommandDefinition(
                 $"SELECT COUNT(*) FROM metrics m LEFT JOIN {MetricLastSeenSql} mls ON mls.metric_id = m.id WHERE {where}",
@@ -449,7 +452,7 @@ public abstract class MetricReadRepositoryBase : DapperReadRepository, IMetricRe
                 break;
             case "last":
                 forward = false;
-                var lastCount = await TryGetExactCatalogNameCountAsync(conn, baseWhere, parameters, cancellationToken);
+                var lastCount = await TryGetExactCatalogNameCountAsync(baseWhere, parameters, cancellationToken);
                 requestedSize = lastCount.HasValue ? KeysetCursor.LastPageRowCount(lastCount.Value, size) : size;
                 rows = await FetchCatalogNameOfPageAsync(conn, baseWhere, "", parameters, requestedSize, descending: false, cancellationToken);
                 break;
@@ -593,8 +596,11 @@ public abstract class MetricReadRepositoryBase : DapperReadRepository, IMetricRe
     /// </summary>
     protected virtual string LiteralPagingClause(int limit, int offset) => $"LIMIT {limit} OFFSET {offset}";
 
-    private async Task<long?> TryGetExactCatalogNameCountAsync(DbConnection conn, string where, DynamicParameters parameters, CancellationToken cancellationToken)
+    private async Task<long?> TryGetExactCatalogNameCountAsync(string where, DynamicParameters parameters, CancellationToken cancellationToken)
     {
+        // On its own pooled connection, not the caller's: the caller keeps using its connection for the page itself,
+        // and a count that times out leaves the connection it ran on aborted mid-statement (see TimedQuery).
+        await using var conn = await OpenConnectionAsync(cancellationToken);
         var (result, timedOut) = await TimedQuery.RunAsync(
             async (timeoutSeconds, ct) => await conn.ExecuteScalarAsync<long>(new CommandDefinition(
                 $"""
@@ -695,8 +701,17 @@ public abstract class MetricReadRepositoryBase : DapperReadRepository, IMetricRe
         if (timedOut)
         {
             var retryPoints = Math.Max(1, points / 4);
+            // The retry runs on a FRESH connection, not the one the timed-out attempt was using. That attempt was
+            // aborted mid-statement (TimedQuery cancels the token, and the command timeout can fire at the same
+            // moment), which leaves the connection in a state the driver owns and we cannot inspect: a provider may
+            // break the connector outright (Npgsql wraps its read timeout in an NpgsqlException and the connector is
+            // then unusable) or hand back a session whose previous result set was not fully drained. Reusing it makes
+            // the retry's own result sets suspect, which is worse than a slow query — the per-stream baseline rows it
+            // reads are a lookup keyed on something no index enforces, so a stray row is not a crash but a wrong
+            // delta. See ToDictionaryNewest for the read side of the same concern.
+            await using var retryConn = await OpenConnectionAsync(cancellationToken);
             var (retryResult, retryTimedOut) = await TimedQuery.RunAsync(
-                async (timeoutSeconds, ct) => await RunSeriesQueryAsync(conn, type, metricIds, serviceNameByMetricId, query, retryPoints, top, timeoutSeconds, ct),
+                async (timeoutSeconds, ct) => await RunSeriesQueryAsync(retryConn, type, metricIds, serviceNameByMetricId, query, retryPoints, top, timeoutSeconds, ct),
                 _summaryTimeoutSeconds, cancellationToken);
 
             if (retryTimedOut)
@@ -992,7 +1007,7 @@ public abstract class MetricReadRepositoryBase : DapperReadRepository, IMetricRe
         static double ValueOf(MetricPointRow r) => r.ValueDouble ?? r.ValueInt ?? 0;
 
         var streams = new Dictionary<string, StreamAgg>();
-        var baselineByStream = baselineRows.ToDictionary(r => $"{r.MetricId}\u0001{r.AttributesJson}");
+        var baselineByStream = ToDictionaryNewest(baselineRows, r => $"{r.MetricId}\u0001{r.AttributesJson}", r => r.TimeUnixNano);
 
         foreach (var group in bucketRows.GroupBy(r => $"{r.MetricId}\u0001{r.AttributesJson}"))
         {
@@ -1073,7 +1088,7 @@ public abstract class MetricReadRepositoryBase : DapperReadRepository, IMetricRe
         List<MetricPointRow> bucketRows, List<MetricPointRow> baselineRows, long windowStartNano)
     {
         var streams = new Dictionary<string, StreamAgg>();
-        var baselineByStream = baselineRows.ToDictionary(r => $"{r.MetricId}\u0001{r.AttributesJson}");
+        var baselineByStream = ToDictionaryNewest(baselineRows, r => $"{r.MetricId}\u0001{r.AttributesJson}", r => r.TimeUnixNano);
 
         foreach (var group in bucketRows.GroupBy(r => $"{r.MetricId}\u0001{r.AttributesJson}"))
         {
@@ -1206,7 +1221,7 @@ public abstract class MetricReadRepositoryBase : DapperReadRepository, IMetricRe
         List<MetricPointRow> bucketRows, List<MetricPointRow> baselineRows, long windowStartNano)
     {
         var streams = new Dictionary<string, StreamAgg>();
-        var baselineByStream = baselineRows.ToDictionary(r => $"{r.MetricId}\u0001{r.AttributesJson}");
+        var baselineByStream = ToDictionaryNewest(baselineRows, r => $"{r.MetricId}\u0001{r.AttributesJson}", r => r.TimeUnixNano);
         var globalTargetScale = ComputeGlobalMinScale(bucketRows, baselineRows);
 
         foreach (var group in bucketRows.GroupBy(r => $"{r.MetricId}\u0001{r.AttributesJson}"))
@@ -1422,9 +1437,10 @@ public abstract class MetricReadRepositoryBase : DapperReadRepository, IMetricRe
             commandTimeout: timeoutSeconds, cancellationToken: ct));
 
         var baselineSql = BuildLastPerStreamSql("summary_data_points", idList, " AND dp.time_unix_nano < @start", labelClause, SummaryCols);
-        var baselineByStream = (await conn.QueryAsync<MetricPointRow>(new CommandDefinition(baselineSql,
-                Merge(new { start = b.StartNano }, lp), commandTimeout: timeoutSeconds, cancellationToken: ct)))
-            .ToDictionary(r => $"{r.MetricId}\u0001{r.AttributesJson}");
+        var baselineByStream = ToDictionaryNewest(
+            await conn.QueryAsync<MetricPointRow>(new CommandDefinition(baselineSql,
+                Merge(new { start = b.StartNano }, lp), commandTimeout: timeoutSeconds, cancellationToken: ct)),
+            r => $"{r.MetricId}\u0001{r.AttributesJson}", r => r.TimeUnixNano);
 
         var streams = new Dictionary<string, StreamAgg>();
         foreach (var group in rows.GroupBy(r => $"{r.MetricId}\u0001{r.AttributesJson}"))
@@ -1918,10 +1934,6 @@ public abstract class MetricReadRepositoryBase : DapperReadRepository, IMetricRe
                 throw new ArgumentException("Invalid or stale cursor.");
         }
 
-        var (total, totalTimedOut) = await TimedQuery.RunAsync(
-            async (timeoutSeconds, ct) => await CountExemplarsAsync(conn, table, baseWhere, baseParams, timeoutSeconds, ct),
-            _summaryTimeoutSeconds, cancellationToken);
-
         List<ExemplarPointRow> rows;
         bool forward;
         var requestedSize = size;
@@ -1949,6 +1961,12 @@ public abstract class MetricReadRepositoryBase : DapperReadRepository, IMetricRe
                 rows = await FetchExemplarPointsAsync(conn, table, isCountTable, baseWhere, baseParams, size, descending: true, null, null, cancellationToken);
                 break;
         }
+
+        // The count runs last, after every query that needs this connection: a count that times out leaves its
+        // connection aborted mid-statement (see TimedQuery), so nothing may run on it afterwards.
+        var (total, totalTimedOut) = await TimedQuery.RunAsync(
+            async (timeoutSeconds, ct) => await CountExemplarsAsync(conn, table, baseWhere, baseParams, timeoutSeconds, ct),
+            _summaryTimeoutSeconds, cancellationToken);
 
         var hasExtra = rows.Count > requestedSize;
         if (hasExtra) rows.RemoveAt(rows.Count - 1);

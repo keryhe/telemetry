@@ -293,6 +293,8 @@ export class LogsComponent implements OnDestroy {
 
   /** "latest N matches" sample-size label for the facets sidebar footer. */
   protected facetSampleSize = computed(() => this.facetsResult()?.sampleSize ?? 0);
+  /** The facets scan timed out: the sidebar says so instead of "No attributes in the current view". */
+  protected facetsTimedOut = computed(() => this.facetsResult()?.timedOut ?? false);
 
   protected chartOptions = signal<ApexOptions>({});
 

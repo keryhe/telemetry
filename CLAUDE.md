@@ -555,8 +555,20 @@ that risks running long (an unindexed scan, a `COUNT(*)` over a large filtered s
 **`TimedQuery.RunAsync`**, which enforces `Telemetry:Query:SummaryTimeoutSeconds` (default 5) and
 returns a lower-bound/"≥ N" result instead of blocking the request indefinitely — `GetLogSummaryAsync`/
 `GetTraceSummaryAsync`/`GetMetricSeriesAsync` (the latter retrying once at a quarter of the
-requested point count, decision 31) all use it; with no rollup tables (schema 3.0.0) a 3d/7d summary on
-a busy tenant is the case that hits it. `SqlServer`'s own read repositories additionally
+requested point count, decision 31), the dashboard's `GetTraceSamplesAsync` and the logs page's `GetLogFacetsAsync` all
+use it; with no rollup tables
+(schema 3.0.0) a 3d/7d summary on a busy tenant is the case that hits it. Two rules, from
+`plans/trace-list-summary-trim.md`'s Background (the 3.0.1 ramp answered these as 500s): **a timeout is decided by
+`TimedQuery`'s own deadline, not the exception type** — any exception after the budget counts, because every driver
+ends an aborted command with its own type (Npgsql an `NpgsqlException` wrapping `TimeoutException`, SqlClient a
+`SqlException` even on token cancellation, MySqlConnector a `MySqlException`; ClickHouse.Client does not enforce
+`CommandTimeout` at all) — and the driver gets the budget plus `DriverTimeoutGraceSeconds` (2) so the token fires
+first; and **a connection a timed-out query ran on is never reused**: fallbacks open a fresh one, and an exact count
+that a page still needs afterwards (the "last" pages) runs on its own connection. Timeouts are counted on the
+`Keryhe.Telemetry.Query` meter's `query_timeouts`, tagged with the exception type (the stress harness collects it). `samples` reports a timeout as
+an empty array plus `X-Telemetry-Timed-Out: true` (the body stays an array); facets as `timedOut` in its body. Still
+unbounded (driver default, 30 s): the trace analytics reads (dependencies, operation stats/counts, average latencies),
+`GetMetricLabelsAsync` and `GetMetricsSummaryAsync`, each a bare-list contract; exports are unbounded by design. `SqlServer`'s own read repositories additionally
 wrap each call in `ExecuteWithRetryAsync`, retrying once on error 1205 — every other provider's
 override is a no-op. Hot reads filter on `tenant_id`/`service_name` columns carried by `spans`,
 `log_records` and `metrics` themselves (copied from the resolved resource at ingest by

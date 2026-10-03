@@ -182,7 +182,9 @@ public abstract class LogReadRepositoryBase : DapperReadRepository, ILogReadRepo
 
         if (timedOut)
         {
-            var (cappedTotal, cappedIsLowerBound) = await GetCappedTotalAsync(conn, query.Service, query.MinSeverity, parsed, startNano, endNano, cancellationToken);
+            // On a fresh connection: the one the summary ran on was aborted mid-statement (see TimedQuery).
+            await using var fresh = await OpenConnectionAsync(cancellationToken);
+            var (cappedTotal, cappedIsLowerBound) = await GetCappedTotalAsync(fresh, query.Service, query.MinSeverity, parsed, startNano, endNano, cancellationToken);
             return new LogSummaryResult
             {
                 Source = "raw",
@@ -321,7 +323,7 @@ public abstract class LogReadRepositoryBase : DapperReadRepository, ILogReadRepo
 
             case "last":
                 forward = false;
-                var lastCount = await TryGetExactCountAsync(conn, clauses, parameters, cancellationToken);
+                var lastCount = await TryGetExactCountAsync(clauses, parameters, cancellationToken);
                 requestedSize = lastCount.HasValue ? KeysetCursor.LastPageRowCount(lastCount.Value, size) : size;
                 rows = await FetchPageAsync(conn, clauses, parameters, requestedSize, descending: false, cancellationToken);
                 break;
@@ -416,8 +418,11 @@ public abstract class LogReadRepositoryBase : DapperReadRepository, ILogReadRepo
     }
 
     private async Task<long?> TryGetExactCountAsync(
-        System.Data.Common.DbConnection conn, List<string> clauses, DynamicParameters parameters, CancellationToken cancellationToken)
+        List<string> clauses, DynamicParameters parameters, CancellationToken cancellationToken)
     {
+        // On its own pooled connection, not the caller's: the caller keeps using its connection for the page itself,
+        // and a count that times out leaves the connection it ran on aborted mid-statement (see TimedQuery).
+        await using var conn = await OpenConnectionAsync(cancellationToken);
         var where = string.Join(" AND ", clauses);
         var sql = $"""
             SELECT COUNT(*) FROM log_records lr
@@ -456,7 +461,14 @@ public abstract class LogReadRepositoryBase : DapperReadRepository, ILogReadRepo
         parameters.Add("offset", 0);
 
         await using var conn = await OpenConnectionAsync(cancellationToken);
-        var attributeJsonRows = (await conn.QueryAsync<string?>(new CommandDefinition(sql, parameters, cancellationToken: cancellationToken))).ToList();
+        // Bounded like the summaries: the sample is the newest matching rows, but finding them can mean scanning the
+        // window (a search term, a narrow service), and without a budget it ran into the driver's 30 s default and
+        // answered 500 under load (Timescale, the 2026-10-03 timeout-work ramp).
+        var (attributeJsonRows, timedOut) = await TimedQuery.RunAsync(
+            async (timeoutSeconds, ct) => (await conn.QueryAsync<string?>(new CommandDefinition(
+                sql, parameters, commandTimeout: timeoutSeconds, cancellationToken: ct))).ToList(),
+            _summaryTimeoutSeconds, cancellationToken);
+        if (timedOut || attributeJsonRows == null) return new LogFacetsResult { TimedOut = true };
 
         var valueLimit = Math.Clamp(query.ValueLimit, 1, 100);
         var keyFilter = query.Keys is { Count: > 0 } ? new HashSet<string>(query.Keys) : null;

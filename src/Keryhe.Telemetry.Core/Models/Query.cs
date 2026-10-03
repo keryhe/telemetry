@@ -125,6 +125,12 @@ public sealed class LogFacetsResult
 {
     public int SampleSize { get; init; }
     public List<LogFacet> Facets { get; init; } = [];
+
+    /// <summary>
+    /// The sample scan ran out of <c>SummaryTimeoutSeconds</c>: <see cref="Facets"/> is empty because the answer is
+    /// unknown, not because the matching rows have no attributes.
+    /// </summary>
+    public bool TimedOut { get; init; }
 }
 
 /// <summary>
@@ -244,6 +250,21 @@ public sealed class TraceSamplesQuery
     /// <summary><c>errors</c> | <c>slowest</c>.</summary>
     public string Kind { get; init; } = "errors";
     public int Limit { get; init; } = 5;
+}
+
+/// <summary>
+/// <c>GET /api/traces/samples</c>'s result. The endpoint's body stays a bare array of <see cref="Items"/>;
+/// <see cref="TimedOut"/> travels as a response header, so existing consumers of the array are unaffected.
+/// </summary>
+public sealed class TraceSamplesResult
+{
+    public List<TraceInfo> Items { get; init; } = [];
+
+    /// <summary>
+    /// The anchor scan ran out of <c>SummaryTimeoutSeconds</c>: <see cref="Items"/> is empty because the answer is
+    /// unknown, not because the window has no matching traces.
+    /// </summary>
+    public bool TimedOut { get; init; }
 }
 
 /// <summary>One bucket of the trace volume histogram.</summary>

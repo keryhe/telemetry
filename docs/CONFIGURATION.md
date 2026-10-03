@@ -186,7 +186,7 @@ API host. `QueryOptions`.
 
 | Key | Default | Description |
 |---|---|---|
-| `SummaryTimeoutSeconds` | 5 | Budget for a summary query (trace and log summaries, metric series and exemplars, exact counts). Past it the cards and charts report "timed out" and the total falls back to a capped count, which gets its own budget of the same length, so a timed-out request takes about twice this. |
+| `SummaryTimeoutSeconds` | 5 | Budget for a summary query (trace and log summaries, the dashboard's trace samples, metric series and exemplars, exact counts). Past it the cards and charts report "timed out" and the total falls back to a capped count, which gets its own budget of the same length, so a timed-out request takes about twice this. The database driver's own command timeout is set 2 seconds longer, so the budget is what ends the query. `0` expires every such query before it starts (useful only for testing the fallbacks). |
 | `RawSearchWindowHoursOverride` | unset (24) | Longest window a free-text/attribute search or `mode=slow` may cover; wider is a `400`. |
 | `AnchorLookbackMinutes` | 5 | How far before a trace-list window the anchor derivation looks, so a trace that began just before the window is not listed on a later span. |
 | `PageSliceSeconds` | 2 | First slice of trace start times a trace-list page scans (relational providers). |

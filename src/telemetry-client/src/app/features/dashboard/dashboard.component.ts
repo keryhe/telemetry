@@ -79,6 +79,9 @@ export class DashboardComponent {
    *  of each were ever shown. */
   protected recentErrors = signal<TraceInfo[]>([]);
   protected slowTraces = signal<TraceInfo[]>([]);
+  /** The samples scan timed out: the widget shows "unavailable", never "no errors" or "no traces". */
+  protected recentErrorsTimedOut = signal(false);
+  protected slowTracesTimedOut = signal(false);
   protected availableServices = signal<string[]>([]);
   protected selectedService = signal(this.saved.selectedService);
   /** True (unbounded) volume histogram — backs the chart and the trace-count/error-rate stat cards. */
@@ -99,6 +102,7 @@ export class DashboardComponent {
   protected traceSummaryTimedOut = signal(false);
   protected logSummaryTimedOut = signal(false);
   protected readonly summaryTimeoutTooltip = SUMMARY_TIMEOUT_TOOLTIP;
+  protected readonly samplesTimeoutHint = 'Timed out for this time range. Narrow the time range.';
 
   protected totalTraces = computed(() => this.traceHistogram().reduce((a, b) => a + b.count, 0));
   protected errorTraces = computed(() => this.traceHistogram().reduce((a, b) => a + b.errorCount, 0));
@@ -235,8 +239,10 @@ export class DashboardComponent {
         this.serviceStats.set(summary.services);
         this.traceSummaryTimedOut.set(summary.timedOut);
         this.logSummaryTimedOut.set(logSummary.timedOut);
-        this.recentErrors.set(recentErrors);
-        this.slowTraces.set(slowest);
+        this.recentErrors.set(recentErrors.items);
+        this.recentErrorsTimedOut.set(recentErrors.timedOut);
+        this.slowTraces.set(slowest.items);
+        this.slowTracesTimedOut.set(slowest.timedOut);
         this.logHistogram.set(logSummary.buckets);
         this.buildCharts(summary.buckets);
         this.loading.set(false);

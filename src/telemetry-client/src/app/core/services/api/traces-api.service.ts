@@ -10,6 +10,15 @@ import {
 } from '../../models/trace.models';
 import { TimeBucket } from '../../../shared/utils/chart.utils';
 
+/** Set by `samples` when its anchor scan ran out of time (`TracesController.TimedOutHeader`). */
+const TIMED_OUT_HEADER = 'X-Telemetry-Timed-Out';
+
+export interface TraceSamplesResult {
+  items: TraceInfo[];
+  /** The scan ran out of time: `items` is empty because the answer is unknown, not because nothing matched. */
+  timedOut: boolean;
+}
+
 /** Filter shape shared by summary/page (list-pages-server-side plan, Phase 3 Target API). */
 export interface TraceListFilter {
   start: Date;
@@ -133,14 +142,22 @@ export class TracesApiService {
     return this.http.get<TracePageResult>(`${this.base}/page`, { params });
   }
 
-  /** Dashboard's Recent Errors / Slowest Traces widgets. */
-  getTraceSamples(start: Date, end: Date, kind: 'errors' | 'slowest', limit = 5): Observable<TraceInfo[]> {
+  /**
+   * Dashboard's Recent Errors / Slowest Traces widgets. The body is a bare array; a timed-out scan is flagged by the
+   * `X-Telemetry-Timed-Out` header instead, and its empty array means "unknown", not "none".
+   */
+  getTraceSamples(start: Date, end: Date, kind: 'errors' | 'slowest', limit = 5): Observable<TraceSamplesResult> {
     const params = new HttpParams()
       .set('start', start.toISOString())
       .set('end', end.toISOString())
       .set('kind', kind)
       .set('limit', limit);
-    return this.http.get<TraceInfo[]>(`${this.base}/samples`, { params });
+    return this.http.get<TraceInfo[]>(`${this.base}/samples`, { params, observe: 'response' }).pipe(
+      map((response) => ({
+        items: response.body ?? [],
+        timedOut: response.headers.get(TIMED_OUT_HEADER) === 'true',
+      })),
+    );
   }
 
   /**

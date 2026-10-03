@@ -268,6 +268,13 @@ public static class HostLauncher
                 Endpoint("Api", port, "Http1");
                 api = new Uri($"http://127.0.0.1:{port}");
                 env["ConnectionStrings__Api"] = options.ApiConnectionString;
+                // The harness calls the API at the option default /api (the readiness probe, ScenarioRunner, TourDiscovery,
+                // MarkerProbe, DetailProbe; ApiRequestNormalizer assumes it), but the shipped Api.Server appsettings mount it
+                // at /telemetry/api. Without this every readiness probe is a 404. The UI follows (TelemetryUi:ApiBasePath unset).
+                env["Telemetry__Api__BasePath"] = "/api";
+                // Pinned to the option default: the hosts are published from the working tree, so a developer's local
+                // appsettings would otherwise set the budget a run measures under. A profile can still override it.
+                env["Telemetry__Query__SummaryTimeoutSeconds"] = "5";
                 break;
             }
         }

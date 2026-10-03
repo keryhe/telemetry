@@ -539,7 +539,9 @@ public abstract class TraceReadRepositoryBase : DapperReadRepository, ITraceRead
         if (timedOut || fetched == null)
         {
             // The scan did not finish in time: no chart or card data, only a capped count of the paginator's population.
-            var (cappedTotal, cappedIsLowerBound) = await GetListTotalAsync(conn, query, parsed, startNano, endNano, asOf, cancellationToken, skipExact: true);
+            // On a fresh connection: the one the scan ran on was aborted mid-statement (see TimedQuery).
+            await using var fresh = await OpenConnectionAsync(cancellationToken);
+            var (cappedTotal, cappedIsLowerBound) = await GetListTotalAsync(fresh, query, parsed, startNano, endNano, asOf, cancellationToken, skipExact: true);
             return new TraceSummaryResult
             {
                 Source = "raw", Buckets = [], ListTotal = cappedTotal, TotalIsLowerBound = cappedIsLowerBound, TimedOut = true, AsOf = asOf
@@ -691,18 +693,32 @@ public abstract class TraceReadRepositoryBase : DapperReadRepository, ITraceRead
         var anchors = AnchorsSql(hasService, pinAsOf: true, errorsOnly: query.Mode == "errors");
         var sql = $"SELECT COUNT(*) FROM {anchors} a WHERE {where}";
 
-        var timedOut = skipExact;
-        if (!skipExact)
+        // Set when the exact count below timed out: its connection was aborted mid-statement (see TimedQuery), so the
+        // capped count runs on a fresh one, disposed on the way out.
+        System.Data.Common.DbConnection? fresh = null;
+        try
         {
-            long result;
-            (result, timedOut) = await TimedQuery.RunAsync(
-                async (timeoutSeconds, ct) => await conn.ExecuteScalarAsync<long>(new CommandDefinition(
-                    sql, parameters, commandTimeout: timeoutSeconds, cancellationToken: ct)),
-                _summaryTimeoutSeconds, cancellationToken);
-            if (!timedOut) return (result, false);
+            if (!skipExact)
+            {
+                var (result, timedOut) = await TimedQuery.RunAsync(
+                    async (timeoutSeconds, ct) => await conn.ExecuteScalarAsync<long>(new CommandDefinition(
+                        sql, parameters, commandTimeout: timeoutSeconds, cancellationToken: ct)),
+                    _summaryTimeoutSeconds, cancellationToken);
+                if (!timedOut) return (result, false);
+                fresh = await OpenConnectionAsync(cancellationToken);
+            }
+            return await GetCappedListTotalAsync(fresh ?? conn, anchors, where, parameters, cancellationToken);
         }
+        finally
+        {
+            if (fresh != null) await fresh.DisposeAsync();
+        }
+    }
 
-        // Capped fallback: count a capped candidate set instead.
+    /// <summary><see cref="GetListTotalAsync"/>'s fallback: counts a capped candidate set instead of every anchor.</summary>
+    private async Task<(long Total, bool IsLowerBound)> GetCappedListTotalAsync(
+        System.Data.Common.DbConnection conn, string anchors, string where, DynamicParameters parameters, CancellationToken cancellationToken)
+    {
         var cappedSql = $"""
             SELECT COUNT(*) FROM (
                 SELECT 1 AS x FROM {anchors} a
@@ -800,7 +816,7 @@ public abstract class TraceReadRepositoryBase : DapperReadRepository, ITraceRead
 
             case "last":
                 forward = false;
-                var lastCount = await TryGetExactAnchorCountAsync(conn, anchors, clauses, parameters, cancellationToken);
+                var lastCount = await TryGetExactAnchorCountAsync(anchors, clauses, parameters, cancellationToken);
                 requestedSize = lastCount.HasValue ? KeysetCursor.LastPageRowCount(lastCount.Value, size) : size;
                 rows = await FetchAnchorPageAsync(conn, anchors, clauses, parameters, requestedSize, descending: false, cancellationToken);
                 break;
@@ -948,8 +964,11 @@ public abstract class TraceReadRepositoryBase : DapperReadRepository, ITraceRead
     }
 
     private async Task<long?> TryGetExactAnchorCountAsync(
-        System.Data.Common.DbConnection conn, string anchors, List<string> clauses, DynamicParameters parameters, CancellationToken cancellationToken)
+        string anchors, List<string> clauses, DynamicParameters parameters, CancellationToken cancellationToken)
     {
+        // On its own pooled connection, not the caller's: the caller keeps using its connection for the page itself,
+        // and a count that times out leaves the connection it ran on aborted mid-statement (see TimedQuery).
+        await using var conn = await OpenConnectionAsync(cancellationToken);
         var where = clauses.Count == 0 ? "1 = 1" : string.Join(" AND ", clauses);
         var sql = $"SELECT COUNT(*) FROM {anchors} a WHERE {where}";
         var (result, timedOut) = await TimedQuery.RunAsync(
@@ -1089,7 +1108,7 @@ public abstract class TraceReadRepositoryBase : DapperReadRepository, ITraceRead
     // SAMPLES -- dashboard widgets
     // =========================================================================
 
-    public async Task<List<TraceInfo>> GetTraceSamplesAsync(TraceSamplesQuery query, CancellationToken cancellationToken = default)
+    public async Task<TraceSamplesResult> GetTraceSamplesAsync(TraceSamplesQuery query, CancellationToken cancellationToken = default)
     {
         if (query.Start >= query.End)
             throw new ArgumentException("Start time must be before end time");
@@ -1144,10 +1163,21 @@ public abstract class TraceReadRepositoryBase : DapperReadRepository, ITraceRead
             ORDER BY {order}
             {PagingClause}
             """;
-        var rows = (await conn.QueryAsync<AnchorRow>(new CommandDefinition(sql, parameters, cancellationToken: cancellationToken))).ToList();
+        // Bounded like the summaries: this derives anchors over the whole window too, and without a budget it ran into the
+        // driver's 30 s default and answered 500 under load (Timescale, 3.0.1 ramp). On timeout the follow-up below is
+        // skipped, so nothing else runs on the aborted connection (see TimedQuery).
+        var (rows, timedOut) = await TimedQuery.RunAsync(
+            async (timeoutSeconds, ct) => (await conn.QueryAsync<AnchorRow>(new CommandDefinition(
+                sql, parameters, commandTimeout: timeoutSeconds, cancellationToken: ct))).ToList(),
+            _summaryTimeoutSeconds, cancellationToken);
+        if (timedOut || rows == null) return new TraceSamplesResult { TimedOut = true };
+
         var seekRows = query.Kind != "errors" && SupportsSeekAnchors;
-        return await LoadPageTraceInfosAsync(conn, rows, null, cancellationToken,
-            errorScope: seekRows ? new ErrorScope(startNano - _anchorLookbackNanos, endNano, null) : null);
+        return new TraceSamplesResult
+        {
+            Items = await LoadPageTraceInfosAsync(conn, rows, null, cancellationToken,
+                errorScope: seekRows ? new ErrorScope(startNano - _anchorLookbackNanos, endNano, null) : null)
+        };
     }
 
     // =========================================================================

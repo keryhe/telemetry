@@ -116,7 +116,9 @@
       </div>
 
       @if (!facetsCollapsed()) {
-        @if (filteredFacets().length === 0) {
+        @if (facetsTimedOut()) {
+          <div class="facet-empty">Fields timed out for this time range. Narrow the time range or add a filter.</div>
+        } @else if (filteredFacets().length === 0) {
           <div class="facet-empty">{{ fieldFilter() ? 'No fields match "' + fieldFilter() + '"' : 'No attributes in the current view' }}</div>
         }
         @for (f of visibleFacets(); track f.key) {

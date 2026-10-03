@@ -119,6 +119,11 @@ public class HostOrchestrationTests
         Assert.NotNull(api);
         Assert.Contains("ConnectionStrings__Api", apiEnv.Keys);
         Assert.DoesNotContain("ConnectionStrings__Collector", apiEnv.Keys);
+        // The harness calls the API at /api; the shipped appsettings mount it at /telemetry/api, so this must be set or
+        // the readiness probe is a 404 (the ramp failed exactly that way after the base-path change).
+        Assert.Equal("/api", apiEnv["Telemetry__Api__BasePath"]);
+        // Not inherited from whatever appsettings the hosts were published with.
+        Assert.Equal("5", apiEnv["Telemetry__Query__SummaryTimeoutSeconds"]);
     }
 
     [Fact]

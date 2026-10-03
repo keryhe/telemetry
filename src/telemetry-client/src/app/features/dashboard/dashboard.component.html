@@ -137,7 +137,9 @@
     <mat-card class="dashboard-widget widget-recent-errors">
       <mat-card-header><mat-card-title>Recent Errors</mat-card-title></mat-card-header>
       <mat-card-content>
-        @if (recentErrors().length === 0) {
+        @if (recentErrorsTimedOut()) {
+          <app-empty-state icon="hourglass_empty" message="Unavailable" [hint]="samplesTimeoutHint" />
+        } @else if (recentErrors().length === 0) {
           <app-empty-state icon="check_circle" message="No errors" hint="All traces are healthy" />
         } @else {
           <table mat-table [dataSource]="recentErrors()" class="full-width">
@@ -168,7 +170,9 @@
     <mat-card class="dashboard-widget widget-slow-traces">
       <mat-card-header><mat-card-title>Slowest Traces (&gt;500ms)</mat-card-title></mat-card-header>
       <mat-card-content>
-        @if (slowTraces().length === 0) {
+        @if (slowTracesTimedOut()) {
+          <app-empty-state icon="hourglass_empty" message="Unavailable" [hint]="samplesTimeoutHint" />
+        } @else if (slowTraces().length === 0) {
           <app-empty-state icon="speed" message="No traces" />
         } @else {
           <table mat-table [dataSource]="slowTraces()" class="full-width">

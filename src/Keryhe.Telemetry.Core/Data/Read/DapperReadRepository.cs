@@ -263,6 +263,28 @@ public abstract class DapperReadRepository
         return result;
     }
 
+    /// <summary>
+    /// <c>ToDictionary</c> that keeps the NEWEST row per key (largest <paramref name="observedAt"/>) instead of
+    /// throwing on a duplicate, for lookups keyed on something the database does not enforce as unique. The five
+    /// data-point tables are plain append targets since schema 3.0.0 (decision 7: no unique key, no foreign keys),
+    /// so a re-delivered point is stored twice and any "one row per stream" result set is only as unique as the
+    /// query that derived it; reads must tolerate a repeat rather than turn it into a 500. On a tie the first row
+    /// wins — equal <paramref name="observedAt"/> means the same observation arrived twice, so either will do.
+    /// Compare <see cref="ToDictionaryFirst"/>, which is the same guard for rows that carry no timestamp to rank by.
+    /// </summary>
+    protected static Dictionary<TKey, TSource> ToDictionaryNewest<TSource, TKey>(
+        IEnumerable<TSource> source, Func<TSource, TKey> key, Func<TSource, long> observedAt) where TKey : notnull
+    {
+        var result = new Dictionary<TKey, TSource>();
+        foreach (var item in source)
+        {
+            var k = key(item);
+            if (!result.TryGetValue(k, out var existing) || observedAt(item) > observedAt(existing))
+                result[k] = item;
+        }
+        return result;
+    }
+
     // =========================================================================
     // JSON / ATTRIBUTE HELPERS (parity with the former EF [NotMapped] getters)
     // =========================================================================
