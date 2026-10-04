@@ -34,7 +34,7 @@ public sealed class ClickHouseFixture : ProviderFixture
         [
             "log_records", "spans", "metrics", "metric_last_seen", "gauge_data_points", "sum_data_points",
             "histogram_data_points", "exponential_histogram_data_points", "summary_data_points",
-            "trace_index"
+            "trace_index", "request_rollup_minute", "log_rollup_minute"
         ];
         foreach (var table in tables)
         {

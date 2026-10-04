@@ -1,4 +1,5 @@
 using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.DependencyInjection.Extensions;
 using Keryhe.Telemetry.Api.Retention;
 
 namespace Microsoft.Extensions.DependencyInjection;
@@ -29,6 +30,12 @@ public static class RetentionServiceCollectionExtensions
             services.Configure(configure);
 
         services.AddHostedService<RetentionWorker>();
+
+        // The rollup hour tier's compaction (plans/summary-rollups.md, Phase 4): idles unless the provider registers an
+        // IRollupCompactor (MySQL). Reads RollupOptions (Telemetry:Rollup), registered by AddKeryheTelemetryApi.
+        services.Configure<Keryhe.Telemetry.Core.Data.RollupOptions>(configuration.GetSection(Keryhe.Telemetry.Core.Data.RollupOptions.SectionName));
+        services.TryAddSingleton(TimeProvider.System);
+        services.AddHostedService<RollupCompactionWorker>();
 
         return services;
     }

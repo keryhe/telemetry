@@ -42,6 +42,10 @@ public sealed class DatabaseObserverSession : IAsyncDisposable
     public Task<RowCounts> CountRowsAsync(long backdatedCutoffNanos, CancellationToken cancellationToken = default) =>
         _observer.CountRowsAsync(backdatedCutoffNanos, cancellationToken);
 
+    /// <summary>Only the summary rollup tables' counts (plans/summary-rollups.md): cheap enough to poll while the rollup catches up.</summary>
+    public Task<RowCounts> CountRollupRowsAsync(long backdatedCutoffNanos, CancellationToken cancellationToken = default) =>
+        _observer.CountRollupRowsAsync(backdatedCutoffNanos, cancellationToken);
+
     /// <summary>The effective server settings read when the session started.</summary>
     public IReadOnlyList<ServerSetting> Settings => _settings;
 

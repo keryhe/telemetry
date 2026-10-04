@@ -1,4 +1,4 @@
--- OpenTelemetry MySQL Schema (MySQL 8.0+) -- schema 3.1.0
+-- OpenTelemetry MySQL Schema (MySQL 8.0+) -- schema 3.2.1
 -- Supports OTLP logs, metrics, and traces as defined in opentelemetry-proto. MySQL 8 only: no
 -- MariaDB compatibility is maintained.
 --
@@ -312,6 +312,120 @@ CREATE TABLE log_records (
 CREATE INDEX idx_log_trace ON log_records (trace_id);
 
 -- =============================================================================
+-- SUMMARY ROLLUPS (schema 3.2.0; plans/summary-rollups.md)
+-- =============================================================================
+
+-- Per-minute rollups the dashboard, trace list and logs page read instead of scanning spans and
+-- log records. request_rollup_minute counts INBOUND spans (kind SERVER or CONSUMER) per
+-- (tenant, service, minute of start time): request_count, error_count, duration sum/max and a
+-- 24-band doubling duration histogram (h00 = under 0.25 ms, hNN = [0.25 ms * 2^(NN-1), 0.25 ms * 2^NN),
+-- h23 = 1,048.6 s and over). log_rollup_minute counts log records per (tenant, service, severity
+-- number, minute); severity_number is -1 for a record whose severity is NULL. Rows are partial:
+-- no unique key, no foreign keys, reads SUM them. service_name is '' for a span or log without one.
+CREATE TABLE request_rollup_minute (
+    id                     BIGINT       NOT NULL AUTO_INCREMENT,
+    tenant_id              BIGINT       NOT NULL,
+    service_name           VARCHAR(255) NOT NULL DEFAULT '',
+    bucket_start_unix_nano BIGINT       NOT NULL,
+    request_count          BIGINT       NOT NULL,
+    error_count            BIGINT       NOT NULL,
+    sum_duration_nanos     BIGINT       NOT NULL,
+    max_duration_nanos     BIGINT       NOT NULL,
+    h00 BIGINT NOT NULL DEFAULT 0,
+    h01 BIGINT NOT NULL DEFAULT 0,
+    h02 BIGINT NOT NULL DEFAULT 0,
+    h03 BIGINT NOT NULL DEFAULT 0,
+    h04 BIGINT NOT NULL DEFAULT 0,
+    h05 BIGINT NOT NULL DEFAULT 0,
+    h06 BIGINT NOT NULL DEFAULT 0,
+    h07 BIGINT NOT NULL DEFAULT 0,
+    h08 BIGINT NOT NULL DEFAULT 0,
+    h09 BIGINT NOT NULL DEFAULT 0,
+    h10 BIGINT NOT NULL DEFAULT 0,
+    h11 BIGINT NOT NULL DEFAULT 0,
+    h12 BIGINT NOT NULL DEFAULT 0,
+    h13 BIGINT NOT NULL DEFAULT 0,
+    h14 BIGINT NOT NULL DEFAULT 0,
+    h15 BIGINT NOT NULL DEFAULT 0,
+    h16 BIGINT NOT NULL DEFAULT 0,
+    h17 BIGINT NOT NULL DEFAULT 0,
+    h18 BIGINT NOT NULL DEFAULT 0,
+    h19 BIGINT NOT NULL DEFAULT 0,
+    h20 BIGINT NOT NULL DEFAULT 0,
+    h21 BIGINT NOT NULL DEFAULT 0,
+    h22 BIGINT NOT NULL DEFAULT 0,
+    h23 BIGINT NOT NULL DEFAULT 0,
+    PRIMARY KEY (tenant_id, bucket_start_unix_nano, id),
+    KEY idx_request_rollup_id (id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+CREATE TABLE log_rollup_minute (
+    id                     BIGINT       NOT NULL AUTO_INCREMENT,
+    tenant_id              BIGINT       NOT NULL,
+    service_name           VARCHAR(255) NOT NULL DEFAULT '',
+    severity_number        INT          NOT NULL,
+    bucket_start_unix_nano BIGINT       NOT NULL,
+    record_count           BIGINT       NOT NULL,
+    PRIMARY KEY (tenant_id, bucket_start_unix_nano, id),
+    KEY idx_log_rollup_id (id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- HOUR TIER (schema 3.2.1, MySQL only: the measurement gate in plans/summary-rollups.md found a week of
+-- minute rows too slow to sum on MySQL, 2.3 s p95 against a 1 s budget; the other providers met it and
+-- ship no hour tier). One row per (tenant, service, hour) -- request_rollup_hour -- and per (tenant,
+-- service, severity, hour) -- log_rollup_hour -- rebuilt from the minute rows by the API host's
+-- RollupCompactionWorker. rollup_compaction records, per signal, the hour boundary below which the hour
+-- tier is authoritative; reads of a bucket an hour or wider use the hour tier before it and the minute
+-- rows after it. The secondary indexes serve the compaction's delete-by-hour.
+CREATE TABLE request_rollup_hour (
+    tenant_id              BIGINT       NOT NULL,
+    service_name           VARCHAR(255) NOT NULL DEFAULT '',
+    bucket_start_unix_nano BIGINT       NOT NULL,
+    request_count          BIGINT       NOT NULL,
+    error_count            BIGINT       NOT NULL,
+    sum_duration_nanos     BIGINT       NOT NULL,
+    max_duration_nanos     BIGINT       NOT NULL,
+    h00 BIGINT NOT NULL DEFAULT 0,
+    h01 BIGINT NOT NULL DEFAULT 0,
+    h02 BIGINT NOT NULL DEFAULT 0,
+    h03 BIGINT NOT NULL DEFAULT 0,
+    h04 BIGINT NOT NULL DEFAULT 0,
+    h05 BIGINT NOT NULL DEFAULT 0,
+    h06 BIGINT NOT NULL DEFAULT 0,
+    h07 BIGINT NOT NULL DEFAULT 0,
+    h08 BIGINT NOT NULL DEFAULT 0,
+    h09 BIGINT NOT NULL DEFAULT 0,
+    h10 BIGINT NOT NULL DEFAULT 0,
+    h11 BIGINT NOT NULL DEFAULT 0,
+    h12 BIGINT NOT NULL DEFAULT 0,
+    h13 BIGINT NOT NULL DEFAULT 0,
+    h14 BIGINT NOT NULL DEFAULT 0,
+    h15 BIGINT NOT NULL DEFAULT 0,
+    h16 BIGINT NOT NULL DEFAULT 0,
+    h17 BIGINT NOT NULL DEFAULT 0,
+    h18 BIGINT NOT NULL DEFAULT 0,
+    h19 BIGINT NOT NULL DEFAULT 0,
+    h20 BIGINT NOT NULL DEFAULT 0,
+    h21 BIGINT NOT NULL DEFAULT 0,
+    h22 BIGINT NOT NULL DEFAULT 0,
+    h23 BIGINT NOT NULL DEFAULT 0,
+    PRIMARY KEY (tenant_id, bucket_start_unix_nano, service_name),
+    KEY idx_request_hour_bucket (bucket_start_unix_nano)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+CREATE TABLE log_rollup_hour (
+    tenant_id              BIGINT       NOT NULL,
+    service_name           VARCHAR(255) NOT NULL DEFAULT '',
+    severity_number        INT          NOT NULL,
+    bucket_start_unix_nano BIGINT       NOT NULL,
+    record_count           BIGINT       NOT NULL,
+    PRIMARY KEY (tenant_id, bucket_start_unix_nano, service_name, severity_number),
+    KEY idx_log_hour_bucket (bucket_start_unix_nano)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+CREATE TABLE rollup_compaction (
+    signal_kind                 VARCHAR(16) NOT NULL PRIMARY KEY,
+    compacted_through_unix_nano BIGINT      NOT NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- =============================================================================
 -- UTILITY TABLES
 -- =============================================================================
 
@@ -376,7 +490,7 @@ VALUES (1, 90, 90, 180);
 -- Only inserted when every statement above succeeded, so a partial apply cannot
 -- leave a false version marker for the apply-schema.sh gate.
 INSERT INTO schema_version (version, applied_at)
-VALUES ('3.1.0', CURRENT_TIMESTAMP(6))
+VALUES ('3.2.1', CURRENT_TIMESTAMP(6))
 ON DUPLICATE KEY UPDATE applied_at = CURRENT_TIMESTAMP(6);
 
 -- =============================================================================

@@ -89,6 +89,8 @@ public sealed class LogShaper
         var entries = new List<LedgerEntry>(2);
         if (current > 0) entries.Add(new LedgerEntry("log_records", RecordAge.Current, current, false, Dedups: false));
         if (backdated > 0) entries.Add(new LedgerEntry("log_records", RecordAge.Backdated, backdated, false, Dedups: false));
+        // The summary rollup counts every log record, a re-delivered one again.
+        if (current > 0) entries.Add(new LedgerEntry(RollupTables.Log, RecordAge.Current, current, false, Dedups: false));
 
         return new Payload<ExportLogsServiceRequest>(request, tenantIndex, target, entries,
             _rng.NextDouble() < _profile.Time.RedeliveryFraction);

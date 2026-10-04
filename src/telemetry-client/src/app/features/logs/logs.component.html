@@ -14,9 +14,9 @@
 
   <div class="stat-grid">
     <app-stat-card label="Total Logs" icon="article" [value]="totalLabel()"
-                   [matTooltip]="totalIsLowerBound() ? 'At least this many: the exact total timed out.' : ''" />
+                   [matTooltip]="summaryTimedOut() ? summaryTimeoutTooltip : (traceFilterActive() ? '' : summaryTooltip)" />
     <app-stat-card label="Errors" icon="error" [value]="summaryTimedOut() ? '—' : errorCount()" [color]="errorCount() > 0 ? 'error' : 'default'"
-                   [matTooltip]="summaryTimedOut() ? summaryTimeoutTooltip : ''" />
+                   [matTooltip]="summaryTimedOut() ? summaryTimeoutTooltip : (traceFilterActive() ? '' : summaryTooltip)" />
     <app-stat-card label="Warnings" icon="warning" [value]="summaryTimedOut() ? '—' : warnCount()" [color]="warnCount() > 0 ? 'warn' : 'default'"
                    [matTooltip]="summaryTimedOut() ? summaryTimeoutTooltip : ''" />
     <app-stat-card label="Services" icon="cloud" [value]="services().length" />
@@ -74,7 +74,7 @@
     </button>
 
     <button mat-icon-button [matMenuTriggerFor]="exportMenu" matTooltip="Export filtered logs"
-            [disabled]="effectiveTotal() === 0 && !totalIsLowerBound()">
+            [disabled]="displayRows().length === 0">
       <mat-icon>download</mat-icon>
     </button>
     <mat-menu #exportMenu="matMenu">
@@ -176,7 +176,7 @@
     <div class="timeout-banner">
       <mat-icon>hourglass_disabled</mat-icon>
       <span>
-        Summarizing this time range took too long, so the severity cards and the chart are unavailable.
+        Summarizing this time range took too long, so the cards and the chart are unavailable.
         Narrow the time range or select a service. The log list below is complete.
       </span>
     </div>
@@ -206,16 +206,6 @@
           <app-empty-state icon="receipt_long" message="No logs found" hint="Adjust the time range or filters" />
         }
       } @else {
-        @if (totalIsLowerBound()) {
-          <div class="capped-notice">
-            <mat-icon>info</mat-icon>
-            @if (effectiveTotal() > 0) {
-              Showing an approximate total (≥ {{ effectiveTotal() | number }}) — the exact count timed out. Narrow the time range for an exact total.
-            } @else {
-              The total timed out. Narrow the time range for an exact total.
-            }
-          </div>
-        }
         <table mat-table [dataSource]="displayRows()" multiTemplateDataRows class="full-width log-table">
           <ng-container matColumnDef="expand">
             <th mat-header-cell *matHeaderCellDef class="expand-col"></th>
@@ -392,6 +382,7 @@
           [pageSize]="pageSize()"
           [pageIndex]="pageIndex()"
           [pageSizeOptions]="pageSizeOptions"
+          class="no-last-button"
           [showFirstLastButtons]="true"
           [disabled]="traceFilterActive()"
           (page)="onPage($event)" />

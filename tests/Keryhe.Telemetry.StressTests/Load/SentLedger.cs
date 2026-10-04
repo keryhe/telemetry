@@ -5,6 +5,16 @@ namespace Keryhe.Telemetry.StressTests.Load;
 public enum RecordAge { Current, Backdated }
 
 /// <summary>
+/// The summary rollup tables the correctness check ledgers beside the signal tables (plans/summary-rollups.md): the request rollup
+/// counts inbound spans (kind SERVER/CONSUMER), the log rollup every log record. Neither collapses a re-delivery.
+/// </summary>
+public static class RollupTables
+{
+    public const string Request = "request_rollup_minute";
+    public const string Log = "log_rollup_minute";
+}
+
+/// <summary>
 /// Rows one export contributes to one table. <see cref="Redelivery"/> marks the second, identical
 /// send of an export; <see cref="Dedups"/> says whether the table collapses such a duplicate
 /// (spans are unique on (trace_id, span_id); log records and data points have no dedup key, so a

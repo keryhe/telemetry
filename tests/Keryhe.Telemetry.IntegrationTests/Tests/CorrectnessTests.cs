@@ -126,4 +126,53 @@ public class CorrectnessTests
         Assert.Equal(7, result.PendingMergeDuplicates);
         Assert.Null(Run([Cell(1, "spans", 50)], [Db(1, "spans", 50)]).PendingMergeDuplicates);
     }
+
+    // ---- the summary rollup tables (plans/summary-rollups.md) ----
+
+    [Fact]
+    public void Rollup_cells_match_when_the_rollup_holds_what_was_sent_including_persisted_redeliveries()
+    {
+        // A re-delivered span collapses nowhere in the rollup (decision e): it is expected twice there.
+        var result = Run(
+            [Cell(1, "spans", 100, collapsed: 0, persisted: 10), Cell(1, RollupTables.Request, 60, persisted: 6), Cell(1, RollupTables.Log, 40)],
+            [Db(1, "spans", 110), Db(1, RollupTables.Request, 66), Db(1, RollupTables.Log, 40)]);
+        Assert.All(result.Rows, r => Assert.Equal(CorrectnessStatus.Match, r.Status));
+        Assert.Equal(66, result.Rows.Single(r => r.Table == RollupTables.Request).Expected);
+    }
+
+    [Fact]
+    public void A_rollup_shortfall_is_explained_by_the_signals_drops_and_does_not_disturb_the_signal_tables()
+    {
+        // Five spans dropped (three of them inbound): spans are short by 5 and the request rollup by 3.
+        var result = Run(
+            [Cell(1, "spans", 100), Cell(1, RollupTables.Request, 60)],
+            [Db(1, "spans", 95), Db(1, RollupTables.Request, 57)], dropped: 5);
+        Assert.Equal(CorrectnessStatus.ExplainedByDrops, result.Rows.Single(r => r.Table == "spans").Status);
+        Assert.Equal(CorrectnessStatus.ExplainedByDrops, result.Rows.Single(r => r.Table == RollupTables.Request).Status);
+        Assert.Equal(0, result.Mismatches);
+        // The signal's drop sum ignores the rollup cell: spans alone are 5 short.
+        Assert.Equal(-5, result.Drops.Single(d => d.Signal == "traces").ActualMinusExpected);
+    }
+
+    [Fact]
+    public void A_rollup_shortfall_beyond_the_drops_or_a_rollup_surplus_is_a_mismatch()
+    {
+        var short_ = Run([Cell(1, RollupTables.Log, 100)], [Db(1, RollupTables.Log, 90)], dropped: 5);
+        Assert.Equal(CorrectnessStatus.Mismatch, Assert.Single(short_.Rows).Status);
+
+        var surplus = Run([Cell(1, RollupTables.Request, 100)], [Db(1, RollupTables.Request, 101)]);
+        Assert.Equal(CorrectnessStatus.Mismatch, Assert.Single(surplus.Rows).Status);
+
+        var none = Run([Cell(1, RollupTables.Request, 100)], [Db(1, RollupTables.Request, 90)]);
+        Assert.Equal(CorrectnessStatus.Mismatch, Assert.Single(none.Rows).Status);
+    }
+
+    [Fact]
+    public void The_rollup_tables_belong_to_their_signal()
+    {
+        Assert.Equal("traces", new CountedTable(RollupTables.Request, "", false).Signal);
+        Assert.Equal("logs", new CountedTable(RollupTables.Log, "", false).Signal);
+        Assert.True(CountedTable.IsRollup(RollupTables.Request));
+        Assert.False(CountedTable.IsRollup("spans"));
+    }
 }

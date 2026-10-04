@@ -6,24 +6,24 @@
   <!-- RED KPI strip: Rate, Errors, Duration (+ Services and one log signal) -->
   <div class="stat-grid">
     <app-stat-card
-      label="Avg Trace Duration"
+      label="Avg Request Duration"
       icon="timer"
       [value]="traceSummaryTimedOut() ? '—' : formatDuration(avgDurationMs())"
       [sparklineOptions]="traceSummaryTimedOut() ? null : durationSparkline()"
-      [matTooltip]="traceSummaryTimedOut() ? summaryTimeoutTooltip : 'Duration of each trace\'s entry span (its earliest span), not the whole trace\'s wall time.'" />
+      [matTooltip]="traceSummaryTimedOut() ? summaryTimeoutTooltip : requestsTooltip" />
     <app-stat-card
-      label="Traces/sec"
+      label="Requests/sec"
       icon="account_tree"
-      [value]="traceSummaryTimedOut() ? '—' : (tracesPerSecond() | number: '1.0-2')"
+      [value]="traceSummaryTimedOut() ? '—' : (requestsPerSecond() | number: '1.0-2')"
       [sparklineOptions]="traceSummaryTimedOut() ? null : tracesSparkline()"
-      [matTooltip]="traceSummaryTimedOut() ? summaryTimeoutTooltip : 'Traces started per second, by entry span. Not limited to HTTP — covers any OTLP trace (queue consumers, jobs, etc.).'" />
+      [matTooltip]="traceSummaryTimedOut() ? summaryTimeoutTooltip : requestsTooltip" />
     <app-stat-card
       label="Error Rate"
       icon="percent"
       [value]="traceSummaryTimedOut() ? '—' : ((errorRate() | percent: '1.1-1') ?? '0%')"
       [color]="traceSummaryTimedOut() ? 'default' : errorRateColor()"
       [sparklineOptions]="traceSummaryTimedOut() ? null : errorRateSparkline()"
-      [matTooltip]="traceSummaryTimedOut() ? summaryTimeoutTooltip : ''" />
+      [matTooltip]="traceSummaryTimedOut() ? summaryTimeoutTooltip : 'Share of inbound requests (server/consumer spans) that ended in an error.'" />
     <app-stat-card
       label="Error Logs"
       icon="article"
@@ -88,7 +88,7 @@
   -->
   <div class="dashboard-grid">
     <mat-card class="dashboard-widget widget-trace-volume">
-      <mat-card-header><mat-card-title>Trace Volume</mat-card-title></mat-card-header>
+      <mat-card-header><mat-card-title [matTooltip]="requestsTooltip">Request Volume</mat-card-title></mat-card-header>
       <mat-card-content>
         @if (traceSummaryTimedOut()) {
           <app-empty-state icon="hourglass_disabled" message="Timed out" hint="Narrow the time range or select a service" />
@@ -109,8 +109,8 @@
 
     <mat-card class="dashboard-widget widget-latency">
       <mat-card-header>
-        <mat-card-title matTooltip="Computed over inbound request traces (server/consumer entry spans) only — internal and client-rooted traces are excluded.">
-          Latency Over Time (request spans)
+        <mat-card-title matTooltip="Computed over inbound requests (server/consumer spans). Percentiles are approximate: they come from a duration histogram.">
+          Latency Over Time (≈ request spans)
         </mat-card-title>
       </mat-card-header>
       <mat-card-content>

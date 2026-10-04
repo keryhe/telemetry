@@ -26,6 +26,9 @@ public sealed class IngestionMetrics : IDisposable
     private readonly Histogram<long> _flushBatchSize;
     private readonly Histogram<double> _commitLag;
     private readonly Counter<long> _authFailures;
+    private readonly Counter<long> _rollupRowsWritten;
+    private readonly Counter<long> _rollupRowsDropped;
+    private readonly Histogram<double> _rollupFlushDuration;
 
     // signal -> reader of that signal's gate's resident count; see RegisterResidentRecords.
     private readonly ConcurrentDictionary<string, Func<int>> _residentRecords = new();
@@ -65,6 +68,18 @@ public sealed class IngestionMetrics : IDisposable
             unit: "{request}",
             description: "Collector requests rejected by API key authentication, tagged by signal and " +
                           "reason (missing, malformed, invalid, expired, unavailable).");
+        _rollupRowsWritten = _meter.CreateCounter<long>(
+            "keryhe.telemetry.ingestion.rollup_rows_written",
+            unit: "{row}",
+            description: "Partial summary-rollup rows appended, tagged by kind (request/log).");
+        _rollupRowsDropped = _meter.CreateCounter<long>(
+            "keryhe.telemetry.ingestion.rollup_rows_dropped",
+            unit: "{row}",
+            description: "Summary-rollup rows dropped (buffer full, or lost at the shutdown deadline), tagged by kind.");
+        _rollupFlushDuration = _meter.CreateHistogram<double>(
+            "keryhe.telemetry.ingestion.rollup_flush_duration",
+            unit: "ms",
+            description: "Duration of one rollup append cycle, tagged by outcome (ok/failed).");
         _meter.CreateObservableGauge(
             "keryhe.telemetry.ingestion.resident_records",
             ObserveResidentRecords,
@@ -118,6 +133,24 @@ public sealed class IngestionMetrics : IDisposable
     /// <param name="milliseconds">Enqueue-to-commit time of one export.</param>
     public void RecordCommitLag(string signal, double milliseconds) =>
         _commitLag.Record(milliseconds, new KeyValuePair<string, object?>("signal", signal));
+
+    /// <param name="kind">"request" or "log".</param>
+    public void RecordRollupRowsWritten(string kind, int count)
+    {
+        if (count <= 0) return;
+        _rollupRowsWritten.Add(count, new KeyValuePair<string, object?>("kind", kind));
+    }
+
+    /// <param name="kind">"request" or "log".</param>
+    public void RecordRollupRowsDropped(string kind, int count)
+    {
+        if (count <= 0) return;
+        _rollupRowsDropped.Add(count, new KeyValuePair<string, object?>("kind", kind));
+    }
+
+    /// <param name="outcome">"ok" or "failed".</param>
+    public void RecordRollupFlushDuration(double milliseconds, string outcome) =>
+        _rollupFlushDuration.Record(milliseconds, new KeyValuePair<string, object?>("outcome", outcome));
 
     public void RecordFlushBatchSize(string signal, int count) =>
         _flushBatchSize.Record(count, new KeyValuePair<string, object?>("signal", signal));

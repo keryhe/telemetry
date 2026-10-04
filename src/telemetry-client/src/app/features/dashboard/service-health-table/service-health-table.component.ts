@@ -46,6 +46,9 @@ export class ServiceHealthTableComponent {
         case 'rate': return r.ratePerSecond;
         case 'errorRate': return r.errorRate;
         case 'avg': return r.avgMs;
+        case 'p50': return r.p50Ms;
+        case 'p90': return r.p90Ms;
+        case 'p95': return r.p95Ms;
         default: return r.count;
       }
     };
@@ -57,7 +60,7 @@ export class ServiceHealthTableComponent {
     });
   });
 
-  protected readonly columns = ['service', 'count', 'rate', 'errorRate', 'avg'];
+  protected readonly columns = ['service', 'count', 'rate', 'errorRate', 'avg', 'p50', 'p90', 'p95'];
   protected readonly formatDuration = formatDuration;
 
   protected onSort(s: Sort): void {

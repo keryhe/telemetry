@@ -9,6 +9,7 @@ import { MatFormFieldModule } from '@angular/material/form-field';
 import { MatIconModule } from '@angular/material/icon';
 import { MatInputModule } from '@angular/material/input';
 import { MatProgressBarModule } from '@angular/material/progress-bar';
+import { MatProgressSpinnerModule } from '@angular/material/progress-spinner';
 import { MatSelectModule } from '@angular/material/select';
 import { MatPaginatorIntl, MatPaginatorModule, PageEvent } from '@angular/material/paginator';
 import { MatSort, MatSortModule, Sort } from '@angular/material/sort';
@@ -24,7 +25,7 @@ import { NgApexchartsModule } from 'ng-apexcharts';
 import { Subscription } from 'rxjs';
 import type { ApexOptions } from 'ng-apexcharts';
 
-import { TracesApiService, TraceLatencyBucket, TraceSummaryResult, TracePageResult } from '../../../core/services/api/traces-api.service';
+import { TracesApiService, RequestLatencyCell, RequestSummaryResult, TracePageResult } from '../../../core/services/api/traces-api.service';
 import { GroupedPaginatorIntl, lowerBoundTotalLabel } from '../../../shared/utils/paginator-intl';
 import { SUMMARY_TIMEOUT_TOOLTIP, formatSummaryTotal } from '../../../shared/utils/summary-total';
 import { ResourcesApiService } from '../../../core/services/api/resources-api.service';
@@ -36,6 +37,7 @@ import { StatCardComponent } from '../../../shared/components/stat-card/stat-car
 import { EmptyStateComponent } from '../../../shared/components/empty-state/empty-state.component';
 import { PageHeaderComponent } from '../../../shared/components/page-header/page-header.component';
 import { formatDuration, parseDotnetTimespan, timeRangeZoom } from '../../../shared/utils/chart.utils';
+import { bubbleTarget } from '../../../shared/utils/latency-bands';
 import { parseSearchQuery, ParsedSearchQuery } from '../../../shared/utils/search-query.parser';
 import { TraceSearchHelpDialogComponent } from '../trace-search-help-dialog/trace-search-help-dialog.component';
 import { loadPageState, savePageState } from '../../../shared/utils/page-state';
@@ -62,16 +64,13 @@ type ChartView = 'volume' | 'latency';
 
 const BUCKET_COUNT = 60;
 const STATE_KEY = 'state.traces';
-/** Explains the "request traces" population behind the chart and stat cards (decision 13). */
+/**
+ * Explains what the cards and charts count (plans/summary-rollups.md, decisions 1 and 9): inbound requests from the
+ * server's rollup, for the time range and service only.
+ */
 const REQUEST_TRACES_TOOLTIP =
-  'Traces whose anchor span is an incoming request (SERVER or CONSUMER kind). Background and client-rooted traces are excluded.';
-/** Discrete error-ratio tiers for latency-bubble coloring (ApexCharts colors per series, not per point). */
-const ERROR_TIERS: { max: number; color: string; label: string }[] = [
-  { max: 0, color: '#2196f3', label: 'OK' },
-  { max: 0.25, color: '#ffb300', label: 'Low errors' },
-  { max: 0.75, color: '#fb8c00', label: 'Mixed' },
-  { max: 1, color: '#e53935', label: 'High errors' },
-];
+  'Inbound requests (server and consumer spans): a request that passes through several services counts once per service. ' +
+  'Counted from the time range and service only; the mode, operation, duration and search filters narrow the list below, not this.';
 
 @Component({
   selector: 'app-trace-list',
@@ -80,7 +79,7 @@ const ERROR_TIERS: { max: number; color: string; label: string }[] = [
     DatePipe, DecimalPipe, LowerCasePipe, FormsModule,
     MatCardModule, MatPaginatorModule, MatTableModule, MatSortModule, MatTabsModule, MatIconModule,
     MatButtonToggleModule, MatButtonModule, MatSelectModule, MatFormFieldModule,
-    MatInputModule, MatProgressBarModule, MatChipsModule, MatTooltipModule,
+    MatInputModule, MatProgressBarModule, MatProgressSpinnerModule, MatChipsModule, MatTooltipModule,
     MatDialogModule, MatMenuModule, NgxGraphModule, NgApexchartsModule,
     StatCardComponent, EmptyStateComponent, PageHeaderComponent,
   ],
@@ -114,7 +113,7 @@ export class TraceListComponent implements OnDestroy {
 
   protected summaryLoading = signal(true);
   protected pageLoading = signal(true);
-  protected summary = signal<TraceSummaryResult | null>(null);
+  protected summary = signal<RequestSummaryResult | null>(null);
   protected page = signal<TracePageResult | null>(null);
   private pageSub?: Subscription;
   private summarySub?: Subscription;
@@ -162,22 +161,18 @@ export class TraceListComponent implements OnDestroy {
   protected displayRows = computed<TraceInfo[]>(() => this.page()?.items ?? []);
   protected loading = computed(() => this.summaryLoading());
 
-  protected effectiveTotal = computed(() => this.summary()?.listTotal ?? 0);
-  protected totalIsLowerBound = computed(() => this.summary()?.totalIsLowerBound ?? false);
   private readonly paginatorIntl = inject(MatPaginatorIntl) as GroupedPaginatorIntl;
-  /** The Traces card: exact, "10,000+" when capped, "—" when even the capped count timed out. */
-  protected totalLabel = computed(() => formatSummaryTotal(this.effectiveTotal(), this.totalIsLowerBound(), this.locale));
+  /** The Requests card: the rollup's inbound-span count for the range and service (not a trace count, and not the list's total). */
+  protected requestCount = computed(() => this.summary()?.summary.count ?? 0);
+  protected requestCountLabel = computed(() =>
+    this.summaryTimedOut() ? '—' : formatSummaryTotal(this.requestCount(), false, this.locale));
   /**
-   * The paginator's length. A capped total would stop "next" at the cap (or at once, when the total is unknown), so it
-   * is stretched to one row past the current page while the server still offers a next page.
+   * The list has no exact total (plans/summary-rollups.md, decision 10), so the paginator's length is the rows seen so far,
+   * one row more while the server offers a next page; its label says "of many".
    */
-  protected paginatorLength = computed(() => {
-    const total = this.effectiveTotal();
-    if (!this.totalIsLowerBound()) return total;
-    const shown = this.pageIndex() * this.pageSize() + this.displayRows().length;
-    return Math.max(total, shown + (this.page()?.nextCursor ? 1 : 0));
-  });
-  /** The server's anchor scan ran out of time: the request cards and charts have no data (which is not "zero"). */
+  protected paginatorLength = computed(() =>
+    this.pageIndex() * this.pageSize() + this.displayRows().length + (this.page()?.nextCursor ? 1 : 0));
+  /** The summary ran out of time: the request cards and charts have no data (which is not "zero"). */
   protected summaryTimedOut = computed(() => this.summary()?.timedOut ?? false);
   protected readonly summaryTimeoutTooltip = SUMMARY_TIMEOUT_TOOLTIP;
   private readonly locale = inject(LOCALE_ID);
@@ -209,10 +204,8 @@ export class TraceListComponent implements OnDestroy {
   protected avgDuration = computed(() => {
     const s = this.summary()?.summary;
     if (!s || s.count === 0) return '—';
-    // p50 is the closest thing the summary carries to a single "typical" duration; the former
-    // avg-from-buckets figure isn't available since the summary no longer ships a raw duration
-    // sum at the window level outside the per-bucket buckets.
-    return formatDuration(s.p50Ms);
+    // Approximate: the percentile comes from a duration histogram.
+    return `≈ ${formatDuration(s.p50Ms)}`;
   });
   protected readonly requestTracesTooltip = REQUEST_TRACES_TOOLTIP;
 
@@ -291,7 +284,7 @@ export class TraceListComponent implements OnDestroy {
   protected readonly analyticsColumns = ['operation', 'count', 'rate', 'errorRate', 'p50', 'p95', 'p99', 'avg'];
 
   protected traceChartOptions = signal<ApexOptions>({});
-  /** Jaeger-style duration-vs-time latency chart, binned into count/error-sized bubbles. */
+  /** Duration-vs-time latency chart, binned into count-sized bubbles (one color: the rollup carries no per-cell errors). */
   protected latencyBubbleOptions = signal<ApexOptions>({});
 
   protected readonly displayedColumns = ['service', 'operation', 'kind', 'spans', 'status', 'duration', 'time'];
@@ -329,12 +322,20 @@ export class TraceListComponent implements OnDestroy {
     this.selectedTab.set(0);
   }
 
+  /** The grid's query has been running for a while: show a hint that it is still working. */
+  protected slowLoad = signal(false);
+  protected readonly skeletonRows = [0, 1, 2, 3, 4, 5, 6, 7];
+
   constructor() {
-    // "of 10,000+" / "of many" while the total is only a lower bound (see paginatorLength).
-    effect(() => {
-      this.paginatorIntl.totalOverride = this.totalIsLowerBound() ? lowerBoundTotalLabel(this.effectiveTotal(), this.locale) : null;
-      this.paginatorIntl.changes.next();
+    effect((onCleanup) => {
+      if (!this.pageLoading()) { this.slowLoad.set(false); return; }
+      const t = setTimeout(() => this.slowLoad.set(true), 3000);
+      onCleanup(() => clearTimeout(t));
     });
+
+    // The list has no exact total: the paginator says "of many" (see paginatorLength).
+    this.paginatorIntl.totalOverride = lowerBoundTotalLabel(0, this.locale);
+    this.paginatorIntl.changes.next();
 
     // Slide relative preset windows to "now" on (re)entry so navigating back refreshes.
     this.timeRange.refreshRelativeWindow();
@@ -344,8 +345,15 @@ export class TraceListComponent implements OnDestroy {
       next: (services) => this.services.set(services),
     });
 
-    // Reload summary + page (in parallel) whenever the time range or any server-side filter
-    // changes. asOf resets so a fresh one is captured for the new query (decision 3's handshake).
+    // The cards and charts follow the time range and the service only (plans/summary-rollups.md, decision 9).
+    effect(() => {
+      this.timeRange.range();
+      this.selectedService();
+      untracked(() => this.reloadSummary());
+    });
+
+    // Reload the page whenever the time range or any server-side filter changes. asOf resets so a fresh one is
+    // captured for the new query (decision 3's handshake).
     effect(() => {
       this.timeRange.range();
       this.filterMode();
@@ -356,7 +364,7 @@ export class TraceListComponent implements OnDestroy {
       this.serverQuery();
       untracked(() => {
         this.pageIndex.set(0);
-        this.reloadAll();
+        this.reloadPage();
       });
     });
 
@@ -414,7 +422,7 @@ export class TraceListComponent implements OnDestroy {
       const { start, end } = this.timeRange.range();
       untracked(() => {
         this.buildChart(start, end, s?.buckets ?? []);
-        this.buildLatencyBubbles(s?.latencyBuckets ?? []);
+        this.buildLatencyBubbles(s?.latency ?? []);
       });
     });
   }
@@ -438,17 +446,23 @@ export class TraceListComponent implements OnDestroy {
     };
   }
 
-  /** Fires `summary` and `page` in parallel for the first page of a (new) query. */
-  private reloadAll(): void {
+  /** The request summary for the range and service; the list's other filters do not apply to it. */
+  private reloadSummary(): void {
     this.summaryLoading.set(true);
-    this.pageLoading.set(true);
-    this.page.set(null);
-
+    const { start, end } = this.timeRange.range();
     this.summarySub?.unsubscribe();
-    this.summarySub = this.api.getTraceSummary({ ...this.currentFilter(), bucketCount: BUCKET_COUNT }).subscribe({
+    this.summarySub = this.api.getRequestSummary({
+      start, end, service: this.selectedService() || undefined, bucketCount: BUCKET_COUNT,
+    }).subscribe({
       next: (result) => { this.summary.set(result); this.summaryLoading.set(false); },
       error: () => this.summaryLoading.set(false),
     });
+  }
+
+  /** The first page of a (new) query. */
+  private reloadPage(): void {
+    this.pageLoading.set(true);
+    this.page.set(null);
 
     this.pageSub?.unsubscribe();
     this.pageSub = this.api.getTracePage({ ...this.currentFilter(), size: this.pageSize(), nav: 'first' }).subscribe({
@@ -478,7 +492,7 @@ export class TraceListComponent implements OnDestroy {
     });
   }
 
-  private buildChart(start: Date, end: Date, buckets: TraceSummaryResult['buckets']): void {
+  private buildChart(start: Date, end: Date, buckets: RequestSummaryResult['buckets']): void {
     const isDark = this.theme.isDark();
     const timestamps = buckets.map((b) => b.timestamp.getTime());
 
@@ -503,28 +517,21 @@ export class TraceListComponent implements OnDestroy {
   }
 
   /**
-   * Jaeger-style latency chart: server-computed buckets on a time x log-duration grid, rendered
-   * as bubbles sized by trace count and colored by error ratio (see ERROR_TIERS). Clicking a
-   * single-trace bubble opens it; clicking a multi-trace bubble zooms into its time span.
+   * Latency chart: the rollup's cells on a time x duration-band grid, as bubbles sized by request count. Clicking a bubble
+   * zooms to its time span and filters the list to Slow mode with the bubble's duration band (see `bubbleTarget`).
    */
-  private buildLatencyBubbles(buckets: TraceLatencyBucket[]): void {
+  private buildLatencyBubbles(cells: RequestLatencyCell[]): void {
     const isDark = this.theme.isDark();
     const { start, end } = this.timeRange.range();
 
-    const tierSeries: { x: number; y: number; z: number; count: number; errorCount: number;
-      errorRatio: number; xStart: number; xEnd: number; yStart: number; yEnd: number; sampleTraceIdHex?: string }[][] =
-      ERROR_TIERS.map(() => []);
-    for (const b of buckets) {
-      const errorRatio = b.errorCount / b.count;
-      const tierIndex = ERROR_TIERS.findIndex((t) => errorRatio <= t.max);
-      const xStart = b.xStart.getTime();
-      const xEnd = b.xEnd.getTime();
-      tierSeries[tierIndex < 0 ? ERROR_TIERS.length - 1 : tierIndex].push({
-        x: (xStart + xEnd) / 2, y: (b.yStartMs + b.yEndMs) / 2, z: Math.sqrt(b.count),
-        count: b.count, errorCount: b.errorCount, errorRatio,
-        xStart, xEnd, yStart: b.yStartMs, yEnd: b.yEndMs, sampleTraceIdHex: b.sampleTraceIdHex,
-      });
-    }
+    const points = cells.map((c) => {
+      const xStart = c.xStart.getTime();
+      const xEnd = c.xEnd.getTime();
+      return {
+        x: (xStart + xEnd) / 2, y: (c.yStartMs + c.yEndMs) / 2, z: Math.sqrt(c.count),
+        count: c.count, xStart, xEnd, yStart: c.yStartMs, yEnd: c.yEndMs, band: c.band,
+      };
+    });
 
     const zoom = timeRangeZoom((s, e) => this.timeRange.setCustom(s, e));
     this.latencyBubbleOptions.set({
@@ -540,38 +547,43 @@ export class TraceListComponent implements OnDestroy {
         },
       },
       theme: { mode: isDark ? 'dark' : 'light' },
-      series: ERROR_TIERS.map((tier, i) => ({ name: tier.label, data: tierSeries[i] })),
-      colors: ERROR_TIERS.map((t) => t.color),
+      series: [{ name: 'Requests', data: points }],
+      colors: ['#2196f3'],
       plotOptions: { bubble: { minBubbleRadius: 4, maxBubbleRadius: 26, zScaling: false } },
       xaxis: { type: 'datetime', min: start.getTime(), max: end.getTime(), labels: { datetimeUTC: false } },
-      yaxis: { title: { text: 'Duration' }, labels: { formatter: (v: number) => formatDuration(v) } },
+      yaxis: { title: { text: 'Duration (≈)' }, labels: { formatter: (v: number) => formatDuration(v) } },
       markers: { strokeWidth: 0, fillOpacity: 0.7 },
       tooltip: {
         custom: ({ seriesIndex, dataPointIndex, w }) => {
           const p = w.config.series[seriesIndex].data[dataPointIndex];
-          const pct = (p.errorRatio * 100).toFixed(0);
           return `<div style="padding:6px 8px">
-            <b>${p.count}</b> trace${p.count === 1 ? '' : 's'}
-            ${p.errorCount ? ` · ${p.errorCount} error${p.errorCount === 1 ? '' : 's'} (${pct}%)` : ''}<br/>
-            ${formatDuration(p.yStart)}–${formatDuration(p.yEnd)}<br/>
-            ${new Date(p.xStart).toLocaleTimeString()} – ${new Date(p.xEnd).toLocaleTimeString()}
+            <b>${p.count}</b> request${p.count === 1 ? '' : 's'}<br/>
+            ${formatDuration(p.yStart)}–${p.band === 23 ? 'and over' : formatDuration(p.yEnd)}<br/>
+            ${new Date(p.xStart).toLocaleTimeString()} – ${new Date(p.xEnd).toLocaleTimeString()}<br/>
+            <i>Click to list these traces</i>
           </div>`;
         },
       },
       grid: { show: true },
-      legend: { position: 'top' },
+      legend: { show: false },
       dataLabels: { enabled: false },
     });
   }
 
-  /** Bubble-click → open a single trace, or zoom into a multi-trace bucket's time span. */
+  /** Bubble click → zoom to the bubble's time span and list the traces of its duration band (Slow mode). */
   private onBubbleClick(cfg: { seriesIndex: number; dataPointIndex: number; w: unknown }): void {
-    const w = cfg.w as { config: { series: { data: { count: number; sampleTraceIdHex?: string; xStart: number; xEnd: number }[] }[] } };
+    const w = cfg.w as { config: { series: { data: { xStart: number; xEnd: number; band: number }[] }[] } };
     const p = w?.config?.series?.[cfg.seriesIndex]?.data?.[cfg.dataPointIndex];
     if (!p) return;
+    const target = bubbleTarget(
+      { xStart: new Date(p.xStart), xEnd: new Date(p.xEnd), band: p.band },
+      this.capabilities().rawSearchWindowHours ?? null);
     this.zone.run(() => {
-      if (p.count === 1 && p.sampleTraceIdHex) this.navigate(p.sampleTraceIdHex);
-      else this.timeRange.setCustom(new Date(p.xStart), new Date(p.xEnd));
+      this.minDurationMs.set(target.minDurationMs);
+      this.maxDurationMs.set(target.maxDurationMs ?? 0);
+      this.filterMode.set('slow');
+      this.pageIndex.set(0);
+      this.timeRange.setCustom(target.start, target.end);
     });
   }
 
@@ -639,13 +651,13 @@ export class TraceListComponent implements OnDestroy {
 
   /** `start` and `end` are the trace's own extent from the row, passed on so the detail read can be bounded (Timescale, ClickHouse). */
   protected navigate(traceId: string, start?: string, end?: string): void {
+    if (this.pageLoading()) return; // the grid is mid-load: its rows are about to be replaced
     this.router.navigate(this.tenant.link('traces', traceId), start && end ? { queryParams: { start, end } } : undefined);
   }
 
   /**
-   * Maps MatPaginator's page event onto a keyset `nav` (decision 1: no arbitrary page jump).
-   * `showFirstLastButtons` only ever moves the index by ±1 or straight to the first/last computed
-   * page, so the direction is unambiguous from the index delta.
+   * Maps MatPaginator's page event onto a keyset `nav` (decision 1: no arbitrary page jump): first, next or prev.
+   * The last-page button is hidden (the list has no exact total to jump to).
    */
   protected onPage(e: PageEvent): void {
     if (e.pageSize !== this.pageSize()) {
@@ -655,10 +667,8 @@ export class TraceListComponent implements OnDestroy {
       return;
     }
 
-    const lastIndex = Math.max(0, Math.ceil(this.effectiveTotal() / this.pageSize()) - 1);
-    let nav: 'first' | 'next' | 'prev' | 'last';
+    let nav: 'first' | 'next' | 'prev';
     if (e.pageIndex === 0) nav = 'first';
-    else if (!this.totalIsLowerBound() && e.pageIndex >= lastIndex) nav = 'last';
     else if (e.pageIndex > (e.previousPageIndex ?? 0)) nav = 'next';
     else nav = 'prev';
 
@@ -666,7 +676,7 @@ export class TraceListComponent implements OnDestroy {
     this.fetchPage(nav);
   }
 
-  private fetchPage(nav: 'first' | 'next' | 'prev' | 'last'): void {
+  private fetchPage(nav: 'first' | 'next' | 'prev'): void {
     const current = this.page();
     const cursor = nav === 'next' ? current?.nextCursor ?? undefined
       : nav === 'prev' ? current?.prevCursor ?? undefined
@@ -676,9 +686,8 @@ export class TraceListComponent implements OnDestroy {
     this.pageSub?.unsubscribe();
     this.pageSub = this.api.getTracePage({
       ...this.currentFilter(),
-      // Must be the page's own resolved asOf, not summary's — see LogsComponent.fetchPage's
-      // identical note (Target API's asOf opaqueness/parallel-request rule).
-      asOf: current?.asOf ?? this.summary()?.asOf,
+      // The page's own resolved asOf: the cursor being sent was minted against it.
+      asOf: current?.asOf,
       size: this.pageSize(),
       cursor,
       nav,

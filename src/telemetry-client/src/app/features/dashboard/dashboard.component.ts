@@ -16,7 +16,7 @@ import { MatSelectModule } from '@angular/material/select';
 import { NgApexchartsModule } from 'ng-apexcharts';
 import type { ApexOptions } from 'ng-apexcharts';
 
-import { TracesApiService } from '../../core/services/api/traces-api.service';
+import { TracesApiService, RequestSummaryResult } from '../../core/services/api/traces-api.service';
 import { LogsApiService } from '../../core/services/api/logs-api.service';
 import { MetricsApiService } from '../../core/services/api/metrics-api.service';
 import { ResourcesApiService } from '../../core/services/api/resources-api.service';
@@ -84,7 +84,9 @@ export class DashboardComponent {
   protected slowTracesTimedOut = signal(false);
   protected availableServices = signal<string[]>([]);
   protected selectedService = signal(this.saved.selectedService);
-  /** True (unbounded) volume histogram — backs the chart and the trace-count/error-rate stat cards. */
+  /** The request summary (inbound spans, from the server's rollup) — backs the charts and the request cards. */
+  private requestSummary = signal<RequestSummaryResult | null>(null);
+  /** Per-bucket request volume — backs the chart and the request-count/error-rate stat cards. */
   private traceHistogram = signal<TimeBucket[]>([]);
   /**
    * Severity histogram — backs the log stat cards (full severity breakdown lives on the Logs
@@ -102,6 +104,9 @@ export class DashboardComponent {
   protected traceSummaryTimedOut = signal(false);
   protected logSummaryTimedOut = signal(false);
   protected readonly summaryTimeoutTooltip = SUMMARY_TIMEOUT_TOOLTIP;
+  /** What the request cards and charts count (decision 1 of plans/summary-rollups.md). */
+  protected readonly requestsTooltip =
+    'Inbound requests: server and consumer spans. A request that passes through several services counts once per service.';
   protected readonly samplesTimeoutHint = 'Timed out for this time range. Narrow the time range.';
 
   protected totalTraces = computed(() => this.traceHistogram().reduce((a, b) => a + b.count, 0));
@@ -131,11 +136,8 @@ export class DashboardComponent {
   // the page already fetches, so none of this adds a request.
   // ---------------------------------------------------------------------------------------------
 
-  private windowSeconds = computed(() => {
-    const { start, end } = this.timeRange.range();
-    return Math.max((end.getTime() - start.getTime()) / 1000, 1);
-  });
-  protected tracesPerSecond = computed(() => this.totalTraces() / this.windowSeconds());
+  /** Requests per second over what the buckets actually cover (the newest minutes are not written yet, so the window is clamped). */
+  protected requestsPerSecond = computed(() => this.requestSummary()?.summary.ratePerSecond ?? 0);
   private sumDurationMsTotal = computed(() => this.traceHistogram().reduce((a, b) => a + b.sumDurationMs, 0));
   protected avgDurationMs = computed(() =>
     this.totalTraces() > 0 ? this.sumDurationMsTotal() / this.totalTraces() : 0
@@ -226,15 +228,15 @@ export class DashboardComponent {
     const svc = this.selectedService();
 
     forkJoin({
-      // Buckets + per-service RED stats, plus the two samples endpoints for the recent-errors/
-      // slowest-traces widgets (list-pages-server-side plan, Phase 3 Target API) — replaces the
-      // retired /overview's combined Items/RecentErrors/SlowestTraces with `summary` + `samples`.
-      summary:      this.tracesApi.getTraceSummary({ start, end, service: svc || undefined }),
+      // Request buckets + per-service RED stats from the rollup (plans/summary-rollups.md), plus the two
+      // samples endpoints for the recent-errors/slowest-traces widgets.
+      summary:      this.tracesApi.getRequestSummary({ start, end, service: svc || undefined }),
       recentErrors: this.tracesApi.getTraceSamples(start, end, 'errors', 5),
       slowest:      this.tracesApi.getTraceSamples(start, end, 'slowest', 5),
       logSummary:   this.logsApi.getLogSummary({ start, end, service: svc || undefined }),
     }).subscribe({
       next: ({ summary, recentErrors, slowest, logSummary }) => {
+        this.requestSummary.set(summary);
         this.traceHistogram.set(summary.buckets);
         this.serviceStats.set(summary.services);
         this.traceSummaryTimedOut.set(summary.timedOut);

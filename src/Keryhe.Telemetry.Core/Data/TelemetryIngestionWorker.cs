@@ -48,6 +48,7 @@ public sealed class TelemetryIngestionWorker(
     TelemetryIngestionChannel ingestionChannel,
     IOptions<TelemetryIngestionOptions> options,
     IngestionMetrics metrics,
+    RollupAccumulator rollups,
     ILogger<TelemetryIngestionWorker> logger) : BackgroundService
 {
     private readonly TelemetryIngestionOptions _options = options.Value;
@@ -136,15 +137,18 @@ public sealed class TelemetryIngestionWorker(
             tasks.Add(ProcessChannelAsync(
                 ingestionChannel.Logs.Reader, writer.FlushLogsAsync,
                 static items => items.Count, _options.MaxLogFlushBatchSize,
-                ingestionChannel.LogGate, logDrainLock, _logsInFlight, "logs", stoppingToken, abortToken));
+                ingestionChannel.LogGate, logDrainLock, _logsInFlight, "logs", stoppingToken, abortToken,
+                rollups.AddLogs));
             tasks.Add(ProcessChannelAsync(
                 ingestionChannel.Traces.Reader, writer.FlushTracesAsync,
                 static items => items.Count, _options.MaxTraceFlushSpanBatchSize,
-                ingestionChannel.TraceGate, traceDrainLock, _tracesInFlight, "traces", stoppingToken, abortToken));
+                ingestionChannel.TraceGate, traceDrainLock, _tracesInFlight, "traces", stoppingToken, abortToken,
+                rollups.AddSpans));
             tasks.Add(ProcessChannelAsync(
                 ingestionChannel.Metrics.Reader, writer.FlushMetricsAsync,
                 static items => items.Count, _options.MaxMetricFlushBatchSize,
-                ingestionChannel.MetricGate, metricDrainLock, _metricsInFlight, "metrics", stoppingToken, abortToken));
+                ingestionChannel.MetricGate, metricDrainLock, _metricsInFlight, "metrics", stoppingToken, abortToken,
+                onFlushed: null));
         }
 
         return Task.WhenAll(tasks);
@@ -160,7 +164,8 @@ public sealed class TelemetryIngestionWorker(
         InFlightCount inFlight,
         string signalName,
         CancellationToken stoppingToken,
-        CancellationToken abortToken)
+        CancellationToken abortToken,
+        Action<List<T>>? onFlushed)
     {
         while (true)
         {
@@ -236,6 +241,13 @@ public sealed class TelemetryIngestionWorker(
                     if (flushed)
                     {
                         metrics.RecordFlushed(signalName, batchSize);
+                        // Only after a successful flush, so a dropped batch is never counted in the
+                        // summary rollups. A fault here must never fail the drain loop.
+                        if (onFlushed != null)
+                        {
+                            try { onFlushed(batch); }
+                            catch (Exception ex) { logger.LogError(ex, "Rollup accumulation failed for a {Signal} batch", signalName); }
+                        }
                         var committed = Stopwatch.GetTimestamp();
                         foreach (var stamp in enqueuedAt)
                             metrics.RecordCommitLag(signalName, Stopwatch.GetElapsedTime(stamp, committed).TotalMilliseconds);

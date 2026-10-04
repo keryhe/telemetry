@@ -4,6 +4,7 @@ using Keryhe.Telemetry.Api.Authorization;
 using Keryhe.Telemetry.Api.Routing;
 using Keryhe.Telemetry.Api.Services;
 using Keryhe.Telemetry.Core;
+using Keryhe.Telemetry.Core.Data;
 using Keryhe.Telemetry.Core.Data.Read;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
@@ -89,6 +90,11 @@ public static class TelemetryApiServiceCollectionExtensions
         // IOptions) agree on the same Telemetry:Query section.
         services.Configure<QueryOptions>(configuration.GetSection(QueryOptions.SectionName));
         services.Configure<ExportOptions>(configuration.GetSection(ExportOptions.SectionName));
+
+        // Summary rollups (plans/summary-rollups.md): the API reads FlushIntervalSeconds, CloseGraceSeconds and
+        // ArrivalMarginSeconds to compute writtenThrough, so these must agree with the collector's section.
+        services.Configure<RollupOptions>(configuration.GetSection(RollupOptions.SectionName));
+        services.TryAddSingleton(TimeProvider.System);
 
         // Phase 8: caps concurrent /api/*/export streams per API instance (decision 17) — one gate
         // shared across logs/traces/metrics exports, not per-signal.

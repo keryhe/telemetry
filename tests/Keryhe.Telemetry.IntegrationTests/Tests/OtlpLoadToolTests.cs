@@ -1,4 +1,5 @@
 using Keryhe.Telemetry.StressTests.Load;
+using Keryhe.Telemetry.StressTests.Observers.Database;
 using OpenTelemetry.Proto.Collector.Logs.V1;
 using Xunit;
 
@@ -31,11 +32,18 @@ public class OtlpLoadToolTests
         for (var i = 0; i < 20; i++)
         {
             var t = traces.Next();
-            Assert.Equal(t.Request.ResourceSpans.Sum(r => r.ScopeSpans.Sum(s => s.Spans.Count)), t.Entries.Sum(e => e.Rows));
-            Assert.Equal(t.Records, t.Entries.Sum(e => e.Rows));
+            // The rollup entries (plans/summary-rollups.md) are a second ledger of the same records, so they are summed apart.
+            var signalTables = t.Entries.Where(e => !CountedTable.IsRollup(e.Table));
+            Assert.Equal(t.Request.ResourceSpans.Sum(r => r.ScopeSpans.Sum(s => s.Spans.Count)), signalTables.Sum(e => e.Rows));
+            Assert.Equal(t.Records, signalTables.Sum(e => e.Rows));
+            var inbound = t.Request.ResourceSpans.SelectMany(r => r.ScopeSpans).SelectMany(s => s.Spans)
+                .Count(s => s.Kind is OpenTelemetry.Proto.Trace.V1.Span.Types.SpanKind.Server or OpenTelemetry.Proto.Trace.V1.Span.Types.SpanKind.Consumer);
+            Assert.True(inbound >= t.Entries.Where(e => e.Table == RollupTables.Request).Sum(e => e.Rows)); // current-age inbound only: backdated ones are not ledgered there
 
             var l = logs.Next();
-            Assert.Equal(l.Request.ResourceLogs.Sum(r => r.ScopeLogs.Sum(s => s.LogRecords.Count)), l.Entries.Sum(e => e.Rows));
+            Assert.Equal(l.Request.ResourceLogs.Sum(r => r.ScopeLogs.Sum(s => s.LogRecords.Count)), l.Entries.Where(e => !CountedTable.IsRollup(e.Table)).Sum(e => e.Rows));
+            Assert.Equal(l.Entries.Where(e => e.Table == "log_records" && e.Age == RecordAge.Current).Sum(e => e.Rows),
+                l.Entries.Where(e => e.Table == RollupTables.Log).Sum(e => e.Rows));
 
             var m = metrics.Next();
             var points = m.Request.ResourceMetrics.SelectMany(r => r.ScopeMetrics).SelectMany(s => s.Metrics).Sum(x =>

@@ -77,10 +77,6 @@ public abstract class TraceQueryBenchBase(ProviderFixture fixture) : IAsyncLifet
         {
             var start = end - window;
             var w = $"{window.TotalHours:0}h";
-            await Time($"summary {w}", async () =>
-                (await repo.GetTraceSummaryAsync(new TraceSummaryQuery { Start = start, End = end, AsOf = asOf, BucketCount = 60 })).ListTotal.ToString());
-            await Time($"summary {w} service", async () =>
-                (await repo.GetTraceSummaryAsync(new TraceSummaryQuery { Start = start, End = end, AsOf = asOf, BucketCount = 60, Service = "order-service" })).ListTotal.ToString());
             await Time($"page first {w}", async () =>
                 (await repo.GetTracePageAsync(new TraceQuery { Start = start, End = end, AsOf = asOf, Size = 100 })).Items.Count.ToString());
             await Time($"page first {w} service", async () =>
@@ -88,14 +84,8 @@ public abstract class TraceQueryBenchBase(ProviderFixture fixture) : IAsyncLifet
             var first = await repo.GetTracePageAsync(new TraceQuery { Start = start, End = end, AsOf = asOf, Size = 100 });
             await Time($"page next {w}", async () =>
                 (await repo.GetTracePageAsync(new TraceQuery { Start = start, End = end, AsOf = first.AsOf, Size = 100, Nav = "next", Cursor = first.NextCursor })).Items.Count.ToString());
-            await Time($"page last {w}", async () =>
-                (await repo.GetTracePageAsync(new TraceQuery { Start = start, End = end, AsOf = asOf, Size = 100, Nav = "last" })).Items.Count.ToString());
-            await Time($"errors summary {w}", async () =>
-                (await repo.GetTraceSummaryAsync(new TraceSummaryQuery { Start = start, End = end, AsOf = asOf, BucketCount = 60, Mode = "errors" })).ListTotal.ToString());
             await Time($"errors page {w}", async () =>
                 (await repo.GetTracePageAsync(new TraceQuery { Start = start, End = end, AsOf = asOf, Size = 100, Mode = "errors" })).Items.Count.ToString());
-            await Time($"errors summary {w} service", async () =>
-                (await repo.GetTraceSummaryAsync(new TraceSummaryQuery { Start = start, End = end, AsOf = asOf, BucketCount = 60, Mode = "errors", Service = "order-service" })).ListTotal.ToString());
             await Time($"errors page {w} service", async () =>
                 (await repo.GetTracePageAsync(new TraceQuery { Start = start, End = end, AsOf = asOf, Size = 100, Mode = "errors", Service = "order-service" })).Items.Count.ToString());
             await Time($"slow page {w}", async () =>

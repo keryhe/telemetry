@@ -1,4 +1,4 @@
--- OpenTelemetry SQL Server Schema (SQL Server 2022) -- schema 3.1.0
+-- OpenTelemetry SQL Server Schema (SQL Server 2022) -- schema 3.2.1
 -- Supports OTLP logs, metrics, and traces as defined in opentelemetry-proto.
 --
 -- Schema 3.0.0 is a fresh-install schema: there is no upgrade path from 2.x. See
@@ -324,6 +324,62 @@ CREATE INDEX idx_log_trace ON log_records (trace_id);
 GO
 
 -- =============================================================================
+-- SUMMARY ROLLUPS (schema 3.2.0; plans/summary-rollups.md)
+-- =============================================================================
+
+-- Per-minute rollups the dashboard, trace list and logs page read instead of scanning spans and
+-- log records. request_rollup_minute counts INBOUND spans (kind SERVER or CONSUMER) per
+-- (tenant, service, minute of start time): request_count, error_count, duration sum/max and a
+-- 24-band doubling duration histogram (h00 = under 0.25 ms, hNN = [0.25 ms * 2^(NN-1), 0.25 ms * 2^NN),
+-- h23 = 1,048.6 s and over). log_rollup_minute counts log records per (tenant, service, severity
+-- number, minute); severity_number is -1 for a record whose severity is NULL. Rows are partial:
+-- no unique key, no foreign keys, reads SUM them. service_name is '' for a span or log without one.
+CREATE TABLE request_rollup_minute (
+    tenant_id              BIGINT        NOT NULL,
+    service_name           NVARCHAR(255) NOT NULL DEFAULT N'',
+    bucket_start_unix_nano BIGINT        NOT NULL,
+    request_count          BIGINT        NOT NULL,
+    error_count            BIGINT        NOT NULL,
+    sum_duration_nanos     BIGINT        NOT NULL,
+    max_duration_nanos     BIGINT        NOT NULL,
+    h00 BIGINT NOT NULL DEFAULT 0,
+    h01 BIGINT NOT NULL DEFAULT 0,
+    h02 BIGINT NOT NULL DEFAULT 0,
+    h03 BIGINT NOT NULL DEFAULT 0,
+    h04 BIGINT NOT NULL DEFAULT 0,
+    h05 BIGINT NOT NULL DEFAULT 0,
+    h06 BIGINT NOT NULL DEFAULT 0,
+    h07 BIGINT NOT NULL DEFAULT 0,
+    h08 BIGINT NOT NULL DEFAULT 0,
+    h09 BIGINT NOT NULL DEFAULT 0,
+    h10 BIGINT NOT NULL DEFAULT 0,
+    h11 BIGINT NOT NULL DEFAULT 0,
+    h12 BIGINT NOT NULL DEFAULT 0,
+    h13 BIGINT NOT NULL DEFAULT 0,
+    h14 BIGINT NOT NULL DEFAULT 0,
+    h15 BIGINT NOT NULL DEFAULT 0,
+    h16 BIGINT NOT NULL DEFAULT 0,
+    h17 BIGINT NOT NULL DEFAULT 0,
+    h18 BIGINT NOT NULL DEFAULT 0,
+    h19 BIGINT NOT NULL DEFAULT 0,
+    h20 BIGINT NOT NULL DEFAULT 0,
+    h21 BIGINT NOT NULL DEFAULT 0,
+    h22 BIGINT NOT NULL DEFAULT 0,
+    h23 BIGINT NOT NULL DEFAULT 0
+);
+CREATE CLUSTERED INDEX cx_request_rollup_minute ON request_rollup_minute (tenant_id, bucket_start_unix_nano, service_name);
+GO
+CREATE TABLE log_rollup_minute (
+    tenant_id              BIGINT        NOT NULL,
+    service_name           NVARCHAR(255) NOT NULL DEFAULT N'',
+    severity_number        INT           NOT NULL,
+    bucket_start_unix_nano BIGINT        NOT NULL,
+    record_count           BIGINT        NOT NULL
+);
+CREATE CLUSTERED INDEX cx_log_rollup_minute ON log_rollup_minute (tenant_id, bucket_start_unix_nano, service_name);
+GO
+
+-- =============================================================================
 -- UTILITY TABLES
 -- =============================================================================
 
@@ -396,7 +452,7 @@ GO
 -- Only reached when every statement above succeeded, so a partial apply cannot
 -- leave a false version marker for the apply-schema.sh gate.
 MERGE schema_version AS target
-USING (VALUES (N'3.1.0')) AS src (version)
+USING (VALUES (N'3.2.1')) AS src (version)
 ON target.version = src.version
 WHEN MATCHED     THEN UPDATE SET applied_at = SYSDATETIME()
 WHEN NOT MATCHED THEN INSERT (version, applied_at) VALUES (src.version, SYSDATETIME());

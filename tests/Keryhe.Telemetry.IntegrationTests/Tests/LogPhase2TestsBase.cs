@@ -81,13 +81,7 @@ public abstract class LogPhase2TestsBase : IAsyncLifetime
             Assert.Equal(expected, actual);
         }
 
-        // nav=last reaches the oldest rows, disjoint from every earlier page's rows except where
-        // the tail naturally overlaps the last forward page fetched.
-        var last = await repo.GetLogPageAsync(new LogQuery { Start = WindowStart, End = windowEnd, Size = size, Nav = "last", AsOf = asOf });
-        Assert.NotEmpty(last.Items);
-        Assert.Null(last.NextCursor);
-        var oldestForward = forwardIds.Min();
-        Assert.True(last.Items.Select(l => l.TimeUnixNano).Min() <= oldestForward);
+        Assert.Null(lastPage.NextCursor);
     }
 
     /// <summary>

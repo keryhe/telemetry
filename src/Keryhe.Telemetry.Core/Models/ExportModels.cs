@@ -5,7 +5,7 @@ namespace Keryhe.Telemetry.Core.Models;
 // GET /api/logs/export, /api/traces/export and /api/metrics/export.
 // =============================================================================
 
-/// <summary>Logs export request — the exact same filters as <see cref="LogQuery"/>/<see cref="LogSummaryQuery"/>, minus paging/AsOf (decision 17: full records, no row cap, streamed).</summary>
+/// <summary>Logs export request — the exact same filters as <see cref="LogQuery"/>, minus paging/AsOf (decision 17: full records, no row cap, streamed).</summary>
 public sealed class LogExportQuery
 {
     public DateTime Start { get; init; }
@@ -15,7 +15,7 @@ public sealed class LogExportQuery
     public string? Search { get; init; }
 }
 
-/// <summary>Traces export request — the exact same filters as <see cref="TraceQuery"/>/<see cref="TraceSummaryQuery"/>. One <see cref="TraceInfo"/> row per trace (decision 17); span-level export is out of scope.</summary>
+/// <summary>Traces export request — the exact same filters as <see cref="TraceQuery"/>. One <see cref="TraceInfo"/> row per trace (decision 17); span-level export is out of scope.</summary>
 public sealed class TraceExportQuery
 {
     public DateTime Start { get; init; }

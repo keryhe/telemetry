@@ -92,10 +92,20 @@ public abstract class RetentionSettingsRepositoryBase : IRetentionSettingsReposi
     protected virtual Task PrepareSweepConnectionAsync(DbConnection conn, CancellationToken ct) => Task.CompletedTask;
 
     public virtual async Task<int> DeleteOldTracesAsync(TimeSpan retentionPeriod, CancellationToken cancellationToken = default)
-        => await SweepPerTenantAsync("spans", "start_time_unix_nano", retentionPeriod, cancellationToken);
+    {
+        var removed = await SweepPerTenantAsync("spans", "start_time_unix_nano", retentionPeriod, cancellationToken);
+        // The request rollup follows the traces window (summary-rollups plan, decision 8); not counted.
+        await SweepPerTenantAsync("request_rollup_minute", "bucket_start_unix_nano", retentionPeriod, cancellationToken);
+        return removed;
+    }
 
     public virtual async Task<int> DeleteOldLogRecordsAsync(TimeSpan retentionPeriod, CancellationToken cancellationToken = default)
-        => await SweepPerTenantAsync("log_records", "time_unix_nano", retentionPeriod, cancellationToken);
+    {
+        var removed = await SweepPerTenantAsync("log_records", "time_unix_nano", retentionPeriod, cancellationToken);
+        // The log rollup follows the logs window; not counted.
+        await SweepPerTenantAsync("log_rollup_minute", "bucket_start_unix_nano", retentionPeriod, cancellationToken);
+        return removed;
+    }
 
     public virtual async Task<int> DeleteOldMetricDataPointsAsync(TimeSpan retentionPeriod, CancellationToken cancellationToken = default)
     {
@@ -110,7 +120,7 @@ public abstract class RetentionSettingsRepositoryBase : IRetentionSettingsReposi
     }
 
     /// <summary>Deletes <paramref name="table"/>'s expired rows tenant by tenant, through its <c>(tenant_id, time)</c> access path.</summary>
-    private async Task<int> SweepPerTenantAsync(string table, string timeColumn, TimeSpan retentionPeriod, CancellationToken ct)
+    protected async Task<int> SweepPerTenantAsync(string table, string timeColumn, TimeSpan retentionPeriod, CancellationToken ct)
     {
         var cutoff = CutoffNano(retentionPeriod);
         await using var conn = await OpenConnectionAsync(ct);

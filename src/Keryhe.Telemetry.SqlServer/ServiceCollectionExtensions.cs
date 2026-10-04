@@ -24,6 +24,8 @@ public static class SqlServerServiceCollectionExtensions
         // metric_last_seen maintenance (list-pages-server-side plan, Phase 5). MetricTouchWorker
         // is provider-agnostic and registered once, in AddKeryheTelemetryCollector.
         services.AddScoped<IMetricTouchStore, SqlServerMetricTouchStore>();
+        // Summary rollups (plans/summary-rollups.md); RollupWorker is registered once, in AddKeryheTelemetryCollector.
+        services.AddScoped<IRollupStore, SqlServerRollupStore>();
         return services;
     }
 
@@ -33,6 +35,7 @@ public static class SqlServerServiceCollectionExtensions
         services.AddScoped<ITraceReadRepository, SqlServerTraceReadRepository>();
         services.AddScoped<IMetricReadRepository, SqlServerMetricReadRepository>();
         services.AddScoped<ILogReadRepository, SqlServerLogReadRepository>();
+        services.AddScoped<IRollupReadRepository, SqlServerRollupReadRepository>();
         services.AddScoped<IResourceReadRepository, SqlServerResourceReadRepository>();
         services.AddScoped<IAlertRuleRepository, SqlServerAlertRuleRepository>();
         services.AddScoped<ITenantCatalogRepository, SqlServerTenantCatalogRepository>();

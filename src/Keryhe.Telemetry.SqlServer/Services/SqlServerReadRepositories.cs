@@ -276,3 +276,16 @@ public class SqlServerRetentionSettingsRepository(IConfiguration configuration)
     protected override async Task PrepareSweepConnectionAsync(DbConnection conn, CancellationToken ct)
         => await conn.ExecuteAsync(new CommandDefinition("SET DEADLOCK_PRIORITY LOW", cancellationToken: ct));
 }
+
+public class SqlServerRollupReadRepository(IConfiguration configuration, ITenantContext tenantContext)
+    : RollupReadRepositoryBase(tenantContext, configuration)
+{
+    private readonly string _connectionString = configuration.GetConnectionString("Api")!;
+
+    // Read connections: DEADLOCK_PRIORITY LOW on a distinct Application Name, retried once on error 1205.
+    protected override async Task<DbConnection> OpenConnectionAsync(CancellationToken cancellationToken)
+        => await SqlServerReadConnection.OpenAsync(_connectionString, cancellationToken);
+
+    protected override Task<T> ExecuteWithRetryAsync<T>(Func<Task<T>> operation)
+        => SqlServerReadConnection.WithRetryOnDeadlockAsync(operation);
+}

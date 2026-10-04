@@ -27,7 +27,7 @@ public sealed class LogQuery
     /// <summary>Opaque keyset cursor from a previous page, or null for the first page.</summary>
     public string? Cursor { get; init; }
 
-    /// <summary><c>first</c> | <c>next</c> | <c>prev</c> | <c>last</c> (decision 1).</summary>
+    /// <summary><c>first</c> | <c>next</c> | <c>prev</c> (decision 1; there is no <c>last</c>: the lists have no exact total).</summary>
     public string Nav { get; init; } = "first";
 
     /// <summary>
@@ -36,51 +36,6 @@ public sealed class LogQuery
     /// from the database clock and returns it for the client to echo on later requests.
     /// </summary>
     public DateTime? AsOf { get; init; }
-}
-
-/// <summary>Filter for <c>GET /api/logs/summary</c> (list-pages-server-side plan, Phase 2, Target API).</summary>
-public sealed class LogSummaryQuery
-{
-    public DateTime Start { get; init; }
-    public DateTime End { get; init; }
-    public string? Service { get; init; }
-    public int? MinSeverity { get; init; }
-    public string? Search { get; init; }
-    public DateTime? AsOf { get; init; }
-
-    /// <summary>Target bucket count for the chart.</summary>
-    public int BucketCount { get; init; } = 60;
-}
-
-/// <summary>One chart bucket of a log summary (list-pages-server-side plan, Phase 2).</summary>
-public sealed class LogSummaryBucket
-{
-    public DateTime Timestamp { get; init; }
-    public long Trace { get; init; }
-    public long Debug { get; init; }
-    public long Info { get; init; }
-    public long Warn { get; init; }
-    public long Error { get; init; }
-    public long Fatal { get; init; }
-}
-
-/// <summary><c>GET /api/logs/summary</c>'s response (Target API): <c>{ source, buckets[], total, totalIsLowerBound, asOf }</c>.</summary>
-public sealed class LogSummaryResult
-{
-    /// <summary>Always <c>"raw"</c> since schema 3.0.0 (there are no rollup tables); kept so the client contract is unchanged.</summary>
-    public string Source { get; init; } = "raw";
-    public List<LogSummaryBucket> Buckets { get; init; } = [];
-
-    /// <summary>
-    /// Exact unless <see cref="TotalIsLowerBound"/>. After a timeout it is a capped count (<see cref="TimedOut"/>): exact
-    /// below the cap, the cap itself (lower bound) above it, and 0 (lower bound) when the capped count ran out of time too.
-    /// </summary>
-    public long Total { get; init; }
-    public bool TotalIsLowerBound { get; init; }
-
-    /// <summary>The histogram did not finish within <c>Telemetry:Query:SummaryTimeoutSeconds</c>: <see cref="Buckets"/> is empty.</summary>
-    public bool TimedOut { get; init; }
-    public DateTime AsOf { get; init; }
 }
 
 /// <summary><c>GET /api/logs/page</c>'s response (Target API): <c>{ items[], nextCursor, prevCursor }</c>.</summary>
@@ -170,66 +125,11 @@ public sealed class TraceQuery
     /// <summary>Opaque keyset cursor from a previous page, or null for the first page.</summary>
     public string? Cursor { get; init; }
 
-    /// <summary><c>first</c> | <c>next</c> | <c>prev</c> | <c>last</c> (decision 1).</summary>
+    /// <summary><c>first</c> | <c>next</c> | <c>prev</c> (decision 1; there is no <c>last</c>: the lists have no exact total).</summary>
     public string Nav { get; init; } = "first";
 
     /// <summary>The ingestion-time pin (decision 3) — see <see cref="LogQuery.AsOf"/>'s doc comment for the exact same contract.</summary>
     public DateTime? AsOf { get; init; }
-}
-
-/// <summary>Filter for <c>GET /api/traces/summary</c> (list-pages-server-side plan, Phase 3, Target API).</summary>
-public sealed class TraceSummaryQuery
-{
-    public DateTime Start { get; init; }
-    public DateTime End { get; init; }
-
-    /// <summary><c>all</c> | <c>errors</c> | <c>slow</c>.</summary>
-    public string Mode { get; init; } = "all";
-    public string? Service { get; init; }
-    public string? Operation { get; init; }
-    public double? MinDurationMs { get; init; }
-    public double? MaxDurationMs { get; init; }
-    public string? Search { get; init; }
-    public DateTime? AsOf { get; init; }
-
-    /// <summary>Target bucket count for the chart.</summary>
-    public int BucketCount { get; init; } = 60;
-
-    /// <summary>Latency heatmap row count (time columns come from <see cref="BucketCount"/>).</summary>
-    public int LatencyDurationRows { get; init; } = 20;
-}
-
-/// <summary><c>GET /api/traces/summary</c>'s response (Target API).</summary>
-public sealed class TraceSummaryResult
-{
-    /// <summary>Always <c>"raw"</c> since schema 3.0.0 (there are no rollup tables); kept so the client contract is unchanged.</summary>
-    public string Source { get; init; } = "raw";
-    public List<TraceVolumeBucket> Buckets { get; init; } = [];
-
-    /// <summary>Window-wide totals/percentiles over inbound-request anchors (decision 12).</summary>
-    public TraceWindowSummary Summary { get; init; } = new();
-    public List<ServiceStats> Services { get; init; } = [];
-    public List<TraceLatencyBucket> LatencyBuckets { get; init; } = [];
-
-    /// <summary>The paginator's population: every trace's anchor, of any kind (schema-simplification decisions 10 and 12).</summary>
-    public long ListTotal { get; init; }
-
-    /// <summary>The cards' population: inbound-request anchors only -- kind SERVER/CONSUMER (decision 12).</summary>
-    public long RequestCount { get; init; }
-
-    /// <summary>
-    /// <see cref="ListTotal"/> is a lower bound: after a timeout it is a capped count, the cap itself when there are more
-    /// anchors than that, or 0 when the capped count ran out of time too.
-    /// </summary>
-    public bool TotalIsLowerBound { get; init; }
-
-    /// <summary>
-    /// The anchor scan did not finish within <c>Telemetry:Query:SummaryTimeoutSeconds</c>: <see cref="Buckets"/>,
-    /// <see cref="Summary"/>, <see cref="Services"/> and <see cref="LatencyBuckets"/> are empty and <see cref="RequestCount"/>
-    /// is 0, so a reader must not present them as "no traces". <see cref="ListTotal"/> is the capped count.
-    /// </summary>
-    public bool TimedOut { get; init; }
-    public DateTime AsOf { get; init; }
 }
 
 /// <summary><c>GET /api/traces/page</c>'s response (Target API): <c>{ items[], nextCursor, prevCursor }</c>.</summary>
@@ -265,72 +165,6 @@ public sealed class TraceSamplesResult
     /// unknown, not because the window has no matching traces.
     /// </summary>
     public bool TimedOut { get; init; }
-}
-
-/// <summary>One bucket of the trace volume histogram.</summary>
-public sealed class TraceVolumeBucket
-{
-    public DateTime Timestamp { get; init; }
-    public int Count { get; init; }
-    public int ErrorCount { get; init; }
-
-    /// <summary>Sum of trace durations (ms) in this bucket; avg = SumDurationMs / Count.</summary>
-    public double SumDurationMs { get; init; }
-
-    /// <summary>
-    /// Duration percentiles (ms) across the traces in this bucket, computed in memory from the
-    /// same per-trace durations the histogram already materializes — no extra query. 0 for an
-    /// empty bucket (Count == 0); callers should treat that as "no data", not a real value.
-    /// </summary>
-    public double P50Ms { get; init; }
-    public double P95Ms { get; init; }
-    public double P99Ms { get; init; }
-}
-
-/// <summary>
-/// One cell of the trace latency chart's time × log-duration grid (trace-latency-p50 plan, Phase
-/// 3), mirroring the client's former <c>LatencyBucket</c> in chart.utils.ts. Empty cells are
-/// omitted from the result entirely rather than sent as zero-count buckets.
-/// </summary>
-public sealed class TraceLatencyBucket
-{
-    public DateTime XStart { get; init; }
-    public DateTime XEnd { get; init; }
-    public double YStartMs { get; init; }
-    public double YEndMs { get; init; }
-    public int Count { get; init; }
-    public int ErrorCount { get; init; }
-
-    /// <summary>
-    /// Set only when <see cref="Count"/> == 1, which is the only case the bubble-click handler
-    /// needs a trace id for — a larger bucket is handled by zooming into its time span instead.
-    /// Deliberately not a full id list: that would reintroduce an unbounded payload (one id per
-    /// trace in the window) for no behavioral gain.
-    /// </summary>
-    public string? SampleTraceIdHex { get; init; }
-}
-
-/// <summary>
-/// Window-wide aggregates over the whole filtered trace set — not per bucket and not per
-/// service. Exists because neither of those can produce a window percentile: percentiles do not
-/// average, so <c>TraceVolumeBucket.P95Ms</c> values cannot be combined into the window's p95,
-/// and <see cref="ServiceStats"/> is grouped by service (and carries no p50 at all). Computed
-/// from the same already-materialized trace list as the other two groupings — one extra sort,
-/// no extra query.
-/// </summary>
-public sealed class TraceWindowSummary
-{
-    public int Count { get; init; }
-    public int ErrorCount { get; init; }
-
-    /// <summary>
-    /// Duration percentiles (ms) across every trace in the window. 0 when <c>Count == 0</c>;
-    /// callers should treat that as "no data", not a real value — same contract as
-    /// <see cref="TraceVolumeBucket"/>.
-    /// </summary>
-    public double P50Ms { get; init; }
-    public double P95Ms { get; init; }
-    public double P99Ms { get; init; }
 }
 
 /// <summary>One bucket of the log volume-by-severity histogram.</summary>

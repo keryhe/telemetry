@@ -296,11 +296,13 @@ when unauthenticated and 403 for a refused tenant or operation. See
 - `alert_events` — Audit log of all fired alert events
 - `retention_settings` — The single row holding the retention windows (traces 90 days, logs 90, metrics 180 by default)
 - `schema_version` — Applied schema versions
-- ClickHouse only: `trace_index` (per-trace time bounds used to locate a trace) and the materialized views feeding it and `metric_last_seen`
+- `request_rollup_minute`, `log_rollup_minute` — Per-minute rollups of inbound spans and log records that the dashboard, trace list and logs page read for their cards and charts (rows are partial and summed on read; forward-only, so ranges before an upgrade show empty charts)
+- MySQL only: `request_rollup_hour`, `log_rollup_hour` and `rollup_compaction` — the hour tier of those rollups
+- ClickHouse only: `trace_index` (per-trace time bounds used to locate a trace) and the materialized views feeding it, `metric_last_seen` and the two rollup tables
 
 Spans, log records and data points are plain appends with no unique key and no foreign keys, so a re-delivered
-batch is stored again and reads tolerate it. There are no views and no rollup tables: every list, summary and chart
-is computed from the raw rows.
+batch is stored again and reads tolerate it. The trace and log lists are computed from the raw rows; the cards and
+charts above them come from the rollups, which count **requests** (inbound server and consumer spans), not traces.
 
 When using the TimescaleDB provider, `spans`, `log_records` and the five data-point tables are hypertables
 (6 hour chunks for spans and logs, 12-24 hours for data points). Compression activates at 7 days, and retention

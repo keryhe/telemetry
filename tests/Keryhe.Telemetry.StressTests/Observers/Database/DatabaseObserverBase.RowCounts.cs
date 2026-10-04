@@ -9,7 +9,15 @@ public sealed record RowCounts(IReadOnlyList<RowCountCell> Cells, long? RawSpanR
 /// <summary>A table the correctness check counts, and how it reaches its tenant (stress-test plan, Phase 7).</summary>
 public sealed record CountedTable(string Table, string TimeColumn, bool ViaMetric)
 {
-    public string Signal => Table switch { "spans" => "traces", "log_records" => "logs", _ => "metrics" };
+    public string Signal => Table switch
+    {
+        "spans" or Load.RollupTables.Request => "traces",
+        "log_records" or Load.RollupTables.Log => "logs",
+        _ => "metrics"
+    };
+
+    /// <summary>The rollup tables (plans/summary-rollups.md): counted by summing their count column, tenant straight from the row.</summary>
+    public static bool IsRollup(string table) => table is Load.RollupTables.Request or Load.RollupTables.Log;
 
     public static IReadOnlyList<CountedTable> All { get; } =
     [
@@ -25,6 +33,24 @@ public sealed record CountedTable(string Table, string TimeColumn, bool ViaMetri
 
 public abstract partial class DatabaseObserverBase
 {
+    /// <summary>
+    /// The rollup tables' row counts: <c>SUM(request_count)</c> / <c>SUM(record_count)</c> per tenant and age (a bucket is backdated when its minute
+    /// is before <paramref name="cutoffNanos"/>). Cheap enough to poll, which the correctness check does while the rollup catches up with the
+    /// last closed minutes. The same SQL runs on every provider (ClickHouse's rollup tables are summed, never read with <c>FINAL</c>).
+    /// </summary>
+    public async Task<RowCounts> CountRollupRowsAsync(long cutoffNanos, CancellationToken cancellationToken)
+    {
+        var cells = new List<RowCountCell>();
+        foreach (var (table, column) in new[] { (Load.RollupTables.Request, "request_count"), (Load.RollupTables.Log, "record_count") })
+        {
+            var age = $"CASE WHEN bucket_start_unix_nano >= {cutoffNanos} THEN 0 ELSE 1 END";
+            var rows = await QueryAsync($"SELECT tenant_id, {age}, SUM({column}) FROM {table} GROUP BY tenant_id, {age}",
+                cancellationToken, commandTimeoutSeconds: 1800);
+            cells.AddRange(rows.Select(r => new RowCountCell(Long(r[0]), table, Long(r[1]) == 1, Long(r[2]))));
+        }
+        return new RowCounts(cells, null);
+    }
+
     /// <summary>
     /// Counts what the database holds per tenant, table and age, exactly as the read side would see it. Tenants are reached
     /// through <c>resources.tenant_id</c> (data points via <c>metrics.resource_id</c>); a row is backdated when its own timestamp is
@@ -43,6 +69,7 @@ public abstract partial class DatabaseObserverBase
                 cancellationToken, commandTimeoutSeconds: 1800);
             cells.AddRange(rows.Select(r => new RowCountCell(Long(r[0]), t.Table, Long(r[1]) == 1, Long(r[2]))));
         }
+        cells.AddRange((await CountRollupRowsAsync(cutoffNanos, cancellationToken)).Cells);
         return new RowCounts(cells, null);
     }
 }

@@ -36,6 +36,8 @@ public sealed class SqlServerFixture : ProviderFixture
             DELETE FROM metrics;
             DELETE FROM metric_last_seen;
             DELETE FROM log_records;
+            DELETE FROM request_rollup_minute;
+            DELETE FROM log_rollup_minute;
             """;
         await using var cmd = new SqlCommand(sql, conn) { CommandTimeout = 120 };
         await cmd.ExecuteNonQueryAsync();

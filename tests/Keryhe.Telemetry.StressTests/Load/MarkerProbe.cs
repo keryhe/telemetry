@@ -127,7 +127,7 @@ public sealed class MarkerProbe(
             traceRequest.ResourceSpans.Add(rs);
 
             // Markers go through the ledgered export path, so the correctness check counts them too.
-            var logEntry = new[] { new LedgerEntry("log_records", RecordAge.Current, 1, false, false) };
+            var logEntry = new[] { new LedgerEntry("log_records", RecordAge.Current, 1, false, false), new LedgerEntry(RollupTables.Log, RecordAge.Current, 1, false, false) };
             var spanEntry = new[] { new LedgerEntry("spans", RecordAge.Current, 1, false, true) };
             var sends = await Task.WhenAll(
                 exporter.ExportLogsAsync(new Payload<ExportLogsServiceRequest>(logRequest, tenantIndex, 1, logEntry, false), false, CancellationToken.None),

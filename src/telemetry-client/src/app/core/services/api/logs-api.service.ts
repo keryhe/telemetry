@@ -21,14 +21,19 @@ export interface LogFilter {
   q?: string;
 }
 
-export interface LogSummaryQuery extends LogFilter {
+/** The log summary's query (plans/summary-rollups.md): range, service and minimum severity; search does not apply to it. */
+export interface LogSummaryQuery {
+  start: Date;
+  end: Date;
+  service?: string;
+  minSeverity?: number;
   bucketCount?: number;
 }
 
 export interface LogPageQuery extends LogFilter {
   size: number;
   cursor?: string;
-  nav?: 'first' | 'next' | 'prev' | 'last';
+  nav?: 'first' | 'next' | 'prev';
 }
 
 export interface LogFacetsQuery extends LogFilter {
@@ -39,6 +44,7 @@ export interface LogFacetsQuery extends LogFilter {
 /** Wire shape of one summary bucket (backend field is `timestamp`, not `time`). */
 interface LogSummaryBucketDto {
   timestamp: string;
+  coveredSeconds: number;
   trace: number;
   debug: number;
   info: number;
@@ -49,6 +55,7 @@ interface LogSummaryBucketDto {
 
 export interface LogSummaryBucket {
   time: Date;
+  coveredSeconds: number;
   trace: number;
   debug: number;
   info: number;
@@ -58,22 +65,21 @@ export interface LogSummaryBucket {
 }
 
 interface LogSummaryDto {
-  source: 'rollup' | 'raw';
+  bucketSeconds: number;
+  writtenThrough: string;
   buckets: LogSummaryBucketDto[];
   total: number;
-  totalIsLowerBound: boolean;
   timedOut: boolean;
-  asOf: string;
 }
 
 export interface LogSummaryResult {
-  source: 'rollup' | 'raw';
+  bucketSeconds: number;
+  /** Buckets from this instant on are left out: the rollup is not written for them yet. */
+  writtenThrough: string;
   buckets: LogSummaryBucket[];
   total: number;
-  totalIsLowerBound: boolean;
-  /** The server's histogram ran out of time: buckets is empty (not "no logs") and total is a capped count. */
+  /** The server ran out of time: buckets is empty (not "no logs") and total is 0. */
   timedOut: boolean;
-  asOf: string;
 }
 
 interface LogPageDto {
@@ -122,20 +128,24 @@ export class LogsApiService {
     return this.http.get<LogRecord[]>(this.base, { params });
   }
 
-  /** Chart/stat-card summary — the per-severity bucket counts (decisions 3, 37). */
+  /** Chart/stat-card summary: per-severity bucket counts from the log rollup (range, service, minimum severity). */
   getLogSummary(query: LogSummaryQuery): Observable<LogSummaryResult> {
-    let params = this.filterParams(query).set('bucketCount', query.bucketCount ?? 60);
+    let params = new HttpParams()
+      .set('start', query.start.toISOString())
+      .set('end', query.end.toISOString())
+      .set('bucketCount', query.bucketCount ?? 60);
+    if (query.service) params = params.set('service', query.service);
+    if (query.minSeverity != null && query.minSeverity >= 0) params = params.set('minSeverity', query.minSeverity);
     return this.http.get<LogSummaryDto>(`${this.base}/summary`, { params }).pipe(
       map((dto) => ({
-        source: dto.source,
+        bucketSeconds: dto.bucketSeconds,
+        writtenThrough: dto.writtenThrough,
         buckets: dto.buckets.map((b) => ({
-          time: new Date(b.timestamp),
+          time: new Date(b.timestamp), coveredSeconds: b.coveredSeconds,
           trace: b.trace, debug: b.debug, info: b.info, warn: b.warn, error: b.error, fatal: b.fatal,
         })),
         total: dto.total,
-        totalIsLowerBound: dto.totalIsLowerBound,
         timedOut: dto.timedOut ?? false,
-        asOf: dto.asOf,
       }))
     );
   }

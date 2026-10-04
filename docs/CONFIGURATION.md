@@ -41,7 +41,8 @@ Host: `Keryhe.Telemetry.Collector.Server` (gRPC OTLP ingestion, the write path).
     "Collector": { "AllowInsecureTransport": false },
     "Ingestion": { "FlushConcurrency": 4 },
     "TenantResolution": { "PositiveCacheTtlSeconds": 30 },
-    "MetricTouch": { "FlushIntervalSeconds": 60 }
+    "MetricTouch": { "FlushIntervalSeconds": 60 },
+    "Rollup": { "FlushIntervalSeconds": 15, "CloseGraceSeconds": 30 }
   }
 }
 ```
@@ -150,6 +151,25 @@ ClickHouse, where materialized views do it).
 | `FlushIntervalSeconds` | 60 | Interval between flushes. |
 | `MaxBatchSize` | 4000 | Rows per batch (kept under SQL Server's lock-escalation threshold). |
 
+### Summary rollups (`Telemetry:Rollup`)
+
+`RollupOptions`. The collector keeps a per-minute rollup of inbound spans and log records
+(`request_rollup_minute`, `log_rollup_minute`) that the dashboard, trace list, logs page and the error-rate and
+log-spike alerts read. On the relational providers an in-memory accumulator is appended to the database once a minute
+has closed (ClickHouse maintains the same tables with materialized views and ignores these keys). **The API host reads
+`FlushIntervalSeconds`, `CloseGraceSeconds` and `ArrivalMarginSeconds` from the same section, so a host that changes
+the first two on the collector must change them on the API too.**
+
+| Key | Default | Host | Description |
+|---|---|---|---|
+| `FlushIntervalSeconds` | 15 | both | Seconds between rollup appends (collector); part of the write margin (API). |
+| `CloseGraceSeconds` | 30 | both | A minute is appended once its end is this many seconds in the past (collector); part of the write margin (API). |
+| `MaxBufferedRows` | 200000 | collector | Rows held in memory while appends fail; beyond it the oldest are dropped (`rollup_rows_dropped`). |
+| `MaxBatchSize` | 4000 | collector | Rows per append call (kept under SQL Server's lock-escalation threshold). |
+| `ArrivalMarginSeconds` | 60 | API | Extra margin for request duration, SDK export delay and queue lag before a minute counts as written. The charts leave out the minutes after `now - (CloseGraceSeconds + FlushIntervalSeconds + ArrivalMarginSeconds)`, and the rollup alerts read up to that point, so they fire about 1.75 minutes later than on raw data. |
+| `CompactionIntervalSeconds` | 300 | API | MySQL only (the hour tier): seconds between compaction runs. |
+| `RecompactHours` | 6 | API | MySQL only: how many hours back each run re-folds, so late minute rows reach the hour tier. |
+
 ## API
 
 Host: `Keryhe.Telemetry.Api.Server` (REST API, background workers and the UI). Uses `Database:Provider` and
@@ -186,7 +206,7 @@ API host. `QueryOptions`.
 
 | Key | Default | Description |
 |---|---|---|
-| `SummaryTimeoutSeconds` | 5 | Budget for a summary query (trace and log summaries, the dashboard's trace samples, metric series and exemplars, exact counts). Past it the cards and charts report "timed out" and the total falls back to a capped count, which gets its own budget of the same length, so a timed-out request takes about twice this. The database driver's own command timeout is set 2 seconds longer, so the budget is what ends the query. `0` expires every such query before it starts (useful only for testing the fallbacks). |
+| `SummaryTimeoutSeconds` | 5 | Budget for a summary query (the rollup reads behind the cards and charts, the slow-request count, the dashboard's trace samples, the logs facets, metric series and exemplars). Past it the cards and charts report "timed out". The database driver's own command timeout is set 2 seconds longer, so the budget is what ends the query. `0` expires every such query before it starts (useful only for testing the fallbacks). |
 | `RawSearchWindowHoursOverride` | unset (24) | Longest window a free-text/attribute search or `mode=slow` may cover; wider is a `400`. |
 | `AnchorLookbackMinutes` | 5 | How far before a trace-list window the anchor derivation looks, so a trace that began just before the window is not listed on a later span. |
 | `PageSliceSeconds` | 2 | First slice of trace start times a trace-list page scans (relational providers). |

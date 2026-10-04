@@ -36,10 +36,15 @@ public sealed class HistorySeedTests
         Assert.All(spans, s => Assert.InRange((long)s.StartTimeUnixNano, baseNanos, baseNanos + 10_000_000_000L));
 
         // Ledgered as current spans, so the correctness check still balances against the rows the seed writes.
-        var entry = Assert.Single(payload.Entries);
-        Assert.Equal("spans", entry.Table);
+        var entry = Assert.Single(payload.Entries, e => e.Table == "spans");
         Assert.Equal(RecordAge.Current, entry.Age);
         Assert.Equal(spans.Count, entry.Rows);
+
+        // ... and the request rollup's own entry: the inbound spans (SERVER/CONSUMER), re-deliveries counted again.
+        var rollup = Assert.Single(payload.Entries, e => e.Table == RollupTables.Request);
+        Assert.Equal(RecordAge.Current, rollup.Age);
+        Assert.False(rollup.Dedups);
+        Assert.Equal(spans.Count(s => s.Kind is OpenTelemetry.Proto.Trace.V1.Span.Types.SpanKind.Server or OpenTelemetry.Proto.Trace.V1.Span.Types.SpanKind.Consumer), rollup.Rows);
 
         // One remembered trace per export, and it is a real trace in the export.
         var one = Assert.Single(remembered);
@@ -70,7 +75,7 @@ public sealed class HistorySeedTests
         Assert.Single(spans, s => s.ParentSpanId.IsEmpty); // one root
 
         // The ledger counts every span exactly once across the chunks.
-        Assert.Equal(2_300, chunks.SelectMany(c => c.Entries).Sum(e => e.Rows));
+        Assert.Equal(2_300, chunks.SelectMany(c => c.Entries).Where(e => e.Table == "spans").Sum(e => e.Rows));
     }
 
     [Fact]

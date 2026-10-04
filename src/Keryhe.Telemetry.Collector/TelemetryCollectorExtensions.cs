@@ -76,6 +76,14 @@ public static class TelemetryCollectorServiceCollectionExtensions
         services.AddSingleton<MetricTouchTracker>();
         services.AddHostedService<MetricTouchWorker>();
 
+        // Summary rollups (plans/summary-rollups.md): registered BEFORE the ingestion worker so the
+        // host stops it after the ingestion drain and its final flush includes everything drained.
+        // Providers register IRollupStore (ClickHouse's is a no-op: materialized views feed its
+        // tables). Bound from Telemetry:Rollup.
+        services.Configure<RollupOptions>(configuration.GetSection(RollupOptions.SectionName));
+        services.AddSingleton<RollupAccumulator>();
+        services.AddHostedService<RollupWorker>();
+
         // Write path: the generic worker drains the ingestion channel and delegates each
         // batch flush to the active provider's ITelemetryBulkWriter. The host is responsible
         // for registering that provider (ITelemetryBulkWriter, IApiKeyLookup,

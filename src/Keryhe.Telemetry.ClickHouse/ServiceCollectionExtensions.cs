@@ -29,6 +29,8 @@ public static class ClickHouseServiceCollectionExtensions
         // doc comment. MetricTouchWorker is still registered unconditionally in
         // AddKeryheTelemetryCollector; it will just drain to nothing on this provider.
         services.AddScoped<IMetricTouchStore, ClickHouseMetricTouchStore>();
+        // Summary rollups (plans/summary-rollups.md); RollupWorker is registered once, in AddKeryheTelemetryCollector.
+        services.AddScoped<IRollupStore, ClickHouseRollupStore>();
         return services;
     }
 
@@ -38,6 +40,7 @@ public static class ClickHouseServiceCollectionExtensions
         services.AddScoped<ITraceReadRepository, ClickHouseTraceReadRepository>();
         services.AddScoped<IMetricReadRepository, ClickHouseMetricReadRepository>();
         services.AddScoped<ILogReadRepository, ClickHouseLogReadRepository>();
+        services.AddScoped<IRollupReadRepository, ClickHouseRollupReadRepository>();
         services.AddScoped<IResourceReadRepository, ClickHouseResourceReadRepository>();
         services.AddScoped<IAlertRuleRepository, ClickHouseAlertRuleRepository>();
         services.AddScoped<ITenantCatalogRepository, ClickHouseTenantCatalogRepository>();

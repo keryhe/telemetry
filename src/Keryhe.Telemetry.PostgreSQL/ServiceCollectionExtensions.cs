@@ -26,6 +26,8 @@ public static class PostgreSqlServiceCollectionExtensions
         // metric_last_seen maintenance (list-pages-server-side plan, Phase 5). MetricTouchWorker
         // is provider-agnostic and registered once, in AddKeryheTelemetryCollector.
         services.AddScoped<IMetricTouchStore, PostgreSqlMetricTouchStore>();
+        // Summary rollups (plans/summary-rollups.md); RollupWorker is registered once, in AddKeryheTelemetryCollector.
+        services.AddScoped<IRollupStore, PostgreSqlRollupStore>();
         return services;
     }
 
@@ -36,6 +38,7 @@ public static class PostgreSqlServiceCollectionExtensions
         services.AddScoped<ITraceReadRepository, PostgreSqlTraceReadRepository>();
         services.AddScoped<IMetricReadRepository, PostgreSqlMetricReadRepository>();
         services.AddScoped<ILogReadRepository, PostgreSqlLogReadRepository>();
+        services.AddScoped<IRollupReadRepository, PostgreSqlRollupReadRepository>();
         services.AddScoped<IResourceReadRepository, PostgreSqlResourceReadRepository>();
         services.AddScoped<IAlertRuleRepository, PostgreSqlAlertRuleRepository>();
         services.AddScoped<ITenantCatalogRepository, PostgreSqlTenantCatalogRepository>();

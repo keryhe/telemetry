@@ -13,10 +13,9 @@ namespace Keryhe.Telemetry.IntegrationTests.Tests;
 /// lower-bounded — and never throw: in the 3.0.1 stress ramp these paths answered 500 instead (the drivers' own timeout
 /// exceptions escaped <c>TimedQuery</c>, and the fallbacks reused the aborted connection). Covers:
 /// <list type="bullet">
-/// <item>trace and log summaries, whose capped-count fallback now runs on a fresh connection;</item>
+/// <item>the request and log rollup reads and the slow-request count (plans/summary-rollups.md), which report a timeout
+/// instead of throwing;</item>
 /// <item>the dashboard's trace samples and the logs page's facets, which had no time bound at all;</item>
-/// <item>the "last" trace and log pages, whose exact count now runs on its own connection so the page itself is read
-/// on a connection that was never aborted;</item>
 /// <item>metric series, whose quarter-resolution retry runs on a fresh connection.</item>
 /// </list>
 /// <see cref="TimedQueryProviderTestsBase"/> covers the drivers' exception types themselves.
@@ -53,16 +52,23 @@ public abstract class SummaryTimeoutDegradationTestsBase : IAsyncLifetime
         var traces = scope.ServiceProvider.GetRequiredService<ITraceReadRepository>();
         var logs = scope.ServiceProvider.GetRequiredService<ILogReadRepository>();
         var metrics = scope.ServiceProvider.GetRequiredService<IMetricReadRepository>();
-        var asOf = DateTime.UtcNow.AddMinutes(5); // past every seeded row's created_at, whatever the provider's asOf backoff
 
-        var traceSummary = await traces.GetTraceSummaryAsync(new TraceSummaryQuery { Start = WindowStart, End = WindowEnd, AsOf = asOf });
-        Assert.True(traceSummary.TimedOut);
-        Assert.Empty(traceSummary.Buckets);
-        Assert.True(traceSummary.TotalIsLowerBound);
+        var rollups = scope.ServiceProvider.GetRequiredService<IRollupReadRepository>();
+        var rollupQuery = new RollupQuery
+        {
+            StartNano = SeededDataBuilder.ToUnixNano(WindowStart), EndNano = SeededDataBuilder.ToUnixNano(WindowEnd), BucketSeconds = 60
+        };
+        var requestRollup = await rollups.GetRequestRollupAsync(rollupQuery);
+        Assert.True(requestRollup.TimedOut);
+        Assert.Empty(requestRollup.Rows);
 
-        var logSummary = await logs.GetLogSummaryAsync(new LogSummaryQuery { Start = WindowStart, End = WindowEnd, AsOf = asOf });
-        Assert.True(logSummary.TimedOut);
-        Assert.True(logSummary.TotalIsLowerBound);
+        var logRollup = await rollups.GetLogRollupAsync(rollupQuery);
+        Assert.True(logRollup.TimedOut);
+        Assert.Empty(logRollup.Rows);
+
+        var slow = await traces.CountSlowInboundSpansAsync(WindowStart, WindowEnd, null, 500);
+        Assert.True(slow.TimedOut);
+        Assert.Equal(0, slow.Count);
 
         var facets = await logs.GetLogFacetsAsync(new LogFacetsQuery { Start = WindowStart, End = WindowEnd });
         Assert.True(facets.TimedOut);
@@ -74,14 +80,6 @@ public abstract class SummaryTimeoutDegradationTestsBase : IAsyncLifetime
             Assert.True(samples.TimedOut, kind);
             Assert.Empty(samples.Items);
         }
-
-        // The "last" pages: the exact count times out, so the page falls back to a full page of the oldest rows. The rows
-        // must still come back, read on a connection the aborted count never touched.
-        var lastTraces = await traces.GetTracePageAsync(new TraceQuery { Start = WindowStart, End = WindowEnd, Nav = "last", Size = 10, AsOf = asOf });
-        Assert.Equal(10, lastTraces.Items.Count);
-
-        var lastLogs = await logs.GetLogPageAsync(new LogQuery { Start = WindowStart, End = WindowEnd, Nav = "last", Size = 10, AsOf = asOf });
-        Assert.Equal(10, lastLogs.Items.Count);
 
         var series = await metrics.GetMetricSeriesAsync(new MetricSeriesQuery
         {

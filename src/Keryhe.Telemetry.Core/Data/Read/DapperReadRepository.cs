@@ -121,6 +121,12 @@ public abstract class DapperReadRepository
     protected virtual string BucketIndexExpr(string numerator, string denominator) => $"({numerator} / {denominator})";
 
     /// <summary>
+    /// Casts an aggregate to a 64-bit integer, so a <c>SUM</c> that a provider returns as a
+    /// <c>numeric</c>/<c>decimal</c> (PostgreSQL, MySQL) maps onto a <c>long</c> property.
+    /// </summary>
+    protected virtual string BigintExpr(string expression) => $"CAST({expression} AS BIGINT)";
+
+    /// <summary>
     /// Escapes LIKE/ILIKE wildcards in user search text so <c>%</c>/<c>_</c> match literally.
     /// Postgres/ILIKE default: backslash escape. SqlServer overrides to bracket escaping. Moved
     /// here from <c>LogReadRepositoryBase</c> (list-pages-server-side plan, Phase 1) so

@@ -75,19 +75,6 @@ public abstract class TracePhase3TestsBase : IAsyncLifetime
         });
     }
 
-    private async Task<TraceSummaryResult> SummaryAsync(
-        string? service = null, string mode = "all", DateTime? start = null, DateTime? end = null, double? minDurationMs = null,
-        DateTime? asOf = null)
-    {
-        using var scope = Scope();
-        return await scope.ServiceProvider.GetRequiredService<ITraceReadRepository>().GetTraceSummaryAsync(new TraceSummaryQuery
-        {
-            Start = start ?? WindowStart.AddMinutes(-1),
-            End = end ?? WindowStart.AddHours(1),
-            Service = service, Mode = mode, BucketCount = 4, AsOf = asOf ?? FutureAsOf(), MinDurationMs = minDurationMs
-        });
-    }
-
     // ---------------------------------------------------------------------------------------------
     // Anchors
     // ---------------------------------------------------------------------------------------------
@@ -176,7 +163,7 @@ public abstract class TracePhase3TestsBase : IAsyncLifetime
     }
 
     [Fact]
-    public async Task SlowFilter_SummaryPercentiles_AndRowDuration_AllUseTheAnchorsOwnDuration()
+    public async Task SlowFilter_AndRowDuration_UseTheAnchorsOwnDuration()
     {
         var slow = NewTraceId();
         var fast = NewTraceId();
@@ -191,15 +178,10 @@ public abstract class TracePhase3TestsBase : IAsyncLifetime
         Assert.Equal(slow, row.TraceIdHex);
         Assert.Equal(TimeSpan.FromMilliseconds(1234), row.TraceDuration);
 
-        var summary = await SummaryAsync(mode: "slow", minDurationMs: 1000);
-        Assert.Equal(1, summary.Summary.Count);
-        Assert.Equal(1234, summary.Summary.P50Ms, 0.5);
-        Assert.Equal(1, summary.ListTotal);
-
-        // Unfiltered, the percentiles are over both anchors' own durations (20 ms and 1234 ms).
-        var all = await SummaryAsync();
-        Assert.Equal(2, all.Summary.Count);
-        Assert.Equal(1234, all.Summary.P99Ms, 0.5);
+        // Unfiltered, both anchors are listed (the fast trace's anchor is 20 ms even though a late child makes the whole trace long).
+        var all = await PageAsync();
+        Assert.Equal(2, all.Items.Count);
+        Assert.Equal(new[] { 20.0, 1234.0 }, all.Items.Select(i => i.TraceDuration.TotalMilliseconds).Order().ToArray());
     }
 
     [Fact]
@@ -271,7 +253,7 @@ public abstract class TracePhase3TestsBase : IAsyncLifetime
     }
 
     [Fact]
-    public async Task RequestCountCard_CountsOnlyInboundAnchors_WhileTheListShowsEveryKind()
+    public async Task TheList_ShowsEveryKindOfAnchor()
     {
         var kinds = new[] { SpanKind.SERVER, SpanKind.CONSUMER, SpanKind.CLIENT, SpanKind.INTERNAL };
         await FlushAsync(kinds.Select((kind, i) =>
@@ -280,61 +262,6 @@ public abstract class TracePhase3TestsBase : IAsyncLifetime
         var page = await PageAsync();
         Assert.Equal(4, page.Items.Count);
         Assert.Equal(kinds.Select(k => k.ToString()).Order(), page.Items.Select(t => t.AnchorKind!).Order());
-
-        var summary = await SummaryAsync();
-        Assert.Equal(2, summary.Summary.Count);
-        Assert.Equal(2, summary.RequestCount);
-        Assert.Equal(4, summary.ListTotal);
-    }
-
-    /// <summary>
-    /// <c>listTotal</c> rides along with the inbound rows of the single summary pass; with no inbound anchor at all
-    /// there is no row to carry it, and the separate count must still report every anchor.
-    /// </summary>
-    [Fact]
-    public async Task Summary_WithNoInboundAnchors_StillReportsTheAllKindsListTotal()
-    {
-        await FlushAsync(
-            Span(NewTraceId(), "svc-a", "client-op", SpanKind.CLIENT, WindowStart, 10),
-            Span(NewTraceId(), "svc-a", "internal-op", SpanKind.INTERNAL, WindowStart.AddSeconds(1), 10));
-
-        var summary = await SummaryAsync();
-        Assert.Equal(0, summary.RequestCount);
-        Assert.Equal(0, summary.Summary.Count);
-        Assert.Equal(2, summary.ListTotal);
-
-        var empty = await SummaryAsync(start: WindowStart.AddDays(2), end: WindowStart.AddDays(2).AddHours(1));
-        Assert.Equal(0, empty.ListTotal);
-    }
-
-    /// <summary>
-    /// The summary is pinned on <c>asOf</c> like the page (3.0.1): the chart, the cards and <c>listTotal</c> describe the
-    /// same traces the pinned list can show, so a trace that arrives after the pin is in none of them. Negative
-    /// control: a pin past its arrival includes it everywhere.
-    /// </summary>
-    [Fact]
-    public async Task Summary_IsPinnedOnAsOf_ChartCardsAndTotalExcludeLateArrivals()
-    {
-        var baseline = Enumerable.Range(0, 3).Select(i => Span(NewTraceId(), "svc-a", "base", SpanKind.SERVER, WindowStart.AddSeconds(i), 40)).ToArray();
-        await FlushAsync(baseline);
-
-        // Same PostgreSQL/Timescale 5-second pin margin as the other pin tests.
-        await Task.Delay(TimeSpan.FromSeconds(6));
-        var asOf = (await PageAsync(useDbAsOf: true)).AsOf;
-
-        await FlushAsync(Enumerable.Range(0, 2).Select(i => Span(NewTraceId(), "svc-a", "late", SpanKind.SERVER, WindowStart.AddSeconds(10 + i), 40)));
-
-        var pinned = await SummaryAsync(asOf: asOf);
-        Assert.Equal(asOf, pinned.AsOf);
-        Assert.Equal(3, pinned.ListTotal);
-        Assert.Equal(3, pinned.RequestCount);
-        Assert.Equal(3, pinned.Summary.Count);
-        Assert.Equal(3, pinned.Buckets.Sum(b => b.Count));
-
-        var unpinned = await SummaryAsync(asOf: FutureAsOf());
-        Assert.Equal(5, unpinned.ListTotal);
-        Assert.Equal(5, unpinned.RequestCount);
-        Assert.Equal(5, unpinned.Buckets.Sum(b => b.Count));
     }
 
     // ---------------------------------------------------------------------------------------------
@@ -466,10 +393,8 @@ public abstract class TracePhase3TestsBase : IAsyncLifetime
                         forward.AddRange(page.Items);
                     }
 
-                    // Backward: last, then prev until the start; pages are prepended to restore the descending order.
-                    var backward = new List<TraceInfo>();
-                    page = await repo.GetTracePageAsync(Q("last"));
-                    backward.InsertRange(0, page.Items);
+                    // Backward: from the last forward page, prev until the start; pages are prepended to restore the descending order.
+                    var backward = new List<TraceInfo>(page.Items);
                     for (var guard = 0; page.PrevCursor != null && guard < 100; guard++)
                     {
                         page = await repo.GetTracePageAsync(Q("prev", page.PrevCursor));
@@ -615,7 +540,7 @@ public abstract class TracePhase3TestsBase : IAsyncLifetime
     }
 
     [Fact]
-    public async Task RedeliveredBatch_IsStoredAgain_ButTheRowCountAndTraceDetailCountEachSpanOnce()
+    public async Task RedeliveredBatch_IsStoredAgain_ButTheRowAndTraceDetailCountEachSpanOnce()
     {
         var traceId = NewTraceId();
         var rootId = NewSpanId();
@@ -636,9 +561,6 @@ public abstract class TracePhase3TestsBase : IAsyncLifetime
         var detail = await repo.GetTraceByIdAsync(traceId);
         Assert.Equal(2, detail.Count);
         Assert.Equal(2, detail.Select(s => s.SpanIdHex).Distinct().Count());
-
-        var summary = await SummaryAsync();
-        Assert.Equal(1, summary.Summary.Count);
     }
 
     // ---------------------------------------------------------------------------------------------
@@ -693,9 +615,7 @@ public abstract class TracePhase3TestsBase : IAsyncLifetime
             Assert.Equal(expected, actual);
         }
 
-        var last = await repo.GetTracePageAsync(new TraceQuery { Start = WindowStart, End = windowEnd, Size = size, Nav = "last", AsOf = asOf, Mode = "all" });
-        Assert.NotEmpty(last.Items);
-        Assert.Null(last.NextCursor);
+        Assert.Null(lastPage.NextCursor);
     }
 
     /// <summary>A trace whose event time is inside the pinned window but which arrives after `asOf` is excluded from a pinned page and included once a fresh pin passes it (mirrors LogPhase2TestsBase's identical check).</summary>

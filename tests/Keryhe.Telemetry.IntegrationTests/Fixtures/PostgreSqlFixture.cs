@@ -35,7 +35,8 @@ public sealed class PostgreSqlFixture : ProviderFixture
             """
             TRUNCATE TABLE log_records, spans, metrics, metric_last_seen,
                 gauge_data_points, sum_data_points, histogram_data_points,
-                exponential_histogram_data_points, summary_data_points
+                exponential_histogram_data_points, summary_data_points,
+                request_rollup_minute, log_rollup_minute
             RESTART IDENTITY CASCADE
             """, conn);
         await cmd.ExecuteNonQueryAsync();

@@ -27,6 +27,8 @@ public static class TimescaleServiceCollectionExtensions
         // metric_last_seen maintenance (list-pages-server-side plan, Phase 5). MetricTouchWorker
         // is provider-agnostic and registered once, in AddKeryheTelemetryCollector.
         services.AddScoped<IMetricTouchStore, TimescaleMetricTouchStore>();
+        // Summary rollups (plans/summary-rollups.md); RollupWorker is registered once, in AddKeryheTelemetryCollector.
+        services.AddScoped<IRollupStore, TimescaleRollupStore>();
         return services;
     }
 
@@ -37,6 +39,7 @@ public static class TimescaleServiceCollectionExtensions
         services.AddScoped<ITraceReadRepository, TimescaleTraceReadRepository>();
         services.AddScoped<IMetricReadRepository, TimescaleMetricReadRepository>();
         services.AddScoped<ILogReadRepository, TimescaleLogReadRepository>();
+        services.AddScoped<IRollupReadRepository, TimescaleRollupReadRepository>();
         services.AddScoped<IResourceReadRepository, TimescaleResourceReadRepository>();
         services.AddScoped<IAlertRuleRepository, TimescaleAlertRuleRepository>();
         services.AddScoped<ITenantCatalogRepository, TimescaleTenantCatalogRepository>();

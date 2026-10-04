@@ -109,6 +109,8 @@ export interface ServiceStats {
   errorRate: number;      // 0–100
   ratePerSecond: number;
   avgMs: number;
+  p50Ms: number;
+  p90Ms: number;
   p95Ms: number;
 }
 

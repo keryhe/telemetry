@@ -5,15 +5,15 @@
 <app-page-header>
   <!-- Stats -->
   <div class="stat-grid">
-    <app-stat-card label="Traces" icon="account_tree" [value]="totalLabel()"
-                   [matTooltip]="totalIsLowerBound() ? 'At least this many: the exact total timed out.' : ''" />
+    <app-stat-card label="Requests" icon="account_tree" [value]="requestCountLabel()"
+                   [matTooltip]="summaryTimedOut() ? summaryTimeoutTooltip : requestTracesTooltip" />
     <app-stat-card label="Request Errors" icon="error"
                    [value]="errorCountLabel()" [color]="errorCount() > 0 ? 'error' : 'default'"
                    [matTooltip]="summaryTimedOut() ? summaryTimeoutTooltip : requestTracesTooltip" />
     <app-stat-card label="Request Error Rate" icon="percent"
                    [value]="errorRate()" [color]="errorCount() > 0 ? 'error' : 'default'"
                    [matTooltip]="summaryTimedOut() ? summaryTimeoutTooltip : requestTracesTooltip" />
-    <app-stat-card label="p50 Request Duration" icon="timer"
+    <app-stat-card label="p50 Request Duration (≈)" icon="timer"
                    [value]="avgDuration()"
                    [matTooltip]="summaryTimedOut() ? summaryTimeoutTooltip : requestTracesTooltip" />
   </div>
@@ -92,7 +92,7 @@
     </button>
 
     <button mat-icon-button [matMenuTriggerFor]="exportMenu" matTooltip="Export current page's traces"
-            [disabled]="effectiveTotal() === 0 && !totalIsLowerBound()">
+            [disabled]="displayRows().length === 0">
       <mat-icon>download</mat-icon>
     </button>
     <mat-menu #exportMenu="matMenu">
@@ -124,11 +124,6 @@
           <mat-icon>hourglass_disabled</mat-icon>
           <span>
             Summarizing this time range took too long, so the request cards and charts are unavailable.
-            @if (totalIsLowerBound() && effectiveTotal() > 0) {
-              There are at least {{ effectiveTotal() | number }} traces.
-            } @else if (totalIsLowerBound()) {
-              The total could not be counted in time either.
-            }
             Narrow the time range or select a service. The trace list below is complete.
           </span>
         </div>
@@ -137,14 +132,14 @@
           <mat-card-content>
             <div class="chart-header">
               <div class="chart-title" [matTooltip]="requestTracesTooltip">
-                {{ chartView() === 'latency' ? 'Trace Latency (request traces)' : 'Trace Volume (request traces)' }}
+                {{ chartView() === 'latency' ? 'Request Latency (≈ inbound spans)' : 'Request Volume (inbound spans)' }}
               </div>
               <mat-button-toggle-group class="chart-toggle" [value]="chartView()"
                                        (change)="setChartView($event.value)">
-                <mat-button-toggle value="volume" matTooltip="Volume over time (inbound request traces)">
+                <mat-button-toggle value="volume" matTooltip="Request volume over time (inbound spans)">
                   <mat-icon>area_chart</mat-icon>
                 </mat-button-toggle>
-                <mat-button-toggle value="latency" matTooltip="Duration vs time for inbound request traces, bucketed by volume/errors (click to zoom or open)">
+                <mat-button-toggle value="latency" matTooltip="Duration vs time for inbound requests, sized by volume (click a bubble to zoom to it and list its traces)">
                   <mat-icon>bubble_chart</mat-icon>
                 </mat-button-toggle>
               </mat-button-toggle-group>
@@ -185,16 +180,19 @@
           @if (displayRows().length === 0 && !loading() && !pageLoading()) {
             <app-empty-state icon="account_tree" message="No traces found" hint="Try adjusting the time range or filters" />
           } @else {
-            @if (totalIsLowerBound() && !summaryTimedOut()) {
-              <div class="capped-notice">
-                <mat-icon>info</mat-icon>
-                @if (effectiveTotal() > 0) {
-                  Showing at least {{ effectiveTotal() | number }} traces — the exact total timed out. Narrow the time range for an exact count.
-                } @else {
-                  The total timed out. Narrow the time range for an exact count.
+            <div class="grid-wrap" [class.loading]="pageLoading()" [attr.aria-busy]="pageLoading()">
+            @if (pageLoading() && displayRows().length === 0) {
+              <div class="skeleton" aria-label="Loading traces">
+                @for (i of skeletonRows; track i) {
+                  <div class="skeleton-row">
+                    <span class="bar" style="flex: 2"></span><span class="bar" style="flex: 3"></span>
+                    <span class="bar" style="flex: 1"></span><span class="bar" style="flex: 1"></span>
+                    <span class="bar" style="flex: 1"></span><span class="bar" style="flex: 2"></span>
+                    <span class="bar" style="flex: 2"></span>
+                  </div>
                 }
               </div>
-            }
+            } @else {
             <table mat-table [dataSource]="displayRows()" class="full-width">
               <ng-container matColumnDef="service">
                 <th mat-header-cell *matHeaderCellDef>Service</th>
@@ -239,14 +237,27 @@
                   class="clickable-row"
                   (click)="navigate(row.traceIdHex, row.traceStartTime, row.traceEndTime)"></tr>
             </table>
+            }
+
+            @if (pageLoading()) {
+              @if (displayRows().length > 0) {
+                <mat-spinner class="grid-spinner" diameter="36" />
+              }
+              @if (slowLoad()) {
+                <div class="slow-hint">Still working… large time ranges take longer, try narrowing the range.</div>
+              }
+            }
 
             <mat-paginator
               [length]="paginatorLength()"
               [pageSize]="pageSize()"
               [pageIndex]="pageIndex()"
               [pageSizeOptions]="pageSizeOptions"
+              class="no-last-button"
               [showFirstLastButtons]="true"
+              [disabled]="pageLoading()"
               (page)="onPage($event)" />
+            </div>
           }
         </mat-card-content>
       </mat-card>

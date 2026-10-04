@@ -268,7 +268,7 @@ export class MetricDetailComponent implements OnInit, AfterViewInit, OnDestroy {
     const isDark = this.theme.isDark();
     const { start: rangeStart, end: rangeEnd } = this.timeRange.range();
     return {
-      chart: { type: 'area', height: 160, toolbar: { show: false }, background: 'transparent' },
+      chart: { type: 'area', height: 160, toolbar: { show: false }, background: 'transparent', zoom: { allowMouseWheelZoom: false } },
       theme: { mode: isDark ? 'dark' : 'light' },
       series: [{ name: 'Throughput (/s)', data }],
       xaxis: { type: 'datetime', min: rangeStart.getTime(), max: rangeEnd.getTime(), labels: { datetimeUTC: false } },

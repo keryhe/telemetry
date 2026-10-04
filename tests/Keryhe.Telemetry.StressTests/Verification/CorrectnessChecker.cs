@@ -57,18 +57,24 @@ public static class CorrectnessComparer
             raw.Add((key.TenantId, key.Table, cell, actual.GetValueOrDefault(key), cell?.ExpectedRows ?? 0));
         }
 
-        // A shortfall is only "explained by drops" when the signal as a whole lost no more than it reported dropping.
+        // A shortfall is only "explained by drops" when the signal as a whole lost no more than it reported dropping. The summary rollup
+        // tables are left out of that sum: a dropped batch is never counted in them either (the accumulator is fed only after a flush
+        // succeeds), so their shortfall is judged against the same signal's drops on its own, below.
         string SignalOf(string table) => new CountedTable(table, "", false).Signal;
-        var drops = raw.GroupBy(r => SignalOf(r.Table)).Select(g => new SignalDrops(g.Key, recordsDropped(g.Key), g.Sum(r => r.Actual - r.Expected))).ToList();
+        var drops = raw.Where(r => !CountedTable.IsRollup(r.Table)).GroupBy(r => SignalOf(r.Table))
+            .Select(g => new SignalDrops(g.Key, recordsDropped(g.Key), g.Sum(r => r.Actual - r.Expected))).ToList();
         var dropsBySignal = drops.ToDictionary(d => d.Signal);
 
         var rows = raw.Select(r =>
         {
             var delta = r.Actual - r.Expected;
-            var d = dropsBySignal[SignalOf(r.Table)];
+            var d = dropsBySignal.GetValueOrDefault(SignalOf(r.Table)) ?? new SignalDrops(SignalOf(r.Table), recordsDropped(SignalOf(r.Table)), 0);
             var maybeLanded = r.Cell?.RowsMaybeLanded ?? 0;
+            var explainedByDrops = CountedTable.IsRollup(r.Table)
+                ? delta < 0 && -delta <= d.RecordsDropped
+                : delta < 0 && d.RecordsDropped > 0 && d.ActualMinusExpected >= -d.RecordsDropped;
             var status = delta == 0 ? CorrectnessStatus.Match
-                : delta < 0 && d.RecordsDropped > 0 && d.ActualMinusExpected >= -d.RecordsDropped ? CorrectnessStatus.ExplainedByDrops
+                : explainedByDrops ? CorrectnessStatus.ExplainedByDrops
                 : delta > 0 && delta <= maybeLanded ? CorrectnessStatus.ExplainedByAbandonedExports
                 : CorrectnessStatus.Mismatch;
             return new CorrectnessRow(r.Tenant, r.Table, r.Cell?.Rows ?? 0, r.Cell?.DuplicateRowsPersisted ?? 0, r.Cell?.DuplicateRowsCollapsed ?? 0,
@@ -137,6 +143,10 @@ public static class CorrectnessRunner
         }
 
         var cutoff = ToUnixNanos(DateTimeOffset.UtcNow - BackdatedCutoffAge);
+
+        // The summary rollups are written once a minute has closed (plans/summary-rollups.md), so the newest minutes reach them up to a
+        // minute and a half after the spans do: wait for the rollup tables to hold what the ledger sent, or for the limit.
+        await WaitForRollupsAsync(database, ledger, cutoff, log, ct);
         var counts = await database.CountRowsAsync(cutoff, ct);
 
         // ClickHouse applies its deletes as asynchronous mutations, so leftovers get a little time to disappear before they are reported.
@@ -148,6 +158,31 @@ public static class CorrectnessRunner
         }
 
         return CorrectnessComparer.Build(DateTimeOffset.UtcNow, cutoff, ledger, counts, signal => RecordsDropped(hosts, signal), sweepStart, waited);
+    }
+
+    /// <summary>Longest the check waits for the rollup tables to catch up with what was sent: a minute closing, its grace, and a flush interval, with margin.</summary>
+    public static readonly TimeSpan RollupCatchUpLimit = TimeSpan.FromSeconds(150);
+
+    private static async Task WaitForRollupsAsync(
+        DatabaseObserverSession database, IReadOnlyList<LedgerCell> ledger, long cutoff, Action<string> log, CancellationToken ct)
+    {
+        var expected = ledger.Where(c => c.Age == RecordAge.Current && CountedTable.IsRollup(c.Table))
+            .ToDictionary(c => (c.TenantId, c.Table), c => c.ExpectedRows);
+        if (expected.Count == 0) return;
+
+        var began = DateTimeOffset.UtcNow;
+        while (true)
+        {
+            var current = (await database.CountRollupRowsAsync(cutoff, ct)).Cells.Where(c => !c.Backdated)
+                .ToDictionary(c => (c.TenantId, c.Table), c => c.Rows);
+            if (expected.All(e => current.GetValueOrDefault(e.Key) >= e.Value)) return;
+            if (DateTimeOffset.UtcNow - began >= RollupCatchUpLimit)
+            {
+                log($"correctness: the rollup tables did not reach the sent counts within {RollupCatchUpLimit.TotalSeconds:F0}s; comparing as they are");
+                return;
+            }
+            await Task.Delay(TimeSpan.FromSeconds(5), ct);
+        }
     }
 
     /// <summary>The start time (completion minus elapsed) of the first sweep that began after <paramref name="after"/>, on any host.</summary>

@@ -1,4 +1,4 @@
--- OpenTelemetry ClickHouse Schema -- schema 3.1.0
+-- OpenTelemetry ClickHouse Schema -- schema 3.2.1
 -- Supports OTLP logs, metrics, and traces as defined in opentelemetry-proto.
 --
 -- Produces the SAME LOGICAL table/column set as PostgreSQL-Schema.sql, adapted to ClickHouse's
@@ -414,6 +414,124 @@ INSERT INTO retention_settings (id, trace_retention_days, log_retention_days, me
 VALUES (1, 90, 90, 180);
 
 -- =============================================================================
+-- SUMMARY ROLLUPS (schema 3.2.0; plans/summary-rollups.md)
+-- =============================================================================
+
+-- Per-minute rollups the dashboard, trace list and logs page read instead of scanning spans and
+-- log records. request_rollup_minute counts INBOUND spans (kind SERVER or CONSUMER) per
+-- (tenant, service, minute of start time): request_count, error_count, duration sum/max and a
+-- 24-band doubling duration histogram (h00 = under 0.25 ms, hNN = [0.25 ms * 2^(NN-1), 0.25 ms * 2^NN),
+-- h23 = 1,048.6 s and over). log_rollup_minute counts log records per (tenant, service, severity
+-- number, minute); severity_number is -1 for a record whose severity is NULL. Rows are partial:
+-- no unique key, no foreign keys, reads SUM them. service_name is '' for a span or log without one.
+-- ClickHouse: AggregatingMergeTree tables fed by materialized views on spans (inbound only) and
+-- log_records, so there is no accumulator or worker. Reads use sum()/max() with GROUP BY, never FINAL.
+-- The band expression is the integer form of DurationBands.IndexOf: a negative duration counts as 0,
+-- under 250,000 ns is h00, otherwise min(23, floor(log2(duration / 250,000)) + 1), via floor(log2(...)).
+CREATE TABLE IF NOT EXISTS request_rollup_minute
+(
+    tenant_id              Int64,
+    service_name           LowCardinality(String) DEFAULT '',
+    bucket_start_unix_nano Int64,
+    request_count          SimpleAggregateFunction(sum, Int64),
+    error_count            SimpleAggregateFunction(sum, Int64),
+    sum_duration_nanos     SimpleAggregateFunction(sum, Int64),
+    max_duration_nanos     SimpleAggregateFunction(max, Int64),
+    h00 SimpleAggregateFunction(sum, Int64),
+    h01 SimpleAggregateFunction(sum, Int64),
+    h02 SimpleAggregateFunction(sum, Int64),
+    h03 SimpleAggregateFunction(sum, Int64),
+    h04 SimpleAggregateFunction(sum, Int64),
+    h05 SimpleAggregateFunction(sum, Int64),
+    h06 SimpleAggregateFunction(sum, Int64),
+    h07 SimpleAggregateFunction(sum, Int64),
+    h08 SimpleAggregateFunction(sum, Int64),
+    h09 SimpleAggregateFunction(sum, Int64),
+    h10 SimpleAggregateFunction(sum, Int64),
+    h11 SimpleAggregateFunction(sum, Int64),
+    h12 SimpleAggregateFunction(sum, Int64),
+    h13 SimpleAggregateFunction(sum, Int64),
+    h14 SimpleAggregateFunction(sum, Int64),
+    h15 SimpleAggregateFunction(sum, Int64),
+    h16 SimpleAggregateFunction(sum, Int64),
+    h17 SimpleAggregateFunction(sum, Int64),
+    h18 SimpleAggregateFunction(sum, Int64),
+    h19 SimpleAggregateFunction(sum, Int64),
+    h20 SimpleAggregateFunction(sum, Int64),
+    h21 SimpleAggregateFunction(sum, Int64),
+    h22 SimpleAggregateFunction(sum, Int64),
+    h23 SimpleAggregateFunction(sum, Int64)
+)
+ENGINE = AggregatingMergeTree
+PARTITION BY toYYYYMMDD(fromUnixTimestamp64Nano(bucket_start_unix_nano))
+ORDER BY (tenant_id, bucket_start_unix_nano, service_name);
+
+CREATE MATERIALIZED VIEW IF NOT EXISTS mv_request_rollup_minute
+TO request_rollup_minute AS
+SELECT tenant_id,
+       service_name,
+       intDiv(start_time_unix_nano, 60000000000) * 60000000000 AS bucket_start_unix_nano,
+       count() AS request_count,
+       countIf(status_code = 'ERROR') AS error_count,
+       sum(dur_ns) AS sum_duration_nanos,
+       max(dur_ns) AS max_duration_nanos,
+       countIf(band = 0) AS h00,
+       countIf(band = 1) AS h01,
+       countIf(band = 2) AS h02,
+       countIf(band = 3) AS h03,
+       countIf(band = 4) AS h04,
+       countIf(band = 5) AS h05,
+       countIf(band = 6) AS h06,
+       countIf(band = 7) AS h07,
+       countIf(band = 8) AS h08,
+       countIf(band = 9) AS h09,
+       countIf(band = 10) AS h10,
+       countIf(band = 11) AS h11,
+       countIf(band = 12) AS h12,
+       countIf(band = 13) AS h13,
+       countIf(band = 14) AS h14,
+       countIf(band = 15) AS h15,
+       countIf(band = 16) AS h16,
+       countIf(band = 17) AS h17,
+       countIf(band = 18) AS h18,
+       countIf(band = 19) AS h19,
+       countIf(band = 20) AS h20,
+       countIf(band = 21) AS h21,
+       countIf(band = 22) AS h22,
+       countIf(band = 23) AS h23
+FROM
+(
+    SELECT tenant_id, service_name, start_time_unix_nano, status_code,
+           greatest(end_time_unix_nano - start_time_unix_nano, 0) AS dur_ns,
+           if(dur_ns < 250000, 0, least(23, toUInt8(floor(log2(intDiv(dur_ns, 250000)))) + 1)) AS band
+    FROM spans
+    WHERE kind IN ('SERVER', 'CONSUMER')
+)
+GROUP BY tenant_id, service_name, bucket_start_unix_nano;
+
+CREATE TABLE IF NOT EXISTS log_rollup_minute
+(
+    tenant_id              Int64,
+    service_name           LowCardinality(String) DEFAULT '',
+    severity_number        Int32,
+    bucket_start_unix_nano Int64,
+    record_count           SimpleAggregateFunction(sum, Int64)
+)
+ENGINE = AggregatingMergeTree
+PARTITION BY toYYYYMMDD(fromUnixTimestamp64Nano(bucket_start_unix_nano))
+ORDER BY (tenant_id, bucket_start_unix_nano, service_name, severity_number);
+
+CREATE MATERIALIZED VIEW IF NOT EXISTS mv_log_rollup_minute
+TO log_rollup_minute AS
+SELECT tenant_id,
+       service_name,
+       ifNull(severity_number, -1) AS severity_number,
+       intDiv(time_unix_nano, 60000000000) * 60000000000 AS bucket_start_unix_nano,
+       count() AS record_count
+FROM log_records
+GROUP BY tenant_id, service_name, severity_number, bucket_start_unix_nano;
+
+-- =============================================================================
 -- UTILITY
 -- =============================================================================
 
@@ -427,4 +545,4 @@ ORDER BY version;
 
 -- The schema_version row is seeded LAST, so a partial/failed apply never records a version that
 -- the apply-schema.sh version gate would wrongly treat as "already applied".
-INSERT INTO schema_version (version) VALUES ('3.1.0');
+INSERT INTO schema_version (version) VALUES ('3.2.1');

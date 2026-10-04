@@ -135,6 +135,22 @@ revoke must wait for the mutation, or the 30 s promise does not hold:
 ALTER TABLE api_keys UPDATE is_active = 0 WHERE key_hash = '<sha256 hex>' SETTINGS mutations_sync = 1;
 ```
 
+## Summary rollups
+
+Besides the raw spans and logs, the collector maintains a per-minute rollup (`request_rollup_minute`, `log_rollup_minute`,
+schema 3.2.0) that the UI's cards and charts and the error-rate and log-spike alerts read. On every provider except
+ClickHouse (whose materialized views maintain it) an in-memory accumulator is fed after each successful flush and a
+background worker appends the minutes that have closed, every `Telemetry:Rollup:FlushIntervalSeconds` (15) once a
+minute is `CloseGraceSeconds` (30) past its end. Three things to know when operating it:
+
+- **A crash loses the rollup of what was in memory** (about a minute and a half) while the spans and logs survive, so a
+  chart dips for that slice. A normal stop writes everything, within the host's `ShutdownTimeout` (30 s by default,
+  shared with the ingestion drain): give the host more time if it drains large queues.
+- **Several collectors** each append their own partial rows; reads sum them, so scale-out needs no coordination.
+- The API host reads `FlushIntervalSeconds` and `CloseGraceSeconds` from the same `Telemetry:Rollup` section, so change
+  them on both sides. Counters: `rollup_rows_written`, `rollup_rows_dropped`, `rollup_flush_duration` on the
+  `Keryhe.Telemetry.Ingestion` meter.
+
 ## Documentation
 
 See the [project README](https://github.com/keryhe/telemetry) and

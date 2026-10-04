@@ -34,35 +34,50 @@ export interface TraceListFilter {
   q?: string;
 }
 
-export interface TraceSummaryQuery extends TraceListFilter {
+/**
+ * Query of the request summary (plans/summary-rollups.md): the time range and, optionally, one service. The trace list's other
+ * filters (mode, operation, duration, search) narrow the list below and are not part of it.
+ */
+export interface RequestSummaryQuery {
+  start: Date;
+  end: Date;
+  service?: string;
   bucketCount?: number;
-  latencyDurationRows?: number;
 }
 
 export interface TracePageQuery extends TraceListFilter {
   size: number;
   cursor?: string;
-  nav?: 'first' | 'next' | 'prev' | 'last';
+  /** No `last`: the list has no exact total to compute the last page from. */
+  nav?: 'first' | 'next' | 'prev';
 }
 
-/** One cell of the trace latency chart's time × log-duration grid. */
-export interface TraceLatencyBucket {
+/** One chart bucket of the request summary: a `TimeBucket` plus what it actually covers (an edge bucket can be partial). */
+export interface RequestBucket extends TimeBucket {
+  coveredSeconds: number;
+  maxDurationMs: number;
+}
+
+/** One cell of the latency chart: a chart bucket times a duration band (0-23; 23 is open-ended). */
+export interface RequestLatencyCell {
   xStart: Date;
   xEnd: Date;
+  band: number;
   yStartMs: number;
   yEndMs: number;
   count: number;
-  errorCount: number;
-  /** Set only when count === 1 — the only case the bubble-click handler needs a trace id for. */
-  sampleTraceIdHex?: string;
 }
 
-export interface TraceWindowSummary {
+/** Window totals over inbound spans; the percentiles are approximate (duration histogram). */
+export interface RequestWindowSummary {
   count: number;
   errorCount: number;
+  avgMs: number;
+  maxMs: number;
   p50Ms: number;
   p95Ms: number;
   p99Ms: number;
+  ratePerSecond: number;
 }
 
 /** `GET /api/tenants/{tenantId}/traces/{id}/spans`: spans plus the distinct resources and scopes they refer to by index. */
@@ -72,31 +87,28 @@ interface TraceDetailDto {
   spans: (Omit<SpanModel, 'resource' | 'instrumentationScope'> & { resourceIndex: number; scopeIndex: number })[];
 }
 
-interface TraceSummaryDto {
-  source: 'rollup' | 'raw';
-  buckets: (TimeBucket & { timestamp: string })[];
-  summary: TraceWindowSummary;
+interface RequestSummaryDto {
+  bucketSeconds: number;
+  writtenThrough: string;
+  summary: RequestWindowSummary;
+  buckets: (Omit<RequestBucket, 'timestamp'> & { timestamp: string })[];
   services: ServiceStats[];
-  latencyBuckets: (Omit<TraceLatencyBucket, 'xStart' | 'xEnd'> & { xStart: string; xEnd: string })[];
-  listTotal: number;
-  requestCount: number;
-  totalIsLowerBound: boolean;
+  latency: (Omit<RequestLatencyCell, 'xStart' | 'xEnd'> & { xStart: string; xEnd: string })[];
   timedOut: boolean;
-  asOf: string;
 }
 
-export interface TraceSummaryResult {
-  source: 'rollup' | 'raw';
-  buckets: TimeBucket[];
-  summary: TraceWindowSummary;
+/** `GET /api/tenants/{tenantId}/traces/summary`: requests (inbound spans) counted from the server's rollup, not traces. */
+export interface RequestSummaryResult {
+  /** The chart bucket width the server chose. */
+  bucketSeconds: number;
+  /** Buckets from this instant on are left out: the rollup is not written for them yet. */
+  writtenThrough: string;
+  summary: RequestWindowSummary;
+  buckets: RequestBucket[];
   services: ServiceStats[];
-  latencyBuckets: TraceLatencyBucket[];
-  listTotal: number;
-  requestCount: number;
-  totalIsLowerBound: boolean;
-  /** The server's anchor scan ran out of time: buckets/summary/services/latencyBuckets are empty (not "no traces") and listTotal is a capped count. */
+  latency: RequestLatencyCell[];
+  /** The server ran out of time: everything above is empty, which is not "no requests". */
   timedOut: boolean;
-  asOf: string;
 }
 
 export interface TracePageResult {
@@ -114,28 +126,27 @@ export class TracesApiService {
   /** Resolved per call: the tenant is the route's, and changes with it. */
   private get base(): string { return `${tenantApiUrl(this.apiUrl, this.tenant.requireTenantId())}/traces`; }
 
-  /** Chart/stat-card summary — volume/error/duration buckets, per-service RED stats, the latency heatmap, and listTotal/requestCount (decision 13). */
-  getTraceSummary(query: TraceSummaryQuery): Observable<TraceSummaryResult> {
-    let params = this.filterParams(query)
-      .set('bucketCount', query.bucketCount ?? 60)
-      .set('latencyDurationRows', query.latencyDurationRows ?? 20);
-    return this.http.get<TraceSummaryDto>(`${this.base}/summary`, { params }).pipe(
+  /** Cards and charts: request volume, errors, durations, per-service stats and the latency grid, from the rollup. */
+  getRequestSummary(query: RequestSummaryQuery): Observable<RequestSummaryResult> {
+    let params = new HttpParams()
+      .set('start', query.start.toISOString())
+      .set('end', query.end.toISOString())
+      .set('bucketCount', query.bucketCount ?? 60);
+    if (query.service) params = params.set('service', query.service);
+    return this.http.get<RequestSummaryDto>(`${this.base}/summary`, { params }).pipe(
       map((dto) => ({
-        source: dto.source,
-        buckets: dto.buckets.map((b) => ({ ...b, timestamp: new Date(b.timestamp) })),
+        bucketSeconds: dto.bucketSeconds,
+        writtenThrough: dto.writtenThrough,
         summary: dto.summary,
+        buckets: dto.buckets.map((b) => ({ ...b, timestamp: new Date(b.timestamp) })),
         services: dto.services,
-        latencyBuckets: dto.latencyBuckets.map((b) => ({ ...b, xStart: new Date(b.xStart), xEnd: new Date(b.xEnd) })),
-        listTotal: dto.listTotal,
-        requestCount: dto.requestCount,
-        totalIsLowerBound: dto.totalIsLowerBound,
+        latency: dto.latency.map((c) => ({ ...c, xStart: new Date(c.xStart), xEnd: new Date(c.xEnd) })),
         timedOut: dto.timedOut ?? false,
-        asOf: dto.asOf,
       }))
     );
   }
 
-  /** Keyset-paged trace rows (decision 1), anchored on roots plus orphan traces (decision 41), pinned on `asOf` (decision 3). */
+  /** Keyset-paged trace rows (decision 1), pinned on `asOf` (decision 3). */
   getTracePage(query: TracePageQuery): Observable<TracePageResult> {
     let params = this.filterParams(query).set('size', query.size).set('nav', query.nav ?? 'first');
     if (query.cursor) params = params.set('cursor', query.cursor);

@@ -532,3 +532,8 @@ mark.search-hit {
     height: 20px;
   }
 }
+
+// The list has no exact total, so there is no last page to jump to (plans/summary-rollups.md, decision 10).
+.no-last-button ::ng-deep .mat-mdc-paginator-navigation-last {
+  display: none;
+}

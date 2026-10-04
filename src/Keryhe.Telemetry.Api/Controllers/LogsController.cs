@@ -7,6 +7,7 @@ using Keryhe.Telemetry.Core.Models;
 using Microsoft.AspNetCore.Http;
 using Keryhe.Telemetry.Api.Authorization;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.Extensions.Options;
 
 namespace Keryhe.Telemetry.Api.Controllers;
 
@@ -18,9 +19,16 @@ public class LogsController : ControllerBase
     private readonly ILogReadRepository _logs;
     private readonly ProviderCapabilities _capabilities;
     private readonly ExportConcurrencyGate _exportGate;
+    private readonly IRollupReadRepository _rollups;
+    private readonly RollupOptions _rollupOptions;
+    private readonly TimeProvider _time;
 
-    public LogsController(ILogReadRepository logs, ProviderCapabilities capabilities, ExportConcurrencyGate exportGate)
+    public LogsController(ILogReadRepository logs, ProviderCapabilities capabilities, ExportConcurrencyGate exportGate,
+        IRollupReadRepository rollups, IOptions<RollupOptions> rollupOptions, TimeProvider time)
     {
+        _rollups = rollups;
+        _rollupOptions = rollupOptions.Value;
+        _time = time;
         _logs = logs;
         _capabilities = capabilities;
         _exportGate = exportGate;
@@ -38,37 +46,35 @@ public class LogsController : ControllerBase
         return Ok(logs);
     }
 
-    // GET /api/tenants/{tenantId}/logs/summary?start=&end=&asOf=&service=&minSeverity=&q=&bucketCount=
+    // GET /api/tenants/{tenantId}/logs/summary?start=&end=&service=&minSeverity=&bucketCount=
+    // Counts from the log rollup: range, service and minimum severity; search does not apply (plans/summary-rollups.md).
     [TelemetryOperation(TelemetryOperation.Read)]
     [HttpGet("summary")]
-    public async Task<ActionResult<LogSummaryResult>> GetSummary(
+    public async Task<ActionResult<LogRollupSummaryResult>> GetSummary(
         [FromQuery] DateTime start,
         [FromQuery] DateTime end,
-        [FromQuery] DateTime? asOf = null,
         [FromQuery] string? service = null,
         [FromQuery] int? minSeverity = null,
-        [FromQuery] string? q = null,
         [FromQuery] int bucketCount = 60,
         CancellationToken ct = default)
     {
         if (start >= end)
             return BadRequest("Start time must be before end time.");
 
-        var guard = CheckRawSearchWindow(q, start, end);
-        if (!guard.Allowed)
-            return BadRequest(guard.Message);
+        var writtenThrough = RollupSummaryBuilder.WrittenThrough(_time.GetUtcNow().UtcDateTime, _rollupOptions);
+        var window = RollupSummaryBuilder.PlanWindow(start, end, writtenThrough, Math.Clamp(bucketCount, 1, 200));
+        if (window.IsEmpty)
+            return Ok(RollupSummaryBuilder.BuildLogSummary(window, [], writtenThrough));
 
-        var result = await _logs.GetLogSummaryAsync(new LogSummaryQuery
+        var read = await _rollups.GetLogRollupAsync(new RollupQuery
         {
-            Start = start,
-            End = end,
+            StartNano = window.StartNano,
+            EndNano = window.EndNano,
+            BucketSeconds = window.BucketSeconds,
             Service = service,
-            MinSeverity = minSeverity,
-            Search = q,
-            AsOf = asOf,
-            BucketCount = bucketCount
+            MinSeverity = minSeverity
         }, ct);
-        return Ok(result);
+        return Ok(RollupSummaryBuilder.BuildLogSummary(window, read.Rows.ToList(), writtenThrough, read.TimedOut));
     }
 
     // GET /api/tenants/{tenantId}/logs/page?start=&end=&asOf=&service=&minSeverity=&q=&size=&cursor=&nav=

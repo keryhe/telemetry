@@ -181,6 +181,7 @@ public sealed class ClickHouseObserver : DatabaseObserverBase
                 cancellationToken, commandTimeoutSeconds: 1800);
             cells.AddRange(rows.Select(r => new RowCountCell(Long(r[0]), t.Table, Long(r[1]) == 1, Long(r[2]))));
         }
+        cells.AddRange((await CountRollupRowsAsync(cutoffNanos, cancellationToken)).Cells);
         if (!replacingSpans) return new RowCounts(cells, null);
         var raw = await ScalarAsync("SELECT count() FROM spans", cancellationToken);
         return new RowCounts(cells, (long)raw);

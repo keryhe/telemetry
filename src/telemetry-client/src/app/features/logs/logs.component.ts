@@ -201,22 +201,27 @@ export class LogsComponent implements OnDestroy {
   protected loading = computed(() => this.traceFilterActive() ? this.traceLogsLoading() : this.summaryLoading());
   protected rowsLoading = computed(() => this.traceFilterActive() ? this.traceLogsLoading() : this.pageLoading());
 
-  protected effectiveTotal = computed(() => this.traceFilterActive() ? this.traceLogs().length : (this.summary()?.total ?? 0));
-  protected totalIsLowerBound = computed(() => !this.traceFilterActive() && (this.summary()?.totalIsLowerBound ?? false));
-  /** The server's histogram ran out of time: the severity cards and the chart have no data (which is not "zero"). */
+  /** The server's summary ran out of time: the severity cards and the chart have no data (which is not "zero"). */
   protected summaryTimedOut = computed(() => !this.traceFilterActive() && (this.summary()?.timedOut ?? false));
   protected readonly summaryTimeoutTooltip = SUMMARY_TIMEOUT_TOOLTIP;
+  /** What the Total Logs card counts (plans/summary-rollups.md, decision c): range, service and minimum severity, not search. */
+  protected readonly summaryTooltip =
+    'Counted from the log rollup for the time range, service and minimum severity. The search box narrows the list below, not this.';
   private readonly locale = inject(LOCALE_ID);
-  /** The paginator's length; a capped total is stretched past the current page while the server offers a next page (as on the trace list). */
+  /**
+   * The paginator's length. The list has no exact total (decision 10), so outside trace-id mode it is the rows seen so far,
+   * one more while the server offers a next page, and the label says "of many". A trace-id search shows its whole set at once.
+   */
   protected paginatorLength = computed(() => {
-    const total = this.effectiveTotal();
-    if (!this.totalIsLowerBound()) return total;
-    const shown = this.pageIndex() * this.pageSize() + (this.page()?.items.length ?? 0);
-    return Math.max(total, shown + (this.page()?.nextCursor ? 1 : 0));
+    if (this.traceFilterActive()) return this.traceLogs().length;
+    return this.pageIndex() * this.pageSize() + (this.page()?.items.length ?? 0) + (this.page()?.nextCursor ? 1 : 0);
   });
   private readonly paginatorIntl = inject(MatPaginatorIntl) as GroupedPaginatorIntl;
-  /** The Total Logs card: exact, "10,000+" when capped, "—" when even the capped count timed out. */
-  protected totalLabel = computed(() => formatSummaryTotal(this.effectiveTotal(), this.totalIsLowerBound(), this.locale));
+  /** The Total Logs card: the rollup's count for the range, service and severity ("—" when the summary timed out). */
+  protected totalLabel = computed(() => {
+    if (this.traceFilterActive()) return formatSummaryTotal(this.traceLogs().length, false, this.locale);
+    return this.summaryTimedOut() ? '—' : formatSummaryTotal(this.summary()?.total ?? 0, false, this.locale);
+  });
 
   protected errorCount = computed(() => {
     if (this.traceFilterActive()) return this.traceLogs().filter((l) => (l.severityNumber ?? 0) >= 17).length;
@@ -306,9 +311,9 @@ export class LogsComponent implements OnDestroy {
   protected readonly getTimestamp = getTimestamp;
 
   constructor() {
-    // "of 10,000+" / "of many" while the total is only a lower bound (see paginatorLength).
+    // "of many" outside trace-id mode, where the whole set is shown and the exact count is known (see paginatorLength).
     effect(() => {
-      this.paginatorIntl.totalOverride = this.totalIsLowerBound() ? lowerBoundTotalLabel(this.effectiveTotal(), this.locale) : null;
+      this.paginatorIntl.totalOverride = this.traceFilterActive() ? null : lowerBoundTotalLabel(0, this.locale);
       this.paginatorIntl.changes.next();
     });
 
@@ -410,7 +415,9 @@ export class LogsComponent implements OnDestroy {
     this.page.set(null);
 
     this.summarySub?.unsubscribe();
-    this.summarySub = this.api.getLogSummary({ ...this.currentFilter(), bucketCount: BUCKET_COUNT }).subscribe({
+    // The summary follows the range, service and severity; the search narrows the list only.
+    const { q: _q, ...summaryFilter } = this.currentFilter();
+    this.summarySub = this.api.getLogSummary({ ...summaryFilter, bucketCount: BUCKET_COUNT }).subscribe({
       next: (result) => { this.summary.set(result); this.summaryLoading.set(false); },
       error: () => this.summaryLoading.set(false),
     });
@@ -490,8 +497,7 @@ export class LogsComponent implements OnDestroy {
 
   /**
    * Maps MatPaginator's page event onto a keyset `nav` (decision 1: no arbitrary page jump).
-   * `showFirstLastButtons` only ever moves the index by ±1 or straight to the first/last computed
-   * page, so the direction is unambiguous from the index delta.
+   * The last-page button is hidden (no exact total to jump to), so the direction is unambiguous from the index delta.
    */
   protected onPage(e: PageEvent): void {
     if (e.pageSize !== this.pageSize()) {
@@ -501,10 +507,8 @@ export class LogsComponent implements OnDestroy {
       return;
     }
 
-    const lastIndex = Math.max(0, Math.ceil(this.effectiveTotal() / this.pageSize()) - 1);
-    let nav: 'first' | 'next' | 'prev' | 'last';
+    let nav: 'first' | 'next' | 'prev';
     if (e.pageIndex === 0) nav = 'first';
-    else if (!this.totalIsLowerBound() && e.pageIndex >= lastIndex) nav = 'last';
     else if (e.pageIndex > (e.previousPageIndex ?? 0)) nav = 'next';
     else nav = 'prev';
 
@@ -512,7 +516,7 @@ export class LogsComponent implements OnDestroy {
     this.fetchPage(nav);
   }
 
-  private fetchPage(nav: 'first' | 'next' | 'prev' | 'last'): void {
+  private fetchPage(nav: 'first' | 'next' | 'prev'): void {
     const current = this.page();
     const cursor = nav === 'next' ? current?.nextCursor ?? undefined
       : nav === 'prev' ? current?.prevCursor ?? undefined
@@ -522,12 +526,9 @@ export class LogsComponent implements OnDestroy {
     this.pageSub?.unsubscribe();
     this.pageSub = this.api.getLogPage({
       ...this.currentFilter(),
-      // Must be the page's own resolved asOf, not summary's: the cursor being sent was minted
-      // against the page response's asOf, and the server rejects a cursor whose filter hash
-      // (which covers asOf) doesn't match the request's — summary and page resolve asOf
-      // independently when reloadAll() fires them in parallel with neither specifying one, so
-      // preferring summary's here would reject every next/prev/last click with a stale-cursor 400.
-      asOf: current?.asOf ?? this.summary()?.asOf,
+      // The page's own resolved asOf: the cursor being sent was minted against the page response's asOf, and the
+      // server rejects a cursor whose filter hash (which covers asOf) does not match the request's.
+      asOf: current?.asOf,
       size: this.pageSize(),
       cursor,
       nav,

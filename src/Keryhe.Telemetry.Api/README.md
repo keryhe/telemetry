@@ -63,6 +63,26 @@ only, never to the host's own. The bundled UI follows it unless `TelemetryUi:Api
 
 A tenant id that is not a positive number, and any other unknown path under the base, is a JSON `404`.
 
+## Summary endpoints (breaking change in schema 3.2.0)
+
+The cards and charts of the dashboard, trace list and logs page read **per-minute rollups** the collector writes
+(`plans/summary-rollups.md`), not the raw rows:
+
+- `GET {base}/tenants/{id}/traces/summary?start&end&service&bucketCount` returns
+  `{ bucketSeconds, writtenThrough, summary, buckets, services, latency, timedOut }`: **requests** (inbound spans,
+  kind `SERVER`/`CONSUMER`), not traces, with approximate percentiles. A request through three services counts three
+  times. `latency` is the time x duration-band grid (`band` 0-23, 23 open-ended).
+- `GET {base}/tenants/{id}/logs/summary?start&end&service&minSeverity&bucketCount` returns
+  `{ bucketSeconds, writtenThrough, total, buckets, timedOut }`.
+
+The server picks `bucketSeconds` from a fixed ladder (1, 2, 5, 10, 15, 30 min, 1, 2, 3, 6, 12 h, 1 d), rounds the
+window to whole minutes and leaves out the minutes after `writtenThrough`, which the rollup has not been written for
+yet. `mode`, `operation`, `minDurationMs`, `maxDurationMs`, `q` and `asOf` are no longer accepted by either summary
+(they are ignored); the cards and charts describe the time range and service only (and, for logs, the minimum
+severity). The `summary` object no longer carries a trace total, `listTotal` and `latencyBuckets` are gone, and
+**`traces/page` and `logs/page` no longer accept `nav=last`**: the lists have no exact total, so page with `first`,
+`next` and `prev`. Ranges before the rollup existed show empty charts over a populated list.
+
 ## Authorization
 
 Off by default (`Telemetry:Api:Authorization:Enabled`): every tenant is readable and a startup warning

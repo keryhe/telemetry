@@ -21,14 +21,6 @@ public interface ILogReadRepository
     /// </summary>
     Task<IEnumerable<LogRecordModel>> GetSurroundingLogRecordsAsync(long anchorTimeUnixNano, string? service, int before, int after, CancellationToken cancellationToken = default);
 
-    /// <summary>
-    /// Chart/stat-card summary for the logs list page (list-pages-server-side plan, Phase 2):
-    /// per-severity-group bucket counts, the exact (or lower-bound, on timeout) total, and the "new
-    /// since asOf" count, from a group-by over <c>log_records</c> (there are no rollup tables since
-    /// schema 3.0.0).
-    /// </summary>
-    Task<LogSummaryResult> GetLogSummaryAsync(LogSummaryQuery query, CancellationToken cancellationToken = default);
-
     /// <summary>Keyset-paged log rows for the logs list page (decision 1), pinned on <see cref="LogQuery.AsOf"/> (decision 3).</summary>
     Task<LogPageResult> GetLogPageAsync(LogQuery query, CancellationToken cancellationToken = default);
 
@@ -37,7 +29,7 @@ public interface ILogReadRepository
 
     /// <summary>
     /// Streaming export (list-pages-server-side plan, Phase 8, decision 17): every log record
-    /// matching the same filters as <see cref="GetLogSummaryAsync"/>/<see cref="GetLogPageAsync"/>,
+    /// matching the same filters as <see cref="GetLogPageAsync"/>,
     /// with no row cap and no paging — the caller (the export controller) writes each record to the
     /// HTTP response as it arrives. Implementations read with Dapper's unbuffered async query mode
     /// so the whole matching set is never materialized in memory at once.

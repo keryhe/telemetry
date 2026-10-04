@@ -103,3 +103,10 @@ public class PostgreSqlRetentionSettingsRepository(NpgsqlDataSource dataSource)
         WHERE ctid = ANY (ARRAY(SELECT ctid FROM {table} WHERE {predicate} LIMIT {DeleteBatchSize}))
         """;
 }
+
+public class PostgreSqlRollupReadRepository(NpgsqlDataSource dataSource, ITenantContext tenantContext, IConfiguration configuration)
+    : RollupReadRepositoryBase(tenantContext, configuration)
+{
+    protected override async Task<DbConnection> OpenConnectionAsync(CancellationToken cancellationToken)
+        => await dataSource.OpenConnectionAsync(cancellationToken);
+}

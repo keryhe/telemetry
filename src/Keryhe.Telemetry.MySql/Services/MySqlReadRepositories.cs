@@ -5,6 +5,7 @@ using Microsoft.Extensions.Configuration;
 using Keryhe.Telemetry.Core;
 using Keryhe.Telemetry.Core.Data;
 using Keryhe.Telemetry.Core.Data.Read;
+using Keryhe.Telemetry.Core.Models;
 
 namespace Keryhe.Telemetry.MySql.Services;
 
@@ -212,4 +213,63 @@ public class MySqlRetentionSettingsRepository(IConfiguration configuration)
 
     protected override string BatchedDeleteSql(string table, string predicate)
         => $"DELETE FROM {table} WHERE {predicate} LIMIT {DeleteBatchSize}";
+
+    // The hour tier follows its signal's window like the minute rollup does (summary-rollups plan, decision 8); not counted.
+    public override async Task<int> DeleteOldTracesAsync(TimeSpan retentionPeriod, CancellationToken cancellationToken = default)
+    {
+        var removed = await base.DeleteOldTracesAsync(retentionPeriod, cancellationToken);
+        await SweepPerTenantAsync("request_rollup_hour", "bucket_start_unix_nano", retentionPeriod, cancellationToken);
+        return removed;
+    }
+
+    public override async Task<int> DeleteOldLogRecordsAsync(TimeSpan retentionPeriod, CancellationToken cancellationToken = default)
+    {
+        var removed = await base.DeleteOldLogRecordsAsync(retentionPeriod, cancellationToken);
+        await SweepPerTenantAsync("log_rollup_hour", "bucket_start_unix_nano", retentionPeriod, cancellationToken);
+        return removed;
+    }
+}
+
+public class MySqlRollupReadRepository(IConfiguration configuration, ITenantContext tenantContext)
+    : RollupReadRepositoryBase(tenantContext, configuration)
+{
+    private readonly string _connectionString = configuration.GetConnectionString("Api")!;
+
+    protected override async Task<DbConnection> OpenConnectionAsync(CancellationToken cancellationToken)
+    {
+        var conn = new MySqlConnection(_connectionString);
+        await conn.OpenAsync(cancellationToken);
+        return conn;
+    }
+
+    // SUM over BIGINT is a DECIMAL in MySQL; DIV keeps the bucket math integer.
+    protected override string BucketIndexExpr(string numerator, string denominator) => $"({numerator} DIV {denominator})";
+    protected override string BigintExpr(string expression) => $"CAST({expression} AS SIGNED)";
+
+    /// <summary>
+    /// Hour tier (plans/summary-rollups.md, Phase 4): a bucket of an hour or wider reads whole hours from the hour rows below
+    /// <c>compacted_through</c> (read in the same statement) and everything else, the partial hours at the edges and the
+    /// hours not yet compacted, from the minute rows. A window with no whole hour in it reads minute rows alone.
+    /// </summary>
+    protected override string? HourTierSource(string kind, Func<string, string, string> branch, RollupQuery query, string filters, DynamicParameters parameters)
+    {
+        const long hour = 3_600_000_000_000L;
+        if (query.BucketSeconds < 3600) return null;
+        var hs = (query.StartNano + hour - 1) / hour * hour;
+        var he = query.EndNano / hour * hour;
+        if (hs >= he) return null;
+
+        parameters.Add("hs", hs);
+        parameters.Add("he", he);
+        parameters.Add("signal", kind);
+        const string ct = "(SELECT COALESCE(MAX(compacted_through_unix_nano), 0) FROM rollup_compaction WHERE signal_kind = @signal)";
+        var (hourTable, minuteTable) = kind == "request"
+            ? ("request_rollup_hour", "request_rollup_minute")
+            : ("log_rollup_hour", "log_rollup_minute");
+        return $"""
+            {branch(hourTable, $"bucket_start_unix_nano >= @hs AND bucket_start_unix_nano < LEAST(@he, {ct})")}
+            UNION ALL
+            {branch(minuteTable, $"((bucket_start_unix_nano >= @start AND bucket_start_unix_nano < @hs) OR (bucket_start_unix_nano >= GREATEST(@hs, LEAST(@he, {ct})) AND bucket_start_unix_nano < @end))")}
+            """;
+    }
 }

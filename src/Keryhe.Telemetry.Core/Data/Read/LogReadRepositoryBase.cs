@@ -126,140 +126,6 @@ public abstract class LogReadRepositoryBase : DapperReadRepository, ILogReadRepo
     }
 
     // =========================================================================
-    // SUMMARY (list-pages-server-side plan, Phase 2)
-    // =========================================================================
-
-    public async Task<LogSummaryResult> GetLogSummaryAsync(LogSummaryQuery query, CancellationToken cancellationToken = default)
-    {
-        if (query.Start >= query.End)
-            throw new ArgumentException("Start time must be before end time");
-
-        return await ExecuteWithRetryAsync(() => GetLogSummaryCoreAsync(query, cancellationToken));
-    }
-
-    private async Task<LogSummaryResult> GetLogSummaryCoreAsync(LogSummaryQuery query, CancellationToken cancellationToken)
-    {
-        var parsed = SearchQueryParser.Parse(query.Search);
-
-        await using var conn = await OpenConnectionAsync(cancellationToken);
-        var asOf = await ResolveAsOfAsync(conn, query.AsOf, cancellationToken);
-
-        var startNano = TimeConversion.DateTimeToUnixNano(query.Start);
-        var endNano = TimeConversion.DateTimeToUnixNano(query.End);
-
-        // Always the raw path: there are no rollup tables since schema 3.0.0. A window that is too
-        // wide to group within the statement timeout comes back as a lower bound ("≥ N").
-        return await GetRawSummaryAsync(conn, query, parsed, startNano, endNano, asOf, cancellationToken);
-    }
-
-    private async Task<LogSummaryResult> GetRawSummaryAsync(
-        System.Data.Common.DbConnection conn, LogSummaryQuery query, ParsedSearchQuery parsed,
-        long startNano, long endNano, DateTime asOf, CancellationToken cancellationToken)
-    {
-        var bucketCount = Math.Clamp(query.BucketCount, 1, 500);
-        var rangeNano = Math.Max(1, endNano - startNano);
-
-        var (clauses, parameters) = BuildFilterClauses(query.Service, query.MinSeverity, parsed, startNano, endNano);
-
-        var where = string.Join(" AND ", clauses);
-        var rawIndexExpr = BucketIndexExpr("(lr.time_unix_nano - @start) * @bucketCount", "@rangeNano");
-        var clampedIndexExpr = $"CASE WHEN {rawIndexExpr} < 0 THEN 0 WHEN {rawIndexExpr} > @bucketCountMinus1 THEN @bucketCountMinus1 ELSE {rawIndexExpr} END";
-        var sql = $"""
-            SELECT {clampedIndexExpr} AS BucketIndex, {LogSeverityGroupSql.SumCaseColumns("lr.severity_number")}
-            FROM log_records lr
-            WHERE lr.tenant_id = @tenantId AND {where}
-            GROUP BY {clampedIndexExpr}
-            """;
-
-        parameters.Add("bucketCount", bucketCount);
-        parameters.Add("bucketCountMinus1", bucketCount - 1);
-        parameters.Add("rangeNano", rangeNano);
-
-        var (rows, timedOut) = await TimedQuery.RunAsync(
-            async (timeoutSeconds, ct) => (await conn.QueryAsync<LogBucketRow>(new CommandDefinition(
-                sql, parameters, commandTimeout: timeoutSeconds, cancellationToken: ct))).ToList(),
-            _summaryTimeoutSeconds, cancellationToken);
-
-        if (timedOut)
-        {
-            // On a fresh connection: the one the summary ran on was aborted mid-statement (see TimedQuery).
-            await using var fresh = await OpenConnectionAsync(cancellationToken);
-            var (cappedTotal, cappedIsLowerBound) = await GetCappedTotalAsync(fresh, query.Service, query.MinSeverity, parsed, startNano, endNano, cancellationToken);
-            return new LogSummaryResult
-            {
-                Source = "raw",
-                Buckets = [],
-                Total = cappedTotal,
-                TotalIsLowerBound = cappedIsLowerBound,
-                TimedOut = true,
-                AsOf = asOf
-            };
-        }
-
-        var byIndex = (rows ?? []).ToDictionary(r => r.BucketIndex);
-        var startTicks = query.Start.Ticks;
-        var rangeTicks = Math.Max(1, query.End.Ticks - startTicks);
-
-        var buckets = new List<LogSummaryBucket>(bucketCount);
-        for (var i = 0; i < bucketCount; i++)
-        {
-            byIndex.TryGetValue(i, out var r);
-            buckets.Add(new LogSummaryBucket
-            {
-                Timestamp = new DateTime(startTicks + (long)i * rangeTicks / bucketCount, query.Start.Kind),
-                Trace = r?.Trace ?? 0,
-                Debug = r?.Debug ?? 0,
-                Info = r?.Info ?? 0,
-                Warn = r?.Warn ?? 0,
-                Error = r?.Error ?? 0,
-                Fatal = r?.Fatal ?? 0
-            });
-        }
-
-        var total = buckets.Sum(b => b.Trace + b.Debug + b.Info + b.Warn + b.Error + b.Fatal);
-
-        return new LogSummaryResult
-        {
-            Source = "raw",
-            Buckets = buckets,
-            Total = total,
-            TotalIsLowerBound = false,
-            AsOf = asOf
-        };
-    }
-
-    /// <summary>
-    /// Capped-count fallback (ports the retired <c>QueryLogRecordsAsync</c>'s capped-subquery-count shape) for when the raw
-    /// summary times out: exact below the cap, the cap flagged as a lower bound above it. It has its own
-    /// <c>SummaryTimeoutSeconds</c> budget; when that runs out too the total is unknown, reported as a lower bound of 0.
-    /// </summary>
-    private async Task<(long Total, bool IsLowerBound)> GetCappedTotalAsync(
-        System.Data.Common.DbConnection conn, string? service, int? minSeverity, ParsedSearchQuery parsed,
-        long startNano, long endNano, CancellationToken cancellationToken)
-    {
-        const int cap = 10_000;
-        var (clauses, parameters) = BuildFilterClauses(service, minSeverity, parsed, startNano, endNano);
-        var where = string.Join(" AND ", clauses);
-        var sql = $"""
-            SELECT COUNT(*) FROM (
-                SELECT 1 AS x
-                FROM log_records lr
-                WHERE lr.tenant_id = @tenantId AND {where}
-                ORDER BY lr.time_unix_nano DESC
-                {PagingClause}
-            ) capped
-            """;
-        parameters.Add("limit", cap + 1);
-        parameters.Add("offset", 0);
-        var (count, timedOut) = await TimedQuery.RunAsync(
-            async (timeoutSeconds, ct) => await conn.ExecuteScalarAsync<long>(new CommandDefinition(
-                sql, parameters, commandTimeout: timeoutSeconds, cancellationToken: ct)),
-            _summaryTimeoutSeconds, cancellationToken);
-        if (timedOut) return (0, true);
-        return count > cap ? (cap, true) : (count, false);
-    }
-
-    // =========================================================================
     // PAGE (list-pages-server-side plan, Phase 2, keyset paging)
     // =========================================================================
 
@@ -321,13 +187,6 @@ public abstract class LogReadRepositoryBase : DapperReadRepository, ILogReadRepo
                 rows = await FetchPageAsync(conn, clauses, parameters, requestedSize, descending: false, cancellationToken);
                 break;
 
-            case "last":
-                forward = false;
-                var lastCount = await TryGetExactCountAsync(clauses, parameters, cancellationToken);
-                requestedSize = lastCount.HasValue ? KeysetCursor.LastPageRowCount(lastCount.Value, size) : size;
-                rows = await FetchPageAsync(conn, clauses, parameters, requestedSize, descending: false, cancellationToken);
-                break;
-
             default: // "first"
                 forward = true;
                 requestedSize = size;
@@ -355,17 +214,9 @@ public abstract class LogReadRepositoryBase : DapperReadRepository, ILogReadRepo
         {
             displayRows = [.. rows];
             displayRows.Reverse();
-            if (nav == "last")
-            {
-                nextCursor = null;
-                var reachedStart = !hasExtra;
-                prevCursor = reachedStart || displayRows.Count == 0 ? null : Encode(displayRows[0], filterHash);
-            }
-            else // prev
-            {
-                nextCursor = displayRows.Count > 0 ? Encode(displayRows[^1], filterHash) : null;
-                prevCursor = hasExtra && displayRows.Count > 0 ? Encode(displayRows[0], filterHash) : null;
-            }
+            // prev
+            nextCursor = displayRows.Count > 0 ? Encode(displayRows[^1], filterHash) : null;
+            prevCursor = hasExtra && displayRows.Count > 0 ? Encode(displayRows[0], filterHash) : null;
         }
 
         var resourceById = await LoadResourcesAsync(conn, cancellationToken);
@@ -415,24 +266,6 @@ public abstract class LogReadRepositoryBase : DapperReadRepository, ILogReadRepo
         clone.Add("offset", 0);
         var rows = await conn.QueryAsync<SlimLogRow>(new CommandDefinition(sql, clone, cancellationToken: cancellationToken));
         return rows.ToList();
-    }
-
-    private async Task<long?> TryGetExactCountAsync(
-        List<string> clauses, DynamicParameters parameters, CancellationToken cancellationToken)
-    {
-        // On its own pooled connection, not the caller's: the caller keeps using its connection for the page itself,
-        // and a count that times out leaves the connection it ran on aborted mid-statement (see TimedQuery).
-        await using var conn = await OpenConnectionAsync(cancellationToken);
-        var where = string.Join(" AND ", clauses);
-        var sql = $"""
-            SELECT COUNT(*) FROM log_records lr
-            WHERE lr.tenant_id = @tenantId AND {where}
-            """;
-        var (result, timedOut) = await TimedQuery.RunAsync(
-            async (timeoutSeconds, ct) => await conn.ExecuteScalarAsync<long>(new CommandDefinition(
-                sql, parameters, commandTimeout: timeoutSeconds, cancellationToken: ct)),
-            _summaryTimeoutSeconds, cancellationToken);
-        return timedOut ? null : result;
     }
 
     // =========================================================================

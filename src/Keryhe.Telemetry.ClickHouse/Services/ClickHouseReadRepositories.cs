@@ -511,13 +511,13 @@ public class ClickHouseRetentionSettingsRepository(IConfiguration configuration)
         settings.UpdatedAt = updatedAt;
     }
 
-    // trace_index is partitioned by the same days as spans and holds only the trace time bounds,
-    // so its expired partitions go with spans' (not counted in the returned rows).
+    // trace_index and the rollup tables are partitioned by the same days as the table they derive from,
+    // so their expired partitions go with it (not counted in the returned rows).
     public override Task<int> DeleteOldTracesAsync(TimeSpan retentionPeriod, CancellationToken cancellationToken = default)
-        => DropExpiredPartitionsAsync(["spans"], ["trace_index"], retentionPeriod, cancellationToken);
+        => DropExpiredPartitionsAsync(["spans"], ["trace_index", "request_rollup_minute"], retentionPeriod, cancellationToken);
 
     public override Task<int> DeleteOldLogRecordsAsync(TimeSpan retentionPeriod, CancellationToken cancellationToken = default)
-        => DropExpiredPartitionsAsync(["log_records"], [], retentionPeriod, cancellationToken);
+        => DropExpiredPartitionsAsync(["log_records"], ["log_rollup_minute"], retentionPeriod, cancellationToken);
 
     public override Task<int> DeleteOldMetricDataPointsAsync(TimeSpan retentionPeriod, CancellationToken cancellationToken = default)
         => DropExpiredPartitionsAsync(TelemetryIngestionHelpers.TimePrunedMetricTables, [], retentionPeriod, cancellationToken);
@@ -560,4 +560,16 @@ public class ClickHouseRetentionSettingsRepository(IConfiguration configuration)
         public string Partition { get; set; } = null!;
         public long Rows { get; set; }
     }
+}
+
+public class ClickHouseRollupReadRepository(IConfiguration configuration, ITenantContext tenantContext)
+    : RollupReadRepositoryBase(tenantContext, configuration)
+{
+    private readonly string _connectionString = configuration.GetConnectionString("Api")!;
+
+    protected override Task<DbConnection> OpenConnectionAsync(CancellationToken cancellationToken)
+        => ClickHouseConnectionFactory.OpenReadAsync(_connectionString, cancellationToken);
+
+    protected override string BucketIndexExpr(string numerator, string denominator) => $"intDiv({numerator}, {denominator})";
+    protected override string BigintExpr(string expression) => $"toInt64({expression})";
 }

@@ -37,6 +37,8 @@ public sealed class MySqlFixture : ProviderFixture
             "TRUNCATE TABLE summary_data_points",
             "TRUNCATE TABLE metrics",
             "TRUNCATE TABLE metric_last_seen",
+            "TRUNCATE TABLE request_rollup_minute",
+            "TRUNCATE TABLE log_rollup_minute",
             "SET FOREIGN_KEY_CHECKS = 1"
         ];
         foreach (var statement in statements)

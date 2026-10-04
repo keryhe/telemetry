@@ -60,7 +60,7 @@ schema/apply-schema.sh <postgresql|timescale|sqlserver|clickhouse|mysql> [databa
 
 **Schema 3.x is a fresh-install schema.** There is no migration from 2.x (decision 4 of
 `plans/schema-simplification.md`, which explains every change below): an existing 2.x database must
-be recreated, and `schema/migrations/` no longer exists. `apply-schema.sh` only skips when the 3.1.0
+be recreated, and `schema/migrations/` no longer exists. `apply-schema.sh` only skips when the 3.2.1
 version row is already recorded. 3.0.1 over 3.0.0 added one thing: ClickHouse's `bloom_filter` skip index on
 `spans.trace_id` (`plans/trace-list-detail-performance.md`, Phase 5); an existing 3.0.0 ClickHouse database
 can take it with `ALTER TABLE spans ADD INDEX idx_spans_trace trace_id TYPE bloom_filter(0.01) GRANULARITY 4`
@@ -70,7 +70,13 @@ database takes it with one statement per provider (UTC everywhere, so the types 
 `ALTER TABLE api_keys ADD COLUMN expires_at TIMESTAMPTZ` (PostgreSQL, Timescale), `ALTER TABLE api_keys ADD
 expires_at DATETIMEOFFSET(7) NULL` (SQL Server, not `DATETIME2`), `ALTER TABLE api_keys ADD COLUMN expires_at
 DATETIME(6) NULL` (MySQL, UTC by convention), `ALTER TABLE api_keys ADD COLUMN expires_at Nullable(DateTime64(9,
-'UTC'))` (ClickHouse). Then record 3.1.0 in `schema_version`.
+'UTC'))` (ClickHouse). Then record 3.1.0 in `schema_version`. 3.2.0 over 3.1.x adds the summary rollup tables
+(`plans/summary-rollups.md`): an existing 3.1.x database takes the **`SUMMARY ROLLUPS` section of its provider's schema
+script**, which is self-contained (`request_rollup_minute` and `log_rollup_minute` with their index, plus Timescale's
+two hypertables and ClickHouse's two materialized views, `mv_request_rollup_minute` and `mv_log_rollup_minute`); the
+rollup is forward-only, so ranges before the upgrade show empty charts. 3.2.1 over 3.2.0 adds MySQL's hour tier (the
+**`HOUR TIER` section of `schema/MySQL-Schema.sql`**: `request_rollup_hour`, `log_rollup_hour`, `rollup_compaction`);
+the other providers only record the new version. Then record 3.2.0/3.2.1 in `schema_version`.
 
 There is one schema script per supported provider, all producing the same logical
 table/column set: `schema/PostgreSQL-Schema.sql` (plain Postgres), `schema/Timescale-Schema.sql`
@@ -152,7 +158,7 @@ harness at a database on another machine is not supported yet.
 
 `tests/Keryhe.Telemetry.IntegrationTests/Tests/TraceQueryBench.cs` is an opt-in benchmark (a no-op unless
 `TRACE_BENCH_OUT` is set) that seeds a stress-harness-sized volume (default 60,000 traces of ~10 spans over six hours;
-`TRACE_BENCH_TRACES`) into each provider's container and times the repository's real trace queries (summary, first/next/last
+`TRACE_BENCH_TRACES`) into each provider's container and times the repository's real trace queries (first/next
 page, errors, slow, search, operation, samples, detail with and without the start hint) to one table. It is for attributing
 a query change quickly; the stress harness remains the measure of record because it carries concurrent ingest and reads.
 **Run providers one at a time** (xUnit starts every provider's collection in parallel, which contaminates the timings):
@@ -553,18 +559,19 @@ parsed or recomputed by the caller — so paging through a window stays stable e
 arriving. (There is no "new since" banner or poll: removed by `plans/trace-list-detail-performance.md` Phase 1, so a list refreshes only when the user re-applies the time range.) A summary/count query
 that risks running long (an unindexed scan, a `COUNT(*)` over a large filtered set) goes through
 **`TimedQuery.RunAsync`**, which enforces `Telemetry:Query:SummaryTimeoutSeconds` (default 5) and
-returns a lower-bound/"≥ N" result instead of blocking the request indefinitely — `GetLogSummaryAsync`/
-`GetTraceSummaryAsync`/`GetMetricSeriesAsync` (the latter retrying once at a quarter of the
+returns a lower-bound/"≥ N" result instead of blocking the request indefinitely — the rollup reads
+(`IRollupReadRepository`, see "Summary rollups"), `CountSlowInboundSpansAsync`, `GetMetricSeriesAsync` (retrying once at a quarter of the
 requested point count, decision 31), the dashboard's `GetTraceSamplesAsync` and the logs page's `GetLogFacetsAsync` all
-use it; with no rollup tables
-(schema 3.0.0) a 3d/7d summary on a busy tenant is the case that hits it. Two rules, from
-`plans/trace-list-summary-trim.md`'s Background (the 3.0.1 ramp answered these as 500s): **a timeout is decided by
+use it. The trace and log **list pages have no exact total and no last page** (`nav=last` is gone from both; the paginator
+says "of many"): the cards and charts above them come from the rollup, so the old 3d/7d summary timeouts no longer
+occur. Two rules, from
+the 3.0.1 ramp, which answered these as 500s: **a timeout is decided by
 `TimedQuery`'s own deadline, not the exception type** — any exception after the budget counts, because every driver
 ends an aborted command with its own type (Npgsql an `NpgsqlException` wrapping `TimeoutException`, SqlClient a
 `SqlException` even on token cancellation, MySqlConnector a `MySqlException`; ClickHouse.Client does not enforce
 `CommandTimeout` at all) — and the driver gets the budget plus `DriverTimeoutGraceSeconds` (2) so the token fires
 first; and **a connection a timed-out query ran on is never reused**: fallbacks open a fresh one, and an exact count
-that a page still needs afterwards (the "last" pages) runs on its own connection. Timeouts are counted on the
+that a page still needs afterwards runs on its own connection. Timeouts are counted on the
 `Keryhe.Telemetry.Query` meter's `query_timeouts`, tagged with the exception type (the stress harness collects it). `samples` reports a timeout as
 an empty array plus `X-Telemetry-Timed-Out: true` (the body stays an array); facets as `timedOut` in its body. Still
 unbounded (driver default, 30 s): the trace analytics reads (dependencies, operation stats/counts, average latencies),
@@ -753,10 +760,13 @@ the services:
 **Alerting** (`Keryhe.Telemetry.Api/Alerting`): `AlertService.EvaluateAllAsync` iterates all
 tenants with enabled rules, dispatching each rule type to a registered `IAlertEvaluator`
 (`MetricThreshold`, `ErrorRate`, `SlowTrace`, `LogSeveritySpike`). `ErrorRateEvaluator` and
-`SlowTraceEvaluator` read `ITraceReadRepository.GetTraceSummaryAsync`; `LogSeveritySpikeEvaluator`
-reads `ILogReadRepository.GetLogSummaryAsync` — the same summary path the traces/logs list pages use
-(see "Trace anchors" below), not a bespoke scan; `SlowTraceEvaluator` therefore counts inbound trace
-anchors whose own duration is over the threshold, the same duration the trace list shows. An atomic `TryClaimFireAsync` (UPDATE with cooldown check) prevents duplicate fires under
+`LogSeveritySpikeEvaluator` read the **summary rollups** (see "Summary rollups"): requests (inbound spans) in
+`[writtenThrough - window, writtenThrough)` in whole minutes, so a rule fires about 1.75 minutes later than it would on
+raw data and a 1-minute rule always reads one full minute. `SlowTraceEvaluator` ("slow requests") stays on **raw
+spans**: `ITraceReadRepository.CountSlowInboundSpansAsync`, an exact count of inbound spans (kind SERVER/CONSUMER) at or
+over the threshold in the rule's window (a doubling duration band straddling the threshold would make a rollup count
+wrong near it); its message's p99 is an approximate one from the request rollup, and a timeout is logged and the rule
+not fired that run. An atomic `TryClaimFireAsync` (UPDATE with cooldown check) prevents duplicate fires under
 load balancing. The API's `AlertsController` handles rule CRUD via `IAlertRuleRepository`. Evaluation is driven
 by `AlertEvaluationWorker` (a `BackgroundService` in `Api/Alerting`, registered by `AddAlerting(configuration)`,
 which `Api.Server` calls): it wakes every `Telemetry:AlertEvaluation:IntervalSeconds` (default 60), creates a DI
@@ -828,13 +838,13 @@ formula-injection guard (`CsvFormulaGuard`): a cell starting with `=`, `+`, `-` 
 with `'`.
 
 **Trace anchors** (schema-simplification plan, decisions 9-18; replaces the 2.x rollup tables, `RollupWorker`,
-`orphan_roots` and root-based anchoring, all of which are gone). Every trace-list read — summary, page,
-samples, export — is defined by one **anchor** per trace: the trace's **earliest span in scope** (ranked by
+`orphan_roots` and root-based anchoring, all of which are gone). Every trace-list read — page,
+samples, export — is defined by one **anchor** per trace (the cards and charts no longer use anchors: see "Summary rollups"): the trace's **earliest span in scope** (ranked by
 `(start, id)`), where scope is the selected service's own spans when a service is selected (any span kind) and
 the whole trace's otherwise. A trace without a root, or whose root arrives late, simply anchors on whatever its
 earliest span is at the time of the query. That definition is expressed in three SQL shapes
 (`plans/trace-list-detail-performance.md` measured each; the lab benchmark is `TraceQueryBench`, below):
-- **`AnchorsSql`, a whole window** (summary, `listTotal`, the `last` page, export, errors mode). Unscoped, and in
+- **`AnchorsSql`, a whole window** (export, errors mode, ClickHouse pages). Unscoped, and in
   errors mode, it is a hash aggregate joined back to the anchor span (`GROUP BY trace_id` for the earliest start and
   error flag, then the span read by `(trace_id, span_id)`; a tie on start keeps the lowest `id`), which was 2x
   (PostgreSQL, SQL Server) to 5x (MySQL) faster than a window function. With a service selected the narrow
@@ -854,17 +864,15 @@ earliest span is at the time of the query. That definition is expressed in three
   unchanged. Slow mode filters on the anchor's own duration (a few percent of spans), so it reads the whole range in one
   pass. The anchor's error flag is not computed per candidate; the page reads it for its own rows in the follow-up query
   (`ErrorScope`: service, look-back range, pin). A first page went from 190-770 ms (PostgreSQL) and 574-3,800 ms (MySQL)
-  to 4-15 ms. The `last` page still ranks the whole window (it needs the exact count).
+  to 4-15 ms.
   `SlicedPaging_MatchesTheAnchorDefinition_...` checks every nav, filter, page size and slice width against the
   definition restated in LINQ over the seeded spans, and was negative-controlled.
 - ClickHouse has no `(trace_id)` seek, so it reads whole-window anchors for pages too (`SupportsSeekAnchors` false).
-- **Duration is the anchor span's own** `end - start` everywhere — the row, the `mode=slow` filter, the summary
-  percentiles and latency heatmap. The row's service, operation, kind and `DisplaySpanIdHex` are the anchor's;
+- **Duration is the anchor span's own** `end - start` everywhere — the row and the `mode=slow` filter. The row's service, operation, kind and `DisplaySpanIdHex` are the anchor's;
   the error flag is "any span in scope has ERROR" (so `mode=errors` is that flag); the span count is exact,
   `COUNT(DISTINCT span_id)` over the page's traces in a follow-up query, scoped to the selected service when
-  one is selected. The follow-up also supplies the WHOLE trace's start/end for the detail link. The
-  request-count card and the summary charts count only inbound anchors (kind `SERVER`/`CONSUMER`); the list
-  itself shows every kind and displays it.
+  one is selected. The follow-up also supplies the WHOLE trace's start/end for the detail link. The list
+  shows every kind and displays it (the cards and charts count only inbound spans, from the rollup).
 - **Operation filter = the anchor's own name** (what the row shows), not "any span in the trace" as in 2.x.
   **Search matches any span in the whole trace regardless of the service filter** ("traces containing X"), as an
   `EXISTS` through `(trace_id, span_id)` per candidate anchor within the search window; the row stays anchored
@@ -874,13 +882,78 @@ earliest span is at the time of the query. That definition is expressed in three
   window is excluded from it rather than anchored on a later span. A trace that began before the margin is
   anchored on its earliest span inside it (accepted).
 - **`asOf` pins the span set before ranking** (`created_at <= @asOf` inside the derived table), so a root that
-  arrives after the pin is not the anchor within a pinned query and becomes the anchor on the next fresh one. The
-  summary is pinned like the page (3.0.1): the chart, the cards, `listTotal` and the list describe the same traces,
-  from ONE pass over the anchors (the inbound rows, with `listTotal` carried by a window count taken before the
-  inbound filter; a separate count only when no inbound anchor came back). The chart therefore leaves out the last
-  `AsOfBackoffSeconds` (5 s on PostgreSQL/Timescale, 0 elsewhere). There is no "new since" banner or poll on the trace
-  list or the logs page (removed in the same plan): a list refreshes when the user re-applies the time range.
-- `Source` on the summary responses is always `"raw"` (the field stays so the client contract is unchanged).
+  arrives after the pin is not the anchor within a pinned query and becomes the anchor on the next fresh one. There is
+  no "new since" banner or poll on the trace list or the logs page: a list refreshes when the user re-applies the time
+  range.
+
+**Summary rollups** (`plans/summary-rollups.md`, schema 3.2.0; replaces the anchor-based trace summary and the raw log
+summary, and `listTotal`). The cards and charts of the dashboard, trace list and logs page, and the error-rate and
+log-spike alerts, read pre-aggregated per-minute rows whose count follows the range, services and collectors, not
+traffic:
+- **Tables.** `request_rollup_minute` (tenant, service, minute; `request_count`, `error_count`, duration sum/max and a
+  24-band doubling duration histogram `h00`..`h23`) counts **inbound spans** (kind SERVER/CONSUMER), so the numbers are
+  *requests*, not traces, and a request through three services counts three times. `log_rollup_minute` (tenant,
+  service, severity number, minute; `record_count`) counts log records, with `-1` for a NULL severity. Rows are
+  **partial**: no unique key, plain appends, reads `SUM` them. `DurationBands.IndexOf` is the one definition of the
+  bands (band 0 under 0.25 ms, band N `[0.25 ms * 2^(N-1), 0.25 ms * 2^N)`, band 23 from 1,048.6 s; a negative duration
+  counts as 0); ClickHouse's views compute the same with `toUInt8(floor(log2(intDiv(d, 250000))))` (ClickHouse 24.8 has
+  no `intLog2`) and the per-provider tests check both at every edge +-1 ns. Percentiles interpolate within the band
+  (`DurationBands.Percentile`), so they are approximate (up to 2x in the worst case).
+- **Write path (relational providers).** `TelemetryIngestionWorker` calls `RollupAccumulator.AddSpans`/`AddLogs` only
+  **after a flush succeeds**, so a dropped batch is never counted. The accumulator folds a batch into a local dictionary
+  and merges it under one lock (a swap-without-a-lock like `MetricTouchTracker`'s would lose increments, a permanent
+  under-count here). `RollupWorker` (registered by `AddKeryheTelemetryCollector` **before** the ingestion worker, so
+  the host stops it after the ingestion drain) every `Telemetry:Rollup:FlushIntervalSeconds` (15) appends the minutes
+  that have **closed** (`CloseGraceSeconds`, 30, past their end) through `IRollupStore`, sorted and in batches under
+  4,000 rows, keeping the open minutes in memory; a late span for a written minute goes out as one more partial row.
+  A failed append keeps its rows (up to `MaxBufferedRows`, then the oldest are dropped and counted on
+  `rollup_rows_dropped`); on shutdown `StopAsync` writes everything, open minutes included, within the host's
+  `ShutdownTimeout`. A crash loses what is in memory (about a minute plus the grace and a flush interval) while the
+  stored spans survive: charts under-count that slice. `RollupWorker.StartAsync` decides whether the accumulator is
+  enabled (`IRollupStore.FedByViews`), not `ExecuteAsync`: .NET 10 does not guarantee the synchronous part of
+  `ExecuteAsync` has run when `StartAsync` returns. **ClickHouse** has no accumulator or worker: its tables are
+  `AggregatingMergeTree` fed by materialized views on `spans` and `log_records`, and `ClickHouseRollupStore` is a no-op.
+- **Retention.** The request rollup follows the traces window and the log rollup the logs window, swept with them
+  (per-tenant deletes, Timescale `drop_chunks`, ClickHouse `DROP PARTITION`); the counts those sweeps return are the
+  raw rows' only.
+- **Read path.** `RollupReadRepositoryBase` (one statement per call, a derived table that computes
+  `floor(minute / width) * width` and a `GROUP BY (bucket, service)` or `(bucket, severity)`) under `TimedQuery`;
+  `RollupSummaryBuilder` plans the window and folds the rows. The window starts rounded **down** and ends rounded **up**
+  to whole minutes, is clamped to `writtenThrough` (now minus `CloseGraceSeconds`, `FlushIntervalSeconds` and
+  `Telemetry:Rollup:ArrivalMarginSeconds`, 60, rounded down to the minute: a conservative margin, not a promise), and
+  the bucket width is the smallest of the fixed ladder (1, 2, 5, 10, 15, 30 min, 1, 2, 3, 6, 12 h, 1 d) giving at most
+  `bucketCount` (60) buckets over it. An unaligned window has partial edge buckets (`coveredSeconds`), so a result can
+  hold `bucketCount + 1` of them and every rate divides by what a bucket covers. The API reads `FlushIntervalSeconds` and
+  `CloseGraceSeconds` from the same `Telemetry:Rollup` section as the collector, so a change on one side must be made on
+  the other.
+- **API.** `GET .../traces/summary?start&end&service&bucketCount` returns `{bucketSeconds, writtenThrough, summary,
+  buckets, services, latency, timedOut}` and `GET .../logs/summary?start&end&service&minSeverity&bucketCount` returns
+  `{bucketSeconds, writtenThrough, total, buckets, timedOut}`. The mode, operation, duration, search and `asOf`
+  parameters are gone from both: the cards and charts describe the **time range and service** (and, for logs, the
+  minimum severity) and nothing else. **Breaking** for an external consumer.
+- **UI.** The trace list's first card is **Requests**; its latency chart is one color and a bubble click zooms to the
+  bubble's span and switches the list to Slow mode with the band's duration range (`shared/utils/latency-bands.ts`:
+  maximum = band's upper edge minus 1 ns, an explicit minimum of 0 for band 0, no maximum for band 23, and the time
+  range clamped to `rawSearchWindowHours` because slow mode is under `RawSearchWindowGuard`). The lists page "of many"
+  with first/prev/next (the last-page button is hidden by CSS).
+- **Hour tier (MySQL only).** The measurement gate (`RollupQueryBench`: twelve services, a week of minute rows, three
+  partials per service-minute) put the 7-day unscoped request summary at 2.3 s p95 on MySQL against a 1 s budget, so
+  MySQL has `request_rollup_hour`, `log_rollup_hour` and `rollup_compaction` (schema 3.2.1) and the other four do not
+  (PostgreSQL 180 ms, Timescale 175 ms, SQL Server 93 ms, ClickHouse 44 ms). `MySqlRollupCompactor`, driven by the API
+  host's `RollupCompactionWorker` (registered by `AddRetention`; idles on a provider that registers no
+  `IRollupCompactor`) every `CompactionIntervalSeconds` (300) under `GET_LOCK`, re-folds each closed hour from
+  `min(compacted_through, now - RecompactHours)` (6) to the hour of `writtenThrough` (`min`, not `max`: in steady state
+  `compacted_through` is the last closed hour, so `max` would never fold the late rows of the last hours), one
+  transaction per hour. A bucket of an hour or wider reads whole hours from the hour rows below `compacted_through`
+  (read in the same statement) and the partial edges and uncompacted hours from the minute rows. A minute row later than
+  `RecompactHours` stays in the minute tier only, so a 3-day chart can differ from a 24-hour one by such rows. The
+  `signal_kind` column is not called `signal`: that is a reserved word in MySQL.
+- **Tests.** `RollupUnitTests`, `RollupSummaryBuilderTests` and `RollupAlertEvaluatorTests` (no Docker);
+  `RollupSummaryHttpTests` (`ApiHttp`); per provider `*RollupWriteTests` (seed through the bulk writer plus the accumulator
+  path, ClickHouse through its views, compare with a LINQ restatement; reads, retention and the slow-request count too;
+  negative-controlled by perturbing `DurationBands`) and `MySqlRollupHourTierTests`; the stress ledger counts both rollup
+  tables (`RollupTables`, waits up to 150 s for the rollup to catch up with the closed minutes) and
+  `RollupQueryBench` is the lab gate (`ROLLUP_BENCH_OUT=<file>`, one provider at a time).
 
 **Trace detail** (`GET /api/traces/{traceId}/spans?start=`, `TraceDetailResponse`): the response lists each distinct
 resource and instrumentation scope once and the spans refer to them by `resourceIndex`/`scopeIndex` (a span used to
@@ -951,9 +1024,10 @@ Providers: plain PostgreSQL, PostgreSQL + TimescaleDB, SQL Server 2022, ClickHou
   them), the rollup tables, `rollup_state`, `orphan_roots`, `uk_trace_span`, the MySQL `is_root` column, and
   `schema/migrations/`.
 
-**Telemetry (10)**: `resources`, `instrumentation_scopes`, `spans` (events and links folded into
+**Telemetry (12)**: `resources`, `instrumentation_scopes`, `spans` (events and links folded into
 its `events_json`/`links_json` columns — there are no separate `span_events`/`span_links` tables), `metrics`, `gauge_data_points`, `sum_data_points`,
-`histogram_data_points`, `exponential_histogram_data_points`, `summary_data_points`, `log_records`
+`histogram_data_points`, `exponential_histogram_data_points`, `summary_data_points`, `log_records`, `request_rollup_minute`,
+`log_rollup_minute` (MySQL adds `request_rollup_hour`, `log_rollup_hour` and `rollup_compaction`)
 
 **Multi-tenant/auth (2)**: `tenants`, `api_keys`
 

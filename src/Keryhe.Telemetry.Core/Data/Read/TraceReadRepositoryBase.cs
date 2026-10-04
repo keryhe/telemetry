@@ -498,250 +498,6 @@ public abstract class TraceReadRepositoryBase : DapperReadRepository, ITraceRead
     }
 
     // =========================================================================
-    // SUMMARY
-    // =========================================================================
-
-    public async Task<TraceSummaryResult> GetTraceSummaryAsync(TraceSummaryQuery query, CancellationToken cancellationToken = default)
-    {
-        if (query.Start >= query.End)
-            throw new ArgumentException("Start time must be before end time");
-
-        return await ExecuteWithRetryAsync(() => GetTraceSummaryCoreAsync(query, cancellationToken));
-    }
-
-    private async Task<TraceSummaryResult> GetTraceSummaryCoreAsync(TraceSummaryQuery query, CancellationToken cancellationToken)
-    {
-        var parsed = SearchQueryParser.Parse(query.Search);
-
-        await using var conn = await OpenConnectionAsync(cancellationToken);
-        var asOf = await ResolveAsOfAsync(conn, query.AsOf, cancellationToken);
-
-        var startNano = TimeConversion.DateTimeToUnixNano(query.Start);
-        var endNano = TimeConversion.DateTimeToUnixNano(query.End);
-
-        // Always the raw path: there are no rollup tables since schema 3.0.0. The chart/cards and the
-        // paginator's total come from ONE pinned pass over the anchors (3.0.1: the summary used to derive
-        // them twice, once unpinned for the chart and once pinned for the count). 3d/7d windows on a busy
-        // tenant may time out to "≥ N".
-        return await GetRawSummaryAsync(conn, query, parsed, startNano, endNano, asOf, cancellationToken);
-    }
-
-    private async Task<TraceSummaryResult> GetRawSummaryAsync(
-        System.Data.Common.DbConnection conn, TraceSummaryQuery query, ParsedSearchQuery parsed,
-        long startNano, long endNano, DateTime asOf, CancellationToken cancellationToken)
-    {
-        var (fetched, timedOut) = await TimedQuery.RunAsync(
-            async (timeoutSeconds, ct) => await FetchSummaryAnchorsAsync(
-                conn, query.Mode, query.Service, query.Operation, query.MinDurationMs, query.MaxDurationMs,
-                parsed, startNano, endNano, asOf, timeoutSeconds, ct),
-            _summaryTimeoutSeconds, cancellationToken);
-
-        if (timedOut || fetched == null)
-        {
-            // The scan did not finish in time: no chart or card data, only a capped count of the paginator's population.
-            // On a fresh connection: the one the scan ran on was aborted mid-statement (see TimedQuery).
-            await using var fresh = await OpenConnectionAsync(cancellationToken);
-            var (cappedTotal, cappedIsLowerBound) = await GetListTotalAsync(fresh, query, parsed, startNano, endNano, asOf, cancellationToken, skipExact: true);
-            return new TraceSummaryResult
-            {
-                Source = "raw", Buckets = [], ListTotal = cappedTotal, TotalIsLowerBound = cappedIsLowerBound, TimedOut = true, AsOf = asOf
-            };
-        }
-
-        var rows = fetched.Rows;
-        // listTotal counts every anchor (all kinds); it rides along with the inbound rows, and is only
-        // counted separately when no inbound anchor came back to carry it.
-        var (listTotal, listTotalIsLowerBound) = fetched.TotalAll is { } totalAll
-            ? (totalAll, false)
-            : await GetListTotalAsync(conn, query, parsed, startNano, endNano, asOf, cancellationToken);
-
-        var bucketCount = Math.Clamp(query.BucketCount, 1, 500);
-        var startTicks = query.Start.Ticks;
-        var rangeTicks = Math.Max(1, query.End.Ticks - startTicks);
-
-        var buckets = new List<TraceVolumeBucket>(bucketCount);
-        var byIndex = new List<AnchorSummaryRow>[bucketCount];
-        for (var i = 0; i < bucketCount; i++) byIndex[i] = [];
-        foreach (var r in rows)
-        {
-            var idx = (int)((TimeConversion.UnixNanoToDateTime(r.AnchorStart).Ticks - startTicks) * bucketCount / rangeTicks);
-            idx = Math.Clamp(idx, 0, bucketCount - 1);
-            byIndex[idx].Add(r);
-        }
-        for (var i = 0; i < bucketCount; i++)
-        {
-            var group = byIndex[i];
-            var durations = group.Select(DurationMs).OrderBy(x => x).ToList();
-            buckets.Add(new TraceVolumeBucket
-            {
-                Timestamp = new DateTime(startTicks + (long)i * rangeTicks / bucketCount, query.Start.Kind),
-                Count = group.Count,
-                ErrorCount = group.Count(r => r.HasErrorInt != 0),
-                SumDurationMs = durations.Sum(),
-                P50Ms = Percentile(durations, 50),
-                P95Ms = Percentile(durations, 95),
-                P99Ms = Percentile(durations, 99),
-            });
-        }
-
-        var allDurations = rows.Select(DurationMs).OrderBy(x => x).ToList();
-        var windowSeconds = Math.Max((endNano - startNano) / 1_000_000_000.0, 1);
-        var services = rows.GroupBy(r => string.IsNullOrEmpty(r.ServiceName) ? "(unknown)" : r.ServiceName)
-            .Select(g =>
-            {
-                var durations = g.Select(DurationMs).OrderBy(x => x).ToList();
-                var count = durations.Count;
-                var errorCount = g.Count(r => r.HasErrorInt != 0);
-                return new ServiceStats
-                {
-                    Service = g.Key,
-                    Count = count,
-                    ErrorCount = errorCount,
-                    ErrorRate = count > 0 ? errorCount / (double)count * 100 : 0,
-                    RatePerSecond = count / windowSeconds,
-                    AvgMs = count > 0 ? durations.Average() : 0,
-                    P95Ms = Percentile(durations, 95),
-                };
-            })
-            .OrderByDescending(s => s.Count)
-            .ToList();
-
-        return new TraceSummaryResult
-        {
-            Source = "raw",
-            Buckets = buckets,
-            Summary = new TraceWindowSummary
-            {
-                Count = rows.Count,
-                ErrorCount = rows.Count(r => r.HasErrorInt != 0),
-                P50Ms = Percentile(allDurations, 50),
-                P95Ms = Percentile(allDurations, 95),
-                P99Ms = Percentile(allDurations, 99),
-            },
-            Services = services,
-            LatencyBuckets = BuildLatencyBucketsFromRows(rows, query),
-            RequestCount = rows.Count,
-            ListTotal = listTotal,
-            TotalIsLowerBound = listTotalIsLowerBound,
-            AsOf = asOf,
-        };
-    }
-
-    private static double DurationMs(AnchorSummaryRow r) => (r.AnchorEnd - r.AnchorStart) / 1_000_000.0;
-
-    /// <summary>Latency heatmap: a proper time x duration grid over the fetched anchor rows.</summary>
-    private static List<TraceLatencyBucket> BuildLatencyBucketsFromRows(List<AnchorSummaryRow> rows, TraceSummaryQuery query)
-    {
-        if (rows.Count == 0) return [];
-
-        var timeCols = Math.Clamp(query.BucketCount, 1, 200);
-        var durationRows = Math.Clamp(query.LatencyDurationRows, 1, 100);
-        var startTicks = query.Start.Ticks;
-        var rangeTicks = Math.Max(1, query.End.Ticks - startTicks);
-
-        var durationsMs = rows.Select(DurationMs).ToList();
-        var yMin = Math.Max(1.0, durationsMs.Min());
-        var yMax = Math.Max(yMin * 10, durationsMs.Max());
-        var logMin = Math.Log(yMin);
-        var logMax = Math.Log(yMax);
-        var logStep = (logMax - logMin) / durationRows;
-
-        var cells = new Dictionary<(int Col, int Row), (int Count, int ErrorCount, string FirstTraceIdHex)>();
-        foreach (var r in rows)
-        {
-            var startTime = TimeConversion.UnixNanoToDateTime(r.AnchorStart);
-            var col = Math.Clamp((int)((startTime.Ticks - startTicks) * timeCols / rangeTicks), 0, timeCols - 1);
-            var durationMs = DurationMs(r);
-            var row = durationMs <= yMin ? 0 : Math.Clamp((int)((Math.Log(durationMs) - logMin) / logStep), 0, durationRows - 1);
-            var key = (col, row);
-            cells[key] = cells.TryGetValue(key, out var existing)
-                ? (existing.Count + 1, existing.ErrorCount + (r.HasErrorInt != 0 ? 1 : 0), existing.FirstTraceIdHex)
-                : (1, r.HasErrorInt != 0 ? 1 : 0, r.TraceId);
-        }
-
-        var result = new List<TraceLatencyBucket>(cells.Count);
-        foreach (var ((col, row), (count, errorCount, firstTraceIdHex)) in cells)
-        {
-            result.Add(new TraceLatencyBucket
-            {
-                XStart = new DateTime(startTicks + col * rangeTicks / timeCols, query.Start.Kind),
-                XEnd = new DateTime(startTicks + (col + 1) * rangeTicks / timeCols, query.Start.Kind),
-                YStartMs = Math.Exp(logMin + row * logStep),
-                YEndMs = Math.Exp(logMin + (row + 1) * logStep),
-                Count = count,
-                ErrorCount = errorCount,
-                SampleTraceIdHex = count == 1 ? firstTraceIdHex : null,
-            });
-        }
-        return result;
-    }
-
-    /// <summary>
-    /// <c>listTotal</c>: an exact count of every anchor matching the filter (all kinds), as of the pin; on timeout (or
-    /// <paramref name="skipExact"/>) a count capped at <see cref="CappedTotalLimit"/>, which is still exact below the cap.
-    /// The capped count has its own <c>SummaryTimeoutSeconds</c> budget (it ranks the same window, so it can be as slow as
-    /// the query that just timed out); when that runs out too the total is unknown and reported as a lower bound of 0.
-    /// </summary>
-    private async Task<(long Total, bool IsLowerBound)> GetListTotalAsync(
-        System.Data.Common.DbConnection conn, TraceSummaryQuery query, ParsedSearchQuery parsed,
-        long startNano, long endNano, DateTime asOf, CancellationToken cancellationToken, bool skipExact = false)
-    {
-        var hasService = !string.IsNullOrEmpty(query.Service);
-        var (clauses, parameters) = BuildAnchorFilterClauses(query.Mode, query.Service, query.Operation, query.MinDurationMs, query.MaxDurationMs, parsed, startNano, endNano);
-        parameters.Add("asOf", asOf);
-        var where = clauses.Count == 0 ? "1 = 1" : string.Join(" AND ", clauses);
-        var anchors = AnchorsSql(hasService, pinAsOf: true, errorsOnly: query.Mode == "errors");
-        var sql = $"SELECT COUNT(*) FROM {anchors} a WHERE {where}";
-
-        // Set when the exact count below timed out: its connection was aborted mid-statement (see TimedQuery), so the
-        // capped count runs on a fresh one, disposed on the way out.
-        System.Data.Common.DbConnection? fresh = null;
-        try
-        {
-            if (!skipExact)
-            {
-                var (result, timedOut) = await TimedQuery.RunAsync(
-                    async (timeoutSeconds, ct) => await conn.ExecuteScalarAsync<long>(new CommandDefinition(
-                        sql, parameters, commandTimeout: timeoutSeconds, cancellationToken: ct)),
-                    _summaryTimeoutSeconds, cancellationToken);
-                if (!timedOut) return (result, false);
-                fresh = await OpenConnectionAsync(cancellationToken);
-            }
-            return await GetCappedListTotalAsync(fresh ?? conn, anchors, where, parameters, cancellationToken);
-        }
-        finally
-        {
-            if (fresh != null) await fresh.DisposeAsync();
-        }
-    }
-
-    /// <summary><see cref="GetListTotalAsync"/>'s fallback: counts a capped candidate set instead of every anchor.</summary>
-    private async Task<(long Total, bool IsLowerBound)> GetCappedListTotalAsync(
-        System.Data.Common.DbConnection conn, string anchors, string where, DynamicParameters parameters, CancellationToken cancellationToken)
-    {
-        var cappedSql = $"""
-            SELECT COUNT(*) FROM (
-                SELECT 1 AS x FROM {anchors} a
-                WHERE {where}
-                ORDER BY a.anchor_start DESC
-                {PagingClause}
-            ) capped
-            """;
-        var cappedParams = new DynamicParameters(parameters);
-        cappedParams.Add("limit", CappedTotalLimit + 1);
-        cappedParams.Add("offset", 0);
-        var (capped, cappedTimedOut) = await TimedQuery.RunAsync(
-            async (timeoutSeconds, ct) => await conn.ExecuteScalarAsync<long>(new CommandDefinition(
-                cappedSql, cappedParams, commandTimeout: timeoutSeconds, cancellationToken: ct)),
-            _summaryTimeoutSeconds, cancellationToken);
-        if (cappedTimedOut) return (0, true);
-        return capped > CappedTotalLimit ? (CappedTotalLimit, true) : (capped, false);
-    }
-
-    /// <summary>The capped count's cap: past it the total is reported as this value, flagged as a lower bound.</summary>
-    private const int CappedTotalLimit = 10_000;
-
-    // =========================================================================
     // PAGE (keyset paging)
     // =========================================================================
 
@@ -766,8 +522,8 @@ public abstract class TraceReadRepositoryBase : DapperReadRepository, ITraceRead
         var endNano = TimeConversion.DateTimeToUnixNano(query.End);
         var (clauses, parameters) = BuildAnchorFilterClauses(query.Mode, query.Service, query.Operation, query.MinDurationMs, query.MaxDurationMs, parsed, startNano, endNano);
         parameters.Add("asOf", asOf);
-        // Whole-window anchors: errors mode (restricted to traces with an ERROR span, found through the errors index) and
-        // the page-count-bound "last" page. Every other page reads a slice of seek-verified anchors instead.
+        // Whole-window anchors: errors mode (restricted to traces with an ERROR span, found through the errors index).
+        // Every other page reads a slice of seek-verified anchors instead.
         var errorsMode = query.Mode == "errors";
         var anchors = AnchorsSql(hasService, pinAsOf: true, errorsOnly: errorsMode);
         var useSlices = SupportsSeekAnchors && !errorsMode;
@@ -814,13 +570,6 @@ public abstract class TraceReadRepositoryBase : DapperReadRepository, ITraceRead
                     : await FetchAnchorPageAsync(conn, anchors, clauses, parameters, requestedSize, descending: false, cancellationToken);
                 break;
 
-            case "last":
-                forward = false;
-                var lastCount = await TryGetExactAnchorCountAsync(anchors, clauses, parameters, cancellationToken);
-                requestedSize = lastCount.HasValue ? KeysetCursor.LastPageRowCount(lastCount.Value, size) : size;
-                rows = await FetchAnchorPageAsync(conn, anchors, clauses, parameters, requestedSize, descending: false, cancellationToken);
-                break;
-
             default: // "first"
                 forward = true;
                 requestedSize = size;
@@ -848,23 +597,15 @@ public abstract class TraceReadRepositoryBase : DapperReadRepository, ITraceRead
         {
             displayRows = [.. rows];
             displayRows.Reverse();
-            if (nav == "last")
-            {
-                nextCursor = null;
-                var reachedStart = !hasExtra;
-                prevCursor = reachedStart || displayRows.Count == 0 ? null : Encode(displayRows[0], filterHash);
-            }
-            else // prev
-            {
-                nextCursor = displayRows.Count > 0 ? Encode(displayRows[^1], filterHash) : null;
-                prevCursor = hasExtra && displayRows.Count > 0 ? Encode(displayRows[0], filterHash) : null;
-            }
+            // prev
+            nextCursor = displayRows.Count > 0 ? Encode(displayRows[^1], filterHash) : null;
+            prevCursor = hasExtra && displayRows.Count > 0 ? Encode(displayRows[0], filterHash) : null;
         }
 
         // Exact span counts and whole-trace bounds for just this page's anchors (bounded by `size`). A sliced page did not
         // compute the error flag per anchor, so it is read here, for these traces only.
         var items = await LoadPageTraceInfosAsync(conn, displayRows, query.Service, cancellationToken,
-            errorScope: useSlices && nav != "last" ? new ErrorScope(startNano - _anchorLookbackNanos, endNano, asOf) : null);
+            errorScope: useSlices ? new ErrorScope(startNano - _anchorLookbackNanos, endNano, asOf) : null);
 
         return new TracePageResult { Items = items, NextCursor = nextCursor, PrevCursor = prevCursor, AsOf = asOf };
     }
@@ -961,21 +702,6 @@ public abstract class TraceReadRepositoryBase : DapperReadRepository, ITraceRead
         clone.Add("offset", 0);
         var rows = await conn.QueryAsync<AnchorRow>(new CommandDefinition(sql, clone, cancellationToken: cancellationToken));
         return rows.ToList();
-    }
-
-    private async Task<long?> TryGetExactAnchorCountAsync(
-        string anchors, List<string> clauses, DynamicParameters parameters, CancellationToken cancellationToken)
-    {
-        // On its own pooled connection, not the caller's: the caller keeps using its connection for the page itself,
-        // and a count that times out leaves the connection it ran on aborted mid-statement (see TimedQuery).
-        await using var conn = await OpenConnectionAsync(cancellationToken);
-        var where = clauses.Count == 0 ? "1 = 1" : string.Join(" AND ", clauses);
-        var sql = $"SELECT COUNT(*) FROM {anchors} a WHERE {where}";
-        var (result, timedOut) = await TimedQuery.RunAsync(
-            async (timeoutSeconds, ct) => await conn.ExecuteScalarAsync<long>(new CommandDefinition(
-                sql, parameters, commandTimeout: timeoutSeconds, cancellationToken: ct)),
-            _summaryTimeoutSeconds, cancellationToken);
-        return timedOut ? null : result;
     }
 
     /// <summary>
@@ -1180,12 +906,50 @@ public abstract class TraceReadRepositoryBase : DapperReadRepository, ITraceRead
         };
     }
 
+    /// <summary>
+    /// Exact count of inbound spans (kind SERVER/CONSUMER) of the active tenant that started in
+    /// <c>[start, end)</c> and ran at least <paramref name="minDurationMs"/>: the slow-request alert's one
+    /// raw statement (plans/summary-rollups.md). Through <c>(tenant_id, service_name, start)</c> /
+    /// <c>(tenant_id, start)</c>, under the summary timeout; on timeout the count is unknown.
+    /// </summary>
+    public async Task<SlowRequestCount> CountSlowInboundSpansAsync(
+        DateTime start, DateTime end, string? service, double minDurationMs, CancellationToken cancellationToken = default)
+    {
+        var parameters = new DynamicParameters();
+        parameters.Add("tenantId", TenantId);
+        parameters.Add("start", TimeConversion.DateTimeToUnixNano(start));
+        parameters.Add("end", TimeConversion.DateTimeToUnixNano(end));
+        parameters.Add("minNanos", (long)Math.Ceiling(minDurationMs * 1_000_000.0));
+        var serviceFilter = "";
+        if (service != null)
+        {
+            parameters.Add("service", service);
+            serviceFilter = " AND service_name = @service";
+        }
+
+        var sql = $"""
+            SELECT COUNT(*) FROM spans
+            WHERE tenant_id = @tenantId AND start_time_unix_nano >= @start AND start_time_unix_nano < @end
+              AND kind IN ('SERVER', 'CONSUMER') AND (end_time_unix_nano - start_time_unix_nano) >= @minNanos{serviceFilter}
+            """;
+
+        var (count, timedOut) = await TimedQuery.RunAsync(
+            async (timeoutSeconds, ct) =>
+            {
+                await using var conn = await OpenConnectionAsync(ct);
+                return await conn.ExecuteScalarAsync<long>(new CommandDefinition(
+                    sql, parameters, commandTimeout: timeoutSeconds, cancellationToken: ct));
+            },
+            _summaryTimeoutSeconds, cancellationToken);
+        return new SlowRequestCount(timedOut ? 0 : count, timedOut);
+    }
+
     // =========================================================================
     // SHARED FILTER COMPILATION / ANCHOR FETCH
     // =========================================================================
 
     /// <summary>
-    /// Builds the WHERE clauses shared by the summary, listTotal, page, export and samples queries,
+    /// Builds the WHERE clauses shared by the page, export and samples queries,
     /// all scoped to the <see cref="AnchorsSql"/> alias <c>a</c>, plus the parameters the anchors
     /// derived table and the clauses reference (<c>@tenantId</c>, <c>@start</c>, <c>@end</c>,
     /// <c>@anchorFrom</c>, <c>@service</c>). The time/service/pin scoping itself lives inside the
@@ -1284,41 +1048,6 @@ public abstract class TraceReadRepositoryBase : DapperReadRepository, ITraceRead
     /// </summary>
     protected virtual string SpanLevelMatchPredicateWithResource(string traceIdColumn, string innerTimeClause, string innerPredicate)
         => $"EXISTS (SELECT 1 FROM spans s2 JOIN resources rs2 ON rs2.id = s2.resource_id WHERE s2.trace_id = {traceIdColumn}{innerTimeClause} AND {innerPredicate})";
-
-    /// <summary>
-    /// Fetches the anchor rows the summary is computed from in ONE pinned pass over the anchors
-    /// (<c>created_at &lt;= @asOf</c>): the inbound anchors only (kind <c>SERVER</c>/<c>CONSUMER</c>,
-    /// decision 12), plus -- on every row, via a window count taken before the inbound filter -- the
-    /// number of anchors of ANY kind that match the filters, which is the paginator's <c>listTotal</c>.
-    /// <see cref="SummaryAnchors.TotalAll"/> is null when no inbound anchor came back to carry it.
-    /// </summary>
-    private async Task<SummaryAnchors> FetchSummaryAnchorsAsync(
-        System.Data.Common.DbConnection conn, string mode, string? service, string? operation,
-        double? minDurationMs, double? maxDurationMs, ParsedSearchQuery parsed,
-        long startNano, long endNano, DateTime asOf, int? commandTimeoutSeconds, CancellationToken ct)
-    {
-        var (clauses, parameters) = BuildAnchorFilterClauses(mode, service, operation, minDurationMs, maxDurationMs, parsed, startNano, endNano);
-        parameters.Add("asOf", asOf);
-        var where = clauses.Count == 0 ? "1 = 1" : string.Join(" AND ", clauses);
-
-        var sql = $"""
-            SELECT t.trace_id AS TraceId, t.anchor_start AS AnchorStart, t.anchor_end AS AnchorEnd,
-                   t.service_name AS ServiceName, t.has_error AS HasErrorInt, t.total_all AS TotalAll
-            FROM (
-                SELECT a.trace_id, a.anchor_start, a.anchor_end, a.service_name, a.has_error, a.anchor_kind,
-                       COUNT(*) OVER () AS total_all
-                FROM {AnchorsSql(!string.IsNullOrEmpty(service), pinAsOf: true, errorsOnly: mode == "errors")} a
-                WHERE {where}
-            ) t
-            WHERE t.anchor_kind IN ('SERVER', 'CONSUMER')
-            """;
-
-        var rows = (await conn.QueryAsync<AnchorSummaryRow>(new CommandDefinition(
-            sql, parameters, commandTimeout: commandTimeoutSeconds, cancellationToken: ct))).ToList();
-        return new SummaryAnchors(rows, rows.Count > 0 ? rows[0].TotalAll : null);
-    }
-
-    private sealed record SummaryAnchors(List<AnchorSummaryRow> Rows, long? TotalAll);
 
     // =========================================================================
     // ANALYSIS READS
@@ -1502,15 +1231,6 @@ public abstract class TraceReadRepositoryBase : DapperReadRepository, ITraceRead
     // ROW DTOs
     // =========================================================================
 
-    private sealed class AnchorSummaryRow
-    {
-        public string TraceId { get; set; } = null!;
-        public long AnchorStart { get; set; }
-        public long AnchorEnd { get; set; }
-        public string? ServiceName { get; set; }
-        public int HasErrorInt { get; set; }
-        public long TotalAll { get; set; }
-    }
 
     private sealed class AnchorRow
     {

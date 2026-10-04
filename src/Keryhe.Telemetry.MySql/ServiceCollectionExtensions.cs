@@ -25,6 +25,8 @@ public static class MySqlServiceCollectionExtensions
         // metric_last_seen maintenance (list-pages-server-side plan, Phase 5). MetricTouchWorker
         // is provider-agnostic and registered once, in AddKeryheTelemetryCollector.
         services.AddScoped<IMetricTouchStore, MySqlMetricTouchStore>();
+        // Summary rollups (plans/summary-rollups.md); RollupWorker is registered once, in AddKeryheTelemetryCollector.
+        services.AddScoped<IRollupStore, MySqlRollupStore>();
         return services;
     }
 
@@ -34,6 +36,9 @@ public static class MySqlServiceCollectionExtensions
         services.AddScoped<ITraceReadRepository, MySqlTraceReadRepository>();
         services.AddScoped<IMetricReadRepository, MySqlMetricReadRepository>();
         services.AddScoped<ILogReadRepository, MySqlLogReadRepository>();
+        services.AddScoped<IRollupReadRepository, MySqlRollupReadRepository>();
+        // The hour tier exists on MySQL only (the measurement gate named it); driven by the API host's RollupCompactionWorker.
+        services.AddScoped<IRollupCompactor, MySqlRollupCompactor>();
         services.AddScoped<IResourceReadRepository, MySqlResourceReadRepository>();
         services.AddScoped<IAlertRuleRepository, MySqlAlertRuleRepository>();
         services.AddScoped<ITenantCatalogRepository, MySqlTenantCatalogRepository>();

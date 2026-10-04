@@ -63,11 +63,21 @@ public sealed class TimescaleRetentionSettingsRepository(NpgsqlDataSource dataSo
 {
     private readonly NpgsqlDataSource _dataSource = dataSource;
 
-    public override Task<int> DeleteOldTracesAsync(TimeSpan retentionPeriod, CancellationToken cancellationToken = default)
-        => DropChunksAsync(["spans"], retentionPeriod, cancellationToken);
+    // The rollup hypertables follow their signal's window (summary-rollups plan, decision 8); their
+    // rows are not part of the returned count.
+    public override async Task<int> DeleteOldTracesAsync(TimeSpan retentionPeriod, CancellationToken cancellationToken = default)
+    {
+        var removed = await DropChunksAsync(["spans"], retentionPeriod, cancellationToken);
+        await DropChunksAsync(["request_rollup_minute"], retentionPeriod, cancellationToken);
+        return removed;
+    }
 
-    public override Task<int> DeleteOldLogRecordsAsync(TimeSpan retentionPeriod, CancellationToken cancellationToken = default)
-        => DropChunksAsync(["log_records"], retentionPeriod, cancellationToken);
+    public override async Task<int> DeleteOldLogRecordsAsync(TimeSpan retentionPeriod, CancellationToken cancellationToken = default)
+    {
+        var removed = await DropChunksAsync(["log_records"], retentionPeriod, cancellationToken);
+        await DropChunksAsync(["log_rollup_minute"], retentionPeriod, cancellationToken);
+        return removed;
+    }
 
     public override Task<int> DeleteOldMetricDataPointsAsync(TimeSpan retentionPeriod, CancellationToken cancellationToken = default)
         => DropChunksAsync(TelemetryIngestionHelpers.TimePrunedMetricTables, retentionPeriod, cancellationToken);
@@ -104,3 +114,6 @@ public sealed class TimescaleRetentionSettingsRepository(NpgsqlDataSource dataSo
         return (int)Math.Min(total, int.MaxValue);
     }
 }
+
+public sealed class TimescaleRollupReadRepository(NpgsqlDataSource dataSource, ITenantContext tenantContext, IConfiguration configuration)
+    : PostgreSqlRollupReadRepository(dataSource, tenantContext, configuration);

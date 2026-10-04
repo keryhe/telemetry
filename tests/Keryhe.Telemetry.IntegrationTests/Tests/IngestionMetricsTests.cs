@@ -77,7 +77,7 @@ public class IngestionMetricsTests
         var opts = Options.Create(options ?? new TelemetryIngestionOptions { RetryBaseDelayMilliseconds = 5, RetryMaxDelayMilliseconds = 10 });
         var metrics = new IngestionMetrics();
         var channel = new TelemetryIngestionChannel(opts, metrics);
-        var worker = new TelemetryIngestionWorker(writer, channel, opts, metrics, NullLogger<TelemetryIngestionWorker>.Instance);
+        var worker = new TelemetryIngestionWorker(writer, channel, opts, metrics, new RollupAccumulator(), NullLogger<TelemetryIngestionWorker>.Instance);
         return (channel, worker, metrics);
     }
 

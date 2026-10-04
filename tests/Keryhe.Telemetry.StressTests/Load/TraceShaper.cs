@@ -27,6 +27,7 @@ public sealed class TraceShaper(LoadProfile profile, Topology topology, Random r
         var byService = new Dictionary<string, ScopeSpans>();
         long current = 0, backdated = 0;
 
+        long inbound = 0;
         while (current + backdated < target)
         {
             var (baseNanos, age) = TimeStamps.Pick(profile.Time, rng);
@@ -47,6 +48,7 @@ public sealed class TraceShaper(LoadProfile profile, Topology topology, Random r
             }
 
             if (age == RecordAge.Backdated) backdated += spans.Count; else current += spans.Count;
+            if (age == RecordAge.Current) inbound += spans.Count(IsInbound);
         }
 
         var request = new ExportTraceServiceRequest();
@@ -60,6 +62,8 @@ public sealed class TraceShaper(LoadProfile profile, Topology topology, Random r
         var entries = new List<LedgerEntry>(2);
         if (current > 0) entries.Add(new LedgerEntry("spans", RecordAge.Current, current, false, Dedups: _load.RedeliveryCollapses));
         if (backdated > 0) entries.Add(new LedgerEntry("spans", RecordAge.Backdated, backdated, false, Dedups: _load.RedeliveryCollapses));
+        // The summary rollup counts inbound spans (kind SERVER/CONSUMER) and, unlike spans, stores a re-delivered one again.
+        if (inbound > 0) entries.Add(new LedgerEntry(RollupTables.Request, RecordAge.Current, inbound, false, Dedups: false));
 
         return new Payload<ExportTraceServiceRequest>(request, tenantIndex, (int)(current + backdated), entries,
             rng.NextDouble() < profile.Time.RedeliveryFraction);
@@ -76,7 +80,7 @@ public sealed class TraceShaper(LoadProfile profile, Topology topology, Random r
         var services = topology.ServicesByTenant[tenantIndex];
         var target = profile.Transport.RecordsPerExport;
         var byService = new Dictionary<string, ScopeSpans>();
-        long spanCount = 0;
+        long spanCount = 0, inboundCount = 0;
         while (spanCount < target)
         {
             // A little spread inside the export so its traces do not all start in the same nanosecond.
@@ -94,6 +98,7 @@ public sealed class TraceShaper(LoadProfile profile, Topology topology, Random r
                 scope.Spans.Add(node.Span);
             }
             spanCount += spans.Count;
+            inboundCount += spans.Count(IsInbound);
         }
         var request = new ExportTraceServiceRequest();
         foreach (var service in services.Where(sv => byService.ContainsKey(sv.Name)))
@@ -103,7 +108,8 @@ public sealed class TraceShaper(LoadProfile profile, Topology topology, Random r
             request.ResourceSpans.Add(rs);
         }
         return new Payload<ExportTraceServiceRequest>(request, tenantIndex, (int)spanCount,
-            [new LedgerEntry("spans", RecordAge.Current, spanCount, false, Dedups: _load.RedeliveryCollapses)], false);
+            [new LedgerEntry("spans", RecordAge.Current, spanCount, false, Dedups: _load.RedeliveryCollapses),
+             new LedgerEntry(RollupTables.Request, RecordAge.Current, inboundCount, false, Dedups: false)], false);
     }
 
     /// <summary>
@@ -135,12 +141,18 @@ public sealed class TraceShaper(LoadProfile profile, Topology topology, Random r
                 rs.ScopeSpans.Add(scope);
                 request.ResourceSpans.Add(rs);
             }
-            chunks.Add(new Payload<ExportTraceServiceRequest>(request, tenantIndex, slice.Count, [new LedgerEntry("spans", RecordAge.Current, slice.Count, false, Dedups: _load.RedeliveryCollapses)], false));
+            chunks.Add(new Payload<ExportTraceServiceRequest>(request, tenantIndex, slice.Count,
+                [new LedgerEntry("spans", RecordAge.Current, slice.Count, false, Dedups: _load.RedeliveryCollapses),
+                 new LedgerEntry(RollupTables.Request, RecordAge.Current, slice.Count(IsInbound), false, Dedups: false)], false));
         }
         var first = nodes[0].Span;
         return (chunks, new SeededTrace(tenantIndex, topology.Tenants[tenantIndex].Id, ToHex(first.TraceId),
             (long)nodes.Min(n => n.Span.StartTimeUnixNano), (long)nodes.Max(n => n.Span.EndTimeUnixNano), nodes.Count, "large"));
     }
+
+    /// <summary>Whether the summary rollup counts this span: kind SERVER or CONSUMER.</summary>
+    private static bool IsInbound(Node node) =>
+        node.Span.Kind is Span.Types.SpanKind.Server or Span.Types.SpanKind.Consumer;
 
     private static string ToHex(ByteString id) => Convert.ToHexString(id.ToByteArray()).ToLowerInvariant();
 

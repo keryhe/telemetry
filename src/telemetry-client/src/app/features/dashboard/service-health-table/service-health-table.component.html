@@ -26,6 +26,18 @@
       <th mat-header-cell *matHeaderCellDef mat-sort-header class="num" arrowPosition="before">Avg</th>
       <td mat-cell *matCellDef="let r" class="num">{{ formatDuration(r.avgMs) }}</td>
     </ng-container>
+    <ng-container matColumnDef="p50">
+      <th mat-header-cell *matHeaderCellDef mat-sort-header class="num" arrowPosition="before">p50</th>
+      <td mat-cell *matCellDef="let r" class="num">{{ formatDuration(r.p50Ms) }}</td>
+    </ng-container>
+    <ng-container matColumnDef="p90">
+      <th mat-header-cell *matHeaderCellDef mat-sort-header class="num" arrowPosition="before">p90</th>
+      <td mat-cell *matCellDef="let r" class="num">{{ formatDuration(r.p90Ms) }}</td>
+    </ng-container>
+    <ng-container matColumnDef="p95">
+      <th mat-header-cell *matHeaderCellDef mat-sort-header class="num" arrowPosition="before">p95</th>
+      <td mat-cell *matCellDef="let r" class="num">{{ formatDuration(r.p95Ms) }}</td>
+    </ng-container>
     <tr mat-header-row *matHeaderRowDef="columns"></tr>
     <tr mat-row *matRowDef="let row; columns: columns"
         class="clickable-row"

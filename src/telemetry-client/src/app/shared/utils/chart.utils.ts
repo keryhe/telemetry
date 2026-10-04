@@ -513,7 +513,7 @@ function renderHeatmap(
   const zeroColor = isDark ? '#26272b' : '#f4f4f5';
   const separatorColor = gridLineColor(isDark);
   return {
-    chart: { type: 'heatmap', height, toolbar: { show: false }, background: 'transparent' },
+    chart: { type: 'heatmap', height, toolbar: { show: false }, background: 'transparent', zoom: { allowMouseWheelZoom: false } },
     theme: { mode: isDark ? 'dark' : 'light' },
     series,
     xaxis: { type: 'datetime', labels: { datetimeUTC: false } },
@@ -646,7 +646,7 @@ export function buildHistogramBarFromBuckets(
   const labels = bucketLabels(new Array(groups.length), barBounds, unit);
 
   return {
-    chart: { type: 'bar', height: 220, toolbar: { show: false }, background: 'transparent' },
+    chart: { type: 'bar', height: 220, toolbar: { show: false }, background: 'transparent', zoom: { allowMouseWheelZoom: false } },
     theme: { mode: isDark ? 'dark' : 'light' },
     series: [{ name: 'Count', data: grouped }],
     xaxis: { categories: labels, labels: { rotate: -45, hideOverlappingLabels: true } },

@@ -24,15 +24,6 @@ public interface ITraceReadRepository
     Task<SpanModel?> GetSpanByIdAsync(string traceIdHex, string spanIdHex, CancellationToken cancellationToken = default);
     Task<List<SpanModel>> GetSpansByParentAsync(string traceIdHex, string parentSpanIdHex, CancellationToken cancellationToken = default);
 
-    /// <summary>
-    /// Chart/stat-card summary for the traces list page (list-pages-server-side plan, Phase 3):
-    /// volume/error/duration-percentile buckets, per-service RED stats, the latency heatmap and
-    /// <c>listTotal</c>/<c>requestCount</c>, all derived from each trace's anchor -- its earliest
-    /// span in scope (schema-simplification decision 10). Always the raw path: there are no rollup
-    /// tables since schema 3.0.0, so a 3d/7d window on a busy tenant may come back as a lower bound.
-    /// </summary>
-    Task<TraceSummaryResult> GetTraceSummaryAsync(TraceSummaryQuery query, CancellationToken cancellationToken = default);
-
     /// <summary>Keyset-paged trace rows for the traces list page (decision 1), anchored on each trace's earliest span in scope (decision 10), pinned on <see cref="TraceQuery.AsOf"/> (decision 3).</summary>
     Task<TracePageResult> GetTracePageAsync(TraceQuery query, CancellationToken cancellationToken = default);
 
@@ -42,6 +33,13 @@ public interface ITraceReadRepository
     /// window); on timeout the result is empty and flagged <see cref="TraceSamplesResult.TimedOut"/>.
     /// </summary>
     Task<TraceSamplesResult> GetTraceSamplesAsync(TraceSamplesQuery query, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Exact count of inbound spans (kind SERVER/CONSUMER) that started in <c>[start, end)</c> and ran at least
+    /// <paramref name="minDurationMs"/>, for the slow-request alert (plans/summary-rollups.md). Raw spans, bounded by
+    /// <c>SummaryTimeoutSeconds</c>; on timeout <see cref="SlowRequestCount.TimedOut"/> is set and the count is 0.
+    /// </summary>
+    Task<SlowRequestCount> CountSlowInboundSpansAsync(DateTime start, DateTime end, string? service, double minDurationMs, CancellationToken cancellationToken = default);
 
     // Analysis operations
     Task<List<ServiceDependency>> GetServiceDependenciesAsync(DateTime? startTime = null, DateTime? endTime = null, CancellationToken cancellationToken = default);
@@ -53,11 +51,13 @@ public interface ITraceReadRepository
 
     /// <summary>
     /// Streaming export (list-pages-server-side plan, Phase 8, decision 17): one <see cref="TraceInfo"/>
-    /// row per trace matching the same filters as <see cref="GetTraceSummaryAsync"/>/
-    /// <see cref="GetTracePageAsync"/>, with no row cap. Span-level export is out of scope. Memory
+    /// row per trace matching the same filters as <see cref="GetTracePageAsync"/>, with no row cap. Span-level export is out of scope. Memory
     /// stays bounded to one internal chunk at a time (see <c>TraceReadRepositoryBase</c>'s own doc
     /// comment on this method for why it chunks rather than issuing one unbuffered query), not the
     /// whole matching population.
     /// </summary>
     IAsyncEnumerable<TraceInfo> ExportTracesAsync(TraceExportQuery query, CancellationToken cancellationToken = default);
 }
+
+/// <summary>Result of <see cref="ITraceReadRepository.CountSlowInboundSpansAsync"/>.</summary>
+public readonly record struct SlowRequestCount(long Count, bool TimedOut);

@@ -136,6 +136,8 @@ public class ServiceStats
     public double RatePerSecond { get; set; }
 
     public double AvgMs { get; set; }
+    public double P50Ms { get; set; }
+    public double P90Ms { get; set; }
     public double P95Ms { get; set; }
 }
 
