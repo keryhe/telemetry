@@ -52,9 +52,9 @@ public sealed class ClickHouseDuplicateReferenceRowTests(ClickHouseFixture fixtu
             foreach (var table in tables) await ExecAsync($"INSERT INTO {table} SELECT * FROM {table}");
 
             using var read = fixture.Services.CreateScope();
-            var page = await read.ServiceProvider.GetRequiredService<ILogReadRepository>().GetLogPageAsync(new LogQuery
+            var page = await read.ServiceProvider.GetRequiredService<ILogReadRepository>().GetLogListAsync(new LogQuery
             {
-                Start = WindowStart.AddMinutes(-1), End = WindowStart.AddMinutes(10), Size = 500, AsOf = DateTime.UtcNow.AddMinutes(5)
+                Start = WindowStart.AddMinutes(-1), End = WindowStart.AddMinutes(10), Limit = 500
             });
             Assert.Equal(logs.Count, page.Items.Count);
 

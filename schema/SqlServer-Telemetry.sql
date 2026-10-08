@@ -88,7 +88,7 @@ GO
 -- it -- schema-simplification decision 7), no foreign keys, and clustered on the access path
 -- (tenant_id, start_time_unix_nano, id) rather than on id, so concurrent flushes append at one
 -- tail per tenant instead of all contending for the last page of an IDENTITY key. id stays a
--- BIGINT IDENTITY, only as the keyset-paging tiebreak and to make the clustered key unique.
+-- BIGINT IDENTITY, only as the ordering tiebreak and to make the clustered key unique.
 --
 -- trace_id/span_id are ANSI varchar with a binary collation so the sized AnsiString parameters
 -- the application sends (IdParameter) match with no implicit conversion and the indexes seek.
@@ -114,7 +114,6 @@ CREATE TABLE spans (
     status_code              NVARCHAR(20)  NOT NULL DEFAULT 'UNSET'
         CHECK (status_code IN ('UNSET', 'OK', 'ERROR')),
     status_message           NVARCHAR(MAX),
-    created_at               DATETIME2     NOT NULL DEFAULT SYSDATETIME(),
     attributes_json          NVARCHAR(MAX),
     events_json              NVARCHAR(MAX),
     links_json               NVARCHAR(MAX)
@@ -163,7 +162,7 @@ CREATE INDEX idx_metrics_tenant_service_name ON metrics (tenant_id, service_name
 GO
 
 -- Data-point tables: no primary key, no foreign key, no unique key beyond the clustered key,
--- which is (metric_id, time_unix_nano, id) -- series reads and raw-point keyset paging.
+-- which is (metric_id, time_unix_nano, id) -- series reads and raw-point reads.
 -- exemplars_json holds the OTLP exemplar list (every data point except Summary).
 
 CREATE TABLE gauge_data_points (
@@ -300,10 +299,9 @@ CREATE TABLE log_records (
     flags                    INT          DEFAULT 0,
     trace_id                 VARCHAR(32)  COLLATE Latin1_General_BIN2,
     span_id                  VARCHAR(16)  COLLATE Latin1_General_BIN2,
-    created_at               DATETIME2    NOT NULL DEFAULT SYSDATETIME(),
     attributes_json          NVARCHAR(MAX)
 );
--- List paging, windows, search, per-tenant retention. The service filter is a residual predicate.
+-- Lists, windows, search, per-tenant retention. The service filter is a residual predicate.
 CREATE UNIQUE CLUSTERED INDEX cx_log_records ON log_records (tenant_id, time_unix_nano, id);
 -- Logs for a trace.
 CREATE INDEX idx_log_trace ON log_records (trace_id);

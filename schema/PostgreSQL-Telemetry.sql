@@ -64,7 +64,7 @@ CREATE TABLE instrumentation_scopes (
 --
 -- A plain append target: no primary key, no unique key (a re-delivered span is stored twice and
 -- reads tolerate it -- schema-simplification decision 7), and no foreign keys (reference rows
--- are committed before the data transaction). "id" is an identity used only as the keyset-paging
+-- are committed before the data transaction). "id" is an identity used only as the ordering
 -- tiebreak. "tenant_id" and "service_name" are copied from the resolved resource at ingest.
 -- Ids are TEXT so Npgsql's default text parameter matches the column and uses the indexes.
 CREATE TABLE spans (
@@ -89,7 +89,6 @@ CREATE TABLE spans (
     "status_code"             VARCHAR(20)  NOT NULL DEFAULT 'UNSET'
         CHECK ("status_code" IN ('UNSET', 'OK', 'ERROR')),
     "status_message"          TEXT,
-    "created_at"              TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
     "attributes_json"         JSONB,
     "events_json"             JSONB,
     "links_json"              JSONB
@@ -133,7 +132,7 @@ CREATE TABLE metrics (
 -- Catalog (with or without a service filter) and by-name lookups.
 CREATE INDEX idx_metrics_tenant_service_name ON metrics ("tenant_id", "service_name", "name");
 
--- Data-point tables: no primary key, no foreign key, no unique key. "id" is the keyset tiebreak.
+-- Data-point tables: no primary key, no foreign key, no unique key. "id" is the ordering tiebreak.
 -- exemplars_json holds the OTLP exemplar list (every data point except Summary).
 
 CREATE TABLE gauge_data_points (
@@ -148,7 +147,7 @@ CREATE TABLE gauge_data_points (
     "exemplars_json"     JSONB
 );
 
--- Series reads and raw-point keyset paging.
+-- Series reads and raw-point reads.
 CREATE INDEX idx_gauge_metric_time ON gauge_data_points ("metric_id", "time_unix_nano", "id");
 -- Time access for retention (a batched delete by time).
 CREATE INDEX idx_gauge_time_brin ON gauge_data_points USING BRIN ("time_unix_nano");
@@ -168,7 +167,7 @@ CREATE TABLE sum_data_points (
     "exemplars_json"          JSONB
 );
 
--- Series reads and raw-point keyset paging.
+-- Series reads and raw-point reads.
 CREATE INDEX idx_sum_metric_time ON sum_data_points ("metric_id", "time_unix_nano", "id");
 -- Time access for retention (a batched delete by time).
 CREATE INDEX idx_sum_time_brin ON sum_data_points USING BRIN ("time_unix_nano");
@@ -191,7 +190,7 @@ CREATE TABLE histogram_data_points (
     "exemplars_json"          JSONB
 );
 
--- Series reads and raw-point keyset paging.
+-- Series reads and raw-point reads.
 CREATE INDEX idx_histogram_metric_time ON histogram_data_points ("metric_id", "time_unix_nano", "id");
 -- Time access for retention (a batched delete by time).
 CREATE INDEX idx_histogram_time_brin ON histogram_data_points USING BRIN ("time_unix_nano");
@@ -218,7 +217,7 @@ CREATE TABLE exponential_histogram_data_points (
     "exemplars_json"          JSONB
 );
 
--- Series reads and raw-point keyset paging.
+-- Series reads and raw-point reads.
 CREATE INDEX idx_exp_histogram_metric_time ON exponential_histogram_data_points ("metric_id", "time_unix_nano", "id");
 -- Time access for retention (a batched delete by time).
 CREATE INDEX idx_exp_histogram_time_brin ON exponential_histogram_data_points USING BRIN ("time_unix_nano");
@@ -235,7 +234,7 @@ CREATE TABLE summary_data_points (
     "attributes_json"    JSONB
 );
 
--- Series reads and raw-point keyset paging.
+-- Series reads and raw-point reads.
 CREATE INDEX idx_summary_metric_time ON summary_data_points ("metric_id", "time_unix_nano", "id");
 -- Time access for retention (a batched delete by time).
 CREATE INDEX idx_summary_time_brin ON summary_data_points USING BRIN ("time_unix_nano");
@@ -273,11 +272,10 @@ CREATE TABLE log_records (
     "flags"                  INTEGER      DEFAULT 0,
     "trace_id"                TEXT,
     "span_id"                 TEXT,
-    "created_at"              TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
     "attributes_json"         JSONB
 );
 
--- List paging, windows, search, per-tenant retention. The service filter is a residual predicate.
+-- Lists, windows, search, per-tenant retention. The service filter is a residual predicate.
 CREATE INDEX idx_log_tenant_time_id ON log_records ("tenant_id", "time_unix_nano", "id");
 -- Logs for a trace.
 CREATE INDEX idx_log_trace ON log_records ("trace_id");

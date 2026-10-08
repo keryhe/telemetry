@@ -111,14 +111,12 @@ public sealed class MetricExemplarQuery
     public string MetricName { get; set; } = "";
     public long? MetricId { get; set; }
     public DateTime Start { get; set; }
-    /// <summary>The window's own end — exemplars pin on this directly, never a server-echoed clock value (decision 26).</summary>
+    /// <summary>The window's own end.</summary>
     public DateTime End { get; set; }
     public Dictionary<string, string>? LabelFilters { get; set; }
-    public int Size { get; set; } = 100;
-    /// <summary>Opaque, unparsed keyset cursor (analytics tier only).</summary>
-    public string? Cursor { get; set; }
-    /// <summary>first | next | prev | last (analytics tier only).</summary>
-    public string Nav { get; set; } = "first";
+    /// <summary>Most exemplars to return, newest first. The API clamps it to the configured limit.</summary>
+    public int Limit { get; set; } = DefaultLimit;
+    public const int DefaultLimit = 500;
 }
 
 public sealed class MetricExemplarPage
@@ -127,13 +125,6 @@ public sealed class MetricExemplarPage
     public MetricType Type { get; set; }
     public List<MetricExemplar> Exemplars { get; set; } = new();
 
-    // Analytics tier (decision 26): real keyset paging.
-    public string? NextCursor { get; set; }
-    public string? PrevCursor { get; set; }
-    public long? Total { get; set; }
-    public bool TotalIsLowerBound { get; set; }
-
-    // Standard tier (decision 26): newest-500, no cursor.
-    /// <summary>True when the standard-tier scan hit its 500-row cap: more exemplars exist beyond those returned.</summary>
-    public bool Capped { get; set; }
+    /// <summary>True when more exemplars matched than <see cref="Exemplars"/> holds.</summary>
+    public bool Truncated { get; set; }
 }

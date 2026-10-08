@@ -174,7 +174,7 @@ public static class RunCommand
         var lagLog = r.Markers.Where(m => m.LogLagMs is not null).Select(m => m.LogLagMs!.Value).OrderBy(v => v).ToList();
         var lagTrace = r.Markers.Where(m => m.TraceLagMs is not null).Select(m => m.TraceLagMs!.Value).OrderBy(v => v).ToList();
         if (r.Markers.Count > 0)
-            lines.Add($"  ingest-to-queryable lag p50: log {(lagLog.Count == 0 ? "n/a" : $"{TourSummary.Percentile(lagLog, 0.5):F0} ms")} (includes a {r.LogPinOffsetMs ?? 0:F0} ms asOf pin), trace {(lagTrace.Count == 0 ? "n/a" : $"{TourSummary.Percentile(lagTrace, 0.5):F0} ms")}; {r.Markers.Count(m => m.LogLagMs is null || m.TraceLagMs is null)} timed out");
+            lines.Add($"  ingest-to-queryable lag p50: log {(lagLog.Count == 0 ? "n/a" : $"{TourSummary.Percentile(lagLog, 0.5):F0} ms")}, trace {(lagTrace.Count == 0 ? "n/a" : $"{TourSummary.Percentile(lagTrace, 0.5):F0} ms")}; {r.Markers.Count(m => m.LogLagMs is null || m.TraceLagMs is null)} timed out");
 
         if (r.Quiesce is { } q) lines.Add($"  quiesce: {(q.Reached ? "reached" : "TIMED OUT")} after {q.WaitedSeconds:F0}s");
         foreach (var h in r.Hosts)

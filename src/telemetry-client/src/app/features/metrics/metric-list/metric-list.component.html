@@ -1,4 +1,4 @@
-@if (summaryLoading() || pageLoading()) {
+@if (summaryLoading() || listLoading()) {
   <mat-progress-bar mode="indeterminate" />
 }
 
@@ -52,15 +52,12 @@
 <div class="page-container">
   <mat-card>
     <mat-card-content>
-      @if (totalIsLowerBound()) {
-        <div class="capped-notice">
-          <mat-icon>info</mat-icon>
-          Showing an approximate total (≥ {{ effectiveTotal() | number }}) — the exact count timed out. Narrow the time range for an exact total.
-        </div>
+      @if (truncated()) {
+        <app-list-cap-notice noun="metrics" [limit]="capabilities().metricCatalogLimit" />
       }
 
       @if (groupBy() === 'name') {
-        @if (names().length === 0 && !pageLoading()) {
+        @if (names().length === 0 && !listLoading()) {
           <app-empty-state icon="bar_chart" message="No metrics found" />
         } @else {
           <table mat-table [dataSource]="names()" class="full-width">
@@ -100,7 +97,7 @@
           </table>
         }
       } @else {
-        @if (items().length === 0 && !pageLoading()) {
+        @if (items().length === 0 && !listLoading()) {
           <app-empty-state icon="bar_chart" message="No metrics found" />
         } @else {
           <table mat-table [dataSource]="items()" class="full-width">
@@ -131,14 +128,6 @@
           </table>
         }
       }
-
-      <mat-paginator
-        [length]="effectiveTotal()"
-        [pageSize]="pageSize()"
-        [pageIndex]="pageIndex()"
-        [pageSizeOptions]="pageSizeOptions"
-        [showFirstLastButtons]="true"
-        (page)="onPage($event)" />
     </mat-card-content>
   </mat-card>
 </div>

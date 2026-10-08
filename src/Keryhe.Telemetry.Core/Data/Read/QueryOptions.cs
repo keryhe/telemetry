@@ -1,4 +1,5 @@
 using Keryhe.Telemetry.Core.Data;
+using Microsoft.Extensions.Configuration;
 
 namespace Keryhe.Telemetry.Core.Data.Read;
 
@@ -66,6 +67,50 @@ public sealed class QueryOptions
 
     /// <summary>False ignores every trace-detail time hint: the read is then unbounded on every provider. Default true.</summary>
     public bool TraceHintEnabled { get; set; } = true;
+}
+
+/// <summary>
+/// The most rows each capped list returns, from <c>Telemetry:Query:Limits</c>. A request may ask for fewer, never more.
+/// Read once at registration by <see cref="ProviderCapabilities.FromConfiguration"/>, which also reports them to the UI
+/// through <c>GET /api/capabilities</c>.
+/// </summary>
+public sealed class QueryLimitsOptions
+{
+    /// <summary>Configuration section name these options bind from.</summary>
+    public const string SectionName = QueryOptions.SectionName + ":Limits";
+
+    /// <summary>Logs list. Default 1,000.</summary>
+    public int Logs { get; set; } = 1_000;
+
+    /// <summary>Traces list. Default 500.</summary>
+    public int Traces { get; set; } = 500;
+
+    /// <summary>Metrics catalog, in either grouping. Default 500.</summary>
+    public int MetricCatalog { get; set; } = 500;
+
+    /// <summary>A metric's exemplars. Default 500.</summary>
+    public int Exemplars { get; set; } = 500;
+
+    /// <summary>Reads the section; a value that is present but not a positive integer fails startup naming its key.</summary>
+    public static QueryLimitsOptions FromConfiguration(IConfiguration configuration)
+    {
+        var options = new QueryLimitsOptions();
+        options.Logs = Read(configuration, nameof(Logs), options.Logs);
+        options.Traces = Read(configuration, nameof(Traces), options.Traces);
+        options.MetricCatalog = Read(configuration, nameof(MetricCatalog), options.MetricCatalog);
+        options.Exemplars = Read(configuration, nameof(Exemplars), options.Exemplars);
+        return options;
+    }
+
+    private static int Read(IConfiguration configuration, string name, int fallback)
+    {
+        var key = $"{SectionName}:{name}";
+        var raw = configuration[key];
+        if (string.IsNullOrWhiteSpace(raw)) return fallback;
+        if (!int.TryParse(raw, out var value) || value < 1)
+            throw new InvalidOperationException($"{key} must be a positive integer (was '{raw}').");
+        return value;
+    }
 }
 
 /// <summary>

@@ -9,9 +9,7 @@ namespace Keryhe.Telemetry.Core;
 public interface ILogReadRepository
 {
     // Retrieve operations
-    Task<LogRecordModel?> GetLogRecordByIdAsync(long id, CancellationToken cancellationToken = default);
     Task<IEnumerable<LogRecordModel>> GetLogRecordsByTraceIdAsync(string traceIdHex, CancellationToken cancellationToken = default);
-    Task<IEnumerable<LogRecordModel>> GetLogRecordsByTimeRangeAsync(DateTime startTime, DateTime endTime, CancellationToken cancellationToken = default);
 
     /// <summary>
     /// The <paramref name="before"/> log records immediately preceding and <paramref name="after"/>
@@ -21,16 +19,16 @@ public interface ILogReadRepository
     /// </summary>
     Task<IEnumerable<LogRecordModel>> GetSurroundingLogRecordsAsync(long anchorTimeUnixNano, string? service, int before, int after, CancellationToken cancellationToken = default);
 
-    /// <summary>Keyset-paged log rows for the logs list page (decision 1), pinned on <see cref="LogQuery.AsOf"/> (decision 3).</summary>
-    Task<LogPageResult> GetLogPageAsync(LogQuery query, CancellationToken cancellationToken = default);
+    /// <summary>The newest (or oldest) <see cref="LogQuery.Limit"/> log rows matching the filters, with whether more matched.</summary>
+    Task<LogListResult> GetLogListAsync(LogQuery query, CancellationToken cancellationToken = default);
 
     /// <summary>Server-side attribute facets (decision 15) over the newest matching rows, sampled and labelled as such.</summary>
     Task<LogFacetsResult> GetLogFacetsAsync(LogFacetsQuery query, CancellationToken cancellationToken = default);
 
     /// <summary>
     /// Streaming export (list-pages-server-side plan, Phase 8, decision 17): every log record
-    /// matching the same filters as <see cref="GetLogPageAsync"/>,
-    /// with no row cap and no paging — the caller (the export controller) writes each record to the
+    /// matching the same filters as <see cref="GetLogListAsync"/>,
+    /// with no row cap — the caller (the export controller) writes each record to the
     /// HTTP response as it arrives. Implementations read with Dapper's unbuffered async query mode
     /// so the whole matching set is never materialized in memory at once.
     /// </summary>

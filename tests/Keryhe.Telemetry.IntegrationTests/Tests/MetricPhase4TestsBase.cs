@@ -10,8 +10,7 @@ namespace Keryhe.Telemetry.IntegrationTests.Tests;
 /// <summary>
 /// Phase 4 correctness checks (list-pages-server-side plan): database-side bucketed aggregation
 /// per metric type, top-N + "other" folding, mismatched-histogram-layout exclusion (decision 42),
-/// exponential-histogram scale downscaling, and exemplar paging (keyset on the analytics tier,
-/// capped-500 on the standard tier, via <see cref="ProviderCapabilities.ExemplarPaging"/>).
+/// exponential-histogram scale downscaling, and the capped, newest-first exemplar list.
 /// </summary>
 public abstract class MetricPhase4TestsBase : IAsyncLifetime
 {
@@ -438,7 +437,7 @@ public abstract class MetricPhase4TestsBase : IAsyncLifetime
     }
 
     [Fact]
-    public async Task Exemplars_PageAllMatchingStreams_TierAppropriately()
+    public async Task Exemplars_AreTheNewestFirst_CappedAtTheLimit_AndSayWhenTruncated()
     {
         var metric = SeededDataBuilder.GaugeWithExemplars(_fixture.TenantId, WindowStart, points: 30);
         using (var writeScope = Scope())
@@ -446,49 +445,28 @@ public abstract class MetricPhase4TestsBase : IAsyncLifetime
 
         using var readScope = Scope();
         var repo = readScope.ServiceProvider.GetRequiredService<IMetricReadRepository>();
-        var capabilities = readScope.ServiceProvider.GetRequiredService<ProviderCapabilities>();
 
-        var page = await repo.GetMetricExemplarsAsync(new MetricExemplarQuery
+        Task<MetricExemplarPage?> Exemplars(int limit) => repo.GetMetricExemplarsAsync(new MetricExemplarQuery
         {
             MetricName = "phase4.exemplar.gauge",
             Start = WindowStart.AddSeconds(-1),
             End = WindowStart.AddSeconds(31),
-            Size = 10
+            Limit = limit
         });
 
-        Assert.NotNull(page);
-        if (capabilities.ExemplarPaging)
-        {
-            // Analytics tier: real keyset paging — a first page of size 10 must leave more to page
-            // through (30 exemplars total), and walking `next` until exhausted must visit all 30
-            // exactly once with no gaps or duplicates.
-            Assert.NotNull(page!.NextCursor);
-            var seen = new HashSet<long>(page.Exemplars.Select(e => e.Exemplar.TimeUnixNano));
-            var cursor = page.NextCursor;
-            while (cursor != null)
-            {
-                var next = await repo.GetMetricExemplarsAsync(new MetricExemplarQuery
-                {
-                    MetricName = "phase4.exemplar.gauge",
-                    Start = WindowStart.AddSeconds(-1),
-                    End = WindowStart.AddSeconds(31),
-                    Size = 10,
-                    Cursor = cursor,
-                    Nav = "next"
-                });
-                Assert.NotNull(next);
-                foreach (var e in next!.Exemplars)
-                    Assert.True(seen.Add(e.Exemplar.TimeUnixNano), "keyset paging must not repeat an exemplar");
-                cursor = next.NextCursor;
-            }
-            Assert.Equal(30, seen.Count);
-        }
-        else
-        {
-            // Standard tier: newest 500, no cursor.
-            Assert.Null(page!.NextCursor);
-            Assert.Equal(30, page.Exemplars.Count);
-            Assert.False(page.Capped);
-        }
+        var all = await Exemplars(30);
+        Assert.NotNull(all);
+        Assert.Equal(30, all!.Exemplars.Count);
+        Assert.False(all.Truncated); // exactly N exemplars exist: nothing more
+        var times = all.Exemplars.Select(e => e.Exemplar.TimeUnixNano).ToList();
+        Assert.Equal(times.Distinct().Count(), times.Count);
+        Assert.Equal(times.OrderByDescending(t => t), times); // newest first
+
+        var head = await Exemplars(10);
+        Assert.Equal(times.Take(10), head!.Exemplars.Select(e => e.Exemplar.TimeUnixNano));
+        Assert.True(head.Truncated);
+
+        Assert.True((await Exemplars(29))!.Truncated);
+        Assert.False((await Exemplars(100))!.Truncated);
     }
 }

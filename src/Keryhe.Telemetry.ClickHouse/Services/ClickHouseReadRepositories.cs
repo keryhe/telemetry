@@ -71,11 +71,6 @@ public class ClickHouseTraceReadRepository(IConfiguration configuration, ITenant
     protected override string AttributePredicate(string column, string keyParam, string valueParam, bool negated)
         => ClickHouseJsonAttributeHooks.Predicate(column, keyParam, valueParam, negated);
 
-    // Decision 3/Phase 3 pin helper: ClickHouse's created_at default is evaluated at statement
-    // execution, so no 5-second back-off is needed here -- see ClickHouseLogReadRepository's
-    // identical override.
-    protected override string DatabaseClockNowExpr => "now64(9)";
-
     // ClickHouse can't reliably correlate a subquery to the outer row, so "any span in this trace
     // matches" is expressed as an uncorrelated membership test instead of EXISTS (decision 9,
     // list-pages-server-side plan Phase 1). The subquery's own spans alias is still needed so
@@ -142,15 +137,14 @@ public class ClickHouseTraceReadRepository(IConfiguration configuration, ITenant
     protected override string ReferenceRowsSql(bool resources, string columns, string idPredicate)
         => $"SELECT r.id AS Id, {columns} FROM {(resources ? "resources" : "instrumentation_scopes")} r WHERE {idPredicate} LIMIT 1 BY r.id";
 
-    protected override string AnchorsSql(bool hasService, bool pinAsOf, bool errorsOnly = false)
+    protected override string AnchorsSql(bool hasService, bool errorsOnly = false)
     {
         var service = hasService ? " AND service_name = @service" : "";
-        var pin = pinAsOf ? " AND created_at <= @asOf" : "";
         const string earliest = "tuple(start_time_unix_nano, id)";
         return $"""
             (
                 SELECT trace_id, anchor_span_pk, anchor_span_id, anchor_service AS service_name, root_name, anchor_kind,
-                       anchor_start, anchor_end, anchor_created_at, has_error
+                       anchor_start, anchor_end, has_error
                 FROM (
                     SELECT trace_id,
                            argMin(id, {earliest}) AS anchor_span_pk,
@@ -160,11 +154,10 @@ public class ClickHouseTraceReadRepository(IConfiguration configuration, ITenant
                            argMin(kind, {earliest}) AS anchor_kind,
                            min(start_time_unix_nano) AS anchor_start,
                            argMin(end_time_unix_nano, {earliest}) AS anchor_end,
-                           argMin(created_at, {earliest}) AS anchor_created_at,
                            max(status_code = 'ERROR') AS has_error
                     FROM spans
                     WHERE tenant_id = @tenantId
-                      AND start_time_unix_nano >= @anchorFrom AND start_time_unix_nano <= @end{service}{pin}
+                      AND start_time_unix_nano >= @anchorFrom AND start_time_unix_nano <= @end{service}
                     GROUP BY trace_id
                     HAVING anchor_start >= @start
                 )
@@ -187,11 +180,7 @@ public class ClickHouseMetricReadRepository(IConfiguration configuration, ITenan
     protected override string AttributePredicate(string column, string keyParam, string valueParam, bool negated)
         => ClickHouseJsonAttributeHooks.Predicate(column, keyParam, valueParam, negated);
 
-    // Real bug found while wiring Phase 4's bucketed series queries (same shape as the
-    // DatabaseClockNowExpr gap Phase 3 found on SqlServer/MySql/ClickHouse's trace repositories):
-    // this class had no BucketIndexExpr override, so the new bucket-index SQL every series loader
-    // builds would have fallen back to the Postgres-only `numerator / denominator`, which ClickHouse
-    // promotes to Float64 instead of truncating — see DapperReadRepository's own doc comment.
+    // ClickHouse promotes `/` on Int64 operands to Float64; intDiv keeps the series bucket-index math as true integer floor division.
     protected override string BucketIndexExpr(string numerator, string denominator) => $"intDiv({numerator}, {denominator})";
 
     // Real bug found via the Phase 4 integration tests: ClickHouse's COALESCE requires one common
@@ -229,12 +218,6 @@ public class ClickHouseMetricReadRepository(IConfiguration configuration, ITenan
             """;
     }
 
-    // Analytics-tier exemplar keyset paging (decision 26) is inherited unchanged from
-    // MetricReadRepositoryBase.GetMetricExemplarsAsync — see that method's own doc comment for why
-    // the base implementation (not the standard-tier newest-500 scan) is what every analytics
-    // provider uses, and for the documented simplification versus the plan's literal
-    // per-exemplar-ordinal SQL unnesting.
-
     // Load-bearing for the metrics catalog's service filter (list-pages-server-side plan, Phase
     // 5): ClickHouseTraceReadRepository/ClickHouseLogReadRepository already override this for the
     // same reason; MetricReadRepositoryBase's catalog query calls it polymorphically too.
@@ -262,11 +245,6 @@ public class ClickHouseMetricReadRepository(IConfiguration configuration, ITenan
     // comment on MetricReadRepositoryBase for the full symptom and why this is the fix.
     protected override string CatalogQuerySettingsClause => " SETTINGS optimize_read_in_order = 0";
 
-    // The actual root cause of the Phase 5 "next page comes back empty" bug — see
-    // CatalogTimeExpr's own doc comment on MetricReadRepositoryBase for the full story
-    // (ClickHouse.Client's DateTime parameter binding losing DateTime64(9) precision).
-    protected override string CatalogTimeExpr(string timeExpr) => $"toUnixTimestamp64Nano({timeExpr})";
-    protected override object CatalogCursorKeyParam(long nanos) => nanos;
 }
 
 public class ClickHouseLogReadRepository(IConfiguration configuration, ITenantContext tenantContext)
@@ -290,10 +268,6 @@ public class ClickHouseLogReadRepository(IConfiguration configuration, ITenantCo
     // ClickHouse's `/` on Int64 operands promotes to Float64; intDiv keeps histogram
     // bucket-index math as true integer floor division.
     protected override string BucketIndexExpr(string numerator, string denominator) => $"intDiv({numerator}, {denominator})";
-
-    // Decision 3/Phase 2 pin helper: ClickHouse's created_at default is evaluated at statement
-    // execution, so no 5-second back-off is needed here.
-    protected override string DatabaseClockNowExpr => "now64(9)";
 }
 
 public class ClickHouseResourceReadRepository(IConfiguration configuration, ITenantContext tenantContext)

@@ -7,7 +7,7 @@ namespace Keryhe.Telemetry.Core.Data.Read;
 /// Shared base for the control-plane Dapper repositories (tenants, alert rules, retention settings):
 /// the per-provider connection to <c>ConnectionStrings:ControlPlane</c> and Dapper's column-name
 /// mapping. Deliberately separate from <see cref="DapperReadRepository"/>, which carries the
-/// telemetry-read machinery (the <c>asOf</c> pin, id parameters, dialect hooks) the control plane
+/// telemetry-read machinery (id parameters, dialect hooks) the control plane
 /// has no use for.
 /// </summary>
 public abstract class ControlPlaneRepositoryBase

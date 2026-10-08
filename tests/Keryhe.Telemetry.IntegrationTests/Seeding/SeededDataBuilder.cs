@@ -72,31 +72,6 @@ public static class SeededDataBuilder
         return records;
     }
 
-    /// <summary>A batch whose event time falls well inside <paramref name="pinnedWindowStart"/>/<paramref name="pinnedWindowEnd"/> but is flushed "now" — for pinning/late-arrival tests.</summary>
-    public static List<LogRecordModel> LateArrivingLogs(long tenantId, DateTime pinnedWindowStart, DateTime pinnedWindowEnd, int count = 20)
-    {
-        var midpoint = pinnedWindowStart + (pinnedWindowEnd - pinnedWindowStart) / 2;
-        var scope = Scope();
-        var records = new List<LogRecordModel>(count);
-        for (var i = 0; i < count; i++)
-        {
-            var timestamp = midpoint.AddSeconds(i);
-            records.Add(new LogRecordModel
-            {
-                TimeUnixNano = ToUnixNano(timestamp),
-                ObservedTimeUnixNano = ToUnixNano(timestamp),
-                SeverityNumber = 9,
-                SeverityText = "INFO",
-                BodyType = AttributeType.STRING,
-                BodyValue = $"late-arriving log #{i}",
-                Attributes = new Dictionary<string, object>(),
-                Resource = Resource(tenantId, "late-arrivals-svc"),
-                InstrumentationScope = scope
-            });
-        }
-        return records;
-    }
-
     // =========================================================================
     // TRACES
     // =========================================================================

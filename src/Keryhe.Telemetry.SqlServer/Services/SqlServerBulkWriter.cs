@@ -366,7 +366,7 @@ public sealed class SqlServerBulkWriter(
     ];
 
     // A plain bulk copy into spans: no unique key to violate (a re-delivered span is stored again
-    // and reads tolerate it), no foreign keys, and created_at/id come from the column defaults.
+    // and reads tolerate it), no foreign keys, and id comes from the column default.
     // Rows are ordered by the clustered key (tenant_id, start_time_unix_nano) so the load appends
     // within each tenant's tail instead of scattering inserts through the index.
     private static async Task BulkInsertSpansAsync(

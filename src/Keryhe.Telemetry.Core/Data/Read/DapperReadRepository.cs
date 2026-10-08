@@ -34,39 +34,7 @@ public abstract class DapperReadRepository
     protected abstract Task<DbConnection> OpenConnectionAsync(CancellationToken cancellationToken);
 
     /// <summary>
-    /// Database-clock expression for the <c>asOf</c> pin (list-pages-server-side plan, Phase 1
-    /// decision 3/Phase 2): read once per summary/page request when the caller supplies no
-    /// <c>asOf</c> of its own, then echoed back opaquely and never converted. PostgreSQL
-    /// subtract 5 seconds to cover the transaction-start race documented on
-    /// <see cref="ResolveAsOfAsync"/>; SqlServer/MySql/ClickHouse have no equivalent race (their
-    /// <c>created_at</c> defaults are evaluated at statement execution, not transaction start) so
-    /// their overrides use the bare clock function. A provider that keeps this default must also
-    /// declare <see cref="PostgresAsOfBackoffSeconds"/> as its
-    /// <see cref="ProviderCapabilities.AsOfBackoffSeconds"/>, so callers that measure ingest-to-query
-    /// lag through a pinned list (the stress harness) can subtract it.
-    /// </summary>
-    protected virtual string DatabaseClockNowExpr => $"NOW() - INTERVAL '{PostgresAsOfBackoffSeconds} seconds'";
-
-    /// <summary>How far behind the database clock the default <see cref="DatabaseClockNowExpr"/> pins <c>asOf</c>.</summary>
-    public const int PostgresAsOfBackoffSeconds = 5;
-
-    /// <summary>
-    /// Resolves the <c>asOf</c> pin: the caller's own value when supplied (a later page of the
-    /// same query, or the "new since" banner reset), otherwise the database's own clock via
-    /// <see cref="DatabaseClockNowExpr"/> — never the API host's clock, which can drift from the
-    /// database's and, on SqlServer/MySql, may not even share its time zone.
-    /// </summary>
-    protected async Task<DateTime> ResolveAsOfAsync(DbConnection conn, DateTime? requestedAsOf, CancellationToken cancellationToken)
-    {
-        if (requestedAsOf.HasValue)
-            return requestedAsOf.Value;
-
-        return await conn.ExecuteScalarAsync<DateTime>(new CommandDefinition(
-            $"SELECT {DatabaseClockNowExpr}", cancellationToken: cancellationToken));
-    }
-
-    /// <summary>
-    /// Wraps an idempotent read (summary/page/facets) so a provider can retry it once on a
+    /// Wraps an idempotent read (summary/list/facets) so a provider can retry it once on a
     /// transient error — SqlServer's read repositories override this to retry error 1205 (snapshot
     /// update conflict / deadlock victim) with a short jittered delay (decision 35). Every other
     /// provider's reads don't take locks that produce an equivalent transient failure, so the base

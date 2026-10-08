@@ -181,7 +181,7 @@ Host: `Keryhe.Telemetry.Api.Server` (REST API, background workers and the UI). U
 {
   "Telemetry": {
     "Api": { "BasePath": "/api" },
-    "Query": { "SummaryTimeoutSeconds": 5 },
+    "Query": { "SummaryTimeoutSeconds": 5, "Limits": { "Logs": 1000, "Traces": 500 } },
     "Export": { "MaxConcurrent": 2 },
     "AlertEvaluation": { "Enabled": true, "IntervalSeconds": 60 },
     "Retention": { "Enabled": true, "IntervalSeconds": 3600 }
@@ -215,6 +215,20 @@ API host. `QueryOptions`.
 | `PageSliceGrowth` | 4 | Factor each further slice widens by (minimum 2). |
 | `TraceHintMarginMinutes` | 1 | Margin either side of a trace-detail `?start=&end=` hint (ClickHouse). |
 | `TraceHintEnabled` | true | `false` ignores every trace-detail time hint. |
+
+### List caps (`Telemetry:Query:Limits`)
+
+API host. `QueryLimitsOptions`. The most rows each list returns; a request's `limit` may ask for fewer, never more. A list that
+matched more says `truncated` and the UI suggests narrowing the time range or adding filters. Each must be a positive integer, or
+the host fails at startup naming the key. `GET {base}/capabilities` reports them as `logListLimit`, `traceListLimit`,
+`metricCatalogLimit` and `exemplarLimit`. Export is not capped.
+
+| Key | Default | Description |
+|---|---|---|
+| `Logs` | 1000 | `GET .../logs/list` |
+| `Traces` | 500 | `GET .../traces/list` |
+| `MetricCatalog` | 500 | `GET .../metrics/catalog`, in either grouping |
+| `Exemplars` | 500 | `GET .../metrics/exemplars` |
 
 ### Export (`Telemetry:Export`)
 

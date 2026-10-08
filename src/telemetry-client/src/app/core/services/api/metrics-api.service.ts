@@ -23,7 +23,7 @@ export class MetricsApiService {
   /** Resolved per call: the tenant is the route's, and changes with it. */
   private get base(): string { return `${tenantApiUrl(this.apiUrl, this.tenant.requireTenantId())}/metrics`; }
 
-  /** Server-paged metrics catalog (Phase 5): replaces the former unbounded getAllMetrics call. */
+  /** Metrics catalog, capped by the server; `truncated` says more matched. */
   getCatalog(p: MetricCatalogQueryParams): Observable<MetricCatalogPage> {
     let params = new HttpParams()
       .set('start', p.start.toISOString())
@@ -32,13 +32,11 @@ export class MetricsApiService {
     if (p.q) params = params.set('q', p.q);
     if (p.service) params = params.set('service', p.service);
     if (p.type != null) params = params.set('type', p.type);
-    if (p.size != null) params = params.set('size', p.size);
-    if (p.cursor) params = params.set('cursor', p.cursor);
-    if (p.nav) params = params.set('nav', p.nav);
+    if (p.limit != null) params = params.set('limit', p.limit);
     return this.http.get<MetricCatalogPage>(`${this.base}/catalog`, { params });
   }
 
-  /** True unique-metric-name-per-type counts over the full range, unaffected by the catalog's page size. */
+  /** True unique-metric-name-per-type counts over the full range, unaffected by the catalog's row cap. */
   getMetricsSummary(start?: Date, end?: Date): Observable<MetricsSummary> {
     let params = new HttpParams();
     if (start) params = params.set('start', start.toISOString());
@@ -65,12 +63,10 @@ export class MetricsApiService {
     return this.http.get<MetricSeriesResult>(`${this.base}/series`, { params });
   }
 
-  /** Tier-aware exemplars (Phase 4): real keyset paging on the analytics tier, newest-500 capped on standard. */
+  /** The newest exemplars, capped by the server; `truncated` says more exist. */
   getExemplars(p: MetricExemplarQueryParams): Observable<MetricExemplarPage> {
     let params = this.filterParams(p);
-    if (p.size != null) params = params.set('size', p.size);
-    if (p.cursor) params = params.set('cursor', p.cursor);
-    if (p.nav) params = params.set('nav', p.nav);
+    if (p.limit != null) params = params.set('limit', p.limit);
     return this.http.get<MetricExemplarPage>(`${this.base}/exemplars`, { params });
   }
 

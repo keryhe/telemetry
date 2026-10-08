@@ -467,7 +467,7 @@ unchanged):
   resource ids from `(tenant_id, resource_hash)`, scope ids from `scope_hash` (scopes carry no
   tenant) and metric ids from `(resource_id, scope_id, name, type)`, all via `ClickHouseIds.FromKey`.
   `spans.id` and `log_records.id` come from a monotonic in-process generator (`RowId`): they are
-  only the keyset-paging tiebreak. A span's events and links are `events_json`/`links_json` columns
+  only the row-ordering tiebreak. A span's events and links are `events_json`/`links_json` columns
   on the span row.
 - **Reference tables are `ReplacingMergeTree`; spans are not.** resources/scopes/metrics collapse on their `ORDER BY` key at merge time, backed by
   `ResourceScopeCache` + per-batch dedup, so their dedup is *eventual*. `spans` and `log_records`
@@ -513,9 +513,9 @@ unindexed and time-window bounded on **every** provider: one predicate form per 
 search or `mode=slow` request over a window longer than `Telemetry:Query:RawSearchWindowHours`
 (default 24) is rejected (`400`) by `RawSearchWindowGuard`. The provider tiers (`ProviderTier`) and
 `IndexedSearch` are gone. `ProviderCapabilities` keeps `RawSearchWindowHours`, `ExportMaxWindowDays`
-(7 on PostgreSQL/ClickHouse, 1 on SQL Server/MySQL), `AsOfBackoffSeconds` and
-`ExemplarPaging` (the metric detail page uses it to choose keyset paging vs newest-500), and
-`GET /api/capabilities` reports them; the Angular client reads it once at startup
+(7 on PostgreSQL/ClickHouse, 1 on SQL Server/MySQL) and `Limits` (the row caps of the capped lists,
+`Telemetry:Query:Limits`: logs 1,000, traces 500, metrics catalog 500, exemplars 500), and
+`GET /api/capabilities` reports them (`logListLimit`, `traceListLimit`, `metricCatalogLimit`, `exemplarLimit`); the Angular client reads it once at startup
 (`CapabilitiesService`) and reuses it everywhere a page needs a limit.
 
 **MySQL is MySQL 8.0.19+ only** (no MariaDB): upserts use the `INSERT ... VALUES (...) AS new ON
@@ -573,29 +573,31 @@ return partial-success responses.
 `Alerts`, `Tenants` — each wraps the corresponding read repository with query/aggregation
 logic.
 
-**Query layer** (list-pages-server-side plan, phases 1-8): the logs/traces list pages and the
-metrics catalog share one shape, all in `Keryhe.Telemetry.Core/Data/Read`. Lists page by
-**keyset, not offset** (`KeysetCursor`/`NameKeysetCursor`) — an opaque, filter-hash-checked cursor
-encoding `(sort key, tiebreak id)`, never a page number, so a page never shifts under concurrent
-inserts. Every summary/page request pins on **`asOf`**: a database-clock value (`ResolveAsOfAsync`,
-`DatabaseClockNowExpr`) resolved once per fresh query and echoed back opaquely thereafter — never
-parsed or recomputed by the caller — so paging through a window stays stable even as new rows keep
-arriving. (There is no "new since" banner or poll: removed, so a list refreshes only when the user re-applies the time range.) A summary/count query
+**Query layer** (list-pages-server-side plan, then `plans/list-caps.md`): the logs/traces lists, the
+metrics catalog and a metric's exemplars share one shape, all in `Keryhe.Telemetry.Core/Data/Read`. They are
+**capped, not paged**: `GET .../logs/list`, `.../traces/list`, `.../metrics/catalog` and `.../metrics/exemplars`
+return at most `limit` rows (default and ceiling `Telemetry:Query:Limits:*`; a request may ask for fewer, never more)
+as `{items, truncated}`. The query fetches `limit + 1` rows, so `truncated` is exact, and the UI says so and suggests
+narrowing the time range or filters. Logs and traces take `order=newest|oldest` (default `newest`) so both ends of a
+window are reachable; the catalog keeps its order (most recently first seen first) and exemplars are newest first. There
+are no cursors, no `nav`, no page numbers and no `asOf` pin: a list is one request, so there is nothing to keep stable
+between requests, and it refreshes when the user re-applies the time range. (`logs/page` and `traces/page` were renamed
+`list` so an old client sending a cursor gets a 404 instead of silently receiving the first rows again; `GET logs`, an
+unbounded time-range read, is gone.) Export streams everything. A summary/count query
 that risks running long (an unindexed scan, a `COUNT(*)` over a large filtered set) goes through
 **`TimedQuery.RunAsync`**, which enforces `Telemetry:Query:SummaryTimeoutSeconds` (default 5) and
 returns a lower-bound/"≥ N" result instead of blocking the request indefinitely — the rollup reads
 (`IRollupReadRepository`, see "Summary rollups"), `CountSlowInboundSpansAsync`, `GetMetricSeriesAsync` (retrying once at a quarter of the
 requested point count, decision 31), the dashboard's `GetTraceSamplesAsync` and the logs page's `GetLogFacetsAsync` all
-use it. The trace and log **list pages have no exact total and no last page** (`nav=last` is gone from both; the paginator
-says "of many"): the cards and charts above them come from the rollup, so the old 3d/7d summary timeouts no longer
-occur. Two rules, from
+use it. The lists have no exact total: the cards and charts above them come from the rollup, so the old 3d/7d summary
+timeouts no longer occur. Two rules, from
 the 3.0.1 ramp, which answered these as 500s: **a timeout is decided by
 `TimedQuery`'s own deadline, not the exception type** — any exception after the budget counts, because every driver
 ends an aborted command with its own type (Npgsql an `NpgsqlException` wrapping `TimeoutException`, SqlClient a
 `SqlException` even on token cancellation, MySqlConnector a `MySqlException`; ClickHouse.Client does not enforce
 `CommandTimeout` at all) — and the driver gets the budget plus `DriverTimeoutGraceSeconds` (2) so the token fires
-first; and **a connection a timed-out query ran on is never reused**: fallbacks open a fresh one, and an exact count
-that a page still needs afterwards runs on its own connection. Timeouts are counted on the
+first; and **a connection a timed-out query ran on is never reused**: fallbacks open a fresh one, and a fallback
+that still needs a connection opens its own. Timeouts are counted on the
 `Keryhe.Telemetry.Query` meter's `query_timeouts`, tagged with the exception type (the stress harness collects it). `samples` reports a timeout as
 an empty array plus `X-Telemetry-Timed-Out: true` (the body stays an array); facets as `timedOut` in its body. Still
 unbounded (driver default, 30 s): the trace analytics reads (dependencies, operation stats/counts, average latencies),
@@ -844,7 +846,7 @@ cancellation-token overload in the pinned Dapper version) so the reader advances
 and `CancellationToken` — bound by MVC to `HttpContext.RequestAborted` — reaches the underlying
 database command on client disconnect, not just the enumeration loop; `CommandTimeout = 0` is set
 explicitly since Dapper's 30s default would cut off a large export. Traces export derives the anchors ONCE and streams them
-through the same kind of reader (re-running the anchor query per keyset chunk would repeat the whole window scan for every chunk); every 1,000
+through the same kind of reader (re-running the anchor query per chunk would repeat the whole window scan for every chunk); every 1,000
 anchors a second connection fetches that chunk's exact span counts and whole-trace bounds, so memory stays bounded to one chunk and
 `CancellationToken` still reaches the database command. Metrics export reuses `GetMetricSeriesAsync`'s bucketed
 pipeline with `Top = int.MaxValue`, so `BuildDisplaySeriesAndOther`'s fold-into-"other" step is
@@ -874,18 +876,17 @@ earliest span is at the time of the query. That definition is expressed in three
 - **`SeekAnchorsSql`, a range of start times** (the trace-list page, slow mode, the slowest-traces samples; every
   relational provider, `SupportsSeekAnchors`). A span is its trace's anchor when `NOT EXISTS` an earlier in-scope span
   of the same trace at or after the look-back start, checked by one `(trace_id, span_id)` seek per candidate. The
-  cost follows the candidates, not the window, so a page reads **slices**: `FetchSlicedAnchorPageAsync` starts at
-  `Telemetry:Query:PageSliceSeconds` (default 2) of trace start times from the page's edge (the newest for first/next,
-  the cursor forward for prev), widens by `PageSliceGrowth` (default 4) until it has `size + 1` anchors, and takes the
+  cost follows the candidates, not the window, so a list reads **slices**: `FetchSlicedAnchorPageAsync` starts at
+  `Telemetry:Query:PageSliceSeconds` (default 2) of trace start times from the window's newest end (or its oldest, for
+  `order=oldest`), widens by `PageSliceGrowth` (default 4) until it has `limit + 1` anchors, and takes the
   whole remainder once the next slice would cover half of it (bounding a rare search or operation filter). Slices are
-  disjoint, so rows concatenate in the final order, and every filter and the keyset predicate apply to each slice
-  unchanged. Slow mode filters on the anchor's own duration (a few percent of spans), so it reads the whole range in one
-  pass. The anchor's error flag is not computed per candidate; the page reads it for its own rows in the follow-up query
-  (`ErrorScope`: service, look-back range, pin). A first page went from 190-770 ms (PostgreSQL) and 574-3,800 ms (MySQL)
-  to 4-15 ms.
-  `SlicedPaging_MatchesTheAnchorDefinition_...` checks every nav, filter, page size and slice width against the
+  disjoint, so rows concatenate in the final order, and every filter applies to each slice unchanged. Slow mode filters
+  on the anchor's own duration (a few percent of spans), so it reads the whole range in one pass. The anchor's error
+  flag is not computed per candidate; the list reads it for its own rows in the follow-up query (`ErrorScope`: service,
+  look-back range). A first page went from 190-770 ms (PostgreSQL) and 574-3,800 ms (MySQL) to 4-15 ms.
+  `SlicedList_MatchesTheAnchorDefinition_...` checks every filter, order, limit and slice width against the
   definition restated in LINQ over the seeded spans, and was negative-controlled.
-- ClickHouse has no `(trace_id)` seek, so it reads whole-window anchors for pages too (`SupportsSeekAnchors` false).
+- ClickHouse has no `(trace_id)` seek, so it reads whole-window anchors for lists too (`SupportsSeekAnchors` false).
 - **Duration is the anchor span's own** `end - start` everywhere — the row and the `mode=slow` filter. The row's service, operation, kind and `DisplaySpanIdHex` are the anchor's;
   the error flag is "any span in scope has ERROR" (so `mode=errors` is that flag); the span count is exact,
   `COUNT(DISTINCT span_id)` over the page's traces in a follow-up query, scoped to the selected service when
@@ -899,10 +900,8 @@ earliest span is at the time of the query. That definition is expressed in three
   default 5) and drops anchors that start before the window, so a trace that began inside the margin before the
   window is excluded from it rather than anchored on a later span. A trace that began before the margin is
   anchored on its earliest span inside it (accepted).
-- **`asOf` pins the span set before ranking** (`created_at <= @asOf` inside the derived table), so a root that
-  arrives after the pin is not the anchor within a pinned query and becomes the anchor on the next fresh one. There is
-  no "new since" banner or poll on the trace list or the logs page: a list refreshes when the user re-applies the time
-  range.
+- **No pin.** A list is one request over the spans as they are at that moment, so a root that arrives after one read is
+  the anchor on the next. `spans` and `log_records` carry no `created_at` (schema 4.0.0) because nothing pins on it.
 
 **Summary rollups** (schema 3.2.0; replaces the anchor-based trace summary and the raw log
 summary, and `listTotal`). The cards and charts of the dashboard, trace list and logs page, and the error-rate and
@@ -946,7 +945,7 @@ traffic:
   the other.
 - **API.** `GET .../traces/summary?start&end&service&bucketCount` returns `{bucketSeconds, writtenThrough, summary,
   buckets, services, latency, timedOut}` and `GET .../logs/summary?start&end&service&minSeverity&bucketCount` returns
-  `{bucketSeconds, writtenThrough, total, buckets, timedOut}`. The mode, operation, duration, search and `asOf`
+  `{bucketSeconds, writtenThrough, total, buckets, timedOut}`. The mode, operation, duration and search
   parameters are gone from both: the cards and charts describe the **time range and service** (and, for logs, the
   minimum severity) and nothing else. **Breaking** for an external consumer.
 - **UI.** The trace list's first card is **Requests**; its latency chart is one color and a bubble click zooms to the
@@ -1013,7 +1012,7 @@ Telemetry tables:
   key (a re-delivered span is stored twice, decision 7) and no foreign keys to `resources`, scopes or
   `metrics` (reference rows are committed before the data transaction, so a hot-table FK only cost insert
   time — ~7-8% of PostgreSQL flush time). `metrics` keeps its FKs to `resources` and scopes. `id` is an
-  identity/auto-increment used only as the keyset tiebreak and has no index of its own on PostgreSQL.
+  identity/auto-increment used only as the ordering tiebreak and has no index of its own on PostgreSQL.
 - **`tenant_id` and `service_name` columns** on `spans`, `log_records` and `metrics`; the five data-point
   tables get neither (`metric_id` identifies one tenant and service).
 - **Id columns match their driver's parameter type**: `text` on PostgreSQL; `varchar(32)`/

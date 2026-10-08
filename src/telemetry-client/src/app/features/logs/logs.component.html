@@ -84,8 +84,8 @@
       <button mat-menu-item [disabled]="serverExportPending()" (click)="exportServerSide('csv')">
         <mat-icon>cloud_download</mat-icon> Export all matching (CSV)
       </button>
-      <button mat-menu-item (click)="exportCsv()"><mat-icon>table_chart</mat-icon> Export current page (CSV)</button>
-      <button mat-menu-item (click)="exportJson()"><mat-icon>data_object</mat-icon> Export current page (JSON)</button>
+      <button mat-menu-item (click)="exportCsv()"><mat-icon>table_chart</mat-icon> Export shown rows (CSV)</button>
+      <button mat-menu-item (click)="exportJson()"><mat-icon>data_object</mat-icon> Export shown rows (JSON)</button>
     </mat-menu>
 
     <button mat-icon-button (click)="copyLink()"
@@ -177,7 +177,7 @@
       <mat-icon>hourglass_disabled</mat-icon>
       <span>
         Summarizing this time range took too long, so the cards and the chart are unavailable.
-        Narrow the time range or select a service. The log list below is complete.
+        Narrow the time range or select a service. The log list below is not affected.
       </span>
     </div>
   } @else if (chartOptions().series && !traceFilterActive()) {
@@ -206,6 +206,18 @@
           <app-empty-state icon="receipt_long" message="No logs found" hint="Adjust the time range or filters" />
         }
       } @else {
+        <div class="list-controls">
+          @if (!traceFilterActive()) {
+            <mat-button-toggle-group [value]="order()" (change)="order.set($event.value)" hideSingleSelectionIndicator
+                                     aria-label="Which end of the time range to show">
+              <mat-button-toggle value="newest">Newest</mat-button-toggle>
+              <mat-button-toggle value="oldest">Oldest</mat-button-toggle>
+            </mat-button-toggle-group>
+          }
+        </div>
+        @if (listTruncated()) {
+          <app-list-cap-notice noun="logs" [limit]="capabilities().logListLimit" [order]="order()" />
+        }
         <table mat-table [dataSource]="displayRows()" multiTemplateDataRows class="full-width log-table">
           <ng-container matColumnDef="expand">
             <th mat-header-cell *matHeaderCellDef class="expand-col"></th>
@@ -376,16 +388,6 @@
                just to show one detail panel (list-page-scale plan, Phase 8). -->
           <tr mat-row *matRowDef="let row; columns: ['detail']" class="detail-row"></tr>
         </table>
-
-        <mat-paginator
-          [length]="paginatorLength()"
-          [pageSize]="pageSize()"
-          [pageIndex]="pageIndex()"
-          [pageSizeOptions]="pageSizeOptions"
-          class="no-last-button"
-          [showFirstLastButtons]="true"
-          [disabled]="traceFilterActive()"
-          (page)="onPage($event)" />
       }
     </mat-card-content>
   </mat-card>

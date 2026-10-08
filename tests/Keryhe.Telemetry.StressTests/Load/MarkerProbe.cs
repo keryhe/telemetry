@@ -29,10 +29,8 @@ public sealed record PendingMarker(int Sequence, DateTimeOffset SentAt, bool Log
 /// it measures what a user would see: the log by free-text search on its body (the marker), the trace
 /// by fetching its spans.
 ///
-/// The two lags differ by design on some providers: list pages pin every query on <c>asOf</c>, and on
-/// PostgreSQL that pin is <c>NOW() - 5 seconds</c> (a transaction-start race guard, see
-/// <c>DapperReadRepository.DatabaseClockNowExpr</c>), so a log sits ~5s behind ingestion in the list,
-/// while a trace fetched by id is not pinned. Both are what a user sees, so both are reported.
+/// The log is found through the logs list (<c>limit=1</c>) and the trace by id; neither read is pinned or
+/// delayed, so each lag is the time the data takes to become queryable.
 ///
 /// A probe still polling when the run is cancelled is dropped, not recorded as a timeout.
 /// </summary>
@@ -186,7 +184,7 @@ public sealed class MarkerProbe(
     {
         var start = Uri.EscapeDataString(sentAt.AddMinutes(-1).UtcDateTime.ToString("o"));
         var end = Uri.EscapeDataString(DateTimeOffset.UtcNow.AddMinutes(1).UtcDateTime.ToString("o"));
-        using var request = new HttpRequestMessage(HttpMethod.Get, $"api/tenants/{tenantId}/logs/page?start={start}&end={end}&q={Uri.EscapeDataString(marker)}&size=1");
+        using var request = new HttpRequestMessage(HttpMethod.Get, $"api/tenants/{tenantId}/logs/list?start={start}&end={end}&q={Uri.EscapeDataString(marker)}&limit=1");
         using var response = await api.SendAsync(request, ct);
         if (!response.IsSuccessStatusCode) return false;
         using var doc = await JsonDocument.ParseAsync(await response.Content.ReadAsStreamAsync(ct), cancellationToken: ct);

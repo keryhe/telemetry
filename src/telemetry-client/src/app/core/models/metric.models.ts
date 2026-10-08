@@ -187,10 +187,8 @@ export interface MetricExemplarQueryParams {
   metricId?: number;
   labelFilters?: Record<string, string>;
   q?: string;
-  size?: number;
-  /** Opaque, unparsed keyset cursor (analytics tier only). */
-  cursor?: string | null;
-  nav?: 'first' | 'next' | 'prev' | 'last';
+  /** Fewer exemplars than the server's limit; omitted asks for as many as it allows. */
+  limit?: number;
 }
 
 /** One exemplar plus the identity of the data point and series it was sampled from. Served by the
@@ -212,20 +210,12 @@ export interface MetricExemplarPage {
   name: string;
   type: MetricType;
   exemplars: MetricExemplar[];
-
-  // Analytics tier: real keyset paging.
-  nextCursor?: string | null;
-  prevCursor?: string | null;
-  total?: number | null;
-  totalIsLowerBound: boolean;
-
-  // Standard tier: newest-500, no cursor.
-  /** True when the standard-tier scan hit its 500-row cap: more exemplars exist beyond those returned. */
-  capped: boolean;
+  /** More exemplars exist than `exemplars` holds. */
+  truncated: boolean;
 }
 
 // =============================================================================
-// Phase 5 (list-pages-server-side plan): server-paged metrics catalog. Mirrors
+// Phase 5 (list-pages-server-side plan): capped metrics catalog. Mirrors
 // Keryhe.Telemetry.Core.Models.Metrics.cs's MetricCatalogQuery/MetricCatalogPage exactly.
 // Replaces the former GET /api/metrics (getAllMetrics) call and its client-side
 // uniqueMetrics/filteredUnique/filteredAll grouping.
@@ -251,18 +241,14 @@ export interface MetricCatalogQueryParams {
   service?: string;
   type?: MetricType;
   groupBy: MetricCatalogGroupBy;
-  size?: number;
-  /** Opaque, unparsed keyset cursor. */
-  cursor?: string | null;
-  nav?: 'first' | 'next' | 'prev' | 'last';
+  /** Fewer rows than the server's limit; omitted asks for as many as it allows. */
+  limit?: number;
 }
 
 /** Exactly one of `items` (groupBy=instance) or `names` (groupBy=name) is populated, matching the request's groupBy. */
 export interface MetricCatalogPage {
   items: MetricInfo[];
   names: UniqueMetricSummary[];
-  nextCursor?: string | null;
-  prevCursor?: string | null;
-  total?: number | null;
-  totalIsLowerBound: boolean;
+  /** More rows matched than were returned. */
+  truncated: boolean;
 }

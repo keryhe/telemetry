@@ -20,8 +20,8 @@ public static class TourPlan
     private const string Cards = "app-stat-card";
     private const string Rows = "tr.mat-mdc-row, app-empty-state";
     private const string Chart = "apx-chart svg, app-empty-state";
-    private const string NextPage = "button.mat-mdc-paginator-navigation-next:not([disabled])";
-    private const int PagesToTurn = 3;
+    private const string OldestOrder = "mat-button-toggle[value='oldest'] button";
+    private const string NewestOrder = "mat-button-toggle[value='newest'] button";
 
     public static IReadOnlyList<TourStep> Build(string window, TourOptions options, TourData data, long tenantId)
     {
@@ -41,8 +41,9 @@ public static class TourPlan
         };
 
         steps.Add(Navigate("traces:list", "traces", $"{t}traces?{Range()}", [Cards, Rows]));
-        for (var i = 1; i <= PagesToTurn; i++)
-            steps.Add(Click($"traces:next-{i}", "traces", NextPage, [Rows]));
+        // The capped list shows one end of the window; the toggle reads the other end, and back.
+        steps.Add(Click("traces:oldest", "traces", OldestOrder, [Rows]));
+        steps.Add(Click("traces:newest", "traces", NewestOrder, [Rows]));
         steps.Add(new("trace-detail", "trace-detail", ["app-trace-waterfall, .waterfall, svg, mat-card"], Act: OpenFirstRow));
 
         steps.Add(new("metrics", "metrics", [Cards, Rows], $"{t}metrics?{Range()}"));
@@ -66,8 +67,8 @@ public static class TourPlan
         // The fields sidebar starts collapsed: open it, then open the first field's values.
         steps.Add(Click("logs:facets-open", "logs", "button:has(.fields-toggle-icon)", [".facet-key, .facet-empty"], requiresApi: false));
         steps.Add(Click("logs:facet-values", "logs", ".facet-key", [".facet-value"], requiresApi: false));
-        for (var i = 1; i <= PagesToTurn; i++)
-            steps.Add(Click($"logs:next-{i}", "logs", NextPage, [Rows]));
+        steps.Add(Click("logs:oldest", "logs", OldestOrder, [Rows]));
+        steps.Add(Click("logs:newest", "logs", NewestOrder, [Rows]));
         steps.Add(Click("logs:context", "logs", "tr.log-row", ["tr.detail-row .ctx-val, tr.detail-row"], requiresApi: false));
 
         steps.Add(new("alerts", "alerts", ["mat-card, table, app-empty-state"], $"{t}alerts"));

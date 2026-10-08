@@ -7,15 +7,10 @@ import { TenantService } from '../tenant.service';
 import { tenantApiUrl } from './tenant-api-url';
 import { LogRecord } from '../../models/log.models';
 
-/** Filter shape shared by summary/page/facets (list-pages-server-side plan, Phase 2 Target API). */
+/** Filter shape shared by list/facets/export. */
 export interface LogFilter {
   start: Date;
   end: Date;
-  // Opaque and never parsed into a Date (decision 3: "returned to the client opaquely and never
-  // converted"): the server's asOf carries sub-millisecond precision that a JS Date can't hold,
-  // so round-tripping it through `new Date(...)`/`.toISOString()` silently truncates it and
-  // breaks the keyset cursor's filter-hash check on the very next page/next/prev/last request.
-  asOf?: string;
   service?: string;
   minSeverity?: number;
   q?: string;
@@ -30,10 +25,12 @@ export interface LogSummaryQuery {
   bucketCount?: number;
 }
 
-export interface LogPageQuery extends LogFilter {
-  size: number;
-  cursor?: string;
-  nav?: 'first' | 'next' | 'prev';
+export type ListOrder = 'newest' | 'oldest';
+
+export interface LogListQuery extends LogFilter {
+  order?: ListOrder;
+  /** Fewer rows than the server's limit; omitted asks for as many as it allows. */
+  limit?: number;
 }
 
 export interface LogFacetsQuery extends LogFilter {
@@ -82,18 +79,10 @@ export interface LogSummaryResult {
   timedOut: boolean;
 }
 
-interface LogPageDto {
+export interface LogListResult {
   items: LogRecord[];
-  nextCursor: string | null;
-  prevCursor: string | null;
-  asOf: string;
-}
-
-export interface LogPageResult {
-  items: LogRecord[];
-  nextCursor: string | null;
-  prevCursor: string | null;
-  asOf: string;
+  /** More logs matched than `items` holds. */
+  truncated: boolean;
 }
 
 export interface LogFacetValue {
@@ -121,13 +110,6 @@ export class LogsApiService {
   /** Resolved per call: the tenant is the route's, and changes with it. */
   private get base(): string { return `${tenantApiUrl(this.apiUrl, this.tenant.requireTenantId())}/logs`; }
 
-  getLogs(start: Date, end: Date): Observable<LogRecord[]> {
-    const params = new HttpParams()
-      .set('start', start.toISOString())
-      .set('end', end.toISOString());
-    return this.http.get<LogRecord[]>(this.base, { params });
-  }
-
   /** Chart/stat-card summary: per-severity bucket counts from the log rollup (range, service, minimum severity). */
   getLogSummary(query: LogSummaryQuery): Observable<LogSummaryResult> {
     let params = new HttpParams()
@@ -150,18 +132,11 @@ export class LogsApiService {
     );
   }
 
-  /** Keyset-paged log rows (decision 1), pinned on `asOf` (decision 3). */
-  getLogPage(query: LogPageQuery): Observable<LogPageResult> {
-    let params = this.filterParams(query).set('size', query.size).set('nav', query.nav ?? 'first');
-    if (query.cursor) params = params.set('cursor', query.cursor);
-    return this.http.get<LogPageDto>(`${this.base}/page`, { params }).pipe(
-      map((dto) => ({
-        items: dto.items,
-        nextCursor: dto.nextCursor,
-        prevCursor: dto.prevCursor,
-        asOf: dto.asOf,
-      }))
-    );
+  /** The newest (or oldest) logs matching the filters, capped by the server; `truncated` says more matched. */
+  getLogList(query: LogListQuery): Observable<LogListResult> {
+    let params = this.filterParams(query).set('order', query.order ?? 'newest');
+    if (query.limit != null) params = params.set('limit', query.limit);
+    return this.http.get<LogListResult>(`${this.base}/list`, { params });
   }
 
   /** Server-side attribute facets over the newest matching rows (decision 15). */
@@ -178,7 +153,7 @@ export class LogsApiService {
 
   /**
    * Streaming export (list-pages-server-side plan, Phase 8): the same filters as
-   * {@link getLogSummary}/{@link getLogPage} (minus `asOf`/paging — export has no row cap), fetched
+   * {@link getLogList} (minus the limit and order — export has no row cap), fetched
    * as a Blob so the auth interceptor still runs (see `downloadBlob`'s doc comment). The
    * caller (logs.component.ts's Export menu) hands the result straight to `downloadBlob`.
    */
@@ -201,7 +176,6 @@ export class LogsApiService {
     let params = new HttpParams()
       .set('start', query.start.toISOString())
       .set('end', query.end.toISOString());
-    if (query.asOf) params = params.set('asOf', query.asOf);
     if (query.service) params = params.set('service', query.service);
     if (query.minSeverity != null && query.minSeverity >= 0) params = params.set('minSeverity', query.minSeverity);
     if (query.q) params = params.set('q', query.q);

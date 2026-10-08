@@ -14,7 +14,7 @@ public interface IMetricReadRepository
     Task<List<MetricInfo>> GetMetricsByTypeAsync(MetricType type, CancellationToken cancellationToken = default);
 
     /// <summary>
-    /// Server-side, keyset-paged metrics catalog (list-pages-server-side plan, Phase 5, decisions
+    /// Server-side metrics catalog, capped at <see cref="MetricCatalogQuery.Limit"/> rows (<see cref="MetricCatalogPage.Truncated"/> says whether more matched) (list-pages-server-side plan, Phase 5, decisions
     /// 27-28). Replaces the former <c>GetAllMetricsAsync</c> (deleted: unbounded-scan-with-a-cap,
     /// removed rather than fixed — see this method's implementation for the
     /// <c>metric_last_seen</c>-based "seen in range" approximation it uses instead of scanning the
@@ -34,8 +34,7 @@ public interface IMetricReadRepository
     /// <summary>
     /// The newest exemplars for a metric, independent of the series reads. Returns an empty page for
     /// SUMMARY, whose table has no exemplars_json column (OTLP declares no exemplars on Summary).
-    /// Analytics-tier providers override this for real keyset paging (decision 26); the base
-    /// implementation is the standard-tier newest-500 scan with <see cref="MetricExemplarPage.Capped"/>.
+    /// Newest first, at most <see cref="MetricExemplarQuery.Limit"/>, with <see cref="MetricExemplarPage.Truncated"/> when more exist.
     /// </summary>
     Task<MetricExemplarPage?> GetMetricExemplarsAsync(MetricExemplarQuery query, CancellationToken cancellationToken = default);
 

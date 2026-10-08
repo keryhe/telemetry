@@ -18,7 +18,7 @@
 --        - instrumentation_scopes.id from scope_hash (scopes carry no tenant, shared on purpose).
 --        - metrics.id from (resource_id, scope_id, name, type).
 --      spans.id and log_records.id are a monotonic in-process generator: they are only the
---      keyset-paging tiebreak.
+--      ordering tiebreak.
 --   2. No UNIQUE constraints / ON CONFLICT. The reference tables (resources, scopes, metrics)
 --      are ReplacingMergeTree and collapse
 --      rows sharing the ORDER BY key at merge time, backed by an in-process cache + per-batch
@@ -101,7 +101,6 @@ CREATE TABLE IF NOT EXISTS spans
     flags                    Int32 DEFAULT 0,
     status_code              LowCardinality(String) DEFAULT 'UNSET',
     status_message           String DEFAULT '',
-    created_at               DateTime64(9) DEFAULT now64(9),
     attributes_json          Nullable(String),
     events_json              Nullable(String),
     links_json               Nullable(String),
@@ -332,7 +331,6 @@ CREATE TABLE IF NOT EXISTS log_records
     flags                    Int32 DEFAULT 0,
     trace_id                 String DEFAULT '',
     span_id                  String DEFAULT '',
-    created_at               DateTime64(9) DEFAULT now64(9),
     attributes_json          Nullable(String),
     INDEX idx_log_trace trace_id TYPE bloom_filter(0.01) GRANULARITY 4
 )

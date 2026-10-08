@@ -1,6 +1,6 @@
 import { TenantService } from '../../../core/services/tenant.service';
 import { Component, computed, effect, inject, signal, untracked, OnDestroy } from '@angular/core';
-import { DatePipe, DecimalPipe } from '@angular/common';
+import { DatePipe } from '@angular/common';
 import { Router } from '@angular/router';
 import { Subscription } from 'rxjs';
 import { MatButtonToggleModule } from '@angular/material/button-toggle';
@@ -9,7 +9,6 @@ import { MatChipsModule } from '@angular/material/chips';
 import { MatFormFieldModule } from '@angular/material/form-field';
 import { MatIconModule } from '@angular/material/icon';
 import { MatInputModule } from '@angular/material/input';
-import { MatPaginatorModule, PageEvent } from '@angular/material/paginator';
 import { MatProgressBarModule } from '@angular/material/progress-bar';
 import { MatSelectModule } from '@angular/material/select';
 import { MatTableModule } from '@angular/material/table';
@@ -27,6 +26,8 @@ import {
 import { StatCardComponent } from '../../../shared/components/stat-card/stat-card.component';
 import { EmptyStateComponent } from '../../../shared/components/empty-state/empty-state.component';
 import { PageHeaderComponent } from '../../../shared/components/page-header/page-header.component';
+import { ListCapNoticeComponent } from '../../../shared/components/list-cap-notice/list-cap-notice.component';
+import { CapabilitiesService } from '../../../core/services/capabilities.service';
 import { formatUnitLabel } from '../../../shared/utils/chart.utils';
 import { loadPageState, savePageState } from '../../../shared/utils/page-state';
 import { UrlStateService } from '../../../shared/utils/url-state';
@@ -37,12 +38,12 @@ const STATE_KEY = 'state.metrics';
   selector: 'app-metric-list',
   standalone: true,
   imports: [
-    DatePipe, DecimalPipe, FormsModule,
+    DatePipe, FormsModule,
     MatCardModule, MatTableModule, MatIconModule, MatButtonToggleModule,
-    MatSelectModule, MatFormFieldModule, MatInputModule, MatPaginatorModule,
+    MatSelectModule, MatFormFieldModule, MatInputModule,
     MatProgressBarModule, MatChipsModule, MatButtonModule,
     MatTooltipModule,
-    StatCardComponent, EmptyStateComponent, PageHeaderComponent,
+    StatCardComponent, EmptyStateComponent, PageHeaderComponent, ListCapNoticeComponent,
   ],
   templateUrl: './metric-list.component.html',
   styleUrl: './metric-list.component.scss',
@@ -57,15 +58,15 @@ export class MetricListComponent implements OnDestroy {
 
   private readonly saved = loadPageState(STATE_KEY, {
     searchText: '', selectedService: '', selectedType: -1 as MetricType | -1,
-    groupBy: 'name' as MetricCatalogGroupBy, pageSize: 50,
+    groupBy: 'name' as MetricCatalogGroupBy,
   });
 
   protected summaryLoading = signal(true);
-  protected pageLoading = signal(true);
+  protected listLoading = signal(true);
   /** True (unbounded) distinct-metric-name counts per type — backs the count stat cards. */
   protected summary = signal<MetricsSummary>({ uniqueMetricCount: 0, countsByType: [] });
-  protected page = signal<MetricCatalogPage | null>(null);
-  private pageSub?: Subscription;
+  protected list = signal<MetricCatalogPage | null>(null);
+  private listSub?: Subscription;
   private summarySub?: Subscription;
 
   /** Applied query — what filtering, refetching and saved state read. Changes only on submit. */
@@ -77,9 +78,7 @@ export class MetricListComponent implements OnDestroy {
   protected groupBy = signal<MetricCatalogGroupBy>(
     (this.urlState.get('groupBy') as MetricCatalogGroupBy | null) ?? this.saved.groupBy,
   );
-  protected pageSize = signal<number>(this.readNum('size') ?? this.saved.pageSize);
-  protected pageIndex = signal(0);
-  protected readonly pageSizeOptions = [25, 50, 100, 250];
+  protected readonly capabilities = inject(CapabilitiesService).capabilities;
 
   protected readonly typeLabels = TYPE_LABELS;
   protected readonly MetricType = MetricType;
@@ -87,12 +86,12 @@ export class MetricListComponent implements OnDestroy {
 
   protected services = signal<string[]>([]);
 
-  protected effectiveTotal = computed(() => this.page()?.total ?? 0);
-  protected totalIsLowerBound = computed(() => this.page()?.totalIsLowerBound ?? false);
-  protected items = computed(() => this.page()?.items ?? []);
-  protected names = computed(() => this.page()?.names ?? []);
+  /** More rows matched than the catalog holds, so say so above it. */
+  protected truncated = computed(() => this.list()?.truncated ?? false);
+  protected items = computed(() => this.list()?.items ?? []);
+  protected names = computed(() => this.list()?.names ?? []);
 
-  // True distinct metric-name counts per type across the full catalog (not just this page).
+  // True distinct metric-name counts per type across the full catalog (not just the rows listed).
   private countFor(...types: MetricType[]): number {
     const counts = this.summary().countsByType;
     return types.reduce((sum, t) => sum + (counts.find((c) => c.type === t)?.count ?? 0), 0);
@@ -116,33 +115,28 @@ export class MetricListComponent implements OnDestroy {
     // Slide relative preset windows to "now" on (re)entry so navigating back refreshes.
     this.timeRange.refreshRelativeWindow();
 
-    // Tenant-wide, signal-agnostic — fetched once, not derived from the loaded page's rows.
+    // Tenant-wide, signal-agnostic — fetched once, not derived from the loaded rows.
     this.resourcesApi.getServices().subscribe({
       next: (services) => this.services.set(services),
     });
 
-    // Filter/window edits reset to the first page and refetch both summary and catalog.
+    // Filter/window edits refetch both summary and catalog.
     effect(() => {
       this.timeRange.range();
       this.searchText();
       this.selectedService();
       this.selectedType();
       this.groupBy();
-      untracked(() => {
-        this.pageIndex.set(0);
-        this.reloadAll();
-      });
+      untracked(() => this.reloadAll());
     });
 
-    // Mirror filter state into the URL (shareable/deep-linkable). The cursor itself is never
-    // persisted — it is only valid for the exact query that minted it, same as logs/traces.
+    // Mirror filter state into the URL (shareable/deep-linkable).
     effect(() => {
       this.urlState.patch({
         q: this.searchText() || null,
         service: this.selectedService() || null,
         type: this.selectedType() >= 0 ? this.selectedType() : null,
         groupBy: this.groupBy() !== 'instance' ? this.groupBy() : null,
-        size: this.pageSize() !== 50 ? this.pageSize() : null,
       });
     });
 
@@ -156,13 +150,12 @@ export class MetricListComponent implements OnDestroy {
         selectedService: this.selectedService(),
         selectedType: this.selectedType(),
         groupBy: this.groupBy(),
-        pageSize: this.pageSize(),
       });
     });
   }
 
   ngOnDestroy(): void {
-    this.pageSub?.unsubscribe();
+    this.listSub?.unsubscribe();
     this.summarySub?.unsubscribe();
   }
 
@@ -179,12 +172,10 @@ export class MetricListComponent implements OnDestroy {
     const service = this.urlState.get('service') ?? '';
     const type = this.readNum('type') ?? -1;
     const groupBy = (this.urlState.get('groupBy') as MetricCatalogGroupBy | null) ?? this.saved.groupBy;
-    const size = this.readNum('size') ?? this.pageSize();
     if (this.searchText() !== q) { this.searchText.set(q); this.searchInput.set(q); }
     if (this.selectedService() !== service) this.selectedService.set(service);
     if (this.selectedType() !== type) this.selectedType.set(type as MetricType | -1);
     if (this.groupBy() !== groupBy) this.groupBy.set(groupBy);
-    if (this.pageSize() !== size) this.pageSize.set(size);
   }
 
   private currentFilter() {
@@ -200,7 +191,7 @@ export class MetricListComponent implements OnDestroy {
 
   private reloadAll(): void {
     this.summaryLoading.set(true);
-    this.pageLoading.set(true);
+    this.listLoading.set(true);
     const { start, end } = this.timeRange.range();
 
     this.summarySub?.unsubscribe();
@@ -209,50 +200,11 @@ export class MetricListComponent implements OnDestroy {
       error: () => this.summaryLoading.set(false),
     });
 
-    this.fetchPage('first');
-  }
-
-  private fetchPage(nav: 'first' | 'next' | 'prev' | 'last'): void {
-    const current = this.page();
-    const cursor = nav === 'next' ? current?.nextCursor ?? undefined
-      : nav === 'prev' ? current?.prevCursor ?? undefined
-      : undefined;
-
-    this.pageLoading.set(true);
-    this.pageSub?.unsubscribe();
-    this.pageSub = this.api.getCatalog({
-      ...this.currentFilter(),
-      size: this.pageSize(),
-      cursor,
-      nav,
-    }).subscribe({
-      next: (result) => { this.page.set(result); this.pageLoading.set(false); },
-      error: () => this.pageLoading.set(false),
+    this.listSub?.unsubscribe();
+    this.listSub = this.api.getCatalog(this.currentFilter()).subscribe({
+      next: (result) => { this.list.set(result); this.listLoading.set(false); },
+      error: () => this.listLoading.set(false),
     });
-  }
-
-  /**
-   * Maps MatPaginator's page event onto a keyset `nav` (decision 1: no arbitrary page jump).
-   * `showFirstLastButtons` only ever moves the index by ±1 or straight to the first/last computed
-   * page, so the direction is unambiguous from the index delta.
-   */
-  protected onPage(e: PageEvent): void {
-    if (e.pageSize !== this.pageSize()) {
-      this.pageSize.set(e.pageSize);
-      this.pageIndex.set(0);
-      this.fetchPage('first');
-      return;
-    }
-
-    const lastIndex = Math.max(0, Math.ceil(this.effectiveTotal() / this.pageSize()) - 1);
-    let nav: 'first' | 'next' | 'prev' | 'last';
-    if (e.pageIndex === 0) nav = 'first';
-    else if (!this.totalIsLowerBound() && e.pageIndex >= lastIndex) nav = 'last';
-    else if (e.pageIndex > (e.previousPageIndex ?? 0)) nav = 'next';
-    else nav = 'prev';
-
-    this.pageIndex.set(e.pageIndex);
-    this.fetchPage(nav);
   }
 
   protected navigate(name: string): void {

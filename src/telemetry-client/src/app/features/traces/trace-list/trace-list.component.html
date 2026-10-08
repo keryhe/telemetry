@@ -177,11 +177,11 @@
 
       <mat-card class="tab-card">
         <mat-card-content>
-          @if (displayRows().length === 0 && !loading() && !pageLoading()) {
+          @if (displayRows().length === 0 && !loading() && !listLoading()) {
             <app-empty-state icon="account_tree" message="No traces found" hint="Try adjusting the time range or filters" />
           } @else {
-            <div class="grid-wrap" [class.loading]="pageLoading()" [attr.aria-busy]="pageLoading()">
-            @if (pageLoading() && displayRows().length === 0) {
+            <div class="grid-wrap" [class.loading]="listLoading()" [attr.aria-busy]="listLoading()">
+            @if (listLoading() && displayRows().length === 0) {
               <div class="skeleton" aria-label="Loading traces">
                 @for (i of skeletonRows; track i) {
                   <div class="skeleton-row">
@@ -193,6 +193,16 @@
                 }
               </div>
             } @else {
+            <div class="list-controls">
+              <mat-button-toggle-group [value]="order()" (change)="order.set($event.value)" hideSingleSelectionIndicator
+                                       aria-label="Which end of the time range to show">
+                <mat-button-toggle value="newest">Newest</mat-button-toggle>
+                <mat-button-toggle value="oldest">Oldest</mat-button-toggle>
+              </mat-button-toggle-group>
+            </div>
+            @if (listTruncated()) {
+              <app-list-cap-notice noun="traces" [limit]="capabilities().traceListLimit" [order]="order()" />
+            }
             <table mat-table [dataSource]="displayRows()" class="full-width">
               <ng-container matColumnDef="service">
                 <th mat-header-cell *matHeaderCellDef>Service</th>
@@ -239,7 +249,7 @@
             </table>
             }
 
-            @if (pageLoading()) {
+            @if (listLoading()) {
               @if (displayRows().length > 0) {
                 <mat-spinner class="grid-spinner" diameter="36" />
               }
@@ -247,16 +257,6 @@
                 <div class="slow-hint">Still working… large time ranges take longer, try narrowing the range.</div>
               }
             }
-
-            <mat-paginator
-              [length]="paginatorLength()"
-              [pageSize]="pageSize()"
-              [pageIndex]="pageIndex()"
-              [pageSizeOptions]="pageSizeOptions"
-              class="no-last-button"
-              [showFirstLastButtons]="true"
-              [disabled]="pageLoading()"
-              (page)="onPage($event)" />
             </div>
           }
         </mat-card-content>

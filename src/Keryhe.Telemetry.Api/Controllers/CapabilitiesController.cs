@@ -27,16 +27,20 @@ public class CapabilitiesController(ProviderCapabilities capabilities, IConfigur
         var provider = configuration["Database:Provider"] ?? "Unknown";
         return Ok(new CapabilitiesDto(
             provider,
-            capabilities.ExemplarPaging,
             capabilities.RawSearchWindowHours,
             capabilities.ExportMaxWindowDays,
-            capabilities.AsOfBackoffSeconds));
+            capabilities.Limits.Logs,
+            capabilities.Limits.Traces,
+            capabilities.Limits.MetricCatalog,
+            capabilities.Limits.Exemplars));
     }
 }
 
 public sealed record CapabilitiesDto(
     string Provider,
-    bool ExemplarPaging,
     int? RawSearchWindowHours,
     int ExportMaxWindowDays,
-    int AsOfBackoffSeconds);
+    int LogListLimit,
+    int TraceListLimit,
+    int MetricCatalogLimit,
+    int ExemplarLimit);

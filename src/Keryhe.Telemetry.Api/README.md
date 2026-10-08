@@ -83,8 +83,27 @@ window to whole minutes and leaves out the minutes after `writtenThrough`, which
 yet. `mode`, `operation`, `minDurationMs`, `maxDurationMs`, `q` and `asOf` are no longer accepted by either summary
 (they are ignored); the cards and charts describe the time range and service only (and, for logs, the minimum
 severity). The `summary` object no longer carries a trace total, `listTotal` and `latencyBuckets` are gone, and
-**`traces/page` and `logs/page` no longer accept `nav=last`**: the lists have no exact total, so page with `first`,
-`next` and `prev`. Ranges before the rollup existed show empty charts over a populated list.
+the lists have no exact total. Ranges before the rollup existed show empty charts over a populated list.
+
+## Capped lists (breaking change in schema 4.0.0)
+
+The trace list, logs list, metrics catalog and a metric's exemplars no longer page. Each returns at most `limit` rows
+(default and ceiling `Telemetry:Query:Limits`) as `{ items, truncated }`, where `truncated` is true when more rows matched.
+To see others, narrow the time range or filters, or ask for the other end of the window with `order`. Export still streams
+everything.
+
+| Before | After |
+|---|---|
+| `GET .../logs/page?start&end&asOf&service&minSeverity&q&size&cursor&nav` → `{ items, nextCursor, prevCursor, asOf }` | `GET .../logs/list?start&end&service&minSeverity&q&order=newest\|oldest&limit` → `{ items, truncated }` |
+| `GET .../traces/page?start&end&asOf&mode&service&operation&minDurationMs&maxDurationMs&q&size&cursor&nav` | `GET .../traces/list?start&end&mode&service&operation&minDurationMs&maxDurationMs&q&order=newest\|oldest&limit` → `{ items, truncated }` |
+| `GET .../metrics/catalog?...&size&cursor&nav` → page with cursors and totals | `GET .../metrics/catalog?...&limit` → `{ items, names, truncated }` |
+| `GET .../metrics/exemplars?...&size&cursor&nav` | `GET .../metrics/exemplars?...&limit` → `{ name, type, exemplars, truncated }`, newest first |
+| `GET .../logs?start&end` (every log in the window) | removed |
+| `GET {base}/capabilities`: `exemplarPaging`, `asOfBackoffSeconds` | removed; `logListLimit`, `traceListLimit`, `metricCatalogLimit`, `exemplarLimit` added |
+
+`limit` is clamped to 1 through the configured limit, and `order` other than `newest` or `oldest` is a `400`. The old `page`
+routes answer `404`, so a client still sending a cursor fails instead of silently receiving the first rows again.
+There is no `asOf` pin any more.
 
 ## Authorization
 

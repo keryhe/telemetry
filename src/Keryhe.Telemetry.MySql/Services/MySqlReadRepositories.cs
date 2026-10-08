@@ -61,10 +61,6 @@ public class MySqlTraceReadRepository(IConfiguration configuration, ITenantConte
     // MySqlLogReadRepository's identical override.
     protected override string LikeOperator => "LIKE";
 
-    // Decision 3/Phase 3 pin helper: MySQL's created_at default is evaluated at statement
-    // execution, so no 5-second back-off is needed here -- see MySqlLogReadRepository's identical
-    // override.
-    protected override string DatabaseClockNowExpr => "CURRENT_TIMESTAMP(6)";
 
     // MySQL's `/` always yields a DECIMAL result even for integer operands; DIV keeps bucket-index
     // math as true integer floor division -- see MySqlLogReadRepository's identical override.
@@ -100,10 +96,6 @@ public class MySqlMetricReadRepository(IConfiguration configuration, ITenantCont
     // same reason; MetricReadRepositoryBase's catalog query calls them polymorphically too.
     protected override string LikeOperator => "LIKE";
 
-    // Standard tier (decision 26): newest-500, no cursor — not the analytics-tier keyset default.
-    public override Task<Keryhe.Telemetry.Core.Models.MetricExemplarPage?> GetMetricExemplarsAsync(
-        Keryhe.Telemetry.Core.Models.MetricExemplarQuery query, CancellationToken cancellationToken = default)
-        => GetMetricExemplarsCappedAsync(query, cancellationToken);
 }
 
 public class MySqlLogReadRepository(IConfiguration configuration, ITenantContext tenantContext)
@@ -125,10 +117,6 @@ public class MySqlLogReadRepository(IConfiguration configuration, ITenantContext
     protected override string PagingClause => "LIMIT @limit OFFSET @offset";
     // MySQL LIKE uses backslash as the default escape character (matches the Postgres base default).
 
-    // Decision 3/Phase 2 pin helper: MySQL's created_at default is evaluated at statement
-    // execution (not transaction start like Postgres), so no 5-second back-off is
-    // needed here. Microsecond precision matches the column's DATETIME(6).
-    protected override string DatabaseClockNowExpr => "CURRENT_TIMESTAMP(6)";
 
     // MySQL's `/` always yields a DECIMAL result even for integer operands; DIV keeps histogram
     // bucket-index math as true integer floor division.

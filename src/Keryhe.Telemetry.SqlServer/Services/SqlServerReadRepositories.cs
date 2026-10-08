@@ -118,10 +118,6 @@ public class SqlServerTraceReadRepository(IConfiguration configuration, ITenantC
     protected override string EscapeLike(string value)
         => value.Replace("[", "[[]").Replace("%", "[%]").Replace("_", "[_]");
 
-    // Decision 3/Phase 3 pin helper: SqlServer's created_at default is evaluated at statement
-    // execution (not transaction start like Postgres) -- see SqlServerLogReadRepository's
-    // identical override.
-    protected override string DatabaseClockNowExpr => "SYSDATETIME()";
 }
 
 public class SqlServerMetricReadRepository(IConfiguration configuration, ITenantContext tenantContext)
@@ -155,10 +151,6 @@ public class SqlServerMetricReadRepository(IConfiguration configuration, ITenant
     protected override string EscapeLike(string value)
         => value.Replace("[", "[[]").Replace("%", "[%]").Replace("_", "[_]");
 
-    // Standard tier (decision 26): newest-500, no cursor — not the analytics-tier keyset default.
-    public override Task<Keryhe.Telemetry.Core.Models.MetricExemplarPage?> GetMetricExemplarsAsync(
-        Keryhe.Telemetry.Core.Models.MetricExemplarQuery query, CancellationToken cancellationToken = default)
-        => GetMetricExemplarsCappedAsync(query, cancellationToken);
 }
 
 public class SqlServerLogReadRepository(IConfiguration configuration, ITenantContext tenantContext)
@@ -185,10 +177,6 @@ public class SqlServerLogReadRepository(IConfiguration configuration, ITenantCon
     protected override string AttributePredicate(string column, string keyParam, string valueParam, bool negated)
         => SqlServerJsonAttributeHooks.Predicate(column, keyParam, valueParam, negated);
 
-    // Decision 3/Phase 2 pin helper: SqlServer's created_at default is evaluated at statement
-    // execution (not transaction start like Postgres), so no 5-second back-off is
-    // needed here.
-    protected override string DatabaseClockNowExpr => "SYSDATETIME()";
 }
 
 public class SqlServerResourceReadRepository(IConfiguration configuration, ITenantContext tenantContext)

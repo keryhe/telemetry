@@ -34,18 +34,6 @@ public class LogsController : ControllerBase
         _exportGate = exportGate;
     }
 
-    // GET /api/tenants/{tenantId}/logs?start=&end=
-    [TelemetryOperation(TelemetryOperation.Read)]
-    [HttpGet]
-    public async Task<ActionResult<IEnumerable<LogRecordModel>>> GetLogs(
-        [FromQuery] DateTime start,
-        [FromQuery] DateTime end,
-        CancellationToken ct = default)
-    {
-        var logs = await _logs.GetLogRecordsByTimeRangeAsync(start, end, ct);
-        return Ok(logs);
-    }
-
     // GET /api/tenants/{tenantId}/logs/summary?start=&end=&service=&minSeverity=&bucketCount=
     // Counts from the log rollup: range, service and minimum severity; search does not apply (plans/summary-rollups.md).
     [TelemetryOperation(TelemetryOperation.Read)]
@@ -77,23 +65,25 @@ public class LogsController : ControllerBase
         return Ok(RollupSummaryBuilder.BuildLogSummary(window, read.Rows.ToList(), writtenThrough, read.TimedOut));
     }
 
-    // GET /api/tenants/{tenantId}/logs/page?start=&end=&asOf=&service=&minSeverity=&q=&size=&cursor=&nav=
+    // GET /api/tenants/{tenantId}/logs/list?start=&end=&service=&minSeverity=&q=&order=newest|oldest&limit=
+    // At most `limit` rows (clamped to Telemetry:Query:Limits:Logs) from the newest or oldest end of the window; `truncated` says more matched.
     [TelemetryOperation(TelemetryOperation.Read)]
-    [HttpGet("page")]
-    public async Task<ActionResult<LogPageResult>> GetPage(
+    [HttpGet("list")]
+    public async Task<ActionResult<LogListResult>> GetList(
         [FromQuery] DateTime start,
         [FromQuery] DateTime end,
-        [FromQuery] DateTime? asOf = null,
         [FromQuery] string? service = null,
         [FromQuery] int? minSeverity = null,
         [FromQuery] string? q = null,
-        [FromQuery] int size = 100,
-        [FromQuery] string? cursor = null,
-        [FromQuery] string nav = "first",
+        [FromQuery] string order = ListOrder.Newest,
+        [FromQuery] int? limit = null,
         CancellationToken ct = default)
     {
         if (start >= end)
             return BadRequest("Start time must be before end time.");
+
+        if (!ListOrder.IsValid(order))
+            return BadRequest("order must be 'newest' or 'oldest'.");
 
         var guard = CheckRawSearchWindow(q, start, end);
         if (!guard.Allowed)
@@ -101,17 +91,15 @@ public class LogsController : ControllerBase
 
         try
         {
-            var result = await _logs.GetLogPageAsync(new LogQuery
+            var result = await _logs.GetLogListAsync(new LogQuery
             {
                 Start = start,
                 End = end,
                 Service = service,
                 MinSeverity = minSeverity,
                 Search = q,
-                Size = size,
-                Cursor = cursor,
-                Nav = nav,
-                AsOf = asOf
+                Order = order.ToLowerInvariant(),
+                Limit = Math.Clamp(limit ?? _capabilities.Limits.Logs, 1, _capabilities.Limits.Logs)
             }, ct);
             return Ok(result);
         }
@@ -196,7 +184,7 @@ public class LogsController : ControllerBase
     /// <summary>
     /// GET /api/tenants/{tenantId}/logs/export?start=&end=&service=&minSeverity=&q=&format=ndjson|csv
     /// Phase 8 (list-pages-server-side plan, decision 17): full records, same filters as
-    /// <see cref="GetSummary"/>/<see cref="GetPage"/>, streamed with no row cap. Bounded to
+    /// <see cref="GetSummary"/>/<see cref="GetList"/>, streamed with no row cap. Bounded to
     /// <see cref="ProviderCapabilities.ExportMaxWindowDays"/> (400 beyond it) and
     /// <see cref="ExportConcurrencyGate"/>'s slot count (429 when exhausted). <c>ct</c> is bound by
     /// MVC to <c>HttpContext.RequestAborted</c>, which is what propagates a client disconnect down

@@ -26,9 +26,7 @@ public sealed class RampCriteria
     public double LagGrowthMinMs { get; set; } = 3000;
 
     /// <summary>
-    /// Stop when the last third of a step's probes averaged more than this many seconds of lag, growing or not (0 disables). Both lag
-    /// criteria see the log lag with the provider's <c>asOf</c> pin offset already subtracted, so PostgreSQL's constant 5 s
-    /// back-off neither inflates the growth ratio's denominator nor counts against this limit.
+    /// Stop when the last third of a step's probes averaged more than this many seconds of lag, growing or not (0 disables).
     /// </summary>
     public double MaxLagSeconds { get; set; } = 10;
 

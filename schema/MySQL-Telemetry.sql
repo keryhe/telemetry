@@ -74,7 +74,7 @@ CREATE TABLE instrumentation_scopes (
 -- it -- schema-simplification decision 7) and no foreign keys. InnoDB clusters on the primary
 -- key, so it is (tenant_id, start_time_unix_nano, id): concurrent flushes append at one tail per
 -- tenant instead of all contending for the last page of an AUTO_INCREMENT key. id stays
--- AUTO_INCREMENT as the keyset-paging tiebreak, and InnoDB requires an auto-increment column to
+-- AUTO_INCREMENT as the ordering tiebreak, and InnoDB requires an auto-increment column to
 -- lead some index, hence KEY (id) (sequential, cheap).
 --
 -- trace_id/span_id are ascii_bin so lookups are exact, case-sensitive and use the index with the
@@ -101,7 +101,6 @@ CREATE TABLE spans (
     status_code              VARCHAR(20)  NOT NULL DEFAULT 'UNSET'
         CHECK (status_code IN ('UNSET', 'OK', 'ERROR')),
     status_message           TEXT,
-    created_at               DATETIME(6)  NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
     attributes_json          JSON,
     events_json              JSON,
     links_json               JSON,
@@ -151,7 +150,7 @@ CREATE TABLE metrics (
 CREATE INDEX idx_metrics_tenant_service_name ON metrics (tenant_id, service_name, name);
 
 -- Data-point tables: no foreign key, no unique key beyond the primary key, which is
--- (metric_id, time_unix_nano, id) -- series reads and raw-point keyset paging. id stays
+-- (metric_id, time_unix_nano, id) -- series reads and raw-point reads. id stays
 -- AUTO_INCREMENT behind KEY (id). exemplars_json holds the OTLP exemplar list (every data point
 -- except Summary).
 
@@ -288,7 +287,6 @@ CREATE TABLE log_records (
     flags                    INT         DEFAULT 0,
     trace_id                 CHAR(32)    CHARACTER SET ascii COLLATE ascii_bin,
     span_id                  CHAR(16)    CHARACTER SET ascii COLLATE ascii_bin,
-    created_at               DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
     attributes_json          JSON,
     PRIMARY KEY (tenant_id, time_unix_nano, id),
     KEY idx_log_id (id)

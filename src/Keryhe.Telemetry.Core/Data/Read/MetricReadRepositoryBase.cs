@@ -186,30 +186,6 @@ public abstract class MetricReadRepositoryBase : DapperReadRepository, IMetricRe
         return "(" + string.Join(" OR ", existsClauses) + ")";
     }
 
-    /// <summary>
-    /// Wraps a SQL time expression (a bare column like <c>"m.created_at"</c>, or an aggregate like
-    /// <c>"MAX(m.created_at)"</c>) for use in the catalog's keyset cursor comparison. Identity on
-    /// every relational provider: <c>metrics.created_at</c> is a plain timestamp column there, and
-    /// comparing it directly against a bound <see cref="DateTime"/> parameter
-    /// (<see cref="CatalogCursorKeyParam"/>) works correctly at those providers' native precision.
-    ///
-    /// ClickHouse overrides both this and <see cref="CatalogCursorKeyParam"/> together: a real bug
-    /// found via the Phase 5 integration tests, where a "next" page after a non-empty "first" page
-    /// (whose own <c>NextCursor</c> was correctly non-null) came back with ZERO rows. Root cause:
-    /// <c>created_at</c> is <c>DateTime64(9)</c> there, and ClickHouse.Client's parameter binding
-    /// for a plain .NET <see cref="DateTime"/> does not preserve that precision — the bound
-    /// <c>@cursorK</c> silently lost enough precision to sort BEFORE every row sharing the same
-    /// wall-clock second (all 25 rows in the reproducing test, inserted in one flush), so the
-    /// keyset predicate's <c>created_at &lt;= @cursorK</c> half excluded everything. ClickHouse's
-    /// override compares raw nanoseconds instead: the column via <c>toUnixTimestamp64Nano(...)</c>
-    /// here, and the parameter as the already-nanosecond-precision <see cref="long"/> cursor value
-    /// directly (no DateTime round trip) via <see cref="CatalogCursorKeyParam"/>.
-    /// </summary>
-    protected virtual string CatalogTimeExpr(string timeExpr) => timeExpr;
-
-    /// <summary>The value bound for a decoded cursor's <c>K</c> against <see cref="CatalogTimeExpr"/>'s column expression — see that method's doc comment for why ClickHouse overrides this to the raw nanosecond <see cref="long"/> rather than a converted <see cref="DateTime"/>.</summary>
-    protected virtual object CatalogCursorKeyParam(long nanos) => TimeConversion.UnixNanoToDateTime(nanos);
-
     public async Task<MetricCatalogPage> GetMetricCatalogPageAsync(MetricCatalogQuery query, CancellationToken cancellationToken = default)
     {
         if (query.Start >= query.End)
@@ -217,12 +193,12 @@ public abstract class MetricReadRepositoryBase : DapperReadRepository, IMetricRe
 
         await using var conn = await OpenConnectionAsync(cancellationToken);
 
-        var size = Math.Clamp(query.Size, 1, 500);
+        var limit = Math.Max(1, query.Limit);
         var groupByName = string.Equals(query.GroupBy, "name", StringComparison.OrdinalIgnoreCase);
 
         return groupByName
-            ? await GetMetricCatalogByNameAsync(conn, query, size, cancellationToken)
-            : await GetMetricCatalogByInstanceAsync(conn, query, size, cancellationToken);
+            ? await GetMetricCatalogByNameAsync(conn, query, limit, cancellationToken)
+            : await GetMetricCatalogByInstanceAsync(conn, query, limit, cancellationToken);
     }
 
     /// <summary>Common WHERE fragment (name/service/type filters) shared by both catalog views, ANDed onto the caller's own tenant/seen-in-range predicate.</summary>
@@ -250,7 +226,7 @@ public abstract class MetricReadRepositoryBase : DapperReadRepository, IMetricRe
         return (clauses.Count == 0 ? "" : " AND " + string.Join(" AND ", clauses), parameters);
     }
 
-    private async Task<MetricCatalogPage> GetMetricCatalogByInstanceAsync(DbConnection conn, MetricCatalogQuery query, int size, CancellationToken cancellationToken)
+    private async Task<MetricCatalogPage> GetMetricCatalogByInstanceAsync(DbConnection conn, MetricCatalogQuery query, int limit, CancellationToken cancellationToken)
     {
         var (filterClause, filterParams) = BuildCatalogFilterClauses(query);
         var parameters = new DynamicParameters();
@@ -258,119 +234,31 @@ public abstract class MetricReadRepositoryBase : DapperReadRepository, IMetricRe
         var seenClause = SeenInRangeClause(query.Start, query.End, parameters);
         parameters.Add("tenantId", TenantId);
 
-        var filterHashText = $"{query.Start:O}|{query.End:O}|{query.Q}|{query.Service}|{query.Type}|instance";
-        var filterHash = KeysetCursor.ComputeFilterHash(filterHashText);
-
-        var nav = (query.Nav ?? "first").ToLowerInvariant();
-        DecodedCursor? cursor = null;
-        if (nav is "next" or "prev")
-        {
-            cursor = KeysetCursor.Decode(query.Cursor);
-            if (cursor == null || !KeysetCursor.MatchesFilterHash(cursor, filterHashText))
-                throw new ArgumentException("Invalid or stale cursor.");
-        }
-
         var baseWhere = $"m.tenant_id = @tenantId AND {seenClause}{filterClause}";
 
-        List<MetricRow> rows;
-        bool forward;
-        int requestedSize;
-        switch (nav)
-        {
-            case "next":
-                forward = true;
-                requestedSize = size;
-                var mergedNext = new DynamicParameters(parameters);
-                mergedNext.Add("cursorK", CatalogCursorKeyParam(cursor!.K));
-                mergedNext.Add("cursorId", cursor.Id);
-                rows = await FetchCatalogInstancePageAsync(conn, baseWhere,
-                    KeysetCursor.Predicate(CatalogTimeExpr("m.created_at"), "m.id", "cursorK", "cursorId", descending: true),
-                    mergedNext,
-                    requestedSize, descending: true, cancellationToken);
-                break;
-            case "prev":
-                forward = false;
-                requestedSize = size;
-                rows = await FetchCatalogInstancePageAsync(conn, baseWhere,
-                    KeysetCursor.Predicate(CatalogTimeExpr("m.created_at"), "m.id", "cursorK", "cursorId", descending: false),
-                    Merge(parameters, new { cursorK = CatalogCursorKeyParam(cursor!.K), cursorId = cursor.Id }),
-                    requestedSize, descending: false, cancellationToken);
-                break;
-            case "last":
-                forward = false;
-                var lastCount = await TryGetExactCatalogInstanceCountAsync(baseWhere, parameters, cancellationToken);
-                requestedSize = lastCount.HasValue ? KeysetCursor.LastPageRowCount(lastCount.Value, size) : size;
-                rows = await FetchCatalogInstancePageAsync(conn, baseWhere, "", parameters, requestedSize, descending: false, cancellationToken);
-                break;
-            default:
-                forward = true;
-                requestedSize = size;
-                rows = await FetchCatalogInstancePageAsync(conn, baseWhere, "", parameters, requestedSize, descending: true, cancellationToken);
-                break;
-        }
-
-        var hasExtra = rows.Count > requestedSize;
-        if (hasExtra) rows.RemoveAt(rows.Count - 1);
-
-        List<MetricRow> displayRows;
-        string? nextCursor;
-        string? prevCursor;
-        if (forward)
-        {
-            displayRows = rows;
-            nextCursor = hasExtra ? EncodeInstance(displayRows[^1], filterHash) : null;
-            prevCursor = nav == "first" ? null : (displayRows.Count > 0 ? EncodeInstance(displayRows[0], filterHash) : null);
-        }
-        else
-        {
-            displayRows = [.. rows];
-            displayRows.Reverse();
-            if (nav == "last")
-            {
-                nextCursor = null;
-                prevCursor = !hasExtra || displayRows.Count == 0 ? null : EncodeInstance(displayRows[0], filterHash);
-            }
-            else
-            {
-                nextCursor = displayRows.Count > 0 ? EncodeInstance(displayRows[^1], filterHash) : null;
-                prevCursor = hasExtra && displayRows.Count > 0 ? EncodeInstance(displayRows[0], filterHash) : null;
-            }
-        }
-
-        var items = displayRows.Select(m => ToMetricInfo(m, Svc(m.ServiceName))).ToList();
-
-        var (total, timedOut) = await TimedQuery.RunAsync(
-            async (timeoutSeconds, ct) => await conn.ExecuteScalarAsync<long>(new CommandDefinition(
-                $"SELECT COUNT(*) FROM metrics m LEFT JOIN {MetricLastSeenSql} mls ON mls.metric_id = m.id WHERE {baseWhere}",
-                parameters, commandTimeout: timeoutSeconds, cancellationToken: ct)),
-            _summaryTimeoutSeconds, cancellationToken);
+        // limit + 1 rows: the extra one only says that more matched.
+        var rows = await FetchCatalogInstancesAsync(conn, baseWhere, parameters, limit + 1, cancellationToken);
+        var truncated = rows.Count > limit;
+        if (truncated) rows.RemoveAt(rows.Count - 1);
 
         return new MetricCatalogPage
         {
-            Items = items,
-            NextCursor = nextCursor,
-            PrevCursor = prevCursor,
-            Total = timedOut ? null : total,
-            TotalIsLowerBound = timedOut
+            Items = rows.Select(m => ToMetricInfo(m, Svc(m.ServiceName))).ToList(),
+            Truncated = truncated
         };
     }
 
-    private static string EncodeInstance(MetricRow row, string filterHash)
-        => KeysetCursor.Encode(TimeConversion.DateTimeToUnixNano(row.CreatedAt), row.Id, filterHash);
-
-    private async Task<List<MetricRow>> FetchCatalogInstancePageAsync(
-        DbConnection conn, string baseWhere, string cursorPredicate, object parameters, int size, bool descending, CancellationToken cancellationToken)
+    private async Task<List<MetricRow>> FetchCatalogInstancesAsync(
+        DbConnection conn, string where, object parameters, int rowCount, CancellationToken cancellationToken)
     {
-        var where = string.IsNullOrEmpty(cursorPredicate) ? baseWhere : $"{baseWhere} AND {cursorPredicate}";
-        var order = descending ? "DESC" : "ASC";
         var sql = $"""
             SELECT m.id AS Id, m.name AS Name, m.description AS Description, m.unit AS Unit,
                    m.type AS Type, m.created_at AS CreatedAt, m.service_name AS ServiceName
             FROM metrics m
             LEFT JOIN {MetricLastSeenSql} mls ON mls.metric_id = m.id
             WHERE {where}
-            ORDER BY m.created_at {order}, m.id {order}
-            {LiteralPagingClause(size + 1, 0)}{CatalogQuerySettingsClause}
+            ORDER BY m.created_at DESC, m.id DESC
+            {LiteralPagingClause(rowCount, 0)}{CatalogQuerySettingsClause}
             """;
         var rows = await conn.QueryAsync<MetricRow>(new CommandDefinition(sql, parameters, cancellationToken: cancellationToken));
         return rows.ToList();
@@ -383,31 +271,17 @@ public abstract class MetricReadRepositoryBase : DapperReadRepository, IMetricRe
     /// comment has the actual bug this catalog query hit and how it was root-caused) — disabling
     /// this optimizer forces a correct full sort for the multi-way OR'd EXISTS/IN predicate
     /// (decision 27's exact-seen-in-range fallback) that <c>LiteralPagingClause</c> alone already
-    /// fixes, at a cost that's negligible for a list capped at 500 rows per page.
+    /// fixes, at a cost that's negligible for a capped list.
     /// </summary>
     protected virtual string CatalogQuerySettingsClause => "";
 
-    private async Task<long?> TryGetExactCatalogInstanceCountAsync(string where, DynamicParameters parameters, CancellationToken cancellationToken)
-    {
-        // On its own pooled connection, not the caller's: the caller keeps using its connection for the page itself,
-        // and a count that times out leaves the connection it ran on aborted mid-statement (see TimedQuery).
-        await using var conn = await OpenConnectionAsync(cancellationToken);
-        var (result, timedOut) = await TimedQuery.RunAsync(
-            async (timeoutSeconds, ct) => await conn.ExecuteScalarAsync<long>(new CommandDefinition(
-                $"SELECT COUNT(*) FROM metrics m LEFT JOIN {MetricLastSeenSql} mls ON mls.metric_id = m.id WHERE {where}",
-                parameters, commandTimeout: timeoutSeconds, cancellationToken: ct)),
-            _summaryTimeoutSeconds, cancellationToken);
-        return timedOut ? null : result;
-    }
-
     /// <summary>
-    /// <c>groupBy=name</c> view (decision 28): one row per metric name, keyset on
-    /// <c>(MAX(created_at), name)</c>. The GROUP BY/paging query itself stays portable across all
-    /// five providers (plain COUNT/MAX/HAVING); a second, narrow follow-up query fetches the page's
-    /// own rows to compute the per-name type and distinct service list in C#, instead of a
-    /// per-provider ARRAY_AGG/GROUP_CONCAT/groupUniqArray dialect for what is at most `size` names.
+    /// <c>groupBy=name</c> view (decision 28): one row per metric name, most recently created first. The GROUP BY/LIMIT query
+    /// itself stays portable across all five providers (plain COUNT/MAX); a second, narrow follow-up query fetches the
+    /// returned names' own rows to compute the per-name type and distinct service list in C#, instead of a per-provider
+    /// ARRAY_AGG/GROUP_CONCAT/groupUniqArray dialect for what is at most <c>limit</c> names.
     /// </summary>
-    private async Task<MetricCatalogPage> GetMetricCatalogByNameAsync(DbConnection conn, MetricCatalogQuery query, int size, CancellationToken cancellationToken)
+    private async Task<MetricCatalogPage> GetMetricCatalogByNameAsync(DbConnection conn, MetricCatalogQuery query, int limit, CancellationToken cancellationToken)
     {
         var (filterClause, filterParams) = BuildCatalogFilterClauses(query);
         var parameters = new DynamicParameters();
@@ -415,81 +289,12 @@ public abstract class MetricReadRepositoryBase : DapperReadRepository, IMetricRe
         var seenClause = SeenInRangeClause(query.Start, query.End, parameters);
         parameters.Add("tenantId", TenantId);
 
-        var filterHashText = $"{query.Start:O}|{query.End:O}|{query.Q}|{query.Service}|{query.Type}|name";
-        var filterHash = KeysetCursor.ComputeFilterHash(filterHashText);
-
-        var nav = (query.Nav ?? "first").ToLowerInvariant();
-        DecodedNameCursor? cursor = null;
-        if (nav is "next" or "prev")
-        {
-            cursor = NameKeysetCursor.Decode(query.Cursor);
-            if (cursor == null || !NameKeysetCursor.MatchesFilterHash(cursor, filterHashText))
-                throw new ArgumentException("Invalid or stale cursor.");
-        }
-
         var baseWhere = $"m.tenant_id = @tenantId AND {seenClause}{filterClause}";
 
-        List<NameGroupRow> rows;
-        bool forward;
-        int requestedSize;
-        switch (nav)
-        {
-            case "next":
-                forward = true;
-                requestedSize = size;
-                rows = await FetchCatalogNameOfPageAsync(conn, baseWhere,
-                    NameKeysetCursor.Predicate(CatalogTimeExpr("MAX(m.created_at)"), "m.name", "cursorK", "cursorName", descending: true),
-                    Merge(parameters, new { cursorK = CatalogCursorKeyParam(cursor!.K), cursorName = cursor.Name }),
-                    requestedSize, descending: true, cancellationToken);
-                break;
-            case "prev":
-                forward = false;
-                requestedSize = size;
-                rows = await FetchCatalogNameOfPageAsync(conn, baseWhere,
-                    NameKeysetCursor.Predicate(CatalogTimeExpr("MAX(m.created_at)"), "m.name", "cursorK", "cursorName", descending: false),
-                    Merge(parameters, new { cursorK = CatalogCursorKeyParam(cursor!.K), cursorName = cursor.Name }),
-                    requestedSize, descending: false, cancellationToken);
-                break;
-            case "last":
-                forward = false;
-                var lastCount = await TryGetExactCatalogNameCountAsync(baseWhere, parameters, cancellationToken);
-                requestedSize = lastCount.HasValue ? KeysetCursor.LastPageRowCount(lastCount.Value, size) : size;
-                rows = await FetchCatalogNameOfPageAsync(conn, baseWhere, "", parameters, requestedSize, descending: false, cancellationToken);
-                break;
-            default:
-                forward = true;
-                requestedSize = size;
-                rows = await FetchCatalogNameOfPageAsync(conn, baseWhere, "", parameters, requestedSize, descending: true, cancellationToken);
-                break;
-        }
-
-        var hasExtra = rows.Count > requestedSize;
-        if (hasExtra) rows.RemoveAt(rows.Count - 1);
-
-        List<NameGroupRow> displayRows;
-        string? nextCursor;
-        string? prevCursor;
-        if (forward)
-        {
-            displayRows = rows;
-            nextCursor = hasExtra ? EncodeName(displayRows[^1], filterHash) : null;
-            prevCursor = nav == "first" ? null : (displayRows.Count > 0 ? EncodeName(displayRows[0], filterHash) : null);
-        }
-        else
-        {
-            displayRows = [.. rows];
-            displayRows.Reverse();
-            if (nav == "last")
-            {
-                nextCursor = null;
-                prevCursor = !hasExtra || displayRows.Count == 0 ? null : EncodeName(displayRows[0], filterHash);
-            }
-            else
-            {
-                nextCursor = displayRows.Count > 0 ? EncodeName(displayRows[^1], filterHash) : null;
-                prevCursor = hasExtra && displayRows.Count > 0 ? EncodeName(displayRows[0], filterHash) : null;
-            }
-        }
+        // limit + 1 names: the extra one only says that more matched.
+        var displayRows = await FetchCatalogNamesAsync(conn, baseWhere, parameters, limit + 1, cancellationToken);
+        var truncated = displayRows.Count > limit;
+        if (truncated) displayRows.RemoveAt(displayRows.Count - 1);
 
         // Second, narrow follow-up query: the page's own instances only, to derive per-name type
         // (first-seen wins) and the distinct service list in C# — see this method's doc comment.
@@ -534,47 +339,24 @@ public abstract class MetricReadRepositoryBase : DapperReadRepository, IMetricRe
             }
         }
 
-        var (total, timedOut) = await TimedQuery.RunAsync(
-            async (timeoutSeconds, ct) => await conn.ExecuteScalarAsync<long>(new CommandDefinition(
-                $"""
-                SELECT COUNT(*) FROM (
-                    SELECT m.name
-                    FROM metrics m
-                    LEFT JOIN {MetricLastSeenSql} mls ON mls.metric_id = m.id
-                    WHERE {baseWhere}
-                    GROUP BY m.name
-                ) named
-                """,
-                parameters, commandTimeout: timeoutSeconds, cancellationToken: ct)),
-            _summaryTimeoutSeconds, cancellationToken);
-
         return new MetricCatalogPage
         {
             Names = items,
-            NextCursor = nextCursor,
-            PrevCursor = prevCursor,
-            Total = timedOut ? null : total,
-            TotalIsLowerBound = timedOut
+            Truncated = truncated
         };
     }
 
-    private static string EncodeName(NameGroupRow row, string filterHash)
-        => NameKeysetCursor.Encode(TimeConversion.DateTimeToUnixNano(row.NewestCreatedAt), row.Name, filterHash);
-
-    private async Task<List<NameGroupRow>> FetchCatalogNameOfPageAsync(
-        DbConnection conn, string baseWhere, string cursorPredicate, object parameters, int size, bool descending, CancellationToken cancellationToken)
+    private async Task<List<NameGroupRow>> FetchCatalogNamesAsync(
+        DbConnection conn, string baseWhere, object parameters, int rowCount, CancellationToken cancellationToken)
     {
-        var having = string.IsNullOrEmpty(cursorPredicate) ? "" : $"HAVING {cursorPredicate}";
-        var order = descending ? "DESC" : "ASC";
         var sql = $"""
             SELECT m.name AS Name, MAX(m.created_at) AS NewestCreatedAt, COUNT(*) AS InstanceCount
             FROM metrics m
             LEFT JOIN {MetricLastSeenSql} mls ON mls.metric_id = m.id
             WHERE {baseWhere}
             GROUP BY m.name
-            {having}
-            ORDER BY MAX(m.created_at) {order}, m.name {order}
-            {LiteralPagingClause(size + 1, 0)}{CatalogQuerySettingsClause}
+            ORDER BY MAX(m.created_at) DESC, m.name DESC
+            {LiteralPagingClause(rowCount, 0)}{CatalogQuerySettingsClause}
             """;
         var rows = await conn.QueryAsync<NameGroupRow>(new CommandDefinition(sql, parameters, cancellationToken: cancellationToken));
         return rows.ToList();
@@ -582,8 +364,8 @@ public abstract class MetricReadRepositoryBase : DapperReadRepository, IMetricRe
 
     /// <summary>
     /// <c>LIMIT n OFFSET m</c> with the values inlined as literals rather than bound parameters —
-    /// safe because both are C#-computed page-size integers, never user input. Used only by the
-    /// two catalog page fetches above, in place of the shared <see cref="PagingClause"/> (which
+    /// safe because both are C#-computed integers, never user input. Used only by the
+    /// two catalog fetches above, in place of the shared <see cref="PagingClause"/> (which
     /// stays parameterized for every other query in this file and the rest of the codebase). Real
     /// bug found via the Phase 5 integration tests: on ClickHouse specifically, binding `@limit`/
     /// `@offset` as parameters alongside this query's other bound parameters (the multi-way OR'd
@@ -595,27 +377,6 @@ public abstract class MetricReadRepositoryBase : DapperReadRepository, IMetricRe
     /// sidesteps it entirely rather than chasing the exact mechanism.
     /// </summary>
     protected virtual string LiteralPagingClause(int limit, int offset) => $"LIMIT {limit} OFFSET {offset}";
-
-    private async Task<long?> TryGetExactCatalogNameCountAsync(string where, DynamicParameters parameters, CancellationToken cancellationToken)
-    {
-        // On its own pooled connection, not the caller's: the caller keeps using its connection for the page itself,
-        // and a count that times out leaves the connection it ran on aborted mid-statement (see TimedQuery).
-        await using var conn = await OpenConnectionAsync(cancellationToken);
-        var (result, timedOut) = await TimedQuery.RunAsync(
-            async (timeoutSeconds, ct) => await conn.ExecuteScalarAsync<long>(new CommandDefinition(
-                $"""
-                SELECT COUNT(*) FROM (
-                    SELECT m.name
-                    FROM metrics m
-                    LEFT JOIN {MetricLastSeenSql} mls ON mls.metric_id = m.id
-                    WHERE {where}
-                    GROUP BY m.name
-                ) named
-                """,
-                parameters, commandTimeout: timeoutSeconds, cancellationToken: ct)),
-            _summaryTimeoutSeconds, cancellationToken);
-        return timedOut ? null : result;
-    }
 
     private sealed class NameGroupRow
     {
@@ -1864,34 +1625,14 @@ public abstract class MetricReadRepositoryBase : DapperReadRepository, IMetricRe
     }
 
     // =========================================================================
-    // EXEMPLARS (Phase 4, decision 26)
+    // EXEMPLARS
     // =========================================================================
 
     /// <summary>
-    /// Analytics-tier default (decision 26): real keyset paging, newest first, over the data
-    /// points that carry at least one exemplar. <c>SqlServerMetricReadRepository</c>/
-    /// <c>MySqlMetricReadRepository</c> override this back down to
-    /// <see cref="GetMetricExemplarsCappedAsync"/> for the standard tier's newest-500 behavior.
-    ///
-    /// <b>Deviation from the plan's literal text</b>: the plan describes unnesting individual
-    /// exemplars in SQL (<c>jsonb_array_elements … WITH ORDINALITY</c> on PostgreSQL,
-    /// <c>arrayJoin</c>/<c>arrayEnumerate</c> on ClickHouse) and keyset-paging on
-    /// <c>(time, data point id, ordinal)</c>. This implementation instead keysets one level up, on
-    /// <c>(data point time_unix_nano, data point id)</c>, and returns every exemplar of each data
-    /// point that lands on the page. A page therefore never splits one data point's exemplars
-    /// across two pages (still no row ever skipped or duplicated across pages), but its exemplar
-    /// count can run a little over or under the requested <see cref="MetricExemplarQuery.Size"/>
-    /// when a data point carries an unusually large exemplar batch — and, for the same reason,
-    /// <c>nav=last</c> is not trimmed to the exact <c>total mod size</c> remainder the way logs/
-    /// traces pages are (decision 2): it simply fetches the oldest <c>size</c> data points. Chosen
-    /// over the full per-exemplar SQL unnest for a much smaller, lower-risk, provider-uniform
-    /// implementation (one query shape shared by every provider through existing hooks, instead of
-    /// two bespoke per-dialect array-unnest queries) while still replacing the old hard 500-row cap
-    /// with genuine, unbounded keyset paging. Recorded here per the task's "note material
-    /// deviations" instruction; a follow-up can implement the literal per-exemplar unnest if the
-    /// coarser granularity proves visible in practice.
+    /// The newest <see cref="MetricExemplarQuery.Limit"/> exemplars, label-filtered in SQL, with
+    /// <see cref="MetricExemplarPage.Truncated"/> set when more exist. The same query on every provider.
     /// </summary>
-    public virtual async Task<MetricExemplarPage?> GetMetricExemplarsAsync(MetricExemplarQuery query, CancellationToken cancellationToken = default)
+    public async Task<MetricExemplarPage?> GetMetricExemplarsAsync(MetricExemplarQuery query, CancellationToken cancellationToken = default)
     {
         if (string.IsNullOrEmpty(query.MetricName))
             throw new ArgumentException("Metric name cannot be null or empty", nameof(query));
@@ -1909,216 +1650,7 @@ public abstract class MetricReadRepositoryBase : DapperReadRepository, IMetricRe
         var result = new MetricExemplarPage { Name = query.MetricName, Type = type };
         if (type == MetricType.SUMMARY) return result; // no exemplars_json column
 
-        var table = TableFor(type);
-        var isCountTable = type is MetricType.HISTOGRAM or MetricType.EXPONENTIAL_HISTOGRAM;
-        var metricIds = metrics.Select(m => m.Id).ToList();
-        var serviceNameByMetricId = ToDictionaryFirst(metrics, m => m.Id, m => Svc(m.ServiceName) ?? "unknown");
-
-        var (labelClause, lp) = LabelFilterClause(query.LabelFilters);
-        var (timeClause, tp) = TimeRange(query.Start, query.End);
-        var baseWhere = $"dp.metric_id IN ({IdInList(metricIds)}) AND dp.exemplars_json IS NOT NULL{timeClause}{labelClause}";
-        var baseParams = Merge(tp, lp);
-
-        var filterHashText = $"{query.MetricName}|{query.MetricId}|{query.Start:O}|{query.End:O}|" +
-            string.Join(",", (query.LabelFilters ?? new Dictionary<string, string>()).OrderBy(k => k.Key).Select(kv => $"{kv.Key}={kv.Value}"));
-        var filterHash = KeysetCursor.ComputeFilterHash(filterHashText);
-
-        var nav = (query.Nav ?? "first").ToLowerInvariant();
-        var size = Math.Clamp(query.Size, 1, 1000);
-
-        DecodedCursor? cursor = null;
-        if (nav is "next" or "prev")
-        {
-            cursor = KeysetCursor.Decode(query.Cursor);
-            if (cursor == null || !KeysetCursor.MatchesFilterHash(cursor, filterHashText))
-                throw new ArgumentException("Invalid or stale cursor.");
-        }
-
-        List<ExemplarPointRow> rows;
-        bool forward;
-        var requestedSize = size;
-
-        switch (nav)
-        {
-            case "next":
-                forward = true;
-                rows = await FetchExemplarPointsAsync(conn, table, isCountTable, baseWhere, baseParams, size, descending: true,
-                    KeysetCursor.Predicate("dp.time_unix_nano", "dp.id", "cursorK", "cursorId", descending: true),
-                    new { cursorK = cursor!.K, cursorId = cursor.Id }, cancellationToken);
-                break;
-            case "prev":
-                forward = false;
-                rows = await FetchExemplarPointsAsync(conn, table, isCountTable, baseWhere, baseParams, size, descending: false,
-                    KeysetCursor.Predicate("dp.time_unix_nano", "dp.id", "cursorK", "cursorId", descending: false),
-                    new { cursorK = cursor!.K, cursorId = cursor.Id }, cancellationToken);
-                break;
-            case "last":
-                forward = false;
-                rows = await FetchExemplarPointsAsync(conn, table, isCountTable, baseWhere, baseParams, size, descending: false, null, null, cancellationToken);
-                break;
-            default: // "first"
-                forward = true;
-                rows = await FetchExemplarPointsAsync(conn, table, isCountTable, baseWhere, baseParams, size, descending: true, null, null, cancellationToken);
-                break;
-        }
-
-        // The count runs last, after every query that needs this connection: a count that times out leaves its
-        // connection aborted mid-statement (see TimedQuery), so nothing may run on it afterwards.
-        var (total, totalTimedOut) = await TimedQuery.RunAsync(
-            async (timeoutSeconds, ct) => await CountExemplarsAsync(conn, table, baseWhere, baseParams, timeoutSeconds, ct),
-            _summaryTimeoutSeconds, cancellationToken);
-
-        var hasExtra = rows.Count > requestedSize;
-        if (hasExtra) rows.RemoveAt(rows.Count - 1);
-
-        List<ExemplarPointRow> displayRows;
-        string? nextCursor, prevCursor;
-        if (forward)
-        {
-            displayRows = rows;
-            nextCursor = hasExtra ? Encode(displayRows[^1], filterHash) : null;
-            prevCursor = nav == "first" ? null : (displayRows.Count > 0 ? Encode(displayRows[0], filterHash) : null);
-        }
-        else
-        {
-            displayRows = new List<ExemplarPointRow>(rows);
-            displayRows.Reverse();
-            if (nav == "last")
-            {
-                nextCursor = null;
-                prevCursor = (!hasExtra || displayRows.Count == 0) ? null : Encode(displayRows[0], filterHash);
-            }
-            else
-            {
-                nextCursor = displayRows.Count > 0 ? Encode(displayRows[^1], filterHash) : null;
-                prevCursor = hasExtra && displayRows.Count > 0 ? Encode(displayRows[0], filterHash) : null;
-            }
-        }
-
-        var flattened = new List<MetricExemplar>();
-        foreach (var row in displayRows)
-        {
-            var serviceName = serviceNameByMetricId.GetValueOrDefault(row.MetricId, "unknown");
-            var labels = ToLabelDictionary(DeserializeAttributes(row.AttributesJson));
-            var seriesName = BuildSeriesDisplayName(serviceName, labels);
-            var exemplars = DeserializeExemplars(row.ExemplarsJson) ?? new List<ExemplarModel>();
-            foreach (var ex in exemplars.OrderByDescending(e => e.TimeUnixNano))
-            {
-                flattened.Add(new MetricExemplar
-                {
-                    Exemplar = ex,
-                    SeriesName = seriesName,
-                    ServiceName = serviceName,
-                    Labels = labels,
-                    PointTimestamp = TimeConversion.UnixNanoToDateTime(row.TimeUnixNano),
-                    PointCount = isCountTable ? row.Count : null,
-                    PointDoubleValue = isCountTable ? null : row.ValueDouble,
-                    PointIntValue = isCountTable ? null : row.ValueInt
-                });
-            }
-        }
-
-        result.Exemplars = flattened;
-        result.NextCursor = nextCursor;
-        result.PrevCursor = prevCursor;
-        result.Total = total;
-        result.TotalIsLowerBound = totalTimedOut;
-        return result;
-    }
-
-    private static string Encode(ExemplarPointRow row, string filterHash) => KeysetCursor.Encode(row.TimeUnixNano, row.Id, filterHash);
-
-    /// <summary>
-    /// <paramref name="isCountTable"/> selects the right "value" columns for the table actually
-    /// being queried: histogram/exp-histogram data points carry <c>count</c> (their "value" for
-    /// exemplar display is the observation count) but no <c>value_double</c>/<c>value_int</c>;
-    /// gauge/sum data points are the reverse. Selecting a column absent from the table is a real bug
-    /// found via the Phase 4 integration tests, and on PostgreSQL specifically it doesn't fail with
-    /// the expected "column does not exist": since <c>count</c> IS also a valid aggregate function
-    /// name, Postgres re-parses the bare <c>dp.count</c> as the documented func-call sugar for
-    /// composite-type field access, <c>count(dp)</c> — silently turning the whole query into an
-    /// aggregate one and failing instead with "column dp.metric_id must appear in the GROUP BY
-    /// clause", which is what surfaced this.
-    /// </summary>
-    private async Task<List<ExemplarPointRow>> FetchExemplarPointsAsync(DbConnection conn, string table, bool isCountTable, string baseWhere, object baseParams,
-        int size, bool descending, string? cursorPredicate, object? cursorParams, CancellationToken ct)
-    {
-        var where = baseWhere + (cursorPredicate != null ? $" AND {cursorPredicate}" : "");
-        var order = descending ? "DESC" : "ASC";
-        var parameters = Merge(Merge(baseParams, new { limit = size + 1, offset = 0 }), cursorParams ?? new { });
-        var countCol = isCountTable ? "dp.count AS Count" : "NULL AS Count";
-        var valueCols = isCountTable ? "NULL AS ValueDouble, NULL AS ValueInt" : "dp.value_double AS ValueDouble, dp.value_int AS ValueInt";
-        var sql = $"""
-            SELECT dp.metric_id AS MetricId, dp.id AS Id, dp.time_unix_nano AS TimeUnixNano,
-                   dp.attributes_json AS AttributesJson, {valueCols},
-                   {countCol}, dp.exemplars_json AS ExemplarsJson
-            FROM {table} dp
-            WHERE {where}
-            ORDER BY dp.time_unix_nano {order}, dp.id {order}
-            {PagingClause}
-            """;
-        var rows = await conn.QueryAsync<ExemplarPointRow>(new CommandDefinition(sql, parameters, cancellationToken: ct));
-        return rows.ToList();
-    }
-
-    /// <summary>Exact exemplar count under the shared summary timeout (decision 26/31); an unbuffered scan so memory stays bounded regardless of how many rows match.</summary>
-    private async Task<long> CountExemplarsAsync(DbConnection conn, string table, string baseWhere, object baseParams, int timeoutSeconds, CancellationToken ct)
-    {
-        using var reader = await conn.ExecuteReaderAsync(new CommandDefinition(
-            $"SELECT dp.exemplars_json AS ExemplarsJson FROM {table} dp WHERE {baseWhere}",
-            baseParams, commandTimeout: timeoutSeconds, cancellationToken: ct));
-
-        long total = 0;
-        foreach (var json in reader.Parse<string?>())
-        {
-            if (string.IsNullOrEmpty(json)) continue;
-            try
-            {
-                using var doc = JsonDocument.Parse(json);
-                total += doc.RootElement.GetArrayLength();
-            }
-            catch (JsonException) { /* malformed row; skip rather than fail the whole count */ }
-        }
-        return total;
-    }
-
-    private sealed class ExemplarPointRow
-    {
-        public long MetricId { get; set; }
-        public long Id { get; set; }
-        public long TimeUnixNano { get; set; }
-        public string? AttributesJson { get; set; }
-        public double? ValueDouble { get; set; }
-        public long? ValueInt { get; set; }
-        public long? Count { get; set; }
-        public string? ExemplarsJson { get; set; }
-    }
-
-    /// <summary>
-    /// Standard-tier behavior (decision 26): the newest 500 exemplars (label-filtered in SQL — the
-    /// Phase 1 fix), no cursor, <see cref="MetricExemplarPage.Capped"/> flagged when more exist.
-    /// Called from <c>SqlServerMetricReadRepository</c>/<c>MySqlMetricReadRepository</c>'s override
-    /// of <see cref="GetMetricExemplarsAsync"/>.
-    /// </summary>
-    protected async Task<MetricExemplarPage?> GetMetricExemplarsCappedAsync(MetricExemplarQuery query, CancellationToken cancellationToken = default)
-    {
-        if (string.IsNullOrEmpty(query.MetricName))
-            throw new ArgumentException("Metric name cannot be null or empty", nameof(query));
-
-        await using var conn = await OpenConnectionAsync(cancellationToken);
-
-        var sql = MetricSelect + " AND m.name = @name";
-        if (query.MetricId.HasValue) sql += " AND m.id = @metricId";
-        var metrics = (await conn.QueryAsync<MetricRow>(new CommandDefinition(
-            sql, new { tenantId = TenantId, name = query.MetricName, metricId = query.MetricId }, cancellationToken: cancellationToken))).ToList();
-
-        if (metrics.Count == 0) return null;
-
-        var type = Enum.Parse<MetricType>(metrics[0].Type);
-        var result = new MetricExemplarPage { Name = query.MetricName, Type = type };
-        if (type == MetricType.SUMMARY) return result; // no exemplars_json column
-
-        const int cap = 500;
+        var cap = Math.Max(1, query.Limit);
         var flattened = new List<MetricExemplar>();
         var anyTableHitCap = false;
 
@@ -2128,8 +1660,9 @@ public abstract class MetricReadRepositoryBase : DapperReadRepository, IMetricRe
             var serviceNameByMetricId = ToDictionaryFirst(group, m => m.Id, m => Svc(m.ServiceName) ?? "unknown");
             var ids = group.Select(m => m.Id).ToList();
 
-            var (rows, rowsReturned) = await ScanExemplarRowsAsync(conn, group.Key, ids, query.Start, query.End, cap, query.LabelFilters, cancellationToken);
-            if (rowsReturned == cap) anyTableHitCap = true;
+            // cap + 1 data points: the extra one only says that more exist.
+            var (rows, rowsReturned) = await ScanExemplarRowsAsync(conn, group.Key, ids, query.Start, query.End, cap + 1, query.LabelFilters, cancellationToken);
+            if (rowsReturned > cap) anyTableHitCap = true;
 
             foreach (var row in rows)
             {
@@ -2154,7 +1687,7 @@ public abstract class MetricReadRepositoryBase : DapperReadRepository, IMetricRe
         }
 
         flattened.Sort((a, b) => b.Exemplar.TimeUnixNano.CompareTo(a.Exemplar.TimeUnixNano));
-        result.Capped = anyTableHitCap || flattened.Count > cap;
+        result.Truncated = anyTableHitCap || flattened.Count > cap;
         result.Exemplars = flattened.Take(cap).ToList();
         return result;
     }
