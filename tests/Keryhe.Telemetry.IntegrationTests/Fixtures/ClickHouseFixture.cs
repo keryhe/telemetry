@@ -22,6 +22,9 @@ public sealed class ClickHouseFixture : ProviderFixture
     {
         services.AddClickHouseCollectorServices(configuration);
         services.AddClickHouseApiServices(configuration);
+        // ClickHouse has no control plane of its own: tenants, keys, alert rules and retention settings run on PostgreSQL.
+        services.AddPostgreSqlControlPlaneCollectorServices(configuration);
+        services.AddPostgreSqlControlPlaneApiServices(configuration);
     }
 
     public override async Task ResetAsync()

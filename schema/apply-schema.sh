@@ -1,58 +1,81 @@
 #!/usr/bin/env bash
 #
-# Lightweight per-provider schema apply runner.
+# Lightweight schema apply runner.
 #
-# Applies the schema script matching the chosen provider, skipping the apply when
-# the target schema version is already recorded in the schema_version table.
+# Applies one component's schema script for the chosen provider, skipping the apply when the
+# component's target version is already recorded in its version table. There are two components,
+# each versioned on its own (plans/control-plane-split.md):
+#
+#   controlplane  tenants, API keys, alert rules, retention settings   -> control_plane_schema_version
+#   telemetry     spans, logs, metrics, rollups                        -> telemetry_schema_version
 #
 # Usage:
-#   schema/apply-schema.sh <provider> [database]
+#   schema/apply-schema.sh <controlplane|telemetry> <provider> [database]
 #
-#   <provider>   postgresql | timescale | sqlserver | clickhouse | mysql
+#   <provider>   controlplane: postgresql | sqlserver | mysql
+#                telemetry:    postgresql | sqlserver | clickhouse | mysql
 #   [database]   target database name (default: telemetry)
 #
+# On a relational provider both components normally go to the same database; apply the control
+# plane first (a running collector needs keys before it accepts data), though either order works
+# (no foreign key crosses the two). A ClickHouse deployment applies the telemetry component to
+# ClickHouse and the control plane to a separate PostgreSQL, SQL Server or MySQL database.
+#
 # Connection settings are taken from the standard client environment variables:
-#   postgresql / timescale -> PGHOST, PGPORT, PGUSER, PGPASSWORD (libpq)
-#   sqlserver              -> SQLCMDSERVER, SQLCMDUSER, SQLCMDPASSWORD (sqlcmd)
-#   clickhouse             -> CLICKHOUSE_HOST, CLICKHOUSE_USER, CLICKHOUSE_PASSWORD (clickhouse-client)
-#   mysql                  -> MYSQL_HOST, MYSQL_TCP_PORT, MYSQL_PWD, plus -u via MYSQL_USER (mysql client)
+#   postgresql  -> PGHOST, PGPORT, PGUSER, PGPASSWORD (libpq)
+#   sqlserver   -> SQLCMDSERVER, SQLCMDUSER, SQLCMDPASSWORD (sqlcmd)
+#   clickhouse  -> CLICKHOUSE_HOST, CLICKHOUSE_USER, CLICKHOUSE_PASSWORD (clickhouse-client)
+#   mysql       -> MYSQL_HOST, MYSQL_TCP_PORT, MYSQL_PWD, plus -u via MYSQL_USER (mysql client)
 #
 # Examples:
-#   PGUSER=postgres PGPASSWORD=secret schema/apply-schema.sh timescale
-#   SQLCMDSERVER=localhost SQLCMDUSER=sa SQLCMDPASSWORD=secret schema/apply-schema.sh sqlserver
-#   CLICKHOUSE_HOST=localhost schema/apply-schema.sh clickhouse
-#   MYSQL_HOST=localhost MYSQL_USER=root MYSQL_PWD=secret schema/apply-schema.sh mysql
+#   PGUSER=postgres PGPASSWORD=secret schema/apply-schema.sh controlplane postgresql
+#   PGUSER=postgres PGPASSWORD=secret schema/apply-schema.sh telemetry postgresql
+#   CLICKHOUSE_HOST=localhost schema/apply-schema.sh telemetry clickhouse
 #
-# Schema 3.0.x is a FRESH-INSTALL schema: there is no migration from 2.x (schema-simplification
-# plan, decision 4). An existing 2.x database must be recreated; the full schema scripts are not
-# written to be re-applied on top of another version. This runner skips the apply only when the
-# 3.2.1 version row is already recorded. 3.2.0 over 3.1.x adds the request_rollup_minute and log_rollup_minute tables (summary-rollups plan; CREATE TABLE statements per provider in CLAUDE.md); 3.2.1 over 3.2.0 adds MySQL's hour tier tables (the other providers only record the new version). 3.1.0 over 3.0.x adds api_keys.expires_at (collector-authentication plan, decision 12);
-# an existing 3.0.x database takes it with the one ALTER TABLE api_keys ADD per provider in CLAUDE.md.
-# (3.0.1 over 3.0.0 added a ClickHouse skip index on spans.trace_id: ALTER TABLE spans ADD INDEX it.)
+# Schema 4.0.0 is a FRESH-INSTALL schema for both components: there is no migration from 2.x or
+# 3.x, and the scripts are not written to be re-applied on top of another version. This runner
+# skips the apply only when the component's target version row is already recorded.
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-PROVIDER="${1:-}"
-DATABASE="${2:-telemetry}"
+COMPONENT="${1:-}"
+PROVIDER="${2:-}"
+DATABASE="${3:-telemetry}"
 
-# Target version must match the value written by the schema scripts.
-TARGET_VERSION="3.2.1"
+# Target versions must match the values written by the schema scripts. A schema change edits the
+# affected component's scripts and that component's version, in one commit.
+CONTROLPLANE_TARGET_VERSION="4.0.0"
+TELEMETRY_TARGET_VERSION="4.0.0"
 
-if [[ -z "$PROVIDER" ]]; then
-    echo "usage: $0 <postgresql|timescale|sqlserver|clickhouse|mysql> [database]" >&2
+usage() {
+    echo "usage: $0 <controlplane|telemetry> <provider> [database]" >&2
+    echo "  controlplane providers: postgresql|sqlserver|mysql" >&2
+    echo "  telemetry providers:    postgresql|sqlserver|clickhouse|mysql" >&2
     exit 2
-fi
+}
+
+[[ -z "$COMPONENT" || -z "$PROVIDER" ]] && usage
+
+case "$COMPONENT" in
+    controlplane) FILE_SUFFIX="ControlPlane"; TARGET_VERSION="$CONTROLPLANE_TARGET_VERSION"; VERSION_TABLE="control_plane_schema_version" ;;
+    telemetry)    FILE_SUFFIX="Telemetry";    TARGET_VERSION="$TELEMETRY_TARGET_VERSION";    VERSION_TABLE="telemetry_schema_version" ;;
+    *) echo "error: unknown component '$COMPONENT' (expected controlplane|telemetry)" >&2; usage ;;
+esac
 
 case "$PROVIDER" in
-    postgresql) SCRIPT_FILE="$SCRIPT_DIR/PostgreSQL-Schema.sql"; ENGINE="psql" ;;
-    timescale)  SCRIPT_FILE="$SCRIPT_DIR/Timescale-Schema.sql";  ENGINE="psql" ;;
-    sqlserver)  SCRIPT_FILE="$SCRIPT_DIR/SqlServer-Schema.sql";  ENGINE="sqlcmd" ;;
-    clickhouse) SCRIPT_FILE="$SCRIPT_DIR/ClickHouse-Schema.sql"; ENGINE="clickhouse" ;;
-    mysql)      SCRIPT_FILE="$SCRIPT_DIR/MySQL-Schema.sql";      ENGINE="mysql" ;;
+    postgresql) SCRIPT_FILE="$SCRIPT_DIR/PostgreSQL-$FILE_SUFFIX.sql"; ENGINE="psql" ;;
+    sqlserver)  SCRIPT_FILE="$SCRIPT_DIR/SqlServer-$FILE_SUFFIX.sql";  ENGINE="sqlcmd" ;;
+    mysql)      SCRIPT_FILE="$SCRIPT_DIR/MySQL-$FILE_SUFFIX.sql";      ENGINE="mysql" ;;
+    clickhouse)
+        if [[ "$COMPONENT" == "controlplane" ]]; then
+            echo "error: ClickHouse has no control-plane schema; use postgresql, sqlserver or mysql for the control plane" >&2
+            exit 2
+        fi
+        SCRIPT_FILE="$SCRIPT_DIR/ClickHouse-Telemetry.sql"; ENGINE="clickhouse" ;;
     *)
-        echo "error: unknown provider '$PROVIDER' (expected postgresql|timescale|sqlserver|clickhouse|mysql)" >&2
+        echo "error: unknown provider '$PROVIDER' (expected postgresql|sqlserver|clickhouse|mysql)" >&2
         exit 2
         ;;
 esac
@@ -67,22 +90,22 @@ current_version() {
     case "$ENGINE" in
         psql)
             psql -d "$DATABASE" -tAc \
-                "SELECT version FROM schema_version WHERE version = '$TARGET_VERSION'" \
+                "SELECT version FROM $VERSION_TABLE WHERE version = '$TARGET_VERSION'" \
                 2>/dev/null || true
             ;;
         sqlcmd)
             sqlcmd -d "$DATABASE" -h -1 -W -Q \
-                "SET NOCOUNT ON; SELECT version FROM schema_version WHERE version = '$TARGET_VERSION'" \
+                "SET NOCOUNT ON; SELECT version FROM $VERSION_TABLE WHERE version = '$TARGET_VERSION'" \
                 2>/dev/null | tr -d '[:space:]' || true
             ;;
         clickhouse)
             clickhouse-client --database "$DATABASE" -q \
-                "SELECT version FROM schema_version WHERE version = '$TARGET_VERSION' LIMIT 1" \
+                "SELECT version FROM $VERSION_TABLE WHERE version = '$TARGET_VERSION' LIMIT 1" \
                 2>/dev/null | tr -d '[:space:]' || true
             ;;
         mysql)
             mysql -u "${MYSQL_USER:-root}" --batch --skip-column-names "$DATABASE" -e \
-                "SELECT version FROM schema_version WHERE version = '$TARGET_VERSION' LIMIT 1" \
+                "SELECT version FROM $VERSION_TABLE WHERE version = '$TARGET_VERSION' LIMIT 1" \
                 2>/dev/null | tr -d '[:space:]' || true
             ;;
     esac
@@ -90,11 +113,11 @@ current_version() {
 
 EXISTING="$(current_version)"
 if [[ "$EXISTING" == "$TARGET_VERSION" ]]; then
-    echo "schema $TARGET_VERSION already applied to '$DATABASE' ($PROVIDER); nothing to do."
+    echo "$COMPONENT schema $TARGET_VERSION already applied to '$DATABASE' ($PROVIDER); nothing to do."
     exit 0
 fi
 
-echo "applying $PROVIDER schema ($TARGET_VERSION) to '$DATABASE'..."
+echo "applying $PROVIDER $COMPONENT schema ($TARGET_VERSION) to '$DATABASE'..."
 case "$ENGINE" in
     psql)       psql   -d "$DATABASE" -v ON_ERROR_STOP=1 -f "$SCRIPT_FILE" ;;
     sqlcmd)     sqlcmd -d "$DATABASE" -b -I -i "$SCRIPT_FILE" ;;

@@ -171,30 +171,6 @@ public sealed class PostgreSqlRollupQueryBench(PostgreSqlFixture fixture) : Roll
     }
 }
 
-[Collection(ProviderNames.Timescale)]
-[Trait("Provider", ProviderNames.Timescale)]
-public sealed class TimescaleRollupQueryBench(TimescaleFixture fixture) : RollupQueryBenchBase(fixture)
-{
-    protected override async Task AppendAsync(IReadOnlyList<RequestRollupRow> requests, IReadOnlyList<LogRollupRow> logs)
-    {
-        using var scope = fixture.Services.CreateScope();
-        var store = scope.ServiceProvider.GetRequiredService<IRollupStore>();
-        await store.AppendRequestsAsync(requests, default);
-        await store.AppendLogsAsync(logs, default);
-    }
-
-    protected override async Task AfterSeedAsync()
-    {
-        await using var conn = new Npgsql.NpgsqlConnection(fixture.DatabaseConnectionString);
-        await conn.OpenAsync();
-        foreach (var table in new[] { "request_rollup_minute", "log_rollup_minute" })
-        {
-            await using var cmd = new Npgsql.NpgsqlCommand($"VACUUM (ANALYZE) {table}", conn) { CommandTimeout = 600 };
-            await cmd.ExecuteNonQueryAsync();
-        }
-    }
-}
-
 [Collection(ProviderNames.SqlServer)]
 [Trait("Provider", ProviderNames.SqlServer)]
 public sealed class SqlServerRollupQueryBench(SqlServerFixture fixture) : RollupQueryBenchBase(fixture)

@@ -95,8 +95,7 @@ public abstract class TraceReadRepositoryBase : DapperReadRepository, ITraceRead
 
     /// <summary>
     /// Start-time bounds for a by-trace read derived from the caller's own hint (the trace's start and end), without asking the
-    /// database (null: this provider does not use a hint). Timescale overrides it so a trace read touches only the chunks around the
-    /// trace instead of probing all of them; ClickHouse so it can skip the <c>trace_index</c> round trip.
+    /// database (null: this provider does not use a hint). ClickHouse overrides it so it can skip the <c>trace_index</c> round trip.
     /// </summary>
     protected virtual (long Min, long Max)? HintedTraceTimeBounds(long startHintNano, long endHintNano) => null;
 
@@ -890,7 +889,7 @@ public abstract class TraceReadRepositoryBase : DapperReadRepository, ITraceRead
             {PagingClause}
             """;
         // Bounded like the summaries: this derives anchors over the whole window too, and without a budget it ran into the
-        // driver's 30 s default and answered 500 under load (Timescale, 3.0.1 ramp). On timeout the follow-up below is
+        // driver's 30 s default and answered 500 under load (3.0.1 ramp). On timeout the follow-up below is
         // skipped, so nothing else runs on the aborted connection (see TimedQuery).
         var (rows, timedOut) = await TimedQuery.RunAsync(
             async (timeoutSeconds, ct) => (await conn.QueryAsync<AnchorRow>(new CommandDefinition(

@@ -8,7 +8,6 @@ namespace Keryhe.Telemetry.IntegrationTests;
 public static class ProviderNames
 {
     public const string PostgreSql = "PostgreSQL";
-    public const string Timescale = "Timescale";
     public const string SqlServer = "SqlServer";
     public const string MySql = "MySql";
     public const string ClickHouse = "ClickHouse";

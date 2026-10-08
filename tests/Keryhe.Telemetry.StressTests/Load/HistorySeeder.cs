@@ -14,7 +14,7 @@ public sealed record HistorySeedResult(int Days, int SpansPerDay, long SpansSent
 /// <summary>
 /// Sends days of backdated traces, and a few large ones, through the real OTLP path before the warm-up (trace-list-detail-performance plan,
 /// Phase 0). The records are ledgered as current (the ledger entries the shaper builds), so the correctness check still balances; they
-/// are older than anything the measured window reads, but they make the spans table hold many Timescale chunks / ClickHouse partitions.
+/// are older than anything the measured window reads, but they make the spans table hold many ClickHouse partitions.
 /// Everything is deterministic for a profile seed.
 /// </summary>
 public static class HistorySeeder

@@ -99,7 +99,7 @@ public class HostOrchestrationTests
     }
 
     private static HostLaunchOptions Options(HostTopology topology) =>
-        new("PostgreSQL", "collector-cs", "api-cs", topology, Path.GetTempPath(), RetentionIntervalSeconds: 7);
+        new("PostgreSQL", "collector-cs", "api-cs", "PostgreSQL", "control-plane-cs", topology, Path.GetTempPath(), RetentionIntervalSeconds: 7);
 
     [Fact]
     public void Split_hosts_each_get_only_their_own_endpoint_and_connection_string()
@@ -109,6 +109,9 @@ public class HostOrchestrationTests
         Assert.Null(noApi);
         Assert.Contains("ConnectionStrings__Collector", collector.Keys);
         Assert.DoesNotContain("ConnectionStrings__Api", collector.Keys);
+        // Both hosts need the control plane (the collector for key lookup, the API for rules, tenants and retention settings).
+        Assert.Equal("control-plane-cs", collector["ConnectionStrings__ControlPlane"]);
+        Assert.Equal("PostgreSQL", collector["ControlPlane__Provider"]);
         Assert.Equal("Http2", collector["Kestrel__Endpoints__Https__Protocols"]);
         Assert.StartsWith("http://127.0.0.1:", collector["Kestrel__Endpoints__Https__Url"]);
         // The plaintext endpoint is intended: without this the collector's transport guard refuses to start.
@@ -119,6 +122,8 @@ public class HostOrchestrationTests
         Assert.NotNull(api);
         Assert.Contains("ConnectionStrings__Api", apiEnv.Keys);
         Assert.DoesNotContain("ConnectionStrings__Collector", apiEnv.Keys);
+        Assert.Equal("control-plane-cs", apiEnv["ConnectionStrings__ControlPlane"]);
+        Assert.Equal("PostgreSQL", apiEnv["ControlPlane__Provider"]);
         // The harness calls the API at /api; the shipped appsettings mount it at /telemetry/api, so this must be set or
         // the readiness probe is a 404 (the ramp failed exactly that way after the base-path change).
         Assert.Equal("/api", apiEnv["Telemetry__Api__BasePath"]);

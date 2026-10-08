@@ -38,7 +38,6 @@
     <ProjectReference Include="../../src/Keryhe.Telemetry.Api/Keryhe.Telemetry.Api.csproj" />
     <ProjectReference Include="../../src/Keryhe.Telemetry.Ui/Keryhe.Telemetry.Ui.csproj" />
     <ProjectReference Include="../../src/Keryhe.Telemetry.PostgreSQL/Keryhe.Telemetry.PostgreSQL.csproj" />
-    <ProjectReference Include="../../src/Keryhe.Telemetry.Timescale/Keryhe.Telemetry.Timescale.csproj" />
     <ProjectReference Include="../../src/Keryhe.Telemetry.SqlServer/Keryhe.Telemetry.SqlServer.csproj" />
     <ProjectReference Include="../../src/Keryhe.Telemetry.MySql/Keryhe.Telemetry.MySql.csproj" />
     <ProjectReference Include="../../src/Keryhe.Telemetry.ClickHouse/Keryhe.Telemetry.ClickHouse.csproj" />

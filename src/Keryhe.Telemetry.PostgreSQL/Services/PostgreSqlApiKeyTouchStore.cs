@@ -1,3 +1,4 @@
+using Microsoft.Extensions.DependencyInjection;
 using Npgsql;
 using NpgsqlTypes;
 using Keryhe.Telemetry.Core;
@@ -10,7 +11,7 @@ namespace Keryhe.Telemetry.PostgreSQL.Services;
 /// drained for this interval — the same <c>= ANY(array)</c> idiom the bulk writer uses for
 /// set-based writes.
 /// </summary>
-public class PostgreSqlApiKeyTouchStore(NpgsqlDataSource dataSource) : IApiKeyTouchStore
+public class PostgreSqlApiKeyTouchStore([FromKeyedServices(PostgreSqlControlPlane.ServiceKey)] NpgsqlDataSource dataSource) : IApiKeyTouchStore
 {
     public async Task TouchAsync(IReadOnlyCollection<string> keyHashes, CancellationToken cancellationToken)
     {

@@ -12,12 +12,16 @@ public enum HostTopology { Split }
 /// <param name="Provider">The <c>Database:Provider</c> value.</param>
 /// <param name="CollectorConnectionString">Becomes <c>ConnectionStrings:Collector</c> (ingestion side).</param>
 /// <param name="ApiConnectionString">Becomes <c>ConnectionStrings:Api</c>.</param>
+/// <param name="ControlPlaneProvider">The <c>ControlPlane:Provider</c> value (PostgreSQL for a ClickHouse run, the telemetry provider otherwise).</param>
+/// <param name="ControlPlaneConnectionString">Becomes <c>ConnectionStrings:ControlPlane</c> on both hosts.</param>
 /// <param name="RunDirectory">Where each host's console output is written (<c>host-&lt;role&gt;.log</c>).</param>
 /// <param name="RetentionIntervalSeconds">Short, so a retention sweep lands inside the measured window (Decision 11). Every other worker setting stays at its default.</param>
 public sealed record HostLaunchOptions(
     string Provider,
     string CollectorConnectionString,
     string ApiConnectionString,
+    string ControlPlaneProvider,
+    string ControlPlaneConnectionString,
     HostTopology Topology,
     string RunDirectory,
     int RetentionIntervalSeconds = 60,
@@ -232,6 +236,8 @@ public static class HostLauncher
         var env = new Dictionary<string, string>
         {
             ["Database__Provider"] = options.Provider,
+            ["ControlPlane__Provider"] = options.ControlPlaneProvider,
+            ["ConnectionStrings__ControlPlane"] = options.ControlPlaneConnectionString,
             ["Telemetry__Retention__IntervalSeconds"] = options.RetentionIntervalSeconds.ToString(),
             // One line per entry with a UTC timestamp, which HostLogScanner parses.
             ["Logging__Console__FormatterName"] = "simple",

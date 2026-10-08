@@ -36,7 +36,7 @@ public abstract class DapperReadRepository
     /// <summary>
     /// Database-clock expression for the <c>asOf</c> pin (list-pages-server-side plan, Phase 1
     /// decision 3/Phase 2): read once per summary/page request when the caller supplies no
-    /// <c>asOf</c> of its own, then echoed back opaquely and never converted. PostgreSQL/Timescale
+    /// <c>asOf</c> of its own, then echoed back opaquely and never converted. PostgreSQL
     /// subtract 5 seconds to cover the transaction-start race documented on
     /// <see cref="ResolveAsOfAsync"/>; SqlServer/MySql/ClickHouse have no equivalent race (their
     /// <c>created_at</c> defaults are evaluated at statement execution, not transaction start) so
@@ -75,7 +75,7 @@ public abstract class DapperReadRepository
     protected virtual Task<T> ExecuteWithRetryAsync<T>(Func<Task<T>> operation) => operation();
 
     // =========================================================================
-    // SQL DIALECT HOOKS (defaults are PostgreSQL/Timescale; SqlServer overrides)
+    // SQL DIALECT HOOKS (defaults are PostgreSQL; SqlServer overrides)
     // =========================================================================
 
     /// <summary>Case-insensitive LIKE operator. Postgres uses <c>ILIKE</c>; SqlServer uses <c>LIKE</c> (case-insensitive collation).</summary>
@@ -114,7 +114,7 @@ public abstract class DapperReadRepository
     /// <summary>
     /// Integer floor-division SQL expression, <c>numerator / denominator</c>, used to compute
     /// histogram bucket indices from nanosecond timestamps. The default (<c>bigint / bigint</c>)
-    /// truncates toward zero on Postgres/Timescale/SqlServer, which is correct floor division
+    /// truncates toward zero on Postgres/SqlServer, which is correct floor division
     /// since the numerator is always &gt;= 0. ClickHouse and MySQL promote <c>/</c> to a
     /// floating-point result and must override this with their integer-division operator.
     /// </summary>
@@ -139,7 +139,7 @@ public abstract class DapperReadRepository
     /// <summary>
     /// Substring-match predicate for a free-text search term (decision 5/6). The caller binds
     /// <paramref name="valueParam"/> to a <c>%</c>-wrapped, <see cref="EscapeLike"/>-escaped
-    /// pattern. Postgres/Timescale default to case-insensitive <c>ILIKE</c>; SqlServer/MySql
+    /// pattern. Postgres default to case-insensitive <c>ILIKE</c>; SqlServer/MySql
     /// override <see cref="LikeOperator"/> to plain <c>LIKE</c> (case-insensitive under their
     /// default collation already), so this hook needs no per-provider override of its own.
     /// </summary>
@@ -147,7 +147,7 @@ public abstract class DapperReadRepository
 
     /// <summary>
     /// The parameter VALUE to bind for a <c>key:value</c>/<c>key=value</c> attribute filter's key
-    /// (list-pages-server-side plan, Phase 1, decision 7). PostgreSQL, Timescale and ClickHouse
+    /// (list-pages-server-side plan, Phase 1, decision 7). PostgreSQL and ClickHouse
     /// take the raw key: their extraction functions (<c>-&gt;&gt;</c>, <c>JSONExtractRaw</c>) treat
     /// it as an object member name literal. SQL Server's <c>JSON_VALUE</c> and MySQL's
     /// <c>JSON_EXTRACT</c> instead take a JSON *path*, and an OpenTelemetry key routinely contains
@@ -175,7 +175,7 @@ public abstract class DapperReadRepository
     ///
     /// Negation keeps rows that lack the key (decision 10): <c>NOT (x = @v)</c> evaluates to NULL
     /// for a missing key and would drop the row, so negation is compiled as an explicit
-    /// null-tolerant form per provider (<c>IS DISTINCT FROM</c> on Postgres/Timescale;
+    /// null-tolerant form per provider (<c>IS DISTINCT FROM</c> on Postgres;
     /// <c>IS NULL OR &lt;&gt;</c> on SqlServer/MySql; <c>JSONHas(...) = 0 OR !=</c> on ClickHouse).
     /// </summary>
     protected virtual string AttributePredicate(string column, string keyParam, string valueParam, bool negated)
@@ -192,10 +192,10 @@ public abstract class DapperReadRepository
     /// expression (typically an <see cref="AttributePredicate"/> or <see cref="FreeTextPredicate"/>
     /// result) referencing the correlated alias <paramref name="spanAlias"/> (default <c>s2</c>,
     /// matching <c>TraceReadRepositoryBase</c>'s existing correlated-subquery convention). The time
-    /// range is mandatory: on Timescale a subquery without it checks every chunk, and it is what
-    /// keeps this narrowing rather than an unbounded scan on every provider.
+    /// range is mandatory: it is what keeps this narrowing rather than an unbounded scan on every
+    /// provider.
     ///
-    /// PostgreSQL/Timescale/SqlServer/MySql use a correlated <c>EXISTS</c>; ClickHouse — which
+    /// PostgreSQL/SqlServer/MySql use a correlated <c>EXISTS</c>; ClickHouse — which
     /// doesn't reliably support correlated <c>EXISTS</c> — uses an uncorrelated <c>trace_id IN
     /// (...)</c> instead, overridden below.
     /// </summary>

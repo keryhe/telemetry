@@ -2,6 +2,7 @@ using System.Data.Common;
 using Dapper;
 using Npgsql;
 using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.DependencyInjection;
 using Keryhe.Telemetry.Core;
 using Keryhe.Telemetry.Core.Data;
 using Keryhe.Telemetry.Core.Data.Read;
@@ -49,14 +50,14 @@ public class PostgreSqlResourceReadRepository(NpgsqlDataSource dataSource, ITena
         => await dataSource.OpenConnectionAsync(cancellationToken);
 }
 
-public class PostgreSqlTenantCatalogRepository(NpgsqlDataSource dataSource)
+public class PostgreSqlTenantCatalogRepository([FromKeyedServices(PostgreSqlControlPlane.ServiceKey)] NpgsqlDataSource dataSource)
     : TenantCatalogRepositoryBase
 {
     protected override async Task<DbConnection> OpenConnectionAsync(CancellationToken cancellationToken)
         => await dataSource.OpenConnectionAsync(cancellationToken);
 }
 
-public class PostgreSqlAlertRuleRepository(NpgsqlDataSource dataSource, ITenantContext tenantContext)
+public class PostgreSqlAlertRuleRepository([FromKeyedServices(PostgreSqlControlPlane.ServiceKey)] NpgsqlDataSource dataSource, ITenantContext tenantContext)
     : AlertRuleRepositoryBase(tenantContext)
 {
     protected override async Task<DbConnection> OpenConnectionAsync(CancellationToken cancellationToken)
@@ -78,8 +79,19 @@ public class PostgreSqlAlertRuleRepository(NpgsqlDataSource dataSource, ITenantC
 }
 
 /// <summary>
-/// PostgreSQL (plain) implementation of the <see cref="IRetentionSettingsRepository"/> sweeps: the
-/// shared batched, per-tenant shape from <see cref="RetentionSettingsRepositoryBase"/>, in
+/// PostgreSQL implementation of <see cref="IRetentionSettingsRepository"/>: the shared settings
+/// read/write from <see cref="RetentionSettingsRepositoryBase"/>, against the control-plane database.
+/// </summary>
+public class PostgreSqlRetentionSettingsRepository([FromKeyedServices(PostgreSqlControlPlane.ServiceKey)] NpgsqlDataSource dataSource)
+    : RetentionSettingsRepositoryBase
+{
+    protected override async Task<DbConnection> OpenConnectionAsync(CancellationToken cancellationToken)
+        => await dataSource.OpenConnectionAsync(cancellationToken);
+}
+
+/// <summary>
+/// PostgreSQL (plain) implementation of the <see cref="IRetentionSweeper"/> sweeps: the
+/// shared batched, per-tenant shape from <see cref="RetentionSweeperBase"/>, in
 /// PostgreSQL's dialect.
 ///
 /// Postgres has neither <c>DELETE TOP (n)</c> nor <c>DELETE ... LIMIT n</c>, and the hot tables have
@@ -89,11 +101,10 @@ public class PostgreSqlAlertRuleRepository(NpgsqlDataSource dataSource, ITenantC
 /// the data-point tables -- and each statement commits on its own, so a large first sweep never
 /// holds one transaction open long enough to block autovacuum database-wide.
 ///
-/// <c>ctid</c> is only unique within a single table, which is exactly why Timescale (whose
-/// hypertables are many chunk tables) does not reuse this: it drops chunks instead.
+/// <c>ctid</c> is only unique within a single table, which is why the batch is a TID scan of one table.
 /// </summary>
-public class PostgreSqlRetentionSettingsRepository(NpgsqlDataSource dataSource)
-    : RetentionSettingsRepositoryBase
+public class PostgreSqlRetentionSweeper(NpgsqlDataSource dataSource)
+    : RetentionSweeperBase
 {
     protected override async Task<DbConnection> OpenConnectionAsync(CancellationToken cancellationToken)
         => await dataSource.OpenConnectionAsync(cancellationToken);

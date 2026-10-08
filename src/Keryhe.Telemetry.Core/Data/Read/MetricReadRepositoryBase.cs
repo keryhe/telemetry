@@ -171,7 +171,7 @@ public abstract class MetricReadRepositoryBase : DapperReadRepository, IMetricRe
     /// The exact per-candidate check for decision 27's &gt;1-hour-in-the-past fallback: does
     /// <paramref name="metricsAlias"/>.id have a matching row in any of the five data-point tables
     /// within <c>@seenStartNano</c>/<c>@seenEndNano</c> (bound by the caller,
-    /// <see cref="SeenInRangeClause"/>)? PostgreSQL/Timescale/SqlServer/MySql use a correlated
+    /// <see cref="SeenInRangeClause"/>)? PostgreSQL/SqlServer/MySql use a correlated
     /// <c>EXISTS</c>, index-served on each table's <c>(metric_id, time_unix_nano)</c>. ClickHouse
     /// overrides this: it can't resolve a correlated subquery referencing the outer row
     /// ("Resolve identifier 'm.id' from parent scope only supported for constants and CTE" —
@@ -1821,7 +1821,7 @@ public abstract class MetricReadRepositoryBase : DapperReadRepository, IMetricRe
     /// One row per <c>(metric_id, attributes_json, bucket)</c>, holding <paramref name="valueColumns"/>
     /// from whichever row has the greatest <c>time_unix_nano</c> in that group — the "last point in
     /// this stream-bucket" SQL cumulative sums/histograms need (decision 22). Default implementation
-    /// (PostgreSQL, Timescale, SqlServer, MySQL 8+) uses <c>ROW_NUMBER() OVER (PARTITION BY ...)</c>;
+    /// (PostgreSQL, SqlServer, MySQL 8+) uses <c>ROW_NUMBER() OVER (PARTITION BY ...)</c>;
     /// ClickHouse overrides with <c>argMax</c> per column instead (its window-function support is
     /// there but <c>argMax</c> is the idiomatic, cheaper form for this exact shape — see the plan's
     /// Phase 4 text). <paramref name="idInList"/>/<paramref name="timeClause"/>/<paramref name="labelClause"/>
@@ -1874,7 +1874,7 @@ public abstract class MetricReadRepositoryBase : DapperReadRepository, IMetricRe
     /// <see cref="GetMetricExemplarsCappedAsync"/> for the standard tier's newest-500 behavior.
     ///
     /// <b>Deviation from the plan's literal text</b>: the plan describes unnesting individual
-    /// exemplars in SQL (<c>jsonb_array_elements … WITH ORDINALITY</c> on PostgreSQL/Timescale,
+    /// exemplars in SQL (<c>jsonb_array_elements … WITH ORDINALITY</c> on PostgreSQL,
     /// <c>arrayJoin</c>/<c>arrayEnumerate</c> on ClickHouse) and keyset-paging on
     /// <c>(time, data point id, ordinal)</c>. This implementation instead keysets one level up, on
     /// <c>(data point time_unix_nano, data point id)</c>, and returns every exemplar of each data

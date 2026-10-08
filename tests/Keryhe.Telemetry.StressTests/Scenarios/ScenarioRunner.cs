@@ -71,7 +71,7 @@ public static class ScenarioRunner
             await using var observers = await DatabaseObserverSession.StartAsync(spec.Provider, db, cancellationToken: ct);
             log($"[{spec.Id}] launching {spec.Topology}");
             await using var hosts = await HostLauncher.LaunchAsync(published,
-                new HostLaunchOptions(spec.Provider, db.ConnectionString, db.ConnectionString, spec.Topology, directory, profile.RetentionIntervalSeconds,
+                new HostLaunchOptions(spec.Provider, db.ConnectionString, db.ConnectionString, db.ControlPlaneProviderName, db.ControlPlaneConnectionString, spec.Topology, directory, profile.RetentionIntervalSeconds,
                     ExtraEnvironment: profile.HostEnvironment), ct);
 
             await using var generator = new OtlpLoadGenerator(profile.Load,

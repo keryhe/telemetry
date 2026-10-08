@@ -11,9 +11,9 @@ namespace Keryhe.Telemetry.MySql.Services;
 /// the same chunk size the bulk writer's <c>BulkInsertAsync</c> uses, for the same reason (stay
 /// well under MySQL's placeholder limits without a special case for a pathological tenant count).
 /// </summary>
-public class MySqlApiKeyTouchStore(IConfiguration configuration) : IApiKeyTouchStore
+public class MySqlApiKeyTouchStore(ControlPlaneConnection controlPlane) : IApiKeyTouchStore
 {
-    private readonly string _connectionString = configuration.GetConnectionString("Collector")!;
+    private readonly string _connectionString = controlPlane.ConnectionString;
 
     private const int ChunkSize = 500;
 

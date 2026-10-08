@@ -64,7 +64,7 @@ public class ScenarioTests
     public void Matrix_expands_provider_profile_and_all_means_every_value()
     {
         var all = RunCommand.BuildMatrix("all", "all", "smoke", "fixed", false, null);
-        Assert.Equal(5, all.Count);
+        Assert.Equal(4, all.Count);
         Assert.Equal(all.Count, all.Select(s => s.Id).Distinct().Count());
         Assert.Contains(all, s => s.Id == "clickhouse-split-smoke");
 
@@ -145,7 +145,7 @@ public class ScenarioTests
     [Fact]
     public void Log_lag_is_judged_after_subtracting_the_providers_asOf_pin()
     {
-        // PostgreSQL/Timescale: the pinned list page adds a constant 5 s. Steady at ~5.2 s is ~200 ms of real lag.
+        // PostgreSQL: the pinned list page adds a constant 5 s. Steady at ~5.2 s is ~200 ms of real lag.
         var pinned = new double?[] { 5150, 5200, 5250, 5200, 5300, 5250 };
         Assert.Empty(RampEvaluator.Tripped(new StepMeasurements([Window()], 0, 0, [], pinned, LogPinOffsetMs: 5000), Criteria));
         Assert.Equal([5150.0 - 5000, 200, 250, 200, 300, 250], RampEvaluator.AdjustForPin(pinned, 5000).Select(l => l!.Value));

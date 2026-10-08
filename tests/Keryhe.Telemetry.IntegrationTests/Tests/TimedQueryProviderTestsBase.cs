@@ -111,14 +111,6 @@ public sealed class PostgreSqlTimedQueryTests(PostgreSqlFixture fixture, ITestOu
     protected override DbConnection CreateConnection(string connectionString) => new Npgsql.NpgsqlConnection(connectionString);
 }
 
-[Collection(ProviderNames.Timescale)]
-[Trait("Provider", ProviderNames.Timescale)]
-public sealed class TimescaleTimedQueryTests(TimescaleFixture fixture, ITestOutputHelper output) : TimedQueryProviderTestsBase(fixture, output)
-{
-    protected override string SlowSql => "SELECT pg_sleep(3)";
-    protected override DbConnection CreateConnection(string connectionString) => new Npgsql.NpgsqlConnection(connectionString);
-}
-
 [Collection(ProviderNames.SqlServer)]
 [Trait("Provider", ProviderNames.SqlServer)]
 public sealed class SqlServerTimedQueryTests(SqlServerFixture fixture, ITestOutputHelper output) : TimedQueryProviderTestsBase(fixture, output)

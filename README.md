@@ -7,7 +7,7 @@ A self-hosted OpenTelemetry (OTLP) ingestion and visualization platform for trac
 - **Complete OTLP Support**: Handles traces, metrics, and logs as defined in opentelemetry-proto
 - **Angular UI**: Web interface (Angular 20) for exploring traces, metrics, logs, dashboards, and alerts
 - **REST API**: ASP.NET Core Web API (`Keryhe.Telemetry.Api`) with Swagger support
-- **Multiple Database Providers**: Choose between plain PostgreSQL, PostgreSQL + TimescaleDB, SQL Server, MySQL, or ClickHouse (columnar/OLAP)
+- **Multiple Database Providers**: Choose between PostgreSQL, SQL Server, MySQL, or ClickHouse (columnar/OLAP) for telemetry data; tenants, API keys, alert rules and retention settings (the control plane) live in PostgreSQL, SQL Server or MySQL
 - **Trace Correlation**: Links logs and metrics to traces via trace and span IDs
 - **Built-in Analytics**: Service maps, trace summaries and latency heatmaps, and log severity analysis, computed on demand from the raw data
 - **Multi-tenant**: Every OTLP export carries a per-tenant API key (hashed in the database, optional expiry); the REST API is scoped by tenant and supports pluggable authorization
@@ -21,23 +21,30 @@ A self-hosted OpenTelemetry (OTLP) ingestion and visualization platform for trac
 OpenTelemetry SDKs (any language)
   → OTLP gRPC (port 5117) → Keryhe.Telemetry.Collector.Server
   → bounded ingestion channel → background worker → provider bulk writer
-  → PostgreSQL / TimescaleDB / SQL Server / MySQL / ClickHouse
+  → PostgreSQL / SQL Server / MySQL / ClickHouse   (telemetry data)
   → Keryhe.Telemetry.Api.Server (REST API, port 5188 / 7105)
   → Angular SPA (src/telemetry-client, port 4201)
 ```
 
-The database provider is chosen at runtime via the `Database:Provider` configuration key
-(`PostgreSQL`, `Timescale`, `SqlServer`, `MySql`, or `ClickHouse`); each provider ships its own
-read/write implementation and is selected by the host at startup.
+Tenants, API keys, alert rules and retention settings are the **control plane**: a small relational
+database the collector reads for API keys and the API reads and writes for everything else. On
+PostgreSQL, SQL Server and MySQL it is simply the same database as the telemetry data; a ClickHouse
+deployment runs its control plane on one of those three.
+
+Two providers are chosen at runtime, and both are required: `Database:Provider` for telemetry data
+(`PostgreSQL`, `SqlServer`, `MySql`, or `ClickHouse`, with `ConnectionStrings:Collector` / `:Api`) and
+`ControlPlane:Provider` for the control plane (`PostgreSQL`, `SqlServer`, or `MySql`, with
+`ConnectionStrings:ControlPlane`). Each provider ships its own implementation and is selected by the
+host at startup.
 
 | Project | Role |
 |---------|------|
 | `Keryhe.Telemetry.Core` | Domain interfaces and models, plus the provider-agnostic write repositories, ingestion channel + background worker and Dapper read-repository bases |
-| `Keryhe.Telemetry.PostgreSQL` / `.Timescale` / `.SqlServer` / `.MySql` / `.ClickHouse` | Per-provider read/write implementations |
+| `Keryhe.Telemetry.PostgreSQL` / `.SqlServer` / `.MySql` / `.ClickHouse` | Per-provider implementations: telemetry reads and writes, and (all but ClickHouse) the control plane |
 | `Keryhe.Telemetry.Collector` / `.Collector.Server` | gRPC OTLP ingestion with per-tenant API key authentication (class library + thin host) |
 | `Keryhe.Telemetry.Api` / `.Api.Server` | REST API controllers, base-path routing and authorization, alert evaluation (rules, webhooks, periodic worker) and retention sweeps (class library + thin host) |
 | `Keryhe.Telemetry.Ui` | Prebuilt Angular UI, packaged as static web assets — see [Build your own host](#build-your-own-host) below |
-| `Keryhe.Telemetry.Admin` | Console tool for tenants and API keys (PostgreSQL, Timescale, SQL Server) |
+| `Keryhe.Telemetry.Admin` | Console tool for tenants and API keys (PostgreSQL, SQL Server, MySQL: the control-plane providers) |
 | `Keryhe.Telemetry.TestDataGenerator` | Worker service that simulates a multi-tenant e-commerce system and emits realistic traces, logs and metrics (24h backfill, then live) |
 | `src/telemetry-client` | Angular 20 SPA source (Dashboard, Traces, Metrics, Logs, Alerts, Settings) — built into `Keryhe.Telemetry.Ui`, not part of the .sln |
 | `tests/` | Docker-based per-provider integration tests, a stress-test harness and the test data generator's tests — see [Testing](#testing) |
@@ -48,15 +55,21 @@ pipeline, multi-tenancy, provider-specific caveats).
 ## Quick Start (PostgreSQL)
 
 ```bash
-# 1. Create the database and apply the schema
+# 1. Create the database and apply the two schema scripts (control plane first, then telemetry)
 createdb telemetry
-psql -d telemetry -f schema/PostgreSQL-Schema.sql
+psql -d telemetry -f schema/PostgreSQL-ControlPlane.sql
+psql -d telemetry -f schema/PostgreSQL-Telemetry.sql
 
-# 2. Point both hosts at it via User Secrets (keeps credentials out of source control)
+# 2. Point both hosts at it via User Secrets (keeps credentials out of source control).
+#    ControlPlane:Provider and Database:Provider are PostgreSQL in the shipped appsettings.json.
 dotnet user-secrets --project src/Keryhe.Telemetry.Api.Server \
-  set "ConnectionStrings:Api"       "Host=localhost;Port=5432;Database=telemetry;Username=postgres;Password=<password>"
+  set "ConnectionStrings:Api"          "Host=localhost;Port=5432;Database=telemetry;Username=postgres;Password=<password>"
+dotnet user-secrets --project src/Keryhe.Telemetry.Api.Server \
+  set "ConnectionStrings:ControlPlane" "Host=localhost;Port=5432;Database=telemetry;Username=postgres;Password=<password>"
 dotnet user-secrets --project src/Keryhe.Telemetry.Collector.Server \
-  set "ConnectionStrings:Collector" "Host=localhost;Port=5432;Database=telemetry;Username=postgres;Password=<password>"
+  set "ConnectionStrings:Collector"    "Host=localhost;Port=5432;Database=telemetry;Username=postgres;Password=<password>"
+dotnet user-secrets --project src/Keryhe.Telemetry.Collector.Server \
+  set "ConnectionStrings:ControlPlane" "Host=localhost;Port=5432;Database=telemetry;Username=postgres;Password=<password>"
 
 # 3. Build and run the two hosts (each in its own terminal): gRPC ingestion, then the REST API + UI
 dotnet build Telemetry.sln
@@ -77,7 +90,7 @@ every OTLP request — see [Configure an API key](docs/SETUP.md#3-create-a-tenan
 in the full setup guide. In Development the collector also listens on plaintext `http://localhost:5117`;
 outside Development it requires TLS (`https://…:7057`), because keys travel in every export.
 
-For other database providers (TimescaleDB, SQL Server, MySQL, ClickHouse), Docker recipes,
+For other database providers (SQL Server, MySQL, ClickHouse), Docker recipes,
 running the two hosts, deploying to production, the full schema reference, and alerting
 configuration, see **[docs/SETUP.md](docs/SETUP.md)**. Every configuration key and its default is
 listed in **[docs/CONFIGURATION.md](docs/CONFIGURATION.md)**.
@@ -85,7 +98,7 @@ listed in **[docs/CONFIGURATION.md](docs/CONFIGURATION.md)**.
 ## Build your own host
 
 Every piece of this stack ships as a NuGet package — `Keryhe.Telemetry.Core`, `.Api`,
-`.Collector`, `.Ui`, and the five database providers — so you can compose your own ASP.NET Core
+`.Collector`, `.Ui`, and the four database providers — so you can compose your own ASP.NET Core
 host instead of running `Keryhe.Telemetry.Api.Server`/`.Server` as-is: add your own middleware,
 combine it with an existing application, or change what gets exposed.
 
@@ -93,8 +106,10 @@ combine it with an existing application, or change what gets exposed.
 <ItemGroup>
   <PackageReference Include="Keryhe.Telemetry.Api" Version="1.3.0" />
   <PackageReference Include="Keryhe.Telemetry.Ui" Version="1.3.0" />
-  <!-- Plus exactly one provider package, matching Database:Provider below: -->
-  <PackageReference Include="Keryhe.Telemetry.Timescale" Version="1.3.0" />
+  <!-- Plus the provider package for your telemetry data (Database:Provider) and the one for your
+       control plane (ControlPlane:Provider). On PostgreSQL, SQL Server or MySQL these are the same
+       package; a ClickHouse consumer references Keryhe.Telemetry.ClickHouse and one of the others. -->
+  <PackageReference Include="Keryhe.Telemetry.PostgreSQL" Version="1.3.0" />
 </ItemGroup>
 ```
 
@@ -103,7 +118,8 @@ var builder = WebApplication.CreateBuilder(args);
 
 builder.Services.AddKeryheTelemetryApi(builder.Configuration); // controllers, tenant context, authorization
 builder.Services.AddKeryheTelemetryUi(builder.Configuration);  // binds the TelemetryUi section
-builder.Services.AddTimescaleApiServices(builder.Configuration); // reads ConnectionStrings:Api
+builder.Services.AddPostgreSqlApiServices(builder.Configuration);              // telemetry reads: ConnectionStrings:Api
+builder.Services.AddPostgreSqlControlPlaneApiServices(builder.Configuration);  // alerts, tenants, retention settings: ConnectionStrings:ControlPlane
 
 var app = builder.Build();
 
@@ -155,8 +171,9 @@ under `Telemetry:Api:Authorization` (off by default); see
 [docs/CONFIGURATION.md](docs/CONFIGURATION.md).
 
 Add `Keryhe.Telemetry.Collector` (plus `AddKeryheTelemetryCollector()`/`MapKeryheTelemetryCollector()`
-and the matching `Add<Provider>CollectorServices(configuration)` call, e.g.
-`AddTimescaleCollectorServices`) the same way if your host should also ingest OTLP, running it
+and the matching `Add<Provider>CollectorServices(configuration)` and
+`Add<Provider>ControlPlaneCollectorServices(configuration)` calls, e.g. `AddPostgreSqlCollectorServices`
+and `AddPostgreSqlControlPlaneCollectorServices`) the same way if your host should also ingest OTLP, running it
 as its own service (see [the collector README](src/Keryhe.Telemetry.Collector/README.md)). Pin the UI and API packages to the same version —
 they ship in lockstep, and a mismatch fails silently (a field goes missing from a rendered page)
 rather than with an error.

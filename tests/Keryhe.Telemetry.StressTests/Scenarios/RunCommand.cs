@@ -14,7 +14,7 @@ namespace Keryhe.Telemetry.StressTests.Scenarios;
 public static class RunCommand
 {
     public const string Usage =
-        "run [--provider <PostgreSQL|Timescale|SqlServer|MySql|ClickHouse|all>] [--topology <split|all>]\n" +
+        "run [--provider <PostgreSQL|SqlServer|MySql|ClickHouse|all>] [--topology <split|all>]\n" +
         "    [--profile <smoke|standard|soak|ramp|all|path.json>] [--scenario <fixed|ramp>] [--out <dir>] [--reuse-publish <dir>]\n" +
         "    [--browsers <n>]   override the profile's browser users (0 = none)\n" +
         "    [--db-cpuset <cpus>]   pin the database container to these CPUs of the Docker VM (e.g. 0-3); recorded in the report\n" +

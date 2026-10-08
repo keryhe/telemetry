@@ -296,7 +296,7 @@ public abstract class LogReadRepositoryBase : DapperReadRepository, ILogReadRepo
         await using var conn = await OpenConnectionAsync(cancellationToken);
         // Bounded like the summaries: the sample is the newest matching rows, but finding them can mean scanning the
         // window (a search term, a narrow service), and without a budget it ran into the driver's 30 s default and
-        // answered 500 under load (Timescale, the 2026-10-03 timeout-work ramp).
+        // answered 500 under load (the 2026-10-03 timeout-work ramp).
         var (attributeJsonRows, timedOut) = await TimedQuery.RunAsync(
             async (timeoutSeconds, ct) => (await conn.QueryAsync<string?>(new CommandDefinition(
                 sql, parameters, commandTimeout: timeoutSeconds, cancellationToken: ct))).ToList(),

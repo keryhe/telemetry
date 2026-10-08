@@ -43,7 +43,7 @@ public abstract class TraceQueryBenchBase(ProviderFixture fixture) : IAsyncLifet
 
         // Data ends "now" and spans six hours back, so windows are relative to the data like a real list page.
         // TRACE_BENCH_SPREAD_HOURS spreads the same traces over a longer history (default 6 h): the point of a multi-day table
-        // is the by-trace-id probe of every Timescale chunk. The list windows stay the last hour and six hours of it.
+        // is the by-trace-id probe of every ClickHouse partition. The list windows stay the last hour and six hours of it.
         var spreadHours = int.TryParse(Environment.GetEnvironmentVariable("TRACE_BENCH_SPREAD_HOURS"), out var sh) && sh >= 1 ? sh : 6;
         var dataEnd = DateTime.UtcNow;
         var dataStart = dataEnd.AddHours(-spreadHours);
@@ -360,35 +360,6 @@ public sealed class PostgreSqlTraceQueryBench(PostgreSqlFixture fixture) : Trace
         // index-only scans depend on it.
         await using var cmd = new Npgsql.NpgsqlCommand("VACUUM (ANALYZE) spans", conn) { CommandTimeout = 600 };
         await cmd.ExecuteNonQueryAsync();
-    }
-}
-
-[Collection(ProviderNames.Timescale)]
-[Trait("Provider", ProviderNames.Timescale)]
-public sealed class TimescaleTraceQueryBench(TimescaleFixture fixture) : TraceQueryBenchBase(fixture)
-{
-    protected override async Task<System.Data.Common.DbConnection> OpenRawAsync()
-    {
-        var c = new Npgsql.NpgsqlConnection(fixture.DatabaseConnectionString);
-        await c.OpenAsync();
-        return c;
-    }
-
-    protected override async Task AfterSeedAsync()
-    {
-        await using var conn = new Npgsql.NpgsqlConnection(fixture.DatabaseConnectionString);
-        await conn.OpenAsync();
-        await using var cmd = new Npgsql.NpgsqlCommand("VACUUM (ANALYZE) spans", conn) { CommandTimeout = 600 };
-        await cmd.ExecuteNonQueryAsync();
-
-        // TRACE_BENCH_COMPRESS=1: compress the chunks older than seven days, as the compression policy would, so a by-trace
-        // probe of an old chunk pays for decompression.
-        if (Environment.GetEnvironmentVariable("TRACE_BENCH_COMPRESS") == "1")
-        {
-            await using var compress = new Npgsql.NpgsqlCommand(
-                "SELECT compress_chunk(c, if_not_compressed => true) FROM show_chunks('spans', older_than => (EXTRACT(EPOCH FROM NOW() - INTERVAL '7 days') * 1000000000)::bigint) c", conn) { CommandTimeout = 1200 };
-            await compress.ExecuteNonQueryAsync();
-        }
     }
 }
 

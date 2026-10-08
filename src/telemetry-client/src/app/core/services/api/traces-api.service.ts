@@ -173,7 +173,7 @@ export class TracesApiService {
 
   /**
    * The trace's spans. `start` and `end` are the trace's extent as the list returned it (`traceStartTime`/`traceEndTime`): they
-   * only let a provider that cannot seek a trace id (Timescale, ClickHouse) read that range, so both are optional and a deep link
+   * only let a provider that cannot seek a trace id (ClickHouse) read that range, so both are optional and a deep link
    * without them still works (the read is then unbounded and the trace whole).
    */
   getSpans(traceId: string, start?: string, end?: string): Observable<SpanModel[]> {

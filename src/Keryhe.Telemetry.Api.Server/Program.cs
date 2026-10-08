@@ -40,16 +40,27 @@ builder.Services.AddKeryheTelemetryApi(builder.Configuration);
 // prebuilt bundle without recompiling anything.
 builder.Services.AddKeryheTelemetryUi(builder.Configuration);
 
-// The active provider's read services (Database:Provider + ConnectionStrings:Api).
+// The active provider's read services (Database:Provider + ConnectionStrings:Api) and retention sweeper.
 switch (builder.Configuration["Database:Provider"])
 {
     case "SqlServer":  builder.Services.AddSqlServerApiServices(builder.Configuration);  break;
     case "PostgreSQL": builder.Services.AddPostgreSqlApiServices(builder.Configuration); break;
-    case "Timescale":  builder.Services.AddTimescaleApiServices(builder.Configuration);  break;
     case "ClickHouse": builder.Services.AddClickHouseApiServices(builder.Configuration); break;
     case "MySql":      builder.Services.AddMySqlApiServices(builder.Configuration);      break;
     default: throw new InvalidOperationException(
-        "Unknown or missing Database:Provider (expected SqlServer, PostgreSQL, Timescale, ClickHouse, or MySql).");
+        "Unknown or missing Database:Provider (expected SqlServer, PostgreSQL, ClickHouse, or MySql).");
+}
+
+// The control plane (tenants, alert rules, retention settings): ControlPlane:Provider +
+// ConnectionStrings:ControlPlane, both required. It may be a different provider (and database) from the
+// telemetry data above.
+switch (builder.Configuration["ControlPlane:Provider"])
+{
+    case "SqlServer":  builder.Services.AddSqlServerControlPlaneApiServices(builder.Configuration);  break;
+    case "PostgreSQL": builder.Services.AddPostgreSqlControlPlaneApiServices(builder.Configuration); break;
+    case "MySql":      builder.Services.AddMySqlControlPlaneApiServices(builder.Configuration);      break;
+    default: throw new InvalidOperationException(
+        "Unknown or missing ControlPlane:Provider (expected SqlServer, PostgreSQL, or MySql).");
 }
 
 // ── ALERTING ──────────────────────────────────────────────────────────────────
@@ -59,8 +70,8 @@ builder.Services.AddAlerting(builder.Configuration);
 
 // ── RETENTION ─────────────────────────────────────────────────────────────────
 // Registers the periodic background worker that sweeps old telemetry per the
-// DB-backed retention_settings row. Depends on IRetentionSettingsRepository,
-// registered above by AddKeryheTelemetryApi.
+// DB-backed retention_settings row. Depends on IRetentionSettingsRepository (control plane) and
+// IRetentionSweeper (telemetry provider), both registered above.
 builder.Services.AddRetention(builder.Configuration);
 
 var app = builder.Build();

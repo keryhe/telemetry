@@ -9,10 +9,8 @@ namespace Keryhe.Telemetry.Core.Data.Read;
 /// (no tenant-scoping — this is a cross-tenant listing used for the tenant picker UI).
 /// The SQL is dialect-neutral; providers supply only the connection.
 /// </summary>
-public abstract class TenantCatalogRepositoryBase : ITenantCatalogRepository
+public abstract class TenantCatalogRepositoryBase : ControlPlaneRepositoryBase, ITenantCatalogRepository
 {
-    protected abstract Task<DbConnection> OpenConnectionAsync(CancellationToken cancellationToken);
-
     public async Task<List<TenantInfo>> GetAllTenantsAsync(CancellationToken cancellationToken = default)
     {
         await using var conn = await OpenConnectionAsync(cancellationToken);

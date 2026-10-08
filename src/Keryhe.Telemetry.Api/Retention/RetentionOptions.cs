@@ -4,7 +4,7 @@ namespace Keryhe.Telemetry.Api.Retention;
 /// Options for the periodic <see cref="RetentionWorker"/>. Bound from the <c>Telemetry:Retention</c>
 /// configuration section. This is the sweep's operational cadence only — how many days of
 /// telemetry to keep lives in the DB-backed <c>retention_settings</c> row
-/// (<see cref="Keryhe.Telemetry.Core.IRetentionSettingsRepository"/>), not here.
+/// (<see cref="Keryhe.Telemetry.Core.IRetentionSettingsRepository"/>, in the control plane), not here.
 /// </summary>
 public sealed class RetentionOptions
 {

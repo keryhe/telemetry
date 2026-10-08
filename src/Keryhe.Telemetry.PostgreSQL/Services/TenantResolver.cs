@@ -1,3 +1,4 @@
+using Microsoft.Extensions.DependencyInjection;
 using Npgsql;
 using NpgsqlTypes;
 using Keryhe.Telemetry.Core;
@@ -10,7 +11,7 @@ namespace Keryhe.Telemetry.PostgreSQL.Services;
 /// provider-agnostically, by <c>CachingTenantResolver</c> / <c>ApiKeyTouchWorker</c>; see
 /// <see cref="IApiKeyLookup"/>.
 /// </summary>
-public class TenantResolver(NpgsqlDataSource dataSource) : IApiKeyLookup
+public class TenantResolver([FromKeyedServices(PostgreSqlControlPlane.ServiceKey)] NpgsqlDataSource dataSource) : IApiKeyLookup
 {
     public async Task<ApiKeyLookupResult?> LookupAsync(string keyHash, CancellationToken cancellationToken)
     {

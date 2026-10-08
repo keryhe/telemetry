@@ -649,7 +649,7 @@ export class TraceListComponent implements OnDestroy {
     });
   }
 
-  /** `start` and `end` are the trace's own extent from the row, passed on so the detail read can be bounded (Timescale, ClickHouse). */
+  /** `start` and `end` are the trace's own extent from the row, passed on so the detail read can be bounded (ClickHouse). */
   protected navigate(traceId: string, start?: string, end?: string): void {
     if (this.pageLoading()) return; // the grid is mid-load: its rows are about to be replaced
     this.router.navigate(this.tenant.link('traces', traceId), start && end ? { queryParams: { start, end } } : undefined);

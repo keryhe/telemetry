@@ -17,10 +17,10 @@ namespace Keryhe.Telemetry.Core;
 /// <c>mode=slow</c>, before <see cref="RawSearchWindowGuard"/> rejects it with 400. Null means no limit.
 /// 24 on every provider by default (<see cref="DefaultRawSearchWindowHours"/>).
 /// </param>
-/// <param name="ExportMaxWindowDays">Maximum export time window, in days: 7 on PostgreSQL/Timescale/ClickHouse and 1 on SQL Server/MySQL by default.</param>
+/// <param name="ExportMaxWindowDays">Maximum export time window, in days: 7 on PostgreSQL/ClickHouse and 1 on SQL Server/MySQL by default.</param>
 /// <param name="AsOfBackoffSeconds">
 /// How far behind the database clock a fresh list/summary query pins <c>asOf</c>
-/// (<c>DapperReadRepository.DatabaseClockNowExpr</c>): 5 on PostgreSQL/Timescale, 0 elsewhere. A row
+/// (<c>DapperReadRepository.DatabaseClockNowExpr</c>): 5 on PostgreSQL, 0 elsewhere. A row
 /// is therefore invisible to a pinned list for at least this long after it is written. Informational
 /// only; nothing in the API enforces it. The stress harness subtracts it from its log-lag probe.
 /// </param>
@@ -33,7 +33,7 @@ public sealed record ProviderCapabilities(
     /// <summary>Search is limited to this many hours on every provider unless <c>Telemetry:Query:RawSearchWindowHoursOverride</c> says otherwise.</summary>
     public const int DefaultRawSearchWindowHours = 24;
 
-    /// <summary>Defaults for a provider with keyset exemplar paging and a 7-day export window (PostgreSQL, Timescale, ClickHouse).</summary>
+    /// <summary>Defaults for a provider with keyset exemplar paging and a 7-day export window (PostgreSQL, ClickHouse).</summary>
     public static ProviderCapabilities Default() => new(
         ExemplarPaging: true,
         RawSearchWindowHours: DefaultRawSearchWindowHours,

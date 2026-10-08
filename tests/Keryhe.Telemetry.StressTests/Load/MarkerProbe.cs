@@ -30,7 +30,7 @@ public sealed record PendingMarker(int Sequence, DateTimeOffset SentAt, bool Log
 /// by fetching its spans.
 ///
 /// The two lags differ by design on some providers: list pages pin every query on <c>asOf</c>, and on
-/// PostgreSQL/Timescale that pin is <c>NOW() - 5 seconds</c> (a transaction-start race guard, see
+/// PostgreSQL that pin is <c>NOW() - 5 seconds</c> (a transaction-start race guard, see
 /// <c>DapperReadRepository.DatabaseClockNowExpr</c>), so a log sits ~5s behind ingestion in the list,
 /// while a trace fetched by id is not pinned. Both are what a user sees, so both are reported.
 ///

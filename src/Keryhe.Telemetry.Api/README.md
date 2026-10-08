@@ -42,8 +42,11 @@ app.Run();
 
 Configuration:
 
-- `ConnectionStrings:Api` — connection string for the api (read by the provider's own
+- `ConnectionStrings:Api` — connection string for the telemetry data (read by the provider's own
   `Add<Provider>ApiServices` call, not by `AddKeryheTelemetryApi`).
+- `ControlPlane:Provider` and `ConnectionStrings:ControlPlane` — the control-plane database for alert rules, the tenant
+  catalog and retention settings (read by `Add<Provider>ControlPlaneApiServices`, which throws naming the key when the
+  connection string is missing).
 - `Telemetry:Api` — the section below.
 
 ## Base path and routes

@@ -152,9 +152,6 @@ public sealed class ApiHost : IAsyncDisposable
     {
         public Task<RetentionSettings> GetSettingsAsync(CancellationToken ct = default) => Task.FromResult(new RetentionSettings());
         public Task UpdateSettingsAsync(RetentionSettings settings, CancellationToken ct = default) => Task.CompletedTask;
-        public Task<int> DeleteOldTracesAsync(TimeSpan retentionPeriod, CancellationToken cancellationToken = default) => Task.FromResult(0);
-        public Task<int> DeleteOldMetricDataPointsAsync(TimeSpan retentionPeriod, CancellationToken cancellationToken = default) => Task.FromResult(0);
-        public Task<int> DeleteOldLogRecordsAsync(TimeSpan retentionPeriod, CancellationToken cancellationToken = default) => Task.FromResult(0);
     }
 
     public sealed class FakeAlerts : IAlertRuleRepository

@@ -45,7 +45,7 @@ public class CapabilitiesTests
         Assert.Equal(1, constrained.ExportMaxWindowDays);
         Assert.Equal(24, constrained.RawSearchWindowHours);     // search is window-bounded on EVERY provider now
 
-        var standard = ProviderCapabilities.Default();          // PostgreSQL, Timescale, ClickHouse
+        var standard = ProviderCapabilities.Default();          // PostgreSQL, ClickHouse
         Assert.True(standard.ExemplarPaging);
         Assert.Equal(7, standard.ExportMaxWindowDays);
         Assert.Equal(24, standard.RawSearchWindowHours);

@@ -161,7 +161,7 @@ public class TracesController : ControllerBase
     /// <summary>
     /// The trace's spans, with each distinct resource and instrumentation scope listed once (<see cref="TraceDetailResponse"/>).
     /// <c>start</c> and <c>end</c> are optional and used together: the trace's extent as the list returns it
-    /// (<c>traceStartTime</c>/<c>traceEndTime</c>), which lets a provider that cannot seek a trace id (Timescale, ClickHouse) read only
+    /// (<c>traceStartTime</c>/<c>traceEndTime</c>), which lets a provider that cannot seek a trace id (ClickHouse) read only
     /// that range. With either one missing the read is unbounded and the trace whole.
     /// </summary>
     [TelemetryOperation(TelemetryOperation.Read)]

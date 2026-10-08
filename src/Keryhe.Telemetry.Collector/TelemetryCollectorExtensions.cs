@@ -22,9 +22,10 @@ public static class TelemetryCollectorServiceCollectionExtensions
     /// count — see <see cref="TelemetryIngestionOptions"/>), and the background worker that
     /// drains it. This does not register a database provider — the host must also call the
     /// active provider's <c>Add&lt;Provider&gt;CollectorServices(configuration)</c> (e.g.
-    /// <c>AddPostgreSqlCollectorServices</c>), which supplies <c>ITelemetryBulkWriter</c>,
-    /// <c>IApiKeyLookup</c>, and <c>IApiKeyTouchStore</c> (connection string comes from
-    /// <c>ConnectionStrings:Collector</c>). The host still owns CORS, Kestrel configuration, and
+    /// <c>AddPostgreSqlCollectorServices</c>), which supplies <c>ITelemetryBulkWriter</c>
+    /// (connection string from <c>ConnectionStrings:Collector</c>), and the control plane's
+    /// <c>Add&lt;Provider&gt;ControlPlaneCollectorServices(configuration)</c>, which supplies
+    /// <c>IApiKeyLookup</c> and <c>IApiKeyTouchStore</c> (<c>ConnectionStrings:ControlPlane</c>). The host still owns CORS, Kestrel configuration, and
     /// calling <c>MapKeryheTelemetryCollector()</c>.
     /// </summary>
     public static IServiceCollection AddKeryheTelemetryCollector(this IServiceCollection services, IConfiguration configuration)

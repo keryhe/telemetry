@@ -66,7 +66,6 @@ public class DatabaseObserverTests
     public static IEnumerable<object[]> RelationalProviders() =>
     [
         [ProviderNames.PostgreSql],
-        [ProviderNames.Timescale],
         [ProviderNames.SqlServer],
         [ProviderNames.MySql],
     ];
@@ -75,7 +74,7 @@ public class DatabaseObserverTests
     {
         DbConnection conn = provider switch
         {
-            ProviderNames.PostgreSql or ProviderNames.Timescale => new NpgsqlConnection(connectionString),
+            ProviderNames.PostgreSql => new NpgsqlConnection(connectionString),
             ProviderNames.SqlServer => new SqlConnection(applicationName is null ? connectionString
                 : new SqlConnectionStringBuilder(connectionString) { ApplicationName = applicationName }.ConnectionString),
             ProviderNames.MySql => new MySqlConnection(connectionString),
@@ -170,7 +169,7 @@ public class DatabaseObserverTests
             Assert.NotEmpty(observation.Locks.DeadlockDetails);
         else
             Assert.NotEmpty(observation.Locks.Artifacts);
-        if (provider is ProviderNames.PostgreSql or ProviderNames.Timescale)
+        if (provider == ProviderNames.PostgreSql)
             Assert.NotEmpty(observation.Locks.LockWaitLogLines);
         if (provider == ProviderNames.MySql)
             Assert.True(observation.Locks.CounterDeltas["row_lock_waits"] >= 1);
@@ -184,9 +183,6 @@ public class DatabaseObserverTests
         Assert.NotEmpty(observation.ContainerStats);
         Assert.All(observation.ContainerStats, c => Assert.True(c.MemoryBytes > 0));
 
-        if (provider == ProviderNames.Timescale)
-            Assert.Contains(observation.LockSamples.SelectMany(s => s.Gauges), g => g.Name == "chunks");
-
         AssertSettingsAndDiagnostics(provider, observation);
     }
 
@@ -197,7 +193,7 @@ public class DatabaseObserverTests
         Assert.DoesNotContain("(error)", settings.Keys);
         string[] expected = provider switch
         {
-            ProviderNames.PostgreSql or ProviderNames.Timescale => ["server_version", "shared_buffers", "max_wal_size", "checkpoint_timeout", "pg_stat_statements.track"],
+            ProviderNames.PostgreSql => ["server_version", "shared_buffers", "max_wal_size", "checkpoint_timeout", "pg_stat_statements.track"],
             ProviderNames.SqlServer => ["version", "max server memory (MB)", "physical_memory_mb", "recovery_model", "tempdb_data_files"],
             ProviderNames.MySql => ["version", "innodb_buffer_pool_size", "log_bin", "innodb_flush_log_at_trx_commit", "transaction_isolation"],
             _ => ["version", "max_threads", "max_server_memory_usage"],
@@ -209,7 +205,7 @@ public class DatabaseObserverTests
         Assert.All(diagnostics, d => Assert.True(d.Error is null, $"{d.Name}: {d.Error}"));
         Assert.All(diagnostics, d => Assert.All(d.Rows, r => Assert.Equal(d.Columns.Count, r.Count)));
 
-        if (provider is ProviderNames.PostgreSql or ProviderNames.Timescale)
+        if (provider == ProviderNames.PostgreSql)
         {
             Assert.Equal("all", settings["pg_stat_statements.track"]);
             var fk = Assert.Single(diagnostics, d => d.Name.StartsWith("Foreign-key checks"));
@@ -217,8 +213,6 @@ public class DatabaseObserverTests
             var checkpoints = Assert.Single(diagnostics, d => d.Name == "Checkpoints and WAL");
             Assert.Contains(checkpoints.Rows, r => r[0] == "wal_bytes");
         }
-        if (provider == ProviderNames.Timescale)
-            Assert.NotEmpty(Assert.Single(diagnostics, d => d.Name == "Timescale background jobs").Rows);
         if (provider == ProviderNames.SqlServer)
             Assert.NotEmpty(Assert.Single(diagnostics, d => d.Name == "spans index usage").Rows);
         if (provider == ProviderNames.MySql)
@@ -291,8 +285,8 @@ public class DatabaseObserverTests
         using (var conn = Open(ProviderNames.ClickHouse, container.ConnectionString))
         {
             for (var i = 0; i < 6; i++)
-                await ExecAsync(conn, $"INSERT INTO tenants (id, name) VALUES ({100 + i}, 'observer-{i}')");
-            await ExecAsync(conn, "ALTER TABLE tenants UPDATE name = 'renamed' WHERE id = 100");
+                await ExecAsync(conn, $"INSERT INTO telemetry_schema_version (version) VALUES ('observer-{i}')");
+            await ExecAsync(conn, "ALTER TABLE telemetry_schema_version UPDATE applied_at = now64(9) WHERE version = 'observer-0'");
             await Task.Delay(2500);
         }
 
@@ -300,8 +294,8 @@ public class DatabaseObserverTests
 
         Assert.DoesNotContain(observation.LockSamples, s => s.Error is not null);
         var gauges = observation.LockSamples.SelectMany(s => s.Gauges).ToList();
-        Assert.Contains(gauges, g => g.Name == "parts_active" && g.Label == "tenants" && g.Value >= 1);
-        Assert.Contains(gauges, g => g.Name == "parts_max_per_partition" && g.Label == "tenants");
+        Assert.Contains(gauges, g => g.Name == "parts_active" && g.Label == "telemetry_schema_version" && g.Value >= 1);
+        Assert.Contains(gauges, g => g.Name == "parts_max_per_partition" && g.Label == "telemetry_schema_version");
         Assert.Contains(gauges, g => g.Name == "merges_running");
 
         Assert.Equal(0, observation.Locks.Deadlocks);
@@ -310,15 +304,15 @@ public class DatabaseObserverTests
         Assert.Contains("TOO_MANY_PARTS", observation.Locks.CounterDeltas.Keys);
 
         Assert.Equal("system.query_log", observation.Statements.Source);
-        Assert.Contains(observation.Statements.ByTotal, s => s.Query.Contains("INSERT INTO tenants") && s.Calls >= 6);
-        var table = Assert.Single(observation.Tables, t => t.Table == "tenants");
-        Assert.True(table.Rows >= 8);
+        Assert.Contains(observation.Statements.ByTotal, s => s.Query.Contains("INSERT INTO telemetry_schema_version") && s.Calls >= 6);
+        var table = Assert.Single(observation.Tables, t => t.Table == "telemetry_schema_version");
+        Assert.True(table.Rows >= 7); // the 4.0.0 version row plus six inserts
         Assert.True(table.Bytes > 0);
         Assert.NotEmpty(observation.ContainerStats);
 
         AssertSettingsAndDiagnostics(ProviderNames.ClickHouse, observation);
         var reads = Assert.Single(observation.Diagnostics!, d => d.Name == "Rows and bytes read per query shape");
         Assert.NotEmpty(reads.Rows);
-        Assert.Contains(Assert.Single(observation.Diagnostics!, d => d.Name == "Mutations").Rows, r => r[0] == "tenants");
+        Assert.Contains(Assert.Single(observation.Diagnostics!, d => d.Name == "Mutations").Rows, r => r[0] == "telemetry_schema_version");
     }
 }

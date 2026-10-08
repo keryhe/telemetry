@@ -14,7 +14,7 @@ public interface ITraceReadRepository
     /// <summary>
     /// <see cref="GetTraceByIdAsync(string, CancellationToken)"/> with a time hint: the trace's extent as the trace list returned it
     /// (<see cref="TraceInfo.TraceStartTime"/>/<see cref="TraceInfo.TraceEndTime"/>). A provider that cannot seek a trace id
-    /// (Timescale's chunks, ClickHouse's sort key) reads only that range, widened by <c>Telemetry:Query:TraceHintMarginMinutes</c>
+    /// (ClickHouse's sort key) reads only that range, widened by <c>Telemetry:Query:TraceHintMarginMinutes</c>
     /// (default 1) either side, instead of probing everything. A hint that finds nothing falls back to the unbounded read. A span that
     /// arrives after the list was read and lies beyond the margin is missing from a hinted read, which is the limit of a hint; an
     /// unhinted read is always whole. Every other provider ignores the hint.

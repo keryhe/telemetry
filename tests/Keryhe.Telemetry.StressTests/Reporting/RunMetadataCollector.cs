@@ -28,6 +28,9 @@ public static class RunMetadataCollector
         catch (Exception) { /* Docker unreachable: leave the fields empty rather than fail the report */ }
 
         var images = providers.Distinct().ToDictionary(p => p, p => ProviderContainerFactory.Create(p).ImageName);
+        // ClickHouse holds telemetry only; its control plane runs on a PostgreSQL container (unobserved, and sharing the Docker VM's CPUs).
+        if (images.ContainsKey("ClickHouse"))
+            images["ClickHouse control plane (PostgreSQL)"] = ProviderContainerFactory.Create("PostgreSQL").ImageName;
         return new RunMetadata(DateTimeOffset.UtcNow, string.IsNullOrEmpty(sha) ? null : sha, dirty, RuntimeInformation.OSDescription, Environment.ProcessorCount,
             GC.GetGCMemoryInfo().TotalAvailableMemoryBytes, RuntimeInformation.FrameworkDescription, dockerCpus, dockerMem, dockerVersion, images, commandLine);
     }

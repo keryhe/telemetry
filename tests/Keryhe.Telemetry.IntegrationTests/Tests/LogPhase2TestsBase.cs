@@ -43,7 +43,7 @@ public abstract class LogPhase2TestsBase : IAsyncLifetime
 
         const int size = 40;
         // Pinned well after "now" so this test exercises keyset correctness, not the pin's own
-        // 5-second safety margin (decision 3: PostgreSQL/Timescale capture asOf as "now minus 5
+        // 5-second safety margin (decision 3: PostgreSQL capture asOf as "now minus 5
         // seconds" to cover the transaction-start race, which would otherwise hide rows inserted
         // moments ago in a fast test run).
         var asOf = (DateTime?)DateTime.UtcNow.AddMinutes(1);
@@ -100,7 +100,7 @@ public abstract class LogPhase2TestsBase : IAsyncLifetime
         using var readScope = Scope();
         var repo = readScope.ServiceProvider.GetRequiredService<ILogReadRepository>();
 
-        // PostgreSQL/Timescale capture asOf as "now minus 5 seconds" (decision 3, to cover the
+        // PostgreSQL capture asOf as "now minus 5 seconds" (decision 3, to cover the
         // transaction-start race) — wait past that margin before capturing it here, or the
         // baseline rows just inserted above would themselves fail created_at <= asOf and this test
         // would be asserting the wrong thing.

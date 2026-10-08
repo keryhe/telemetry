@@ -11,9 +11,6 @@ namespace Keryhe.Telemetry.IntegrationTests;
 [CollectionDefinition(ProviderNames.PostgreSql)]
 public sealed class PostgreSqlCollection : ICollectionFixture<PostgreSqlFixture>;
 
-[CollectionDefinition(ProviderNames.Timescale)]
-public sealed class TimescaleCollection : ICollectionFixture<TimescaleFixture>;
-
 [CollectionDefinition(ProviderNames.SqlServer)]
 public sealed class SqlServerCollection : ICollectionFixture<SqlServerFixture>;
 

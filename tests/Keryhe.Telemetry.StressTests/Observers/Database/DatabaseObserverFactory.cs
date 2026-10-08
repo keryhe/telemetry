@@ -10,8 +10,7 @@ public static class DatabaseObserverFactory
 
     public static DatabaseObserverBase Create(string provider, string connectionString, Func<DateTime, CancellationToken, Task<string>>? readLogs = null) => provider switch
     {
-        "PostgreSQL" => new PostgresObserver(connectionString, timescale: false, readLogs),
-        "Timescale" => new PostgresObserver(connectionString, timescale: true, readLogs),
+        "PostgreSQL" => new PostgresObserver(connectionString, readLogs),
         "SqlServer" => new SqlServerObserver(connectionString, readLogs),
         "MySql" => new MySqlObserver(connectionString, readLogs),
         "ClickHouse" => new ClickHouseObserver(connectionString, readLogs),

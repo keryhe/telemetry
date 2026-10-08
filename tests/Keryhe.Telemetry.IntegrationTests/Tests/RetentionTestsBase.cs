@@ -9,12 +9,11 @@ namespace Keryhe.Telemetry.IntegrationTests.Tests;
 
 /// <summary>
 /// Retention sweeps under schema 3.0.0, each provider's own mechanism: batched per-tenant deletes
-/// (PostgreSQL, SQL Server, MySQL), <c>drop_chunks</c> (Timescale) and <c>DROP PARTITION</c>
-/// (ClickHouse). Data is seeded 200 and 100 days old, an hour either side of a 90-day cutoff, and
+/// (PostgreSQL, SQL Server, MySQL) and <c>DROP PARTITION</c> (ClickHouse). Data is seeded 200 and 100 days old, an hour either side of a 90-day cutoff, and
 /// current; a sweep must remove what is older than the window and keep what is inside it.
 ///
-/// Timescale and ClickHouse drop whole chunks/days, so a row just past the cutoff survives until its
-/// chunk/day expires: <see cref="RowGranularRetention"/> says whether the "hour before the cutoff"
+/// ClickHouse drops whole days, so a row just past the cutoff survives until its
+/// day expires: <see cref="RowGranularRetention"/> says whether the "hour before the cutoff"
 /// row is expected to be gone.
 /// </summary>
 public abstract class RetentionTestsBase : IAsyncLifetime
@@ -27,7 +26,7 @@ public abstract class RetentionTestsBase : IAsyncLifetime
     public Task InitializeAsync() => _fixture.ResetAsync();
     public Task DisposeAsync() => Task.CompletedTask;
 
-    /// <summary>False for Timescale (chunk interval) and ClickHouse (whole days): the row an hour past the cutoff may legitimately survive.</summary>
+    /// <summary>False for ClickHouse (whole days): the row an hour past the cutoff may legitimately survive.</summary>
     protected virtual bool RowGranularRetention => true;
 
     /// <summary>Rows of <paramref name="table"/> whose <paramref name="timeColumn"/> falls in <c>[fromNano, toNano)</c>.</summary>
@@ -78,10 +77,38 @@ public abstract class RetentionTestsBase : IAsyncLifetime
         var before = await CountsAsync("spans", "start_time_unix_nano", now);
 
         using var scope = Scope();
-        var removed = await scope.ServiceProvider.GetRequiredService<IRetentionSettingsRepository>().DeleteOldTracesAsync(Window);
+        var removed = await scope.ServiceProvider.GetRequiredService<IRetentionSweeper>().DeleteOldTracesAsync(Window);
 
         Assert.True(removed > 0);
         AssertSwept(before, await CountsAsync("spans", "start_time_unix_nano", now));
+    }
+
+    /// <summary>
+    /// The sweep takes its tenants from the telemetry data (<c>resources</c>), not the control plane's <c>tenants</c>
+    /// (control-plane split, decision 11): data whose tenant has no control-plane row still expires. Negative control:
+    /// sweeping <c>SELECT id FROM tenants</c> instead leaves these rows behind and fails the assertion below.
+    /// </summary>
+    [Fact]
+    public async Task TraceRetention_ExpiresDataOfATenantWithNoControlPlaneRow()
+    {
+        const long unregisteredTenant = 987_654_321;
+        var now = DateTime.UtcNow;
+        var spans = new List<SpanModel>();
+        foreach (var (name, at) in Moments(now).Where(m => m.Name is "200d" or "now"))
+            spans.AddRange(SeededDataBuilder.BasicTraceWindow(unregisteredTenant, at, traceCount: 4, seedOffset: Math.Abs(name.GetHashCode()) % 1_000_000));
+        using (var write = Scope())
+            await write.ServiceProvider.GetRequiredService<ITelemetryBulkWriter>().FlushTracesAsync(spans);
+
+        var before = await CountsAsync("spans", "start_time_unix_nano", now);
+        Assert.True(before["200d"] > 0 && before["now"] > 0);
+
+        using var scope = Scope();
+        var removed = await scope.ServiceProvider.GetRequiredService<IRetentionSweeper>().DeleteOldTracesAsync(Window);
+
+        var after = await CountsAsync("spans", "start_time_unix_nano", now);
+        Assert.True(removed > 0);
+        Assert.Equal(0, after["200d"]);
+        Assert.Equal(before["now"], after["now"]);
     }
 
     [Fact]
@@ -97,7 +124,7 @@ public abstract class RetentionTestsBase : IAsyncLifetime
         var before = await CountsAsync("log_records", "time_unix_nano", now);
 
         using var scope = Scope();
-        var removed = await scope.ServiceProvider.GetRequiredService<IRetentionSettingsRepository>().DeleteOldLogRecordsAsync(Window);
+        var removed = await scope.ServiceProvider.GetRequiredService<IRetentionSweeper>().DeleteOldLogRecordsAsync(Window);
 
         Assert.True(removed > 0);
         AssertSwept(before, await CountsAsync("log_records", "time_unix_nano", now));
@@ -117,7 +144,7 @@ public abstract class RetentionTestsBase : IAsyncLifetime
         var catalogRowsBefore = await CountRowsAsync("metrics", "", 0, 0);
 
         using var scope = Scope();
-        var removed = await scope.ServiceProvider.GetRequiredService<IRetentionSettingsRepository>().DeleteOldMetricDataPointsAsync(Window);
+        var removed = await scope.ServiceProvider.GetRequiredService<IRetentionSweeper>().DeleteOldMetricDataPointsAsync(Window);
 
         Assert.True(removed > 0);
         AssertSwept(before, await CountsAsync("gauge_data_points", "time_unix_nano", now));
@@ -129,7 +156,7 @@ public abstract class RetentionTestsBase : IAsyncLifetime
     public async Task NegativeRetentionPeriod_IsRejected_RatherThanErasingEverything()
     {
         using var scope = Scope();
-        var repo = scope.ServiceProvider.GetRequiredService<IRetentionSettingsRepository>();
+        var repo = scope.ServiceProvider.GetRequiredService<IRetentionSweeper>();
         await Assert.ThrowsAsync<ArgumentOutOfRangeException>(() => repo.DeleteOldTracesAsync(TimeSpan.FromDays(-1)));
     }
 }

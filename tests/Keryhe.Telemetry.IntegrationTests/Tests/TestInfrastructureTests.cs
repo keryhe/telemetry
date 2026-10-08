@@ -15,7 +15,6 @@ public class TestInfrastructureTests
     public static IEnumerable<object[]> Providers() =>
     [
         [ProviderNames.PostgreSql],
-        [ProviderNames.Timescale],
         [ProviderNames.SqlServer],
         [ProviderNames.MySql],
         [ProviderNames.ClickHouse]

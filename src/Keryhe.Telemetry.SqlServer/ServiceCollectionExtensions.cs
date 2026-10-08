@@ -7,8 +7,9 @@ namespace Microsoft.Extensions.DependencyInjection;
 
 /// <summary>
 /// SqlServer provider registration extensions. The host selects this provider via
-/// <c>Database:Provider = "SqlServer"</c>. Connection strings come from
-/// <c>ConnectionStrings:Collector</c> (server) and <c>ConnectionStrings:Api</c> (client/api).
+/// <c>Database:Provider = "SqlServer"</c>. Telemetry connection strings come from
+/// <c>ConnectionStrings:Collector</c> (server) and <c>ConnectionStrings:Api</c> (client/api). The same provider can
+/// also host the control plane (<c>ControlPlane:Provider</c>, <c>ConnectionStrings:ControlPlane</c>).
 /// </summary>
 public static class SqlServerServiceCollectionExtensions
 {
@@ -16,11 +17,6 @@ public static class SqlServerServiceCollectionExtensions
     public static IServiceCollection AddSqlServerCollectorServices(this IServiceCollection services, IConfiguration configuration)
     {
         services.AddSingleton<ITelemetryBulkWriter, SqlServerBulkWriter>();
-        // The raw api_keys lookup and last_used_at bulk update. CachingTenantResolver (the
-        // ITenantResolver every gRPC service actually resolves) and ApiKeyTouchWorker are
-        // provider-agnostic and registered once, in AddKeryheTelemetryCollector.
-        services.AddScoped<IApiKeyLookup, TenantResolver>();
-        services.AddScoped<IApiKeyTouchStore, SqlServerApiKeyTouchStore>();
         // metric_last_seen maintenance (list-pages-server-side plan, Phase 5). MetricTouchWorker
         // is provider-agnostic and registered once, in AddKeryheTelemetryCollector.
         services.AddScoped<IMetricTouchStore, SqlServerMetricTouchStore>();
@@ -37,10 +33,33 @@ public static class SqlServerServiceCollectionExtensions
         services.AddScoped<ILogReadRepository, SqlServerLogReadRepository>();
         services.AddScoped<IRollupReadRepository, SqlServerRollupReadRepository>();
         services.AddScoped<IResourceReadRepository, SqlServerResourceReadRepository>();
+        services.AddScoped<IRetentionSweeper, SqlServerRetentionSweeper>();
+        services.AddSingleton(ProviderCapabilities.FromConfiguration(ProviderCapabilities.Constrained(), configuration));
+        return services;
+    }
+
+    /// <summary>
+    /// Control-plane services for the gRPC ingestion server (uses <c>ConnectionStrings:ControlPlane</c>): the API-key
+    /// lookup and <c>last_used_at</c> update. <c>CachingTenantResolver</c> (the <c>ITenantResolver</c> every gRPC
+    /// service actually resolves) and <c>ApiKeyTouchWorker</c> are provider-agnostic and registered once, in
+    /// <c>AddKeryheTelemetryCollector</c>.
+    /// </summary>
+    public static IServiceCollection AddSqlServerControlPlaneCollectorServices(this IServiceCollection services, IConfiguration configuration)
+    {
+        // Read now, so a missing ConnectionStrings:ControlPlane fails at startup with the key named.
+        services.AddSingleton(ControlPlaneConnection.FromConfiguration(configuration));
+        services.AddScoped<IApiKeyLookup, TenantResolver>();
+        services.AddScoped<IApiKeyTouchStore, SqlServerApiKeyTouchStore>();
+        return services;
+    }
+
+    /// <summary>Control-plane services for the API (uses <c>ConnectionStrings:ControlPlane</c>): alert rules, the tenant catalog and retention settings.</summary>
+    public static IServiceCollection AddSqlServerControlPlaneApiServices(this IServiceCollection services, IConfiguration configuration)
+    {
+        services.AddSingleton(ControlPlaneConnection.FromConfiguration(configuration));
         services.AddScoped<IAlertRuleRepository, SqlServerAlertRuleRepository>();
         services.AddScoped<ITenantCatalogRepository, SqlServerTenantCatalogRepository>();
         services.AddScoped<IRetentionSettingsRepository, SqlServerRetentionSettingsRepository>();
-        services.AddSingleton(ProviderCapabilities.FromConfiguration(ProviderCapabilities.Constrained(), configuration));
         return services;
     }
 }

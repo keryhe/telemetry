@@ -15,10 +15,12 @@ to both.
 
 | Key | Default | Host | Description |
 |---|---|---|---|
-| `Database:Provider` | none (required) | collector, API, Admin | `PostgreSQL`, `Timescale`, `SqlServer`, `ClickHouse` or `MySql`. Unknown or missing fails startup. |
-| `ConnectionStrings:Collector` | none (required) | collector | Write path: bulk writer, tenant resolution, API-key and metric touch workers. |
-| `ConnectionStrings:Api` | none (required) | API | Read path: every read repository, alert rules, retention settings. |
-| `ConnectionStrings:Admin` | none (required) | Admin tool | `Keryhe.Telemetry.Admin`'s connection. |
+| `Database:Provider` | none (required) | collector, API | The telemetry data provider: `PostgreSQL`, `SqlServer`, `ClickHouse` or `MySql`. Unknown or missing fails startup. |
+| `ControlPlane:Provider` | none (required) | collector, API, Admin | The control-plane provider (tenants, API keys, alert rules, retention settings): `PostgreSQL`, `SqlServer` or `MySql`. ClickHouse is not a control-plane provider. Unknown or missing fails startup naming the key. |
+| `ConnectionStrings:Collector` | none (required) | collector | Write path: the telemetry bulk writer, metric-touch and rollup stores. |
+| `ConnectionStrings:Api` | none (required) | API | Read path: every telemetry read repository and the retention sweeper. |
+| `ConnectionStrings:ControlPlane` | none (required) | collector, API | The control-plane database: the collector's API-key lookup and touch, the API's alert rules, tenant catalog and retention settings. No fallback to `Collector`/`Api`; missing fails startup naming the key. On PostgreSQL, SQL Server and MySQL it normally points at the same database as the data strings. |
+| `ConnectionStrings:Admin` | none (required) | Admin tool | `Keryhe.Telemetry.Admin`'s connection (the control-plane database). |
 
 The committed `appsettings.json` files leave the connection strings empty; local values live in User Secrets.
 
@@ -32,8 +34,8 @@ The committed `appsettings.json` files leave the connection strings empty; local
 
 ## Collector
 
-Host: `Keryhe.Telemetry.Collector.Server` (gRPC OTLP ingestion, the write path). Uses `Database:Provider` and
-`ConnectionStrings:Collector` above.
+Host: `Keryhe.Telemetry.Collector.Server` (gRPC OTLP ingestion, the write path). Uses `Database:Provider`,
+`ControlPlane:Provider`, `ConnectionStrings:Collector` and `ConnectionStrings:ControlPlane` above.
 
 ```json
 {
@@ -172,8 +174,8 @@ the first two on the collector must change them on the API too.**
 
 ## API
 
-Host: `Keryhe.Telemetry.Api.Server` (REST API, background workers and the UI). Uses `Database:Provider` and
-`ConnectionStrings:Api` above.
+Host: `Keryhe.Telemetry.Api.Server` (REST API, background workers and the UI). Uses `Database:Provider`,
+`ControlPlane:Provider`, `ConnectionStrings:Api` and `ConnectionStrings:ControlPlane` above.
 
 ```json
 {
@@ -211,7 +213,7 @@ API host. `QueryOptions`.
 | `AnchorLookbackMinutes` | 5 | How far before a trace-list window the anchor derivation looks, so a trace that began just before the window is not listed on a later span. |
 | `PageSliceSeconds` | 2 | First slice of trace start times a trace-list page scans (relational providers). |
 | `PageSliceGrowth` | 4 | Factor each further slice widens by (minimum 2). |
-| `TraceHintMarginMinutes` | 1 | Margin either side of a trace-detail `?start=&end=` hint (Timescale, ClickHouse). |
+| `TraceHintMarginMinutes` | 1 | Margin either side of a trace-detail `?start=&end=` hint (ClickHouse). |
 | `TraceHintEnabled` | true | `false` ignores every trace-detail time hint. |
 
 ### Export (`Telemetry:Export`)
@@ -220,7 +222,7 @@ API host. `ExportOptions`.
 
 | Key | Default | Description |
 |---|---|---|
-| `MaxWindowDaysOverride` | unset (7 on PostgreSQL/Timescale/ClickHouse, 1 on SQL Server/MySQL) | Widest window an export may cover; wider is a `400`. |
+| `MaxWindowDaysOverride` | unset (7 on PostgreSQL/ClickHouse, 1 on SQL Server/MySQL) | Widest window an export may cover; wider is a `400`. |
 | `MaxConcurrent` | 2 | Exports streaming at once per API instance; beyond it a request gets `429`. |
 
 ### Alert evaluation (`Telemetry:AlertEvaluation`)

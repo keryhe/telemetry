@@ -104,8 +104,7 @@ public static class HtmlReportWriter
             ("db.lock_waits", "Lock waits sampled", true),
             ("db.parts", "ClickHouse active parts", true),
             ("db.merges", "ClickHouse merges running", true),
-            ("db.mutations", "ClickHouse mutations pending", true),
-            ("db.chunks", "Timescale chunks", false)]);
+            ("db.mutations", "ClickHouse mutations pending", true)]);
         Charts(sb, s, "Resource timelines", [
             ("db.container_cpu", "Database container CPU", true),
             ("db.container_memory", "Database container memory", false),

@@ -4,9 +4,7 @@ using Npgsql;
 namespace Keryhe.Telemetry.Admin.Data;
 
 /// <summary>
-/// Covers both PostgreSQL and Timescale — Timescale is Postgres, and this tool never touches
-/// anything Timescale-specific (hypertables, compression, retention policies), so one
-/// implementation serves both. See plans/admin-tui.md, sections 1 and 5.
+/// The PostgreSQL control-plane administrator. See plans/admin-tui.md, sections 1 and 5.
 /// </summary>
 public sealed class NpgsqlAdminRepository(string connectionString) : AdminRepositoryBase
 {

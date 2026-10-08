@@ -8,7 +8,8 @@ namespace Microsoft.Extensions.DependencyInjection;
 /// ClickHouse provider registration extensions. The host selects this provider via
 /// <c>Database:Provider = "ClickHouse"</c>. Connection strings come from
 /// <c>ConnectionStrings:Collector</c> (ingestion collector) and <c>ConnectionStrings:Api</c>
-/// (API). Unlike the Postgres provider there is no pooled data-source singleton — like the
+/// (API). It has no control plane: a ClickHouse deployment runs the control plane (tenants, API keys,
+/// alert rules, retention settings) on PostgreSQL, SQL Server or MySQL (<c>ControlPlane:Provider</c>). Unlike the Postgres provider there is no pooled data-source singleton — like the
 /// SqlServer provider, connections are created per operation from the connection string
 /// (ClickHouse.Client pools HTTP connections internally).
 /// </summary>
@@ -18,12 +19,6 @@ public static class ClickHouseServiceCollectionExtensions
     public static IServiceCollection AddClickHouseCollectorServices(this IServiceCollection services, IConfiguration configuration)
     {
         services.AddSingleton<ITelemetryBulkWriter, ClickHouseBulkWriter>();
-        // The raw api_keys lookup and last_used_at bulk update. CachingTenantResolver (the
-        // ITenantResolver every gRPC service actually resolves) and ApiKeyTouchWorker are
-        // provider-agnostic and registered once, in AddKeryheTelemetryCollector.
-        // ClickHouseApiKeyTouchStore is a deliberate no-op — see that type.
-        services.AddScoped<IApiKeyLookup, TenantResolver>();
-        services.AddScoped<IApiKeyTouchStore, ClickHouseApiKeyTouchStore>();
         // metric_last_seen maintenance (list-pages-server-side plan, Phase 5): a deliberate no-op
         // here (materialized views feed the table instead) — see ClickHouseMetricTouchStore's own
         // doc comment. MetricTouchWorker is still registered unconditionally in
@@ -42,9 +37,7 @@ public static class ClickHouseServiceCollectionExtensions
         services.AddScoped<ILogReadRepository, ClickHouseLogReadRepository>();
         services.AddScoped<IRollupReadRepository, ClickHouseRollupReadRepository>();
         services.AddScoped<IResourceReadRepository, ClickHouseResourceReadRepository>();
-        services.AddScoped<IAlertRuleRepository, ClickHouseAlertRuleRepository>();
-        services.AddScoped<ITenantCatalogRepository, ClickHouseTenantCatalogRepository>();
-        services.AddScoped<IRetentionSettingsRepository, ClickHouseRetentionSettingsRepository>();
+        services.AddScoped<IRetentionSweeper, ClickHouseRetentionSweeper>();
         services.AddSingleton(ProviderCapabilities.FromConfiguration(ProviderCapabilities.Default(), configuration));
         return services;
     }

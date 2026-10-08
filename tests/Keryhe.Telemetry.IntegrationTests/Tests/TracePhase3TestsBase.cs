@@ -29,7 +29,7 @@ public abstract class TracePhase3TestsBase : IAsyncLifetime
 
     /// <summary>
     /// A pin far enough in the future to include everything just written, so a test exercises anchor
-    /// semantics rather than the pin's own 5-second PostgreSQL/Timescale safety margin.
+    /// semantics rather than the pin's own 5-second PostgreSQL safety margin.
     /// </summary>
     private static DateTime FutureAsOf() => DateTime.UtcNow.AddMinutes(5);
 
@@ -113,7 +113,7 @@ public abstract class TracePhase3TestsBase : IAsyncLifetime
         var traceId = NewTraceId();
         await FlushAsync(Span(traceId, "svc-a", "late-span", SpanKind.SERVER, WindowStart.AddSeconds(5), 30, parent: NewSpanId()));
 
-        // Wait past PostgreSQL/Timescale's 5-second "now minus 5s" pin margin, then pin.
+        // Wait past PostgreSQL's 5-second "now minus 5s" pin margin, then pin.
         await Task.Delay(TimeSpan.FromSeconds(6));
         var pinned = await PageAsync(useDbAsOf: true);
         var asOf = pinned.AsOf;
@@ -431,7 +431,7 @@ public abstract class TracePhase3TestsBase : IAsyncLifetime
     // Trace detail (trace-list-detail-performance plan, Phase 6): the start-time hint and the shared resources/scopes.
     // ---------------------------------------------------------------------------------------------
 
-    /// <summary>Whether this provider reads only the range of a trace-time hint (Timescale's chunks, ClickHouse's partitions); the others ignore it.</summary>
+    /// <summary>Whether this provider reads only the range of a trace-time hint (ClickHouse's partitions); the others ignore it.</summary>
     protected virtual bool HonorsStartHint => false;
 
     private async Task<List<SpanModel>> DetailAsync(string traceId, TraceTimeHint? hint, IReadOnlyDictionary<string, string?>? config = null)
@@ -629,7 +629,7 @@ public abstract class TracePhase3TestsBase : IAsyncLifetime
         using var readScope = Scope();
         var repo = readScope.ServiceProvider.GetRequiredService<ITraceReadRepository>();
 
-        // Same PostgreSQL/Timescale transaction-start-race margin as the log test.
+        // Same PostgreSQL transaction-start-race margin as the log test.
         await Task.Delay(TimeSpan.FromSeconds(6));
 
         var firstPage = await repo.GetTracePageAsync(new TraceQuery { Start = WindowStart, End = windowEnd, Size = 500, Mode = "all" });

@@ -4,29 +4,25 @@ using Npgsql;
 namespace Keryhe.Telemetry.StressTests.Observers.Database;
 
 /// <summary>
-/// PostgreSQL and TimescaleDB observers. Lock waits come from <c>pg_stat_activity</c> with
+/// PostgreSQL observer. Lock waits come from <c>pg_stat_activity</c> with
 /// <c>pg_blocking_pids()</c> (the blocker chain and both query texts) and <c>pg_locks</c> counts;
 /// deadlocks are the delta of <c>pg_stat_database.deadlocks</c>, with the reports themselves taken
 /// from the container log (<c>log_lock_waits</c> is on); slowest SQL is <c>pg_stat_statements</c>.
-/// Timescale adds chunk counts and background-job stats, plus the lock waits the chunk-creation
-/// conflict CLAUDE.md describes show up as ordinary waits on <c>resources</c>/<c>instrumentation_scopes</c>.
 /// </summary>
 public sealed class PostgresObserver : DatabaseObserverBase
 {
     private readonly string _connectionString;
-    private readonly bool _timescale;
     private double _deadlocksBefore;
     private Dictionary<string, double> _checkpointsBefore = [];
     private DateTime _diagnosticsSince = DateTime.UtcNow;
 
-    public PostgresObserver(string connectionString, bool timescale, Func<DateTime, CancellationToken, Task<string>>? readLogs = null)
+    public PostgresObserver(string connectionString, Func<DateTime, CancellationToken, Task<string>>? readLogs = null)
         : base(readLogs)
     {
         _connectionString = connectionString;
-        _timescale = timescale;
     }
 
-    public override string Provider => _timescale ? "Timescale" : "PostgreSQL";
+    public override string Provider => "PostgreSQL";
 
     protected override DbConnection CreateConnection() => new NpgsqlConnection(_connectionString);
 
@@ -43,10 +39,9 @@ public sealed class PostgresObserver : DatabaseObserverBase
         WHERE a.wait_event_type = 'Lock' AND a.datid = {DatabaseOid}
         """;
 
-    // Lock counts by mode and relation. Timescale chunks are folded into one label: their names are
-    // generated and would otherwise multiply the series by the chunk count.
+    // Lock counts by mode and relation.
     private const string LockCountsSql = $"""
-        SELECT CASE WHEN c.relname LIKE '\_hyper\_%' THEN '(hypertable chunks)' ELSE c.relname END AS relation,
+        SELECT c.relname AS relation,
                l.mode, l.granted, count(*)
         FROM pg_locks l JOIN pg_class c ON c.oid = l.relation
         JOIN pg_namespace n ON n.oid = c.relnamespace
@@ -67,25 +62,6 @@ public sealed class PostgresObserver : DatabaseObserverBase
         foreach (var r in await QueryAsync(LockCountsSql, cancellationToken))
             gauges.Add(new Gauge(Convert.ToBoolean(r[2]) ? "locks_granted" : "locks_waiting", $"{Str(r[0])}/{Str(r[1])}", Num(r[3])));
 
-        if (_timescale)
-        {
-            // Left join so a hypertable with no chunk yet reads as 0 rather than being absent.
-            foreach (var r in await QueryAsync(
-                "SELECT h.hypertable_name, count(c.chunk_name) FROM timescaledb_information.hypertables h " +
-                "LEFT JOIN timescaledb_information.chunks c ON c.hypertable_schema = h.hypertable_schema AND c.hypertable_name = h.hypertable_name GROUP BY 1", cancellationToken))
-                gauges.Add(new Gauge("chunks", Str(r[0]), Num(r[1])));
-
-            // Background jobs (compression, continuous aggregate refresh): cumulative runs/failures and the last run's length.
-            foreach (var r in await QueryAsync(
-                "SELECT job_id, COALESCE(hypertable_name, ''), total_runs, total_failures, " +
-                "COALESCE(EXTRACT(EPOCH FROM last_run_duration) * 1000, 0) FROM timescaledb_information.job_stats", cancellationToken))
-            {
-                var label = $"job {Str(r[0])} {Str(r[1])}".Trim();
-                gauges.Add(new Gauge("job_total_runs", label, Num(r[2])));
-                gauges.Add(new Gauge("job_total_failures", label, Num(r[3])));
-                gauges.Add(new Gauge("job_last_run_ms", label, Num(r[4])));
-            }
-        }
         return (waits, gauges, new List<LongQuery>());
     });
 
@@ -115,7 +91,7 @@ public sealed class PostgresObserver : DatabaseObserverBase
         "synchronous_commit", "fsync", "full_page_writes", "default_transaction_isolation",
         "autovacuum", "autovacuum_max_workers", "autovacuum_naptime", "autovacuum_vacuum_cost_delay", "autovacuum_vacuum_cost_limit",
         "autovacuum_vacuum_scale_factor", "autovacuum_vacuum_insert_scale_factor", "gin_pending_list_limit",
-        "max_worker_processes", "shared_preload_libraries", "pg_stat_statements.track", "timescaledb.max_background_workers",
+        "max_worker_processes", "shared_preload_libraries", "pg_stat_statements.track",
     ];
 
     public override Task<IReadOnlyList<ServerSetting>> ReadSettingsAsync(CancellationToken cancellationToken) => SettingsAsync(
@@ -167,25 +143,12 @@ public sealed class PostgresObserver : DatabaseObserverBase
                     return rows;
                 }),
 
-            await SectionAsync("Vacuum and dead tuples", _timescale ? "Per table, hypertable chunks folded into their hypertable; cumulative since the container started." : "Per table; cumulative since the container started.",
+            await SectionAsync("Vacuum and dead tuples", "Per table; cumulative since the container started.",
                 ["Table", "Live tuples", "Dead tuples", "Autovacuums", "Autoanalyzes", "Last autovacuum"],
-                (_timescale
-                    ? "SELECT COALESCE(c.hypertable_name, s.relname), sum(s.n_live_tup), sum(s.n_dead_tup), sum(s.autovacuum_count), sum(s.autoanalyze_count), max(s.last_autovacuum) " +
-                      "FROM pg_stat_user_tables s LEFT JOIN timescaledb_information.chunks c ON c.chunk_schema = s.schemaname AND c.chunk_name = s.relname "
-                    : "SELECT s.relname, sum(s.n_live_tup), sum(s.n_dead_tup), sum(s.autovacuum_count), sum(s.autoanalyze_count), max(s.last_autovacuum) FROM pg_stat_user_tables s ") +
+                "SELECT s.relname, sum(s.n_live_tup), sum(s.n_dead_tup), sum(s.autovacuum_count), sum(s.autoanalyze_count), max(s.last_autovacuum) FROM pg_stat_user_tables s " +
                 "GROUP BY 1 ORDER BY 3 DESC LIMIT 20", cancellationToken),
         };
 
-        if (_timescale)
-        {
-            sections.Add(await SectionAsync("Timescale background jobs", "Every policy job with its cumulative runs and failures.",
-                ["Job", "Procedure", "Hypertable", "Runs", "Failures", "Last status", "Last duration"],
-                "SELECT j.job_id, j.proc_name, j.hypertable_name, s.total_runs, s.total_failures, s.last_run_status, s.last_run_duration " +
-                "FROM timescaledb_information.jobs j LEFT JOIN timescaledb_information.job_stats s ON s.job_id = j.job_id ORDER BY j.job_id", cancellationToken));
-            sections.Add(await SectionAsync("Timescale job errors", "timescaledb_information.job_errors, newest first.",
-                ["Job", "Procedure", "Started", "SQLSTATE", "Message"],
-                "SELECT job_id, proc_name, start_time, sqlerrcode, left(err_message, 300) FROM timescaledb_information.job_errors ORDER BY start_time DESC LIMIT 20", cancellationToken));
-        }
         return sections;
     }
 
@@ -204,18 +167,13 @@ public sealed class PostgresObserver : DatabaseObserverBase
 
     public override async Task<IReadOnlyList<TableStat>> ReadAsync(CancellationToken cancellationToken)
     {
-        var hypertables = _timescale
-            ? (await QueryAsync("SELECT hypertable_name FROM timescaledb_information.hypertables", cancellationToken)).Select(r => Str(r[0])!).ToHashSet()
-            : [];
         var tables = (await QueryAsync("SELECT tablename FROM pg_tables WHERE schemaname = 'public' ORDER BY tablename", cancellationToken)).Select(r => Str(r[0])!).ToList();
 
         var stats = new List<TableStat>();
         foreach (var table in tables)
         {
             var quoted = "\"" + table.Replace("\"", "\"\"") + "\"";
-            var size = hypertables.Contains(table)
-                ? $"hypertable_size('{EscapeLiteral(quoted)}')"
-                : $"pg_total_relation_size('{EscapeLiteral(quoted)}')";
+            var size = $"pg_total_relation_size('{EscapeLiteral(quoted)}')";
             var rows = await QueryAsync($"SELECT (SELECT count(*) FROM {quoted}), {size}", cancellationToken, commandTimeoutSeconds: 300);
             stats.Add(new TableStat(table, Long(rows[0][0]), false, Long(rows[0][1])));
         }

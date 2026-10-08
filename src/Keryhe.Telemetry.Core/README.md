@@ -20,7 +20,7 @@ type handling and the generic `Microsoft.Extensions.*` abstractions.
   attribute type handler (`Data/Dapper/JsonAttributesTypeHandler.cs`) used by every provider.
 
 This package is a dependency of the provider packages (`Keryhe.Telemetry.PostgreSQL`,
-`Keryhe.Telemetry.Timescale`, `Keryhe.Telemetry.SqlServer`, `Keryhe.Telemetry.MySql`,
+`Keryhe.Telemetry.SqlServer`, `Keryhe.Telemetry.MySql`,
 `Keryhe.Telemetry.ClickHouse`) and of `Keryhe.Telemetry.Api`/`Keryhe.Telemetry.Collector`; it is
 rarely installed directly — install one of those instead, and this one comes along
 transitively.

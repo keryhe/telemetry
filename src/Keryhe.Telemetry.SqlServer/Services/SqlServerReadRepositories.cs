@@ -119,7 +119,7 @@ public class SqlServerTraceReadRepository(IConfiguration configuration, ITenantC
         => value.Replace("[", "[[]").Replace("%", "[%]").Replace("_", "[_]");
 
     // Decision 3/Phase 3 pin helper: SqlServer's created_at default is evaluated at statement
-    // execution (not transaction start like Postgres/Timescale) -- see SqlServerLogReadRepository's
+    // execution (not transaction start like Postgres) -- see SqlServerLogReadRepository's
     // identical override.
     protected override string DatabaseClockNowExpr => "SYSDATETIME()";
 }
@@ -186,7 +186,7 @@ public class SqlServerLogReadRepository(IConfiguration configuration, ITenantCon
         => SqlServerJsonAttributeHooks.Predicate(column, keyParam, valueParam, negated);
 
     // Decision 3/Phase 2 pin helper: SqlServer's created_at default is evaluated at statement
-    // execution (not transaction start like Postgres/Timescale), so no 5-second back-off is
+    // execution (not transaction start like Postgres), so no 5-second back-off is
     // needed here.
     protected override string DatabaseClockNowExpr => "SYSDATETIME()";
 }
@@ -204,10 +204,10 @@ public class SqlServerResourceReadRepository(IConfiguration configuration, ITena
     }
 }
 
-public class SqlServerTenantCatalogRepository(IConfiguration configuration)
+public class SqlServerTenantCatalogRepository(ControlPlaneConnection controlPlane)
     : TenantCatalogRepositoryBase
 {
-    private readonly string _connectionString = configuration.GetConnectionString("Api")!;
+    private readonly string _connectionString = controlPlane.ConnectionString;
 
     protected override async Task<DbConnection> OpenConnectionAsync(CancellationToken cancellationToken)
     {
@@ -217,10 +217,10 @@ public class SqlServerTenantCatalogRepository(IConfiguration configuration)
     }
 }
 
-public class SqlServerAlertRuleRepository(IConfiguration configuration, ITenantContext tenantContext)
+public class SqlServerAlertRuleRepository(ControlPlaneConnection controlPlane, ITenantContext tenantContext)
     : AlertRuleRepositoryBase(tenantContext)
 {
-    private readonly string _connectionString = configuration.GetConnectionString("Api")!;
+    private readonly string _connectionString = controlPlane.ConnectionString;
 
     protected override async Task<DbConnection> OpenConnectionAsync(CancellationToken cancellationToken)
     {
@@ -246,16 +246,33 @@ public class SqlServerAlertRuleRepository(IConfiguration configuration, ITenantC
 }
 
 /// <summary>
-/// SQL Server implementation of the <see cref="IRetentionSettingsRepository"/> sweeps: the shared
-/// batched, per-tenant shape from <see cref="RetentionSettingsRepositoryBase"/>. The batch is
+/// SQL Server implementation of <see cref="IRetentionSettingsRepository"/>: the shared settings read/write
+/// from <see cref="RetentionSettingsRepositoryBase"/>, against the control-plane database.
+/// </summary>
+public class SqlServerRetentionSettingsRepository(ControlPlaneConnection controlPlane)
+    : RetentionSettingsRepositoryBase
+{
+    private readonly string _connectionString = controlPlane.ConnectionString;
+
+    protected override async Task<DbConnection> OpenConnectionAsync(CancellationToken cancellationToken)
+    {
+        var conn = new SqlConnection(_connectionString);
+        await conn.OpenAsync(cancellationToken);
+        return conn;
+    }
+}
+
+/// <summary>
+/// SQL Server implementation of the <see cref="IRetentionSweeper"/> sweeps: the shared
+/// batched, per-tenant shape from <see cref="RetentionSweeperBase"/>. The batch is
 /// <c>DELETE TOP (n)</c>, which seeks the clustered key (<c>(tenant_id, time, id)</c> on spans and
 /// log records) or the data-point time index, and is kept below SQL Server's lock-escalation
 /// threshold (~5000 locks on one table/index in a single statement) so a sweep takes row locks only,
 /// rather than escalating to an exclusive table lock that blocks -- and deadlocks with -- the
 /// ingest path still appending to the same table.
 /// </summary>
-public class SqlServerRetentionSettingsRepository(IConfiguration configuration)
-    : RetentionSettingsRepositoryBase
+public class SqlServerRetentionSweeper(IConfiguration configuration)
+    : RetentionSweeperBase
 {
     private readonly string _connectionString = configuration.GetConnectionString("Api")!;
 

@@ -5,7 +5,7 @@ namespace Keryhe.Telemetry.TestInfrastructure.Containers;
 
 /// <summary>
 /// One database container for one provider: start it, create the <c>telemetry</c> database, apply
-/// the real <c>schema/*.sql</c> script, and seed tenants + API keys. Shared by the integration
+/// the real <c>schema/*.sql</c> scripts (control plane and telemetry), and seed tenants + API keys. Shared by the integration
 /// tests' provider fixtures and the stress harness.
 /// </summary>
 /// <summary>A database container's state as Docker reports it. <see cref="Status"/> is <c>running</c>, <c>exited</c>, <c>restarting</c> ... or <c>unknown</c>.</summary>
@@ -20,6 +20,16 @@ public abstract class ProviderContainer : IAsyncDisposable
 
     /// <summary>Connection string for the <c>telemetry</c> database. Valid once <see cref="StartAsync"/> has completed.</summary>
     public abstract string ConnectionString { get; }
+
+    /// <summary>
+    /// Connection string for the control plane (tenants, API keys, alert rules, retention settings). The relational providers
+    /// apply both schema scripts to their one database and return <see cref="ConnectionString"/>; ClickHouse has no control
+    /// plane of its own and runs one on a PostgreSQL container.
+    /// </summary>
+    public virtual string ControlPlaneConnectionString => ConnectionString;
+
+    /// <summary>The <c>ControlPlane:Provider</c> value the control plane runs on.</summary>
+    public virtual string ControlPlaneProviderName => ProviderName;
 
     /// <summary>Docker id of the database container. Valid once <see cref="StartAsync"/> has completed.</summary>
     public abstract string ContainerId { get; }
@@ -77,6 +87,10 @@ public abstract class ProviderContainer : IAsyncDisposable
         var id = await InsertTenantAndApiKeyAsync(tenantName, apiKeyName, ApiKeyHasher.Hash(apiKeyPlainText), expiresAtUtc, cancellationToken);
         return new SeededTenant(id, tenantName, apiKeyName, apiKeyPlainText);
     }
+
+    /// <summary>Inserts a tenant and an API key given its hash (not plaintext) into the control plane and returns the tenant id.</summary>
+    public Task<long> InsertTenantWithHashedKeyAsync(string tenantName, string apiKeyName, string keyHash, DateTime? expiresAtUtc, CancellationToken cancellationToken = default) =>
+        InsertTenantAndApiKeyAsync(tenantName, apiKeyName, keyHash, expiresAtUtc, cancellationToken);
 
     /// <summary>
     /// Runs extra SQL against the <c>telemetry</c> database after the schema, statement by statement (split as the schema

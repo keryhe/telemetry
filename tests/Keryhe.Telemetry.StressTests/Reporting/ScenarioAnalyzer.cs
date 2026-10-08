@@ -257,7 +257,6 @@ public static class ScenarioAnalyzer
                 ("db.parts", "max per partition", "parts", "parts_max_per_partition", "max"),
                 ("db.merges", "merges running", "merges", "merges_running", "sum"),
                 ("db.mutations", "mutations pending", "mutations", "mutations_pending", "sum"),
-                ("db.chunks", "chunks", "chunks", "chunks", "sum"),
             })
             {
                 var points = db.LockSamples.Where(s => s.Error is null && s.Gauges.Any(g => g.Name == gauge))

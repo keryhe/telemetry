@@ -10,9 +10,9 @@ namespace Keryhe.Telemetry.SqlServer.Services;
 /// provider-agnostically, by <c>CachingTenantResolver</c> / <c>ApiKeyTouchWorker</c>; see
 /// <see cref="IApiKeyLookup"/>.
 /// </summary>
-public class TenantResolver(IConfiguration configuration) : IApiKeyLookup
+public class TenantResolver(ControlPlaneConnection controlPlane) : IApiKeyLookup
 {
-    private readonly string _connectionString = configuration.GetConnectionString("Collector")!;
+    private readonly string _connectionString = controlPlane.ConnectionString;
 
     public async Task<ApiKeyLookupResult?> LookupAsync(string keyHash, CancellationToken cancellationToken)
     {

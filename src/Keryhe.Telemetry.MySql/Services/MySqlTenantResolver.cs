@@ -10,9 +10,9 @@ namespace Keryhe.Telemetry.MySql.Services;
 /// provider-agnostically, by <c>CachingTenantResolver</c> / <c>ApiKeyTouchWorker</c>; see
 /// <see cref="IApiKeyLookup"/>.
 /// </summary>
-public class MySqlTenantResolver(IConfiguration configuration) : IApiKeyLookup
+public class MySqlTenantResolver(ControlPlaneConnection controlPlane) : IApiKeyLookup
 {
-    private readonly string _connectionString = configuration.GetConnectionString("Collector")!;
+    private readonly string _connectionString = controlPlane.ConnectionString;
 
     public async Task<ApiKeyLookupResult?> LookupAsync(string keyHash, CancellationToken cancellationToken)
     {

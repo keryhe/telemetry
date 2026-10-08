@@ -79,7 +79,7 @@ public sealed class ExportOptions
     /// <summary>Configuration section name these options bind from.</summary>
     public const string SectionName = "Telemetry:Export";
 
-    /// <summary>Overrides <see cref="ProviderCapabilities.ExportMaxWindowDays"/>'s tier default (7 days on PostgreSQL/Timescale/ClickHouse, 1 on SQL Server/MySQL) when set.</summary>
+    /// <summary>Overrides <see cref="ProviderCapabilities.ExportMaxWindowDays"/>'s tier default (7 days on PostgreSQL/ClickHouse, 1 on SQL Server/MySQL) when set.</summary>
     public int? MaxWindowDaysOverride { get; set; }
 
     /// <summary>

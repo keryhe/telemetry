@@ -13,7 +13,8 @@ namespace Keryhe.Telemetry.IntegrationTests.Fixtures;
 /// <see cref="Collections"/>) and shared by every test class in that provider's collection.
 ///
 /// Builds a bare <see cref="ServiceCollection"/> through the provider's own
-/// <c>Add&lt;Provider&gt;CollectorServices</c>/<c>Add&lt;Provider&gt;ApiServices</c> — the same
+/// <c>Add&lt;Provider&gt;CollectorServices</c>/<c>Add&lt;Provider&gt;ApiServices</c> and the control plane's
+/// <c>Add&lt;Provider&gt;ControlPlane*Services</c> — the same
 /// registration path the real hosts use — rather than hand-built repositories, per the plan's
 /// Phase 0 section. It deliberately does NOT call <c>AddKeryheTelemetryCollector</c>/
 /// <c>AddKeryheTelemetryApi</c>: those also wire gRPC, MVC controllers and the background
@@ -43,13 +44,16 @@ public abstract class ProviderFixture : IAsyncLifetime
     public Task<Keryhe.Telemetry.TestInfrastructure.Seeding.SeededTenant> SeedTenantAsync(string tenantName, string apiKeyName, string apiKeyPlainText, DateTime? expiresAtUtc = null) =>
         Container.SeedTenantAsync(tenantName, apiKeyName, apiKeyPlainText, expiresAtUtc: expiresAtUtc);
 
+    /// <summary>The control-plane (tenants, API keys, alert rules, retention settings) connection string. The relational providers share the telemetry database; ClickHouse runs its control plane on PostgreSQL.</summary>
+    public string ControlPlaneConnectionString => Container.ControlPlaneConnectionString;
+
     /// <summary>Connection string for the write side (<c>ConnectionStrings:Collector</c>).</summary>
     protected string CollectorConnectionString => Container.ConnectionString;
 
     /// <summary>Connection string for the read side (<c>ConnectionStrings:Api</c>). Same database as the collector string — one test database.</summary>
     protected string ApiConnectionString => Container.ConnectionString;
 
-    /// <summary>Calls this provider's own <c>Add&lt;Provider&gt;CollectorServices</c>/<c>Add&lt;Provider&gt;ApiServices</c>.</summary>
+    /// <summary>Calls this provider's own <c>Add&lt;Provider&gt;CollectorServices</c>/<c>Add&lt;Provider&gt;ApiServices</c> and the control-plane provider's <c>Add&lt;Provider&gt;ControlPlane*Services</c>.</summary>
     protected abstract void AddProviderServices(IServiceCollection services, IConfiguration configuration);
 
     /// <summary>Truncates the signal tables (not the container) so test classes in the same collection start clean.</summary>
@@ -77,7 +81,9 @@ public abstract class ProviderFixture : IAsyncLifetime
         var settings = new Dictionary<string, string?>
         {
             ["ConnectionStrings:Collector"] = CollectorConnectionString,
-            ["ConnectionStrings:Api"] = ApiConnectionString
+            ["ConnectionStrings:Api"] = ApiConnectionString,
+            ["ConnectionStrings:ControlPlane"] = Container.ControlPlaneConnectionString,
+            ["ControlPlane:Provider"] = Container.ControlPlaneProviderName
         };
         if (overrides is not null)
             foreach (var (key, value) in overrides) settings[key] = value;

@@ -22,11 +22,13 @@
        Content items flow through a ProjectReference, so the integration tests and the stress harness
        both find them at AppContext.BaseDirectory/Schema/. -->
   <ItemGroup>
-    <Content Include="../../schema/PostgreSQL-Schema.sql" Link="Schema/PostgreSQL-Schema.sql" CopyToOutputDirectory="PreserveNewest" />
-    <Content Include="../../schema/Timescale-Schema.sql" Link="Schema/Timescale-Schema.sql" CopyToOutputDirectory="PreserveNewest" />
-    <Content Include="../../schema/SqlServer-Schema.sql" Link="Schema/SqlServer-Schema.sql" CopyToOutputDirectory="PreserveNewest" />
-    <Content Include="../../schema/MySQL-Schema.sql" Link="Schema/MySQL-Schema.sql" CopyToOutputDirectory="PreserveNewest" />
-    <Content Include="../../schema/ClickHouse-Schema.sql" Link="Schema/ClickHouse-Schema.sql" CopyToOutputDirectory="PreserveNewest" />
+    <Content Include="../../schema/PostgreSQL-ControlPlane.sql" Link="Schema/PostgreSQL-ControlPlane.sql" CopyToOutputDirectory="PreserveNewest" />
+    <Content Include="../../schema/PostgreSQL-Telemetry.sql" Link="Schema/PostgreSQL-Telemetry.sql" CopyToOutputDirectory="PreserveNewest" />
+    <Content Include="../../schema/SqlServer-ControlPlane.sql" Link="Schema/SqlServer-ControlPlane.sql" CopyToOutputDirectory="PreserveNewest" />
+    <Content Include="../../schema/SqlServer-Telemetry.sql" Link="Schema/SqlServer-Telemetry.sql" CopyToOutputDirectory="PreserveNewest" />
+    <Content Include="../../schema/MySQL-ControlPlane.sql" Link="Schema/MySQL-ControlPlane.sql" CopyToOutputDirectory="PreserveNewest" />
+    <Content Include="../../schema/MySQL-Telemetry.sql" Link="Schema/MySQL-Telemetry.sql" CopyToOutputDirectory="PreserveNewest" />
+    <Content Include="../../schema/ClickHouse-Telemetry.sql" Link="Schema/ClickHouse-Telemetry.sql" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
 </Project>

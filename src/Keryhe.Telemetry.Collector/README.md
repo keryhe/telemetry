@@ -40,8 +40,12 @@ non-collector endpoints, but the two have different security boundaries and scal
 
 Configuration:
 
-- `ConnectionStrings:Collector` — connection string for the collector (read by the provider's
+- `ConnectionStrings:Collector` — connection string for the telemetry data (read by the provider's
   own `Add<Provider>CollectorServices` call, not by `AddKeryheTelemetryCollector`).
+- `ControlPlane:Provider` and `ConnectionStrings:ControlPlane` — the control-plane database the key lookup and
+  `last_used_at` update use (read by `Add<Provider>ControlPlaneCollectorServices`, which throws naming the key when
+  the connection string is missing). A control-plane outage longer than the positive cache TTL (30 s) stops
+  ingestion for keys that are not cached; the cache and the retryable `UNAVAILABLE` on a failed lookup cover a short one.
 - `Telemetry:Collector:AllowInsecureTransport` — see Transport below (default `false`).
 
 ## Authentication
@@ -106,19 +110,15 @@ string, so keys issued earlier keep working.
 
 ### Issuing, expiring, rotating and revoking keys
 
-The Admin TUI (`Keryhe.Telemetry.Admin`, PostgreSQL, Timescale and SQL Server) creates keys, with an
-optional expiry (30/90/365 days or a date, stored as UTC), and revokes, reactivates and deletes them.
-On MySQL and ClickHouse, issue a key with SQL: generate the key, compute `lower(hex(sha256(key)))`, and
-insert it. `expires_at` is UTC; omit it (NULL) for a key that never expires.
+The Admin TUI (`Keryhe.Telemetry.Admin`; PostgreSQL, SQL Server and MySQL, the control-plane providers) creates
+keys, with an optional expiry (30/90/365 days or a date, stored as UTC), and revokes, reactivates and deletes them.
+Keys can also be issued with SQL against the control-plane database: generate the key, compute
+`lower(hex(sha256(key)))`, and insert it. `expires_at` is UTC; omit it (NULL) for a key that never expires.
 
 ```sql
 -- MySQL
 INSERT INTO api_keys (tenant_id, key_hash, name, expires_at)
 VALUES (1, '<sha256 hex>', 'checkout-agents', UTC_TIMESTAMP(6) + INTERVAL 90 DAY);
-
--- ClickHouse: the table has no id generator, and the id is what the principal's ApiKeyId claim carries
-INSERT INTO api_keys (id, tenant_id, key_hash, name, expires_at)
-VALUES (42, 1, '<sha256 hex>', 'checkout-agents', now64(9, 'UTC') + INTERVAL 90 DAY);
 ```
 
 **Rotation.** Several active keys per tenant are allowed. Create the new key, deploy it to the
@@ -128,12 +128,7 @@ exporters, watch the old key's `last_used_at` (shown by the Admin TUI) stop adva
 its positive cache entry expires (`Telemetry:TenantResolution:PositiveCacheTtlSeconds`, default 30 s), so
 revocation takes effect within 30 s; lowering the TTL trades database lookups for latency. There is no
 cross-instance invalidation. A key with an `expires_at` stops exactly at that instant regardless of the
-cache, because the expiry is compared on every request. On ClickHouse the lookup reads `FINAL`, and a
-revoke must wait for the mutation, or the 30 s promise does not hold:
-
-```sql
-ALTER TABLE api_keys UPDATE is_active = 0 WHERE key_hash = '<sha256 hex>' SETTINGS mutations_sync = 1;
-```
+cache, because the expiry is compared on every request.
 
 ## Summary rollups
 

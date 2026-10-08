@@ -126,7 +126,7 @@ public class MySqlLogReadRepository(IConfiguration configuration, ITenantContext
     // MySQL LIKE uses backslash as the default escape character (matches the Postgres base default).
 
     // Decision 3/Phase 2 pin helper: MySQL's created_at default is evaluated at statement
-    // execution (not transaction start like Postgres/Timescale), so no 5-second back-off is
+    // execution (not transaction start like Postgres), so no 5-second back-off is
     // needed here. Microsecond precision matches the column's DATETIME(6).
     protected override string DatabaseClockNowExpr => "CURRENT_TIMESTAMP(6)";
 
@@ -151,10 +151,10 @@ public class MySqlResourceReadRepository(IConfiguration configuration, ITenantCo
     }
 }
 
-public class MySqlTenantCatalogRepository(IConfiguration configuration)
+public class MySqlTenantCatalogRepository(ControlPlaneConnection controlPlane)
     : TenantCatalogRepositoryBase
 {
-    private readonly string _connectionString = configuration.GetConnectionString("Api")!;
+    private readonly string _connectionString = controlPlane.ConnectionString;
 
     protected override async Task<DbConnection> OpenConnectionAsync(CancellationToken cancellationToken)
     {
@@ -164,10 +164,10 @@ public class MySqlTenantCatalogRepository(IConfiguration configuration)
     }
 }
 
-public class MySqlAlertRuleRepository(IConfiguration configuration, ITenantContext tenantContext)
+public class MySqlAlertRuleRepository(ControlPlaneConnection controlPlane, ITenantContext tenantContext)
     : AlertRuleRepositoryBase(tenantContext)
 {
-    private readonly string _connectionString = configuration.GetConnectionString("Api")!;
+    private readonly string _connectionString = controlPlane.ConnectionString;
 
     protected override async Task<DbConnection> OpenConnectionAsync(CancellationToken cancellationToken)
     {
@@ -193,14 +193,31 @@ public class MySqlAlertRuleRepository(IConfiguration configuration, ITenantConte
 }
 
 /// <summary>
-/// MySQL implementation of the <see cref="IRetentionSettingsRepository"/> sweeps: the shared
-/// batched, per-tenant shape from <see cref="RetentionSettingsRepositoryBase"/>. The batch is
+/// MySQL implementation of <see cref="IRetentionSettingsRepository"/>: the shared settings read/write
+/// from <see cref="RetentionSettingsRepositoryBase"/>, against the control-plane database.
+/// </summary>
+public class MySqlRetentionSettingsRepository(ControlPlaneConnection controlPlane)
+    : RetentionSettingsRepositoryBase
+{
+    private readonly string _connectionString = controlPlane.ConnectionString;
+
+    protected override async Task<DbConnection> OpenConnectionAsync(CancellationToken cancellationToken)
+    {
+        var conn = new MySqlConnection(_connectionString);
+        await conn.OpenAsync(cancellationToken);
+        return conn;
+    }
+}
+
+/// <summary>
+/// MySQL implementation of the <see cref="IRetentionSweeper"/> sweeps: the shared
+/// batched, per-tenant shape from <see cref="RetentionSweeperBase"/>. The batch is
 /// <c>DELETE ... LIMIT n</c>, which InnoDB serves from the clustered primary key
 /// (<c>(tenant_id, time, id)</c> on spans and log records) or the data-point time index, bounded so
 /// a sweep cannot escalate to a table lock or build an enormous undo log while ingestion appends.
 /// </summary>
-public class MySqlRetentionSettingsRepository(IConfiguration configuration)
-    : RetentionSettingsRepositoryBase
+public class MySqlRetentionSweeper(IConfiguration configuration)
+    : RetentionSweeperBase
 {
     private readonly string _connectionString = configuration.GetConnectionString("Api")!;
 
