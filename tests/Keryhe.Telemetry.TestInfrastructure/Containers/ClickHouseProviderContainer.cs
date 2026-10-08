@@ -79,10 +79,11 @@ public sealed class ClickHouseProviderContainer : ProviderContainer
         }
     }
 
-    protected override async Task ApplySchemaAsync(CancellationToken cancellationToken)
-    {
-        var script = await SchemaApplier.ReadScriptAsync("ClickHouse-Schema.sql", cancellationToken);
+    protected override async Task ApplySchemaAsync(CancellationToken cancellationToken) =>
+        await ExecuteSqlAsync(await SchemaApplier.ReadScriptAsync("ClickHouse-Schema.sql", cancellationToken), cancellationToken);
 
+    public override async Task ExecuteSqlAsync(string script, CancellationToken cancellationToken = default)
+    {
         await using var conn = new ClickHouseConnection(_connectionString);
         await conn.OpenAsync(cancellationToken);
         foreach (var statement in SchemaApplier.SplitStatements(script))

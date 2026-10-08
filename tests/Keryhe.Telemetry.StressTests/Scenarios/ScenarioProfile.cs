@@ -97,6 +97,12 @@ public sealed class ScenarioProfile
     /// <summary>CPUs the database container is pinned to (Docker <c>--cpuset-cpus</c>, e.g. "0-3"), or null for the shared pool. See the report's CPU-separation note.</summary>
     public string? DatabaseCpuset { get; set; }
 
+    /// <summary>Extra environment variables for both hosts (<c>--host-env KEY=VALUE</c>), e.g. ingestion settings under test. Recorded in the run's command line.</summary>
+    public Dictionary<string, string> HostEnvironment { get; set; } = [];
+
+    /// <summary>SQL run against the database after the schema and before the hosts start (<c>--db-sql &lt;file&gt;</c>), for experiments that change the schema under test.</summary>
+    public string? DatabaseSetupSql { get; set; }
+
     /// <summary>Decision 17: the same CPU/memory cap for every DB container.</summary>
     public double ContainerCpus { get; set; } = 4;
     public double ContainerMemoryGb { get; set; } = 8;

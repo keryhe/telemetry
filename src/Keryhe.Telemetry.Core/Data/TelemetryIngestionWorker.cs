@@ -192,6 +192,8 @@ public sealed class TelemetryIngestionWorker(
                 await drainLock.WaitAsync(abortToken);
                 try
                 {
+                    await LingerAsync(gate, inFlight, maxBatchSize, stoppingToken);
+
                     // Drain all currently available writes (up to maxBatchSize units — records
                     // for logs/metrics, spans for traces) without waiting. Peek before read: an
                     // item is only merged in when it fits the remaining headroom, so the batch
@@ -285,6 +287,33 @@ public sealed class TelemetryIngestionWorker(
                 {
                     break;
                 }
+            }
+        }
+    }
+
+    /// <summary>
+    /// Waits up to <see cref="TelemetryIngestionOptions.FlushLingerMilliseconds"/> for a full batch
+    /// to be queued. Queued units are the gate's resident count minus what this signal's loops have
+    /// in flight (the gate is released only after a flush). Returns at once when the linger is 0 or
+    /// the host is stopping, so shutdown never waits on it.
+    /// </summary>
+    private async Task LingerAsync(RecordCountGate gate, InFlightCount inFlight, int maxBatchSize, CancellationToken stoppingToken)
+    {
+        if (_options.FlushLingerMilliseconds <= 0) return;
+
+        var deadline = Stopwatch.GetTimestamp() + Stopwatch.Frequency * _options.FlushLingerMilliseconds / 1000;
+        while (!stoppingToken.IsCancellationRequested
+               && gate.Resident - Volatile.Read(ref inFlight.Value) < maxBatchSize)
+        {
+            var remainingMs = (deadline - Stopwatch.GetTimestamp()) * 1000 / Stopwatch.Frequency;
+            if (remainingMs <= 0) return;
+            try
+            {
+                await Task.Delay(TimeSpan.FromMilliseconds(Math.Min(10, remainingMs)), stoppingToken);
+            }
+            catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+            {
+                return;
             }
         }
     }

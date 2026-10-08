@@ -78,6 +78,13 @@ public abstract class ProviderContainer : IAsyncDisposable
         return new SeededTenant(id, tenantName, apiKeyName, apiKeyPlainText);
     }
 
+    /// <summary>
+    /// Runs extra SQL against the <c>telemetry</c> database after the schema, statement by statement (split as the schema
+    /// scripts are). For experiments that change the schema under test, e.g. dropping views; not every provider supports it.
+    /// </summary>
+    public virtual Task ExecuteSqlAsync(string script, CancellationToken cancellationToken = default) =>
+        throw new NotSupportedException($"{ProviderName} does not support running extra SQL.");
+
     /// <summary>Starts the container (and creates the <c>telemetry</c> database) with <see cref="Options"/> applied.</summary>
     protected abstract Task StartContainerAsync(CancellationToken cancellationToken);
 

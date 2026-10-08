@@ -19,7 +19,9 @@ public static class RunCommand
         "    [--browsers <n>]   override the profile's browser users (0 = none)\n" +
         "    [--db-cpuset <cpus>]   pin the database container to these CPUs of the Docker VM (e.g. 0-3); recorded in the report\n" +
         "    [--retention-interval <stress|realistic|seconds>]   override the profile's retention interval (stress = 30 s, realistic = 3600 s)\n" +
-        "    [--seed-days <n>] [--seed-spans-per-day <n>]   send n days (1-60) of backdated history, plus large traces, before the warm-up; recorded in the report";
+        "    [--seed-days <n>] [--seed-spans-per-day <n>]   send n days (1-60) of backdated history, plus large traces, before the warm-up; recorded in the report\n" +
+        "    [--host-env KEY=VALUE]...   extra environment variables for both hosts (e.g. Telemetry__Ingestion__FlushLingerMilliseconds=1000)\n" +
+        "    [--db-sql <file>]   SQL run against the database after the schema, before the hosts start (ClickHouse only)";
 
     public static async Task<int> RunAsync(string[] args)
     {
@@ -28,6 +30,8 @@ public static class RunCommand
         int? browsers = null;
         string? retentionInterval = null, dbCpuset = null;
         int? seedDays = null, seedSpansPerDay = null;
+        var hostEnvironment = new Dictionary<string, string>();
+        string? databaseSqlFile = null;
         var scenarioGiven = false;
         for (var i = 0; i < args.Length; i++)
         {
@@ -45,6 +49,15 @@ public static class RunCommand
                 case "--db-cpuset": dbCpuset = Next(); break;
                 case "--seed-days": seedDays = int.Parse(Next()); break;
                 case "--seed-spans-per-day": seedSpansPerDay = int.Parse(Next()); break;
+                case "--host-env":
+                {
+                    var pair = Next();
+                    var eq = pair.IndexOf('=');
+                    if (eq < 1) { Console.Error.WriteLine($"--host-env needs KEY=VALUE, got '{pair}'."); return 2; }
+                    hostEnvironment[pair[..eq]] = pair[(eq + 1)..];
+                    break;
+                }
+                case "--db-sql": databaseSqlFile = Next(); break;
                 default: Console.Error.WriteLine($"unknown argument {args[i]}\n{Usage}"); return 2;
             }
         }
@@ -54,6 +67,12 @@ public static class RunCommand
         {
             specs = BuildMatrix(provider, topology, profile, scenario, scenarioGiven, browsers, retentionInterval, dbCpuset);
             if (seedDays is { } days) foreach (var spec in specs) spec.Profile.ApplySeed(days, seedSpansPerDay);
+            var databaseSql = databaseSqlFile is null ? null : File.ReadAllText(databaseSqlFile);
+            foreach (var spec in specs)
+            {
+                spec.Profile.HostEnvironment = new Dictionary<string, string>(hostEnvironment);
+                spec.Profile.DatabaseSetupSql = databaseSql;
+            }
         }
         catch (Exception ex) when (ex is ArgumentException or FileNotFoundException or InvalidDataException)
         {

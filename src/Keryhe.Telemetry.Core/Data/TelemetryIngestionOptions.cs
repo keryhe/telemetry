@@ -64,6 +64,16 @@ public sealed class TelemetryIngestionOptions
     public int FlushConcurrency { get; set; } = 4;
 
     /// <summary>
+    /// How long a drain loop waits, once a signal has something queued, for a full batch to build up
+    /// before flushing whatever is there, in milliseconds. 0 (the default) flushes as soon as anything
+    /// is queued. A column store such as ClickHouse wants a few large inserts rather than many small
+    /// ones; a linger trades up to this much extra commit latency for larger batches. The wait runs
+    /// under the per-signal drain lock, so concurrent loops linger one after another rather than all
+    /// waking together and splitting one interval's records into several small batches.
+    /// </summary>
+    public int FlushLingerMilliseconds { get; set; }
+
+    /// <summary>
     /// Maximum retry attempts for a batch flush that throws, after the first attempt, before the
     /// batch is dropped. Defaults to 5 (6 attempts total).
     /// </summary>

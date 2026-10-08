@@ -60,11 +60,19 @@ public static class ScenarioRunner
             await db.StartAsync(new ContainerOptions(Diagnostics: true, CpuLimit: profile.ContainerCpus,
                 MemoryLimitBytes: (long)(profile.ContainerMemoryGb * ContainerOptions.Gigabyte), CpusetCpus: profile.DatabaseCpuset), ct);
             var tenants = await TenantSeeder.SeedAsync(db, profile.Tenants);
+            if (profile.DatabaseSetupSql is { } setupSql)
+            {
+                log($"[{spec.Id}] running --db-sql against the database");
+                await db.ExecuteSqlAsync(setupSql, ct);
+            }
+            if (profile.HostEnvironment.Count > 0)
+                log($"[{spec.Id}] host environment: {string.Join(", ", profile.HostEnvironment.Select(kv => $"{kv.Key}={kv.Value}"))}");
 
             await using var observers = await DatabaseObserverSession.StartAsync(spec.Provider, db, cancellationToken: ct);
             log($"[{spec.Id}] launching {spec.Topology}");
             await using var hosts = await HostLauncher.LaunchAsync(published,
-                new HostLaunchOptions(spec.Provider, db.ConnectionString, db.ConnectionString, spec.Topology, directory, profile.RetentionIntervalSeconds), ct);
+                new HostLaunchOptions(spec.Provider, db.ConnectionString, db.ConnectionString, spec.Topology, directory, profile.RetentionIntervalSeconds,
+                    ExtraEnvironment: profile.HostEnvironment), ct);
 
             await using var generator = new OtlpLoadGenerator(profile.Load,
                 tenants.Select(t => new LoadTenant(t.Id, t.Name, t.ApiKey)).ToList(), hosts.GrpcUri);
