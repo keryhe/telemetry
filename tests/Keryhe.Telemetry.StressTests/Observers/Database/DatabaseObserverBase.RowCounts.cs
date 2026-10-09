@@ -3,7 +3,7 @@ namespace Keryhe.Telemetry.StressTests.Observers.Database;
 /// <summary>Rows in one table for one tenant, split by age: <see cref="Backdated"/> rows are older than the cutoff the caller passed.</summary>
 public sealed record RowCountCell(long TenantId, string Table, bool Backdated, long Rows);
 
-/// <param name="RawSpanRows">ClickHouse only: spans rows before <c>ReplacingMergeTree</c> has merged duplicates away. The difference from the deduplicated span count is the "pending merge duplicates" number.</param>
+/// <param name="RawSpanRows">Always null: no provider has a merge-pending span number any more (spans are plain appends everywhere). Kept so the report model is unchanged.</param>
 public sealed record RowCounts(IReadOnlyList<RowCountCell> Cells, long? RawSpanRows);
 
 /// <summary>A table the correctness check counts, and how it reaches its tenant (stress-test plan, Phase 7).</summary>

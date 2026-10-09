@@ -8,9 +8,8 @@ namespace Keryhe.Telemetry.Core.Data;
 /// provider's bulk writer calls <see cref="MarkTouched"/> once per metric in a flushed batch,
 /// after its data-point insert has committed; <see cref="MetricTouchWorker"/> drains and
 /// bulk-writes <c>metric_last_seen.last_seen_unix_nano</c> via <see cref="IMetricTouchStore"/> on
-/// a timer. Not registered/used on ClickHouse — its <c>metric_last_seen</c> table is fed by
-/// materialized views on the data-point tables themselves (see <see cref="IMetricTouchStore"/>'s
-/// doc comment).
+/// a timer. Not fed on ClickHouse, which has no <c>metric_last_seen</c> table (see
+/// <see cref="IMetricTouchStore"/>'s doc comment).
 ///
 /// Mirrors <see cref="ApiKeyTouchTracker"/>'s shape, with one difference: a key here carries a
 /// VALUE (the newest timestamp seen for that metric), not just presence, so a metric touched

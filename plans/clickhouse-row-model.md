@@ -1,5 +1,8 @@
 # ClickHouse row model (redesign step 3)
 
+> **Implemented** by [plans/clickhouse-redesign](clickhouse-redesign/README.md) (phases 1-6). Where the two differ, the
+> phase notes record what was built and why.
+
 Designed 2026-10-08 from the OTLP data shape and ClickHouse practice, without reference to the other providers or the
 current ClickHouse schema. The targets it must meet are in `plans/clickhouse-diagnosis-results.md` ("Redesign targets"):
 100,000 records/s on 4 CPU / 8 GB with the database under about 60% CPU, at most 5 s to queryable, tiered read p95s, one
@@ -18,14 +21,14 @@ here carries a column only for paging.
 | 1 | ClickHouse version | 25.8 LTS |
 | 2 | Resources and scopes | Copied onto every row (attributes, schema URL, scope name/version). No reference tables, no surrogate ids |
 | 3 | Attributes | `Map(LowCardinality(String), String)` holds the full set. A fixed list of common semantic-convention keys is also promoted to real typed columns (`MATERIALIZED` from the map) |
-| 4 | Trace and span ids | Raw bytes: `FixedString(16)` / `FixedString(8)`; `hex()` / `unhex()` at the edges |
-| 5 | Timestamps | `DateTime64(9, 'UTC')`; span duration as `UInt64` nanoseconds |
-| 6 | Duplicates | Plain `MergeTree`. Each insert carries an `insert_deduplication_token` that is reused on retry; tables set `non_replicated_deduplication_window`. A client re-send in a new export is still stored twice; reads tolerate it |
+| 4 | Trace and span ids | Raw width, as `UUID` (trace id, a `Guid` built from the 16 id bytes) and `UInt64` (span id, from the 8 bytes); hex conversion in the app only. *Phase 0 spike 1: `ClickHouse.Client` cannot write raw bytes into `FixedString`, which the first draft used* |
+| 5 | Timestamps | `DateTime64(9, 'UTC')`; span duration as `UInt64` nanoseconds. *Phase 0 spike 1: the driver stores `DateTime64` at 100 ns resolution (the last two digits of an OTLP nanosecond timestamp are lost); `duration_ns` is exact. Accepted by the user 2026-10-09; the `Int64` nanosecond alternative was declined (see phase-0-results.md)* |
+| 6 | Duplicates | Plain `MergeTree`. Each insert carries an `insert_deduplication_token` that is reused on retry; tables set `non_replicated_deduplication_window`. A client re-send in a new export is still stored twice; reads tolerate it. *Phase 0 spike 3: the token belongs to one INSERT statement (a token shared by several statements drops all but the first), and a re-batched set needs a new token* |
 | 7 | Span sort key | `(tenant_id, service_name, start_time)`; operation filters use a skip index on `span_name` |
 | 8 | Events and links | Arrays on the span row (`Nested`) |
 | 9 | Trace lookup | `trace_index` table, written by the collector, one row per (trace, service, day), sorted by `(tenant_id, trace_id, service_name)` |
-| 10 | Log sort key | `(tenant_id, toStartOfFiveMinutes(timestamp), service_name, timestamp)`, the OpenTelemetry exporter's shape with tenant first. No row id: lists are capped, so nothing needs a paging tiebreak |
-| 11 | Log search | `tokenbf_v1` skip index on `lower(body)` |
+| 10 | Log sort key | `(tenant_id, toStartOfFiveMinutes(timestamp), service_name, timestamp)`, the OpenTelemetry exporter's shape with tenant first. No row id: lists are capped, so nothing needs a paging tiebreak. *Phase 0 spike 5: every query with a time range must also carry `toStartOfFiveMinutes(timestamp) BETWEEN ...`, or the key does not prune; lists read in widening slices* |
+| 11 | Log search | `tokenbf_v1(32768, 3, 0)` skip index on `lower(body)`, used by `hasToken(lower(body), 'word')` only (confirmed by spike 4; `LIKE` scans) |
 | 12 | Metrics | One table per type; sort key `(tenant_id, service_name, metric_name, toStartOfHour(time), series_id, time)`; `series_id` is a 64-bit hash the collector computes |
 | 13 | Derived data | Written by the collector after the raw insert succeeds. No materialized views on any insert path |
 | 14 | Request rollup | Per `(tenant, service, operation, minute)`, inbound spans only, 24 fixed duration bands |
@@ -101,9 +104,9 @@ CREATE TABLE spans
     span_name                 LowCardinality(String),
     start_time                DateTime64(9, 'UTC') CODEC(Delta(8), ZSTD(1)),
     duration_ns               UInt64 CODEC(T64, ZSTD(1)),
-    trace_id                  FixedString(16),
-    span_id                   FixedString(8),
-    parent_span_id            FixedString(8),          -- all zero bytes for a root
+    trace_id                  UUID,
+    span_id                   UInt64,
+    parent_span_id            UInt64,                  -- 0 for a root
     trace_state               String CODEC(ZSTD(1)),
     flags                     UInt32,
     kind                      Enum8('UNSPECIFIED' = 0, 'INTERNAL' = 1, 'SERVER' = 2, 'CLIENT' = 3, 'PRODUCER' = 4, 'CONSUMER' = 5),
@@ -121,8 +124,8 @@ CREATE TABLE spans
     dropped_events_count      UInt32,
     links Nested
     (
-        trace_id                 FixedString(16),
-        span_id                  FixedString(8),
+        trace_id                 UUID,
+        span_id                  UInt64,
         trace_state              String,
         flags                    UInt32,
         attributes               Map(LowCardinality(String), String),
@@ -173,7 +176,7 @@ SETTINGS index_granularity = 8192, non_replicated_deduplication_window = 1000;
 CREATE TABLE trace_index
 (
     tenant_id     UInt64,
-    trace_id      FixedString(16),
+    trace_id      UUID,
     service_name  LowCardinality(String),
     day           Date,
     start_min     SimpleAggregateFunction(min, DateTime64(9, 'UTC')),
@@ -234,8 +237,8 @@ CREATE TABLE log_records
     service_name              LowCardinality(String),
     timestamp                 DateTime64(9, 'UTC') CODEC(Delta(8), ZSTD(1)),
     observed_timestamp        DateTime64(9, 'UTC') CODEC(Delta(8), ZSTD(1)),
-    trace_id                  FixedString(16),         -- all zero bytes when absent
-    span_id                   FixedString(8),
+    trace_id                  UUID,                    -- all zero when absent
+    span_id                   UInt64,
     flags                     UInt32,
     severity_number           UInt8,                   -- OTLP 0 = unspecified
     severity_text             LowCardinality(String),
@@ -267,9 +270,14 @@ SETTINGS index_granularity = 8192, non_replicated_deduplication_window = 1000;
 
 - **Why time comes before service.** The default logs page is the newest records across all services. With the
   five-minute bucket right after the tenant, a query ordered by `toStartOfFiveMinutes(timestamp) DESC, timestamp DESC`
-  matches the sort key, so ClickHouse reads in order (`optimize_read_in_order`) from the newest bucket and stops once
-  it has `limit + 1` rows. With service ahead of time, it would have to read and sort the whole window: about 86 million rows
-  for one tenant's 24 hours at the target load.
+  matches the sort key, so ClickHouse reads in order (`optimize_read_in_order`) from the newest bucket. With service
+  ahead of time, it would have to read and sort the whole window: about 86 million rows for one tenant's 24 hours at
+  the target load. **Spike 5 (measured):** one ordered query over the whole window reads in order but stops early only
+  when the filter is not selective (a severity or word filter read 66-97% of the window); and a time range on
+  `timestamp` alone does not prune the key. So every logs query with a time range adds
+  `toStartOfFiveMinutes(timestamp) >= toStartOfFiveMinutes(@start) AND toStartOfFiveMinutes(timestamp) <=
+  toStartOfFiveMinutes(@end)`, and lists read in widening slices (5 minutes, then x4, the whole remainder once the
+  next slice would cover half of it), each the ordered query with `LIMIT remaining`: 8 to 27 ms for the dense cases.
 - **The cost falls on small services.** A selected service is one short range per bucket. A service with a small
   share of the traffic may fill less than a granule per bucket and read some of its neighbours' rows. At about 1,000
   records/s per tenant, a service with 1% of the traffic reads roughly 3× what it needs. That's bounded, and it's
@@ -279,8 +287,10 @@ SETTINGS index_granularity = 8192, non_replicated_deduplication_window = 1000;
 - There's no row id. Lists are capped and ordered by `timestamp` (ties in no particular order), and nothing in the UI
   identifies a log row by id (`plans/list-caps.md`, Phase 4). That saves 8 random, incompressible bytes per row.
 - Oldest first reads the buckets in ascending order; reading in order works in both directions.
-- Whole-word search terms use the token index. A substring search (part of a word) scans the 24 h search window. The
-  index size (32 KB per granule) is a starting point to tune in the spike.
+- Whole-word search terms use the token index, written as `hasToken(lower(body), 'word')`. A substring search (part of
+  a word, `LIKE`) scans the 24 h search window. Spike 4 kept 32 KB per granule (8% of the table): it helps a term that
+  appears in few granules (an identifier, an absent word: 245 ms down to 38 ms and 14 ms on 4M rows) and does nothing
+  for a word that appears in most.
 - A record with no timestamp uses `observed_timestamp`, as OTLP specifies.
 
 ## Metric data points
@@ -320,7 +330,7 @@ SETTINGS index_granularity = 8192, non_replicated_deduplication_window = 1000;
 | `exp_histogram_points` | `count UInt64`, `sum`, `min`, `max` (Nullable), `scale Int32`, `zero_count UInt64`, `zero_threshold Float64`, `positive_offset Int32`, `positive_bucket_counts Array(UInt64)`, `negative_offset Int32`, `negative_bucket_counts Array(UInt64)`, `temporality`, `exemplars` |
 | `summary_points` | `count UInt64`, `sum Float64`, `quantiles Nested(quantile Float64, value Float64)` |
 
-`exemplars` is `Nested(time DateTime64(9,'UTC'), value Float64, trace_id FixedString(16), span_id FixedString(8),
+`exemplars` is `Nested(time DateTime64(9,'UTC'), value Float64, trace_id UUID, span_id UInt64,
 filtered_attributes Map(LowCardinality(String), String))`.
 
 - `series_id` = 64-bit hash over (tenant, resource attributes, scope name/version/attributes, metric name, type, point
@@ -402,7 +412,7 @@ CREATE TABLE log_rollup_minute
     tenant_id        UInt64,
     service_name     LowCardinality(String),
     minute           DateTime('UTC'),
-    severity_number  UInt8,
+    severity_number  Int16,                  -- -1 = unspecified, as on the relational providers
     record_count     SimpleAggregateFunction(sum, UInt64)
 )
 ENGINE = AggregatingMergeTree
@@ -434,9 +444,27 @@ SETTINGS non_replicated_deduplication_window = 1000;
 | Metrics page, attribute pickers | `metric_catalog`, `metric_series` |
 | Metric charts | One points table: one range per hour of the window, narrowed by `series_id` when one series is selected |
 
+## Planning decisions (agreed 2026-10-08)
+
+These settle what the row model left open for step 4. The phase plans are in [clickhouse-redesign/](clickhouse-redesign/README.md).
+
+| # | Topic | Decision |
+|---|---|---|
+| P1 | Write path | ClickHouse registers its own ingestion worker: linger batching, the day-partition split, and the derived writes (`trace_index`, rollups, catalog) after the raw insert succeeds. The shared channel, record-count gates and gRPC services stay as they are. The relational providers' worker, `ResourceScopeCache` use and `RollupAccumulator`/`RollupWorker` are untouched |
+| P2 | Core contracts | Frozen. Core read/write interfaces, models and API responses do not change; ClickHouse adapts inside the provider (for example, trace detail's `resourceIndex`/`scopeIndex` are built from the copied row data) |
+| P3 | Schema version | Folded into 4.0.0. 4.0.0 is unreleased and fresh-install only, so the new layout simply becomes `schema/ClickHouse-Telemetry.sql` at 4.0.0; no version bump |
+| P4 | Ordering | Commit `plans/list-caps.md` and the control-plane split first, then this redesign, then `plans/collector-improvements/` (whose phase 1 builds on the new ClickHouse worker) |
+| P5 | Spikes | The five spikes below become Phase 0 of the plan. Each names the decision it can overturn and what replanning a failure triggers; later phases do not start until Phase 0's results are recorded |
+| P6 | Cutover | Replace `Keryhe.Telemetry.ClickHouse` in place on the branch; the old layout is gone when it merges. No side-by-side provider or config switch |
+| P7 | Tests | The shared per-provider test bases stay unchanged and are the contract the new layout must pass. Only the ClickHouse-specific tests that assume the old layout (reference tables, `ToDictionaryFirst`, view-fed rollups) are deleted or rewritten |
+| P8 | Done gate | No automatic gate, commit or merge. The final phase runs the stress ramp and records the results against the redesign targets; the user decides whether it merges |
+
 ## Spike before the plan (step 4)
 
-These could change a decision above, so each gets a short test on 25.8 first:
+**Done 2026-10-09: results and the changes they made are in `plans/clickhouse-redesign/phase-0-results.md`.** Summary:
+ids became `UUID`/`UInt64` (spike 1), timestamps are stored at 100 ns (spike 1, to confirm), insert cost is 23% of 4
+cores at 100,000 records/s (spike 2), tokens work with two rules (spike 3), the 32 KB token index stays (spike 4), and
+logs need the bucket predicate and widening slices (spike 5). The original questions:
 
 1. **The .NET client.** Confirm the driver can bulk-write `Map(LowCardinality(String), String)`, `FixedString`,
    `Nested` (including maps inside it) and `DateTime64(9)`, with an `insert_deduplication_token` per insert.

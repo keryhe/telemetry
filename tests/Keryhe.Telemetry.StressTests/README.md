@@ -161,7 +161,7 @@ result, every time series, and the summary tables. Use it to compare runs by han
 
 - The metrics catalog only lists a metric once `MetricTouchWorker` has flushed (60s by default), so the browser tour waits up to 90s at start for it. Use a warm-up of at least 70s with browsers.
 - The tour opens metric detail by clicking through the metrics list, not by URL, because a hard load of `/metrics/<dotted.name>` is answered 404 by the UI host.
-- ClickHouse deletes are asynchronous mutations, so after a sweep the correctness check re-counts for up to 60s before reporting leftover backdated rows.
+- ClickHouse retention drops partitions (no mutations), so leftover backdated rows are reported as counted. Its API host reads with `use_query_condition_cache = 0` (the 25.x cache makes a repeated predicate look free). The report adds `late_buffer_records` and `derived_rows_dropped` beside the write instruments.
 - There is no product endpoint to trigger a retention sweep (by design); the harness waits for a natural one.
 - The load tool is open-loop. If it falls behind its own schedule it reports `not sent` and skipped exports, so load-tool saturation is never mistaken for server slowness; check offered versus acked.
 

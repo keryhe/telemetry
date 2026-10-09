@@ -5,7 +5,7 @@ namespace Keryhe.Telemetry.Core.Data;
 /// <summary>
 /// The 24 doubling duration bands of the request rollup (summary-rollups plan, "Duration bands"):
 /// band 0 is under 0.25 ms, band N (1-22) is [0.25 ms * 2^(N-1), 0.25 ms * 2^N), and band 23 is
-/// 1,048.6 s and over. <see cref="IndexOf"/> is the one definition; ClickHouse's materialized view
+/// 1,048.6 s and over. <see cref="IndexOf"/> is the one definition; ClickHouse's writer
 /// computes the same with integer arithmetic and a test checks both at every edge +-1 ns.
 /// </summary>
 public static class DurationBands

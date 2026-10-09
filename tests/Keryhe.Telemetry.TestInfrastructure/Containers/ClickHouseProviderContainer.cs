@@ -24,7 +24,7 @@ public sealed class ClickHouseProviderContainer : ProviderContainer
     private readonly PostgreSqlProviderContainer _controlPlane = new(controlPlaneOnly: true);
 
     public override string ProviderName => "ClickHouse";
-    public override string ImageName => "clickhouse/clickhouse-server:24.8";
+    public override string ImageName => "clickhouse/clickhouse-server:25.8";
     public override string ConnectionString => _connectionString!;
     public override string ControlPlaneConnectionString => _controlPlane.ConnectionString;
     public override string ControlPlaneProviderName => _controlPlane.ProviderName;

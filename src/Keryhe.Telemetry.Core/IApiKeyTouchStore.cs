@@ -8,12 +8,8 @@ namespace Keryhe.Telemetry.Core;
 /// used during that interval, and at most one row write per key per interval no matter how many
 /// times that key was actually used.
 ///
-/// ClickHouse's implementation is a deliberate no-op. Before this interface existed, ClickHouse
-/// was the one provider that skipped <c>last_used_at</c> entirely, because a mutation per gRPC
-/// request was disproportionate to the value of the field. Now every provider bumps it at most
-/// once per flush interval instead of once per request — ClickHouse's own mutation cost is still
-/// disproportionate even amortized across a whole interval, so it keeps opting out; the other four
-/// providers get the field for the first time.
+/// Implemented by the control-plane providers (PostgreSQL, SQL Server, MySQL); ClickHouse holds no
+/// API keys.
 /// </summary>
 public interface IApiKeyTouchStore
 {

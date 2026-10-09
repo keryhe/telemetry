@@ -51,7 +51,7 @@ public abstract class ProviderFixture : IAsyncLifetime
     protected string CollectorConnectionString => Container.ConnectionString;
 
     /// <summary>Connection string for the read side (<c>ConnectionStrings:Api</c>). Same database as the collector string — one test database.</summary>
-    protected string ApiConnectionString => Container.ConnectionString;
+    protected virtual string ApiConnectionString => Container.ConnectionString;
 
     /// <summary>Calls this provider's own <c>Add&lt;Provider&gt;CollectorServices</c>/<c>Add&lt;Provider&gt;ApiServices</c> and the control-plane provider's <c>Add&lt;Provider&gt;ControlPlane*Services</c>.</summary>
     protected abstract void AddProviderServices(IServiceCollection services, IConfiguration configuration);
@@ -76,6 +76,9 @@ public abstract class ProviderFixture : IAsyncLifetime
     /// </summary>
     public ServiceProvider CreateServices(IReadOnlyDictionary<string, string?> overrides) => BuildServices(overrides);
 
+    /// <summary>Configuration a provider adds to every service provider this fixture builds (a test's own overrides win).</summary>
+    protected virtual IReadOnlyDictionary<string, string?> ProviderSettings => new Dictionary<string, string?>();
+
     private ServiceProvider BuildServices(IReadOnlyDictionary<string, string?>? overrides)
     {
         var settings = new Dictionary<string, string?>
@@ -85,6 +88,7 @@ public abstract class ProviderFixture : IAsyncLifetime
             ["ConnectionStrings:ControlPlane"] = Container.ControlPlaneConnectionString,
             ["ControlPlane:Provider"] = Container.ControlPlaneProviderName
         };
+        foreach (var (key, value) in ProviderSettings) settings[key] = value;
         if (overrides is not null)
             foreach (var (key, value) in overrides) settings[key] = value;
         var configuration = new ConfigurationBuilder().AddInMemoryCollection(settings).Build();

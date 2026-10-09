@@ -3,12 +3,9 @@ using Keryhe.Telemetry.Core;
 namespace Keryhe.Telemetry.ClickHouse.Services;
 
 /// <summary>
-/// Deliberate no-op implementation of <see cref="IMetricTouchStore"/> (list-pages-server-side
-/// plan, Phase 5, decision 27). ClickHouse's <c>metric_last_seen</c> table is an
-/// <c>AggregatingMergeTree</c> fed by one materialized view per data-point table (see
-/// <c>ClickHouse-Schema.sql</c>), so there is nothing for <c>MetricTouchWorker</c> to write here —
-/// new rows in any data-point table already update it as a side effect of the insert itself, with
-/// no periodic worker and no mutation.
+/// Deliberate no-op implementation of <see cref="IMetricTouchStore"/>. ClickHouse has no last-seen side table:
+/// <see cref="ClickHouseBulkWriter"/> writes <c>metric_catalog</c> and <c>metric_series</c> (with their
+/// <c>last_seen</c>) itself, so there is nothing for <c>MetricTouchWorker</c> to write here.
 /// </summary>
 public sealed class ClickHouseMetricTouchStore : IMetricTouchStore
 {

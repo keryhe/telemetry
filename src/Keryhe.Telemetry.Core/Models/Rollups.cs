@@ -110,7 +110,7 @@ public sealed class LogRollupSummaryResult
     public bool TimedOut { get; init; }
 }
 
-/// <summary>One chart bucket of the log rollup, by severity group (<c>LogSeverityGroupSql</c>'s grouping).</summary>
+/// <summary>One chart bucket of the log rollup, by severity group (<c>RollupSummaryBuilder.SeverityGroup</c>).</summary>
 public sealed class LogRollupBucket
 {
     public DateTime Timestamp { get; init; }

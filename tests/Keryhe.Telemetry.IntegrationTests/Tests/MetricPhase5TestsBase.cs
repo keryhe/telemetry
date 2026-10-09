@@ -20,14 +20,20 @@ namespace Keryhe.Telemetry.IntegrationTests.Tests;
 /// the same two steps that worker performs on its interval: drain <see cref="MetricTouchTracker"/>
 /// (populated automatically by each relational bulk writer's <c>FlushMetricsAsync</c>) and call
 /// <see cref="IMetricTouchStore.TouchAsync"/> directly. On ClickHouse this manual step is a
-/// deliberate no-op (see <c>ClickHouseMetricTouchStore</c>) — its <c>metric_last_seen</c> is kept
-/// current by materialized views firing on the data-point INSERTs already performed by
-/// <c>FlushMetricsAsync</c>, so no extra step is needed there at all.
+/// deliberate no-op (see <c>ClickHouseMetricTouchStore</c>) — its <c>metric_catalog</c> is written
+/// by <c>FlushMetricsAsync</c> itself, so no extra step is needed there at all.
 /// </summary>
 public abstract class MetricPhase5TestsBase : IAsyncLifetime
 {
     private readonly ProviderFixture _fixture;
     protected MetricPhase5TestsBase(ProviderFixture fixture) => _fixture = fixture;
+
+    /// <summary>
+    /// Whether a catalog "instance" is one resource of a service (every relational provider) or the service itself (ClickHouse, whose
+    /// catalog is keyed by tenant, service, metric and type: plans/clickhouse-redesign README R6). Only the assertions that count
+    /// instances depend on it.
+    /// </summary>
+    protected virtual bool CatalogInstanceIsPerResource => true;
 
     public Task InitializeAsync() => _fixture.ResetAsync();
     public Task DisposeAsync() => Task.CompletedTask;
@@ -69,23 +75,26 @@ public abstract class MetricPhase5TestsBase : IAsyncLifetime
             Start = WindowStart.AddDays(-1), End = WindowStart.AddDays(1), GroupBy = "instance", Limit = limit
         });
 
-        // All 25 share (nearly) one metrics.created_at, so the order leans on the id tiebreak: a shorter list must still be
+        // 25 pods of one service over 5 metric names: 25 instances, or 5 where an instance is a service's metric.
+        var expected = CatalogInstanceIsPerResource ? count : 5;
+
+        // All share (nearly) one creation time, so the order leans on the id tiebreak: a shorter list must still be
         // the head of the full one, with no row repeated.
-        var all = await Catalog(count);
-        Assert.Equal(count, all.Items.Count);
-        Assert.Equal(count, all.Items.Select(i => i.Id).Distinct().Count());
+        var all = await Catalog(expected);
+        Assert.Equal(expected, all.Items.Count);
+        Assert.Equal(expected, all.Items.Select(i => i.Id).Distinct().Count());
         Assert.False(all.Truncated); // exactly N rows matched: nothing more
 
-        var head = await Catalog(7);
-        Assert.Equal(all.Items.Take(7).Select(i => i.Id), head.Items.Select(i => i.Id));
+        var head = await Catalog(3);
+        Assert.Equal(all.Items.Take(3).Select(i => i.Id), head.Items.Select(i => i.Id));
         Assert.True(head.Truncated);
 
-        var oneShort = await Catalog(count - 1);
-        Assert.Equal(count - 1, oneShort.Items.Count);
+        var oneShort = await Catalog(expected - 1);
+        Assert.Equal(expected - 1, oneShort.Items.Count);
         Assert.True(oneShort.Truncated);
 
-        var roomToSpare = await Catalog(count + 50);
-        Assert.Equal(count, roomToSpare.Items.Count);
+        var roomToSpare = await Catalog(expected + 50);
+        Assert.Equal(expected, roomToSpare.Items.Count);
         Assert.False(roomToSpare.Truncated);
     }
 
@@ -141,7 +150,7 @@ public abstract class MetricPhase5TestsBase : IAsyncLifetime
         var row = Assert.Single(page.Names);
         Assert.Equal("phase5.grouped.metric", row.Name);
         Assert.Equal(MetricType.SUM, row.Type);
-        Assert.Equal(3, row.InstanceCount);
+        Assert.Equal(CatalogInstanceIsPerResource ? 3 : 2, row.InstanceCount); // a1, a2, b1 -- or the two services
         Assert.Equal(new[] { "svc-a", "svc-b" }, row.Services.OrderBy(s => s).ToArray());
     }
 
@@ -251,10 +260,8 @@ public abstract class MetricPhase5TestsBase : IAsyncLifetime
         using (var readScope = Scope())
         {
             var repo = readScope.ServiceProvider.GetRequiredService<IMetricReadRepository>();
-            // ClickHouse's metric_last_seen materialized views are ordinarily synchronous with
-            // their source INSERT, but this test observed a brief propagation lag under the test
-            // container for a single-row flush; a short bounded poll accommodates that without
-            // weakening the assertion itself (still requires exactly one matching row).
+            // A short bounded poll tolerates a brief propagation lag under the test container for a
+            // single-row flush, without weakening the assertion itself (still exactly one matching row).
             MetricCatalogPage afterTouch = null!;
             for (var attempt = 0; attempt < 10; attempt++)
             {

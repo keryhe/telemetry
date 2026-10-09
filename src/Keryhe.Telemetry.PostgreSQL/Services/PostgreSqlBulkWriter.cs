@@ -124,8 +124,7 @@ public sealed class PostgreSqlBulkWriter(
         // Group data points by target table across the WHOLE batch, attaching each row's already
         // -resolved metric_id as it is grouped. This is what turns a metric flush into AT MOST
         // FIVE bulk inserts instead of one per metric: a naive per-metric loop here defeats the
-        // whole point of batching (up to MaxMetricFlushBatchSize round trips per flush), and on
-        // ClickHouse it also explodes into one tiny part per metric.
+        // whole point of batching (up to MaxMetricFlushBatchSize round trips per flush).
         var gaugeRows = new List<(long MetricId, GaugeDataPointModel DataPoint)>();
         var sumRows = new List<(long MetricId, SumDataPointModel DataPoint)>();
         var histogramRows = new List<(long MetricId, HistogramDataPointModel DataPoint)>();

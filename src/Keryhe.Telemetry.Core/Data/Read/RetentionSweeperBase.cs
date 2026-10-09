@@ -27,7 +27,7 @@ public abstract class RetentionSweeperBase : IRetentionSweeper
     protected virtual int DeleteBatchSize => 5_000;
 
     /// <summary>How long a sweep pauses after a full batch, so ingestion's own writes interleave with it.</summary>
-    protected virtual TimeSpan PauseBetweenBatches => TimeSpan.FromMilliseconds(25);
+    private static readonly TimeSpan PauseBetweenBatches = TimeSpan.FromMilliseconds(25);
 
     /// <summary>
     /// One batched DELETE statement against <paramref name="table"/>, removing at most

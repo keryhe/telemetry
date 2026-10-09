@@ -149,14 +149,6 @@ public static class CorrectnessRunner
         await WaitForRollupsAsync(database, ledger, cutoff, log, ct);
         var counts = await database.CountRowsAsync(cutoff, ct);
 
-        // ClickHouse applies its deletes as asynchronous mutations, so leftovers get a little time to disappear before they are reported.
-        var retryUntil = DateTimeOffset.UtcNow.AddSeconds(60);
-        while (sweepStart is not null && counts.Cells.Any(c => c.Backdated && c.Rows > 0) && DateTimeOffset.UtcNow < retryUntil)
-        {
-            await Task.Delay(TimeSpan.FromSeconds(3), ct);
-            counts = await database.CountRowsAsync(cutoff, ct);
-        }
-
         return CorrectnessComparer.Build(DateTimeOffset.UtcNow, cutoff, ledger, counts, signal => RecordsDropped(hosts, signal), sweepStart, waited);
     }
 

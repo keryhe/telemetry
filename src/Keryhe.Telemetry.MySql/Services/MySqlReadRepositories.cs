@@ -88,7 +88,7 @@ public class MySqlMetricReadRepository(IConfiguration configuration, ITenantCont
 
     // MySQL's `/` always yields a DECIMAL result even for integer operands; DIV keeps Phase 4's
     // bucket-index math as true integer floor division — see MySqlLogReadRepository's identical
-    // override. Same real bug shape as the ClickHouse BucketIndexExpr gap this phase also fixed.
+    // override.
     protected override string BucketIndexExpr(string numerator, string denominator) => $"({numerator} DIV {denominator})";
 
     // Load-bearing for the metrics catalog's service/name filters (list-pages-server-side plan,

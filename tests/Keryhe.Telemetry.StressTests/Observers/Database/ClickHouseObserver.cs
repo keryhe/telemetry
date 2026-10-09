@@ -157,39 +157,38 @@ public sealed class ClickHouseObserver : DatabaseObserverBase
     }
 
     /// <summary>
-    /// The read side's view: <c>resources</c>/<c>metrics</c> are collapsed to one row per id before joining (a pending merge would otherwise multiply
-    /// counts). On a 2.x schema spans are a <c>ReplacingMergeTree</c> and are read as <c>LIMIT 1 BY trace_id, span_id</c>, with the raw span count returned too so the
-    /// report can show pending merge duplicates. On 3.0.0 (recognised by <c>trace_index</c>) spans are a plain <c>MergeTree</c> that stores a re-delivered span again, so
-    /// they are counted as they are and there is no merge-pending number.
+    /// Every table carries its own <c>tenant_id</c> and a <c>DateTime64</c> time column (row model), so each is counted directly with no joins.
+    /// The ledger keeps the logical table names the relational providers use; this maps them to the physical ones. Spans and logs are plain
+    /// appends, so there is no merge-pending number (<see cref="RowCounts.RawSpanRows"/> stays null).
     /// </summary>
+    private static readonly Dictionary<string, (string Table, string TimeColumn)> Physical = new()
+    {
+        ["spans"] = ("spans", "start_time"),
+        ["log_records"] = ("log_records", "timestamp"),
+        ["gauge_data_points"] = ("gauge_points", "time"),
+        ["sum_data_points"] = ("sum_points", "time"),
+        ["histogram_data_points"] = ("histogram_points", "time"),
+        ["exponential_histogram_data_points"] = ("exp_histogram_points", "time"),
+        ["summary_data_points"] = ("summary_points", "time"),
+    };
+
     public override async Task<RowCounts> CountRowsAsync(long cutoffNanos, CancellationToken cancellationToken)
     {
         var cells = new List<RowCountCell>();
-        var replacingSpans = (long)await ScalarAsync(
-            "SELECT count() FROM system.tables WHERE database = currentDatabase() AND name = 'trace_index'", cancellationToken) == 0;
         foreach (var t in CountedTable.All)
         {
-            var age = $"if(t.{t.TimeColumn} >= {cutoffNanos}, 0, 1)";
-            var source = t.Table == "spans" && replacingSpans
-                ? $"(SELECT resource_id, {t.TimeColumn} FROM spans LIMIT 1 BY trace_id, span_id)"
-                : t.Table;
-            var joins = t.ViaMetric
-                ? "JOIN (SELECT id, any(resource_id) AS resource_id FROM metrics GROUP BY id) m ON m.id = t.metric_id " +
-                  "JOIN (SELECT id, any(tenant_id) AS tenant_id FROM resources GROUP BY id) r ON r.id = m.resource_id"
-                : "JOIN (SELECT id, any(tenant_id) AS tenant_id FROM resources GROUP BY id) r ON r.id = t.resource_id";
-            var rows = await QueryAsync($"SELECT r.tenant_id, {age} AS backdated, count() FROM {source} t {joins} GROUP BY r.tenant_id, backdated",
+            var (table, column) = Physical[t.Table];
+            var age = $"if({column} >= fromUnixTimestamp64Nano({cutoffNanos}, 'UTC'), 0, 1)";
+            var rows = await QueryAsync($"SELECT tenant_id, {age} AS backdated, count() FROM {table} GROUP BY tenant_id, backdated",
                 cancellationToken, commandTimeoutSeconds: 1800);
             cells.AddRange(rows.Select(r => new RowCountCell(Long(r[0]), t.Table, Long(r[1]) == 1, Long(r[2]))));
         }
         cells.AddRange((await CountRollupRowsAsync(cutoffNanos, cancellationToken)).Cells);
-        if (!replacingSpans) return new RowCounts(cells, null);
-        var raw = await ScalarAsync("SELECT count() FROM spans", cancellationToken);
-        return new RowCounts(cells, (long)raw);
+        return new RowCounts(cells, null);
     }
 
     public override async Task<IReadOnlyList<TableStat>> ReadAsync(CancellationToken cancellationToken)
     {
-        // Active parts before merges finish still hold ReplacingMergeTree duplicates, so the row counts can run high.
         var rows = await QueryAsync(
             "SELECT table, sum(rows), sum(bytes_on_disk) FROM system.parts WHERE database = currentDatabase() AND active GROUP BY table ORDER BY table",
             cancellationToken);

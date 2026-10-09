@@ -61,10 +61,6 @@ public abstract class DapperReadRepository
     /// </summary>
     protected virtual object IdParam(string? value, int length) => value!;
 
-    /// <summary>The table expressions a fact row's resource and scope are joined from. ClickHouse overrides them to collapse the not-yet-merged duplicate rows of its eventually-deduplicated reference tables, so a duplicate cannot multiply the fact rows.</summary>
-    protected virtual string ResourcesTable => "resources";
-    protected virtual string ScopesTable => "instrumentation_scopes";
-
     /// <summary>
     /// SQL boolean expression: does the JSON column <paramref name="jsonColumn"/> contain the key
     /// named by parameter <paramref name="keyParam"/> (e.g. <c>"@tagKey0"</c>), regardless of the
@@ -83,8 +79,8 @@ public abstract class DapperReadRepository
     /// Integer floor-division SQL expression, <c>numerator / denominator</c>, used to compute
     /// histogram bucket indices from nanosecond timestamps. The default (<c>bigint / bigint</c>)
     /// truncates toward zero on Postgres/SqlServer, which is correct floor division
-    /// since the numerator is always &gt;= 0. ClickHouse and MySQL promote <c>/</c> to a
-    /// floating-point result and must override this with their integer-division operator.
+    /// since the numerator is always &gt;= 0. MySQL promotes <c>/</c> to a
+    /// floating-point result and must override this with its integer-division operator.
     /// </summary>
     protected virtual string BucketIndexExpr(string numerator, string denominator) => $"({numerator} / {denominator})";
 
@@ -111,12 +107,12 @@ public abstract class DapperReadRepository
     /// override <see cref="LikeOperator"/> to plain <c>LIKE</c> (case-insensitive under their
     /// default collation already), so this hook needs no per-provider override of its own.
     /// </summary>
-    protected virtual string FreeTextPredicate(string column, string valueParam) => $"{column} {LikeOperator} {valueParam}";
+    protected string FreeTextPredicate(string column, string valueParam) => $"{column} {LikeOperator} {valueParam}";
 
     /// <summary>
     /// The parameter VALUE to bind for a <c>key:value</c>/<c>key=value</c> attribute filter's key
-    /// (list-pages-server-side plan, Phase 1, decision 7). PostgreSQL and ClickHouse
-    /// take the raw key: their extraction functions (<c>-&gt;&gt;</c>, <c>JSONExtractRaw</c>) treat
+    /// (list-pages-server-side plan, Phase 1, decision 7). PostgreSQL
+    /// takes the raw key: its extraction function (<c>-&gt;&gt;</c>) treats
     /// it as an object member name literal. SQL Server's <c>JSON_VALUE</c> and MySQL's
     /// <c>JSON_EXTRACT</c> instead take a JSON *path*, and an OpenTelemetry key routinely contains
     /// dots (e.g. <c>service.name</c>) that a naive path would read as nesting — so those two
@@ -144,7 +140,7 @@ public abstract class DapperReadRepository
     /// Negation keeps rows that lack the key (decision 10): <c>NOT (x = @v)</c> evaluates to NULL
     /// for a missing key and would drop the row, so negation is compiled as an explicit
     /// null-tolerant form per provider (<c>IS DISTINCT FROM</c> on Postgres;
-    /// <c>IS NULL OR &lt;&gt;</c> on SqlServer/MySql; <c>JSONHas(...) = 0 OR !=</c> on ClickHouse).
+    /// <c>IS NULL OR &lt;&gt;</c> on SqlServer/MySql).
     /// </summary>
     protected virtual string AttributePredicate(string column, string keyParam, string valueParam, bool negated)
     {
@@ -163,11 +159,9 @@ public abstract class DapperReadRepository
     /// range is mandatory: it is what keeps this narrowing rather than an unbounded scan on every
     /// provider.
     ///
-    /// PostgreSQL/SqlServer/MySql use a correlated <c>EXISTS</c>; ClickHouse — which
-    /// doesn't reliably support correlated <c>EXISTS</c> — uses an uncorrelated <c>trace_id IN
-    /// (...)</c> instead, overridden below.
+    /// A correlated <c>EXISTS</c> on every provider.
     /// </summary>
-    protected virtual string SpanLevelMatchPredicate(string traceIdColumn, string innerTimeClause, string innerPredicate, string spanAlias = "s2")
+    protected string SpanLevelMatchPredicate(string traceIdColumn, string innerTimeClause, string innerPredicate, string spanAlias = "s2")
         => $"EXISTS (SELECT 1 FROM spans {spanAlias} WHERE {spanAlias}.trace_id = {traceIdColumn}{innerTimeClause} AND {innerPredicate})";
 
     // =========================================================================
@@ -225,9 +219,9 @@ public abstract class DapperReadRepository
 
     /// <summary>
     /// <c>ToDictionary</c> that keeps the first row per key instead of throwing on a duplicate. The reference
-    /// tables (<c>resources</c>, <c>instrumentation_scopes</c>, <c>metrics</c>) are <c>ReplacingMergeTree</c> on
-    /// ClickHouse, whose dedup is eventual: two flushes that both missed the cache can store the same id twice
-    /// until a merge, and a plain <c>ToDictionary</c> over those rows turned that into a 400 on every logs page.
+    /// tables (<c>resources</c>, <c>instrumentation_scopes</c>, <c>metrics</c>) are keyed by a unique constraint, but a
+    /// lookup built from joined or aggregated rows can still repeat an id; a plain <c>ToDictionary</c> would turn that
+    /// repeat into a 400.
     /// </summary>
     protected static Dictionary<TKey, TValue> ToDictionaryFirst<TSource, TKey, TValue>(
         IEnumerable<TSource> source, Func<TSource, TKey> key, Func<TSource, TValue> value) where TKey : notnull
@@ -288,7 +282,7 @@ public abstract class DapperReadRepository
         return attributes["service.name"]?.ToString();
     }
 
-    protected static string ConvertAttributeValueToString(object value)
+    protected internal static string ConvertAttributeValueToString(object value)
     {
         return value switch
         {

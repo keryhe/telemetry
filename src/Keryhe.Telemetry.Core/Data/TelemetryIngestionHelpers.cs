@@ -40,8 +40,8 @@ public static class TelemetryIngestionHelpers
     /// all five data-point tables' batches for this flush, concatenated. Pre-aggregates to one
     /// <see cref="MetricTouchTracker.MarkTouched"/> call per distinct metric id in the flush rather
     /// than one per row, since a single metric can carry hundreds of data points in one batch.
-    /// Not called by <c>ClickHouseBulkWriter</c> — its <c>metric_last_seen</c> is fed by
-    /// materialized views instead (see <see cref="IMetricTouchStore"/>'s doc comment).
+    /// Not called by <c>ClickHouseBulkWriter</c>, which has no <c>metric_last_seen</c> table (see
+    /// <see cref="IMetricTouchStore"/>'s doc comment).
     /// </summary>
     public static void MarkMetricTouches(MetricTouchTracker tracker, IEnumerable<(long MetricId, long TimeUnixNano)> rows)
     {
@@ -110,9 +110,6 @@ public static class TelemetryIngestionHelpers
     /// Injective because resourceId and scopeId are digits-only and cannot themselves contain the
     /// "__" separator, so a left-to-right scan parses unambiguously even when the metric name
     /// contains "__".
-    ///
-    /// ClickHouse feeds this same string to ClickHouseIds.FromKey to derive the row's deterministic
-    /// Int64 surrogate key, so the cache key and the ClickHouse id can never drift apart.
     /// </summary>
     /// <summary>
     /// Canonical in-process key for a resource's identity, matching the
@@ -129,8 +126,6 @@ public static class TelemetryIngestionHelpers
     /// that as the same resource files one tenant's telemetry under the other.
     ///
     /// Injective because tenantId is digits and the hash is 64 hex chars — neither can contain "__".
-    /// ClickHouse feeds this same string to ClickHouseIds.FromKey for the row's surrogate id, so the
-    /// cache key and the ClickHouse id can never disagree about what a resource is.
     /// </summary>
     public static string ResourceKey(long tenantId, string resourceHash)
         => $"{tenantId}__{resourceHash}";
@@ -149,7 +144,7 @@ public static class TelemetryIngestionHelpers
     /// Used for resource/scope attributes since the write path's inception, and, as of the
     /// list-pages-server-side plan's Phase 1, for every data-point table's <c>attributes_json</c>
     /// too (all five providers' bulk writers). Rows written before that change keep whatever key
-    /// order <c>SerializeJsonOrNull</c> produced; on SQL Server and ClickHouse, which group series
+    /// order <c>SerializeJsonOrNull</c> produced; on SQL Server, which groups series
     /// by comparing <c>attributes_json</c> as text, an old and a new row for the same attribute set
     /// can therefore compare unequal and show as two series until retention ages the old row out.
     /// </summary>

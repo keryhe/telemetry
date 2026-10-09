@@ -70,8 +70,8 @@ public static class TelemetryCollectorServiceCollectionExtensions
 
         // metric_last_seen maintenance (list-pages-server-side plan, Phase 5, decision 27):
         // registered unconditionally on every provider, same shape as ApiKeyTouchWorker above —
-        // ClickHouse opts out via a no-op IMetricTouchStore (materialized views feed its table
-        // instead), not by this worker knowing which provider is active. Bound from
+        // ClickHouse opts out via a no-op IMetricTouchStore (it has no such table),
+        // not by this worker knowing which provider is active. Bound from
         // Telemetry:MetricTouch.
         services.Configure<MetricTouchOptions>(configuration.GetSection(MetricTouchOptions.SectionName));
         services.AddSingleton<MetricTouchTracker>();
@@ -79,8 +79,8 @@ public static class TelemetryCollectorServiceCollectionExtensions
 
         // Summary rollups (plans/summary-rollups.md): registered BEFORE the ingestion worker so the
         // host stops it after the ingestion drain and its final flush includes everything drained.
-        // Providers register IRollupStore (ClickHouse's is a no-op: materialized views feed its
-        // tables). Bound from Telemetry:Rollup.
+        // Providers register IRollupStore (ClickHouse's is a no-op: its ingestion worker writes
+        // the rollup tables). Bound from Telemetry:Rollup.
         services.Configure<RollupOptions>(configuration.GetSection(RollupOptions.SectionName));
         services.AddSingleton<RollupAccumulator>();
         services.AddHostedService<RollupWorker>();

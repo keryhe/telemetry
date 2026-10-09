@@ -12,12 +12,10 @@ namespace Keryhe.Telemetry.Core;
 /// already recorded — late-arriving data, or a metric touched again after quieting down — and
 /// must never move the "last seen" value backwards).
 ///
-/// ClickHouse's implementation is a deliberate no-op: its <c>metric_last_seen</c> table is an
-/// <c>AggregatingMergeTree</c> fed by materialized views on the data-point tables themselves, so
-/// there is nothing for a periodic worker to write there. <see cref="IMetricTouchStore"/> is not
-/// registered against a ClickHouse <c>Add ClickHouseCollectorServices</c> call at all — the no-op
-/// still needs an implementation only because <c>MetricTouchWorker</c> is registered
-/// unconditionally on every provider, same reasoning as <c>ApiKeyTouchStore</c>.
+/// ClickHouse's implementation is a deliberate no-op: it has no <c>metric_last_seen</c> table (its
+/// metric catalog is written with each flush), so there is nothing for a periodic worker to write
+/// there. The no-op exists only because <c>MetricTouchWorker</c> is registered unconditionally on
+/// every provider.
 /// </summary>
 public interface IMetricTouchStore
 {

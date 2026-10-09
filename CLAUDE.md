@@ -97,7 +97,7 @@ scripts to their one `telemetry` database, and `ClickHouseProviderContainer` com
 
 Beyond the read-path tests, the suite covers per-provider retention (`RetentionTestsBase`: 200- and
 100-day-old rows, an hour either side of the cutoff, current — ClickHouse drops whole days so its "hour
-before the cutoff" row is not asserted; plus a tenant with data but no `tenants` row, which must still expire),
+before the cutoff" row is not asserted (its test maps the base's table and column names to the ClickHouse ones); plus a tenant with data but no `tenants` row, which must still expire),
 the control-plane repositories (`ControlPlaneTestsBase`: alert-rule CRUD, atomic `TryClaimFireAsync`, tenant catalog,
 retention settings, key touch; run per control-plane provider, and for ClickHouse on its PostgreSQL control plane),
 the trace-list anchor semantics
@@ -143,7 +143,7 @@ dotnet run --project tests/Keryhe.Telemetry.StressTests -- report --in stress-re
 holds many ClickHouse partitions) plus three large traces (1,000/5,000/20,000 spans) for the first tenant, ledgers them as current
 (the correctness check still balances), tags the profile name (`...-seed14d`), and after quiesce probes trace detail for them with and without the
 `?start=&end=` hint (the report's "History seed" section). A run with history is not comparable with one without. A database that stops answering under
-overload (ClickHouse is OOM-killed at its 8 GB limit above about 21,000 records/s on the reference machine) is recorded as a `DatabaseOutage` finding
+overload (the old ClickHouse layout was OOM-killed at its 8 GB limit above about 21,000 records/s on the reference machine; the redesigned layout sustained about 83,000 records/s write-only and 42,700 with the UI reading, see `plans/clickhouse-redesign/results.md`) is recorded as a `DatabaseOutage` finding
 (`docker inspect`: status, exit code, OOM-killed) and the steps that need it are skipped; the scenario still ends `error: none`. Removing the database
 container at the end is logged, not fatal. Any other `OperationCanceledException` is reported with its exception, never as "Cancelled." (that is Ctrl-C only).
 
@@ -459,57 +459,54 @@ plane, so PostgreSQL can be both providers (or just the control plane beside Cli
 control-plane classes (`TenantResolver`, `PostgreSqlApiKeyTouchStore`, `PostgreSqlAlertRuleRepository`,
 `PostgreSqlTenantCatalogRepository`, `PostgreSqlRetentionSettingsRepository`) take it through `[FromKeyedServices]`.
 
-**ClickHouse provider notes.** ClickHouse is columnar/OLAP, so the provider diverges from the
-relational four in a few deliberate ways (all confined to the provider; Core interfaces are
-unchanged):
-- **App-generated ids.** No auto-increment / `RETURNING`. `ClickHouseBulkWriter` computes the
-  `Int64` surrogate keys the read repos join on, always from the table's full `ORDER BY` key:
-  resource ids from `(tenant_id, resource_hash)`, scope ids from `scope_hash` (scopes carry no
-  tenant) and metric ids from `(resource_id, scope_id, name, type)`, all via `ClickHouseIds.FromKey`.
-  `spans.id` and `log_records.id` come from a monotonic in-process generator (`RowId`): they are
-  only the row-ordering tiebreak. A span's events and links are `events_json`/`links_json` columns
-  on the span row.
-- **Reference tables are `ReplacingMergeTree`; spans are not.** resources/scopes/metrics collapse on their `ORDER BY` key at merge time, backed by
-  `ResourceScopeCache` + per-batch dedup, so their dedup is *eventual*. `spans` and `log_records`
-  are plain `MergeTree` appends (decision 7: a re-delivered span is stored twice and reads tolerate
-  it), so there is no `LIMIT 1 BY` and no `FINAL` anywhere on the read path.
-  Two consequences are load-bearing: the writer puts an id in `ResourceScopeCache` only AFTER the row's
-  insert succeeded (caching first would leave a failed insert — e.g. the server's memory limit under
-  overload — cached forever, and every later flush would skip a catalog row that does not exist); and the
-  read repositories build their id lookups with `ToDictionaryFirst`, because two flushes that both missed
-  the cache can store the same resource/scope/metric id twice until a merge, and a plain `ToDictionary`
-  over those rows threw and turned every logs page into a `400` (`ClickHouseDuplicateReferenceRowTests`).
-- **Laid out for the way it is read (schema 3.0.0).** `spans` is `ORDER BY (tenant_id, service_name,
-  start_time_unix_nano)` and `log_records` `ORDER BY (tenant_id, service_name, time_unix_nano)`, both
-  partitioned by day, so a tenant/service/time window prunes partitions and granules. `trace_index` (an
-  `AggregatingMergeTree` fed by a materialized view from `spans`, one row per tenant/trace/day) holds
-  each trace's min/max start: trace detail and a trace-list page's follow-up query read it for time
-  bounds first (`ResolveTraceTimeBoundsAsync`, or the caller's start-time hint when it has one, see "Trace
-  detail"), then read `spans` with tenant and time bounds, instead of scanning for a trace id. `spans` and
-  `log_records` each have one `bloom_filter` skip index on `trace_id` (logs-by-trace; trace detail, schema 3.0.1),
-  which prune the granules inside those bounds: the sort key has no trace-id seek, so a bounded read otherwise
-  reads at least one granule per service. Where null carries no meaning the column is non-`Nullable` with an empty default
-  (`parent_span_id`, `trace_state`, `status_message`, `event_name`, log `trace_id`/`span_id`,
-  `service_name`) and the read repositories map `''` back to null.
-- **Writes go through `ClickHouseBulkCopy`** (async batched insert), one long-lived instance
-  cached per destination table for the life of the process (`ClickHouseBulkWriter`'s singleton
-  `TableBulkCopy` cache) rather than a fresh connection + `InitAsync()` schema-probe round trip on
-  every flush; reads reuse the shared Dapper bases unchanged (attributes are JSON text
-  deserialized in C#).
-- **Retention is `ALTER TABLE ... DROP PARTITION`** for every fully expired day (no row deletes, no
-  mutations); see "Retention".
+**ClickHouse provider notes** (the redesign is `plans/clickhouse-redesign/`, row model `plans/clickhouse-row-model.md`;
+schema 4.0.0, ClickHouse 25.8, fresh install only). ClickHouse is columnar/OLAP, so the provider diverges from the
+relational four in deliberate ways (all confined to the provider; Core interfaces and API responses are unchanged):
+- **One row carries everything.** No reference tables, no surrogate ids: the resource and scope attributes are copied onto
+  every span, log record and metric point (`ResourceScopeCache` is not used). Attributes are
+  `Map(LowCardinality(String), String)`; a value's type is not kept (`ClickHouseAttributes`; README R7), so a numeric
+  comparison casts. Trace ids are `UUID` and span ids `UInt64`, converted to hex only at the edges (`ClickHouseIds`;
+  R8, never `hex(trace_id)` in SQL). `DateTime64(9)` is stored at the driver's 100 ns (R9); `duration_ns` is exact.
+- **Tables** (all `PARTITION BY toDate(time)`): `spans`, `log_records`, `gauge_points`, `sum_points`, `histogram_points`,
+  `exp_histogram_points`, `summary_points`; derived `trace_index`, `request_rollup_minute`, `log_rollup_minute`,
+  `metric_catalog`, `metric_series`. Spans sort `(tenant_id, service_name, start_time)`; logs
+  `(tenant_id, toStartOfFiveMinutes(timestamp), service_name, timestamp)`; points
+  `(..., toStartOfHour(time), series_id, time)`. **A log time range must also carry a `toStartOfFiveMinutes(timestamp)`
+  bound and a metric time range a `toStartOfHour(time)` bound, or the sort key does not prune** (measured: a time bound
+  alone read the whole table); lists read in widening time slices. The tests prove pruning with `system.query_log`
+  `read_rows`.
+- **Plain `MergeTree` appends.** Each INSERT statement carries an `insert_deduplication_token` (reused on retry, a new one
+  for a re-batched set) so a retried flush is not stored twice; a client re-sending an export is stored twice and reads
+  tolerate it. No `FINAL`, no `LIMIT 1 BY`, no materialized views on any insert path.
+- **Derived data is written by the collector** after the raw insert succeeds (`ClickHouseBulkWriter.Derived.cs`): the
+  rollups, `trace_index`, `metric_catalog` and `metric_series`. If a derived insert fails the raw rows stay and the cards,
+  charts and catalog under-count that slice (`derived_rows_dropped`). A metric's id is a hash of (tenant, service, name,
+  type) (README R6), so a catalog "instance" is one service's metric, not a resource.
+- **Large flushes are split.** A raw-table insert of at least `ParallelFlushMinRows` (50,000) rows is cut at fixed row
+  boundaries into up to `MaxParallelInserts` (4) pieces of at least `InsertPieceRows` rows that insert concurrently, each under
+  its own dedup token (`{token}:{table}:{i}`; smaller batches stay one insert under `{token}:{table}`), and spans and logs are
+  built into rows on several threads at that size (metrics too, per chunk with merged catalog/series notes, and a metrics batch's five points-table inserts run together). A flush can therefore land partly within one table; a retry with the same
+  token stores each piece once. Phase 7 profiling showed the driver's serialization, not the database, limited the collector.
+- **Ingestion** has its own worker (`ClickHouseIngestionWorker`, `Telemetry:ClickHouse:Ingestion`) in place of the shared
+  one: records are buffered per UTC day (current day, then late days with a longer linger), tokens survive retries, records
+  past the retention window are dropped at ingest (`RetentionWindowCache`), and shutdown drains.
+- **Reads** are ClickHouse-specific repositories (`ClickHouseTrace/Log/Metric/ResourceReadRepository`) implementing the Core
+  interfaces; the metric math is shared with the relational providers through Core's `MetricSeriesPipeline`. Free-text
+  search of only letters and digits is a whole-word `hasToken` match through a token index; anything else scans.
+- **Trace anchors** stay the earliest span in scope: a candidate per time slice is confirmed against `trace_index`'s
+  per-service minimum start.
+- **Retention is `ALTER TABLE ... DROP PARTITION ID`** for every fully expired day, plus a lightweight `DELETE` of
+  `metric_series`/`metric_catalog` rows not written to within the metrics window; see "Retention".
 - **No control plane.** ClickHouse holds telemetry only; tenants, API keys, alert rules and retention settings run on
   PostgreSQL, SQL Server or MySQL (`ControlPlane:Provider`), so alert CRUD and `TryClaimFireAsync` are as atomic as
-  they are there. The former mutation-based alert CRUD, `FINAL` key lookup, no-op key touch and
-  `ALTER TABLE retention_settings UPDATE` are gone.
-- **The anchors derived table is a `GROUP BY trace_id`** with `argMin` over `(start, id)` (see "Trace
-  anchors"). ClickHouse resolves a SELECT alias over a same-named column in WHERE, so the aggregates are
-  computed under non-colliding aliases in an inner query and renamed outside it.
+  they are there.
 
 **Search and capabilities (schema 3.0.0, decisions 3 and 19).** Free-text and `key:value` search is
 unindexed and time-window bounded on **every** provider: one predicate form per dialect (the
 `LIKE`/`ILIKE` text form and `LOWER(col ->> key)` / `JSON_VALUE` / `JSON_EXTRACT` /
-`JSONExtractRaw` attribute comparison, all case-insensitive), no GIN/trigram/skip indexes, and a
+`JSONExtractRaw` attribute comparison, all case-insensitive), no GIN/trigram/skip indexes (ClickHouse is the exception: its
+`Map` attribute columns are compared directly and a free-text term of only letters and digits is a whole-word `hasToken`
+match through a token index on the log body), and a
 search or `mode=slow` request over a window longer than `Telemetry:Query:RawSearchWindowHours`
 (default 24) is rejected (`400`) by `RawSearchWindowGuard`. The provider tiers (`ProviderTier`) and
 `IndexedSearch` are gone. `ProviderCapabilities` keeps `RawSearchWindowHours`, `ExportMaxWindowDays`
@@ -641,7 +638,7 @@ type and matched an existing row would write points the reader never looks for. 
 2.7.0 — before it, `metrics` grew by one row per export cycle per metric.
 
 Inserts use ON CONFLICT DO UPDATE (Postgres), MERGE ... WITH (HOLDLOCK) (SqlServer),
-ON DUPLICATE KEY UPDATE ... AS new (MySql) or `ReplacingMergeTree` (ClickHouse). Spans, log records and
+ON DUPLICATE KEY UPDATE ... AS new (MySql); ClickHouse has no reference tables to dedup. Spans, log records and
 the data-point tables are NOT deduplicated (schema 3.0.0): they are plain appends with no unique key and
 no foreign keys, so a re-delivered batch is stored again and reads tolerate it (the trace-list row's span
 count is `COUNT(DISTINCT span_id)` and trace detail drops a duplicate span id). A metric's `tenant_id` and
@@ -665,9 +662,8 @@ providers it's written by a periodic `MetricTouchWorker`/`MetricTouchTracker` pa
 `metric_id → newest time_unix_nano` map each interval into batches sorted by `metric_id` and
 capped under 4,000 rows so concurrent collector instances always lock in the same order and never
 escalate to a table lock on SQL Server (`DEADLOCK_PRIORITY LOW` plus one retry on error 1205
-there). On ClickHouse it's an `AggregatingMergeTree` fed by one materialized view per data-point
-table instead — no mutation per flush interval, no worker; `IMetricTouchStore`'s ClickHouse
-implementation is a deliberate no-op purely so `MetricTouchWorker` can stay registered
+there). ClickHouse has no `metric_last_seen`: its `metric_catalog` carries `last_seen`, written by the collector.
+`IMetricTouchStore`'s ClickHouse implementation is a deliberate no-op purely so `MetricTouchWorker` can stay registered
 unconditionally on every provider. "Seen in range" is an approximation
 (`last_seen_unix_nano >= start AND metrics.created_at <= end`), falling back to an exact
 per-candidate `EXISTS` over the five data-point tables when the window's end is more than an hour
@@ -818,7 +814,7 @@ includes the rows removed and the sweep's elapsed milliseconds. The mechanism is
 | Provider | Retention |
 |---|---|
 | PostgreSQL, SQL Server, MySQL | Spans and logs: bounded-batch deletes **per tenant** (`tenant_id = @t AND time < @cutoff`) through the `(tenant_id, time)` access path; data points: bounded batches through their time index (PostgreSQL's BRIN, SQL Server/MySQL's `(time_unix_nano)`). The shared loop is `RetentionSweeperBase`; a provider supplies only `BatchedDeleteSql` (PostgreSQL has no primary key on these tables, so a batch is `DELETE ... WHERE ctid = ANY (ARRAY(SELECT ctid ... LIMIT n))`; SQL Server `DELETE TOP (n)` at `DEADLOCK_PRIORITY LOW`, batch kept under the lock-escalation threshold; MySQL `DELETE ... LIMIT n`). The tenants swept are `SELECT DISTINCT tenant_id FROM resources`, **not** the control plane's `tenants` (the two may be different databases; data whose tenant was removed from the control plane still expires). |
-| ClickHouse | `ALTER TABLE ... DROP PARTITION ID` for each fully expired day (spans, `trace_index`, logs, data points); rows counted from `system.parts` first. No row deletes, no mutations. Granularity is the day. |
+| ClickHouse | `ALTER TABLE ... DROP PARTITION ID` for each fully expired day (spans, `trace_index`, `request_rollup_minute`, logs, `log_rollup_minute`, the five points tables); rows of the raw tables counted from `system.parts` (`partition_id`) first. Metric sweeps also run a lightweight `DELETE` of `metric_series`/`metric_catalog` rows with `last_seen` before the cutoff. Granularity is the day. |
 
 `AddRetention()` registers the worker; called from `Api.Server`'s `Program.cs` only, never
 `Collector.Server` — retention is entirely an API-host concern. The retention WINDOWS are global
@@ -886,7 +882,7 @@ earliest span is at the time of the query. That definition is expressed in three
   look-back range). A first page went from 190-770 ms (PostgreSQL) and 574-3,800 ms (MySQL) to 4-15 ms.
   `SlicedList_MatchesTheAnchorDefinition_...` checks every filter, order, limit and slice width against the
   definition restated in LINQ over the seeded spans, and was negative-controlled.
-- ClickHouse has no `(trace_id)` seek, so it reads whole-window anchors for lists too (`SupportsSeekAnchors` false).
+- ClickHouse has its own anchor reads (time slices confirmed against `trace_index`, see its provider notes); the seek form above is relational only.
 - **Duration is the anchor span's own** `end - start` everywhere — the row and the `mode=slow` filter. The row's service, operation, kind and `DisplaySpanIdHex` are the anchor's;
   the error flag is "any span in scope has ERROR" (so `mode=errors` is that flag); the span count is exact,
   `COUNT(DISTINCT span_id)` over the page's traces in a follow-up query, scoped to the selected service when
@@ -913,7 +909,7 @@ traffic:
   service, severity number, minute; `record_count`) counts log records, with `-1` for a NULL severity. Rows are
   **partial**: no unique key, plain appends, reads `SUM` them. `DurationBands.IndexOf` is the one definition of the
   bands (band 0 under 0.25 ms, band N `[0.25 ms * 2^(N-1), 0.25 ms * 2^N)`, band 23 from 1,048.6 s; a negative duration
-  counts as 0); ClickHouse's views compute the same with `toUInt8(floor(log2(intDiv(d, 250000))))` (ClickHouse 24.8 has
+  counts as 0); ClickHouse's writer computes the same with `toUInt8(floor(log2(intDiv(d, 250000))))` (ClickHouse has
   no `intLog2`) and the per-provider tests check both at every edge +-1 ns. Percentiles interpolate within the band
   (`DurationBands.Percentile`), so they are approximate (up to 2x in the worst case).
 - **Write path (relational providers).** `TelemetryIngestionWorker` calls `RollupAccumulator.AddSpans`/`AddLogs` only
@@ -928,8 +924,8 @@ traffic:
   `ShutdownTimeout`. A crash loses what is in memory (about a minute plus the grace and a flush interval) while the
   stored spans survive: charts under-count that slice. `RollupWorker.StartAsync` decides whether the accumulator is
   enabled (`IRollupStore.FedByViews`), not `ExecuteAsync`: .NET 10 does not guarantee the synchronous part of
-  `ExecuteAsync` has run when `StartAsync` returns. **ClickHouse** has no accumulator or worker: its tables are
-  `AggregatingMergeTree` fed by materialized views on `spans` and `log_records`, and `ClickHouseRollupStore` is a no-op.
+  `ExecuteAsync` has run when `StartAsync` returns. **ClickHouse** has no accumulator or worker: its collector-side ingestion worker folds each batch into the rollup rows
+  and inserts them right after the raw rows (`AggregatingMergeTree`, no materialized views), and `ClickHouseRollupStore` is a no-op.
 - **Retention.** The request rollup follows the traces window and the log rollup the logs window, swept with them
   (per-tenant deletes, ClickHouse `DROP PARTITION`); the counts those sweeps return are the
   raw rows' only.
@@ -967,7 +963,7 @@ traffic:
   `signal_kind` column is not called `signal`: that is a reserved word in MySQL.
 - **Tests.** `RollupUnitTests`, `RollupSummaryBuilderTests` and `RollupAlertEvaluatorTests` (no Docker);
   `RollupSummaryHttpTests` (`ApiHttp`); per provider `*RollupWriteTests` (seed through the bulk writer plus the accumulator
-  path, ClickHouse through its views, compare with a LINQ restatement; reads, retention and the slow-request count too;
+  path, ClickHouse through its writer, compare with a LINQ restatement; reads, retention and the slow-request count too;
   negative-controlled by perturbing `DurationBands`) and `MySqlRollupHourTierTests`; the stress ledger counts both rollup
   tables (`RollupTables`, waits up to 150 s for the rollup to catch up with the closed minutes) and
   `RollupQueryBench` is the lab gate (`ROLLUP_BENCH_OUT=<file>`, one provider at a time).
@@ -981,11 +977,10 @@ trip, one trace probe); three alternatives were measured and rejected: three rou
 batched statement with the reference selects as `IN (SELECT ... FROM spans WHERE <trace>)` sub-selects (the trace
 predicate runs three times: a hypertable probes every chunk three times, and SQL Server's plan degraded under
 concurrency, 32 -> 180 ms p95 in the stress run), and `ROW_NUMBER()` to send each resource's attributes once (the
-windows sort every row: a 20,000-span trace 551 ms on SQL Server). ClickHouse reads the reference rows in their own
-queries (`JoinsReferenceRows` false; `ReferenceRowsSql` filters the raw table before `LIMIT 1 BY id`). The optional `start` and `end` (used
+windows sort every row: a 20,000-span trace 551 ms on SQL Server). ClickHouse has no reference rows (resource and scope are on the span row). The optional `start` and `end` (used
 together) are the trace's extent, which the list rows and dashboard widgets already carry (`traceStartTime`/`traceEndTime`)
 and pass in the link (`?start=&end=`; a log's timestamp is NOT such a hint, so log links do not pass one). ClickHouse
-uses them (`HintedTraceTimeBounds`): `[start - margin, end + margin]` (`Telemetry:Query:TraceHintMarginMinutes`,
+uses them (its own trace repository): `[start - margin, end + margin]` (`Telemetry:Query:TraceHintMarginMinutes`,
 default 1; `Telemetry:Query:TraceHintEnabled=false` ignores every hint) replaces the `trace_index` round trip; PostgreSQL, SQL Server and
 MySQL seek `(trace_id, span_id)` and ignore it. The range is the trace's own extent on purpose: a first version bounded only
 the start (`[start - 5 min, start + 24 h]`), which a stress run on a time-chunked provider showed to be slower under live
@@ -1017,7 +1012,7 @@ Telemetry tables:
   tables get neither (`metric_id` identifies one tenant and service).
 - **Id columns match their driver's parameter type**: `text` on PostgreSQL; `varchar(32)`/
   `varchar(16)` `COLLATE Latin1_General_BIN2` on SQL Server (sent as sized `AnsiString`); `char(32)`/`char(16)`
-  `ascii_bin` on MySQL; `String` on ClickHouse.
+  `ascii_bin` on MySQL; `UUID` (trace) and `UInt64` (span) on ClickHouse, converted to hex at the edges (`ClickHouseIds`).
 - **Index set (relational), every index serving a named query**: `spans (trace_id, span_id)` (trace detail, span
   by id, spans by parent, service-map parent join), `(tenant_id, start_time_unix_nano)` (unscoped anchors,
   windows, search, service-map child range, per-tenant retention), `(tenant_id, service_name, start_time_unix_nano)`
@@ -1063,8 +1058,9 @@ its `events_json`/`links_json` columns — there are no separate `span_events`/`
 **Utility (1)**: `control_plane_schema_version` (in the control-plane scripts; the telemetry scripts carry
 `telemetry_schema_version`)
 
-There are no views and no derived-data tables; ClickHouse additionally has `trace_index` and `metric_last_seen`
-(both fed by materialized views).
+There are no views and no derived-data tables on the relational providers. ClickHouse has its own table set (see its provider
+notes): no `resources`, `instrumentation_scopes`, `metrics` or `metric_last_seen`, and the derived `trace_index`,
+`metric_catalog` and `metric_series` written by the collector.
 
 Connection strings and providers (both hosts need all of these; see "Provider abstraction"):
 - Ingestion server reads `ConnectionStrings:Collector` (telemetry) and `ConnectionStrings:ControlPlane` in

@@ -99,12 +99,13 @@ public static class HtmlReportWriter
             ("write.commit_lag", "Commit lag p95 (enqueue to commit)", true),
             ("write.batch_size", "Flush batch size p95", false),
             ("write.resident", "Records resident in the ingestion queue", true),
+            ("write.late_buffer", "Late buffer (ClickHouse: records held for a closed day)", true),
             ("write.retries", "Flush retries and dropped records", true)]);
         Charts(sb, s, "Database timelines", [
             ("db.lock_waits", "Lock waits sampled", true),
             ("db.parts", "ClickHouse active parts", true),
             ("db.merges", "ClickHouse merges running", true),
-            ("db.mutations", "ClickHouse mutations pending", true)]);
+            ("db.mutations", "ClickHouse mutations pending (the metric catalog sweep)", true)]);
         Charts(sb, s, "Resource timelines", [
             ("db.container_cpu", "Database container CPU", true),
             ("db.container_memory", "Database container memory", false),

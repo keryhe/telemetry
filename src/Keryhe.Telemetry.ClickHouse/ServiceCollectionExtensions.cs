@@ -1,5 +1,8 @@
 using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.DependencyInjection.Extensions;
+using Microsoft.Extensions.Hosting;
 using Keryhe.Telemetry.Core;
+using Keryhe.Telemetry.Core.Data;
 using Keryhe.Telemetry.ClickHouse.Services;
 
 namespace Microsoft.Extensions.DependencyInjection;
@@ -18,10 +21,27 @@ public static class ClickHouseServiceCollectionExtensions
     /// <summary>Write-side services for the gRPC ingestion collector.</summary>
     public static IServiceCollection AddClickHouseCollectorServices(this IServiceCollection services, IConfiguration configuration)
     {
-        services.AddSingleton<ITelemetryBulkWriter, ClickHouseBulkWriter>();
-        // metric_last_seen maintenance (list-pages-server-side plan, Phase 5): a deliberate no-op
-        // here (materialized views feed the table instead) — see ClickHouseMetricTouchStore's own
-        // doc comment. MetricTouchWorker is still registered unconditionally in
+        services.AddSingleton<ClickHouseBulkWriter>();
+        services.AddSingleton<ITelemetryBulkWriter>(sp => sp.GetRequiredService<ClickHouseBulkWriter>());
+        services.AddSingleton<IClickHouseTokenWriter>(sp => sp.GetRequiredService<ClickHouseBulkWriter>());
+
+        // ClickHouse batches for itself (plans/clickhouse-redesign phase 2): swap the shared worker for
+        // ClickHouseIngestionWorker. AddKeryheTelemetryCollector must have run first (the order Collector.Server uses)
+        // for the swap to find the shared worker; a container that never registered it (the integration fixtures write
+        // through ITelemetryBulkWriter and run no hosted services) simply gets ours.
+        services.AddOptions<ClickHouseIngestionOptions>()
+            .Bind(configuration.GetSection(ClickHouseIngestionOptions.SectionName))
+            .Validate(o => { o.Validate(); return true; })
+            .ValidateOnStart();
+        services.TryAddSingleton(TimeProvider.System);
+        services.AddSingleton<IRetentionWindows, RetentionWindowCache>();
+        var shared = services.FirstOrDefault(d => d.ServiceType == typeof(IHostedService) && d.ImplementationType == typeof(TelemetryIngestionWorker));
+        if (shared is not null) services.Remove(shared);
+        else if (services.Any(d => d.ServiceType == typeof(TelemetryIngestionChannel)))
+            throw new InvalidOperationException("The shared TelemetryIngestionWorker registration was not found; call AddKeryheTelemetryCollector before AddClickHouseCollectorServices.");
+        services.AddHostedService<ClickHouseIngestionWorker>();
+        // The catalog's last-seen maintenance: a deliberate no-op here (the writer maintains
+        // metric_catalog itself) — see ClickHouseMetricTouchStore's own doc comment. MetricTouchWorker is still registered unconditionally in
         // AddKeryheTelemetryCollector; it will just drain to nothing on this provider.
         services.AddScoped<IMetricTouchStore, ClickHouseMetricTouchStore>();
         // Summary rollups (plans/summary-rollups.md); RollupWorker is registered once, in AddKeryheTelemetryCollector.

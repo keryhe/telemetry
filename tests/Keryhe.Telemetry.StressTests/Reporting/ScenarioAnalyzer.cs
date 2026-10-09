@@ -239,6 +239,10 @@ public static class ScenarioAnalyzer
             }
             Add(all, "write.retries", $"{host} flush retries", "per s", Sum(samples, Ingestion + "flush_retries", t));
             Add(all, "write.retries", $"{host} records dropped", "per s", Sum(samples, Ingestion + "records_dropped", t));
+            // ClickHouse only (absent on the other providers, which then add no series): rows held for a closed day, and derived rows lost
+            // (the rollups and catalog under-count, the raw rows do not).
+            Add(all, "write.retries", $"{host} derived rows dropped", "per s", Sum(samples, Ingestion + "derived_rows_dropped", t));
+            Add(all, "write.late_buffer", host, "records", samples.Where(s => s.Instrument == Ingestion + "late_buffer_records" && Finite(s.Value)).Select(s => new SeriesPoint(t(s.At), s.Value)));
 
             Add(all, "host.cpu", host, "cores", Sum(samples, "dotnet.process.cpu.time", t));
             Add(all, "host.memory", host, "MB", samples.Where(s => s.Instrument == "dotnet.process.memory.working_set" && Finite(s.Value)).Select(s => new SeriesPoint(t(s.At), s.Value / 1048576.0)));

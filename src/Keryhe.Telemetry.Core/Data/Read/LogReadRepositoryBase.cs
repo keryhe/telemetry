@@ -58,8 +58,8 @@ public abstract class LogReadRepositoryBase : DapperReadRepository, ILogReadRepo
             sc.schema_url                AS ScopeSchemaUrl,
             sc.attributes_json           AS ScopeAttributesJson
         FROM log_records lr
-        JOIN {ResourcesTable} r               ON lr.resource_id = r.id
-        JOIN {ScopesTable} sc ON lr.scope_id = sc.id
+        JOIN resources r               ON lr.resource_id = r.id
+        JOIN instrumentation_scopes sc ON lr.scope_id = sc.id
         WHERE lr.tenant_id = @tenantId
         """;
 
@@ -353,7 +353,7 @@ public abstract class LogReadRepositoryBase : DapperReadRepository, ILogReadRepo
         return ToDictionaryFirst(scopeRows, s => s.Id, s => s);
     }
 
-    // ClickHouse stores an absent trace id/span id/event name as '' (non-Nullable columns); the model keeps null.
+    // An empty trace id/span id/event name is absent: the model keeps null.
     private static string? NullIfEmpty(string? value) => string.IsNullOrEmpty(value) ? null : value;
 
     private static LogRecordModel Map(LogRow r) => new()

@@ -273,7 +273,11 @@ public static class HostLauncher
                 var port = PortFinder.GetFreePorts(1)[0];
                 Endpoint("Api", port, "Http1");
                 api = new Uri($"http://127.0.0.1:{port}");
-                env["ConnectionStrings__Api"] = options.ApiConnectionString;
+                // ClickHouse 25.x caches a predicate's matching granules, so a repeated read looks free in a measurement (Phase 0, spike 4):
+                // the harness's API host reads with the cache off. Production queries do not.
+                env["ConnectionStrings__Api"] = options.Provider == "ClickHouse"
+                    ? options.ApiConnectionString + ";set_use_query_condition_cache=0"
+                    : options.ApiConnectionString;
                 // The harness calls the API at the option default /api (the readiness probe, ScenarioRunner, TourDiscovery,
                 // MarkerProbe, DetailProbe; ApiRequestNormalizer assumes it), but the shipped Api.Server appsettings mount it
                 // at /telemetry/api. Without this every readiness probe is a 404. The UI follows (TelemetryUi:ApiBasePath unset).

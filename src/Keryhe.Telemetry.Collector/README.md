@@ -134,7 +134,7 @@ cache, because the expiry is compared on every request.
 
 Besides the raw spans and logs, the collector maintains a per-minute rollup (`request_rollup_minute`, `log_rollup_minute`,
 schema 3.2.0) that the UI's cards and charts and the error-rate and log-spike alerts read. On every provider except
-ClickHouse (whose materialized views maintain it) an in-memory accumulator is fed after each successful flush and a
+ClickHouse (whose own ingestion worker writes it with each flush, no materialized views) an in-memory accumulator is fed after each successful flush and a
 background worker appends the minutes that have closed, every `Telemetry:Rollup:FlushIntervalSeconds` (15) once a
 minute is `CloseGraceSeconds` (30) past its end. Three things to know when operating it:
 

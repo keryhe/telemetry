@@ -3,10 +3,11 @@ using Keryhe.Telemetry.Core;
 namespace Keryhe.Telemetry.ClickHouse.Services;
 
 /// <summary>
-/// Deliberate no-op <see cref="IRollupStore"/> (plans/summary-rollups.md). ClickHouse's
-/// <c>request_rollup_minute</c> and <c>log_rollup_minute</c> are <c>AggregatingMergeTree</c> tables
-/// fed by materialized views on <c>spans</c> and <c>log_records</c>, so there is no accumulator and
-/// nothing for <c>RollupWorker</c> to write; <see cref="FedByViews"/> tells it to stay idle.
+/// Deliberate no-op <see cref="IRollupStore"/> (plans/summary-rollups.md). <c>request_rollup_minute</c> and
+/// <c>log_rollup_minute</c> are written by <see cref="ClickHouseBulkWriter"/> itself, in the same flush as the raw
+/// rows (plans/clickhouse-redesign phase 3; there are no materialized views), so there is no accumulator and nothing
+/// for <c>RollupWorker</c> to write; <see cref="FedByViews"/> (kept <c>true</c> for that meaning: "the provider writes
+/// the rollup") tells it to stay idle.
 /// </summary>
 public sealed class ClickHouseRollupStore : IRollupStore
 {

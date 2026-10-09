@@ -9,10 +9,9 @@ namespace Keryhe.Telemetry.Core.Data;
 /// Periodic background worker that drains <see cref="MetricTouchTracker"/> and flushes it to the
 /// active provider's <see cref="IMetricTouchStore"/> (list-pages-server-side plan, Phase 5,
 /// decision 27). Mirrors <see cref="ApiKeyTouchWorker"/>'s shape. Registered unconditionally by
-/// <c>AddKeryheTelemetryCollector</c> on every provider except ClickHouse, whose
-/// <c>metric_last_seen</c> table is fed by materialized views instead — see
-/// <see cref="IMetricTouchStore"/>'s doc comment for why even ClickHouse still needs a (no-op)
-/// implementation rather than this worker being conditionally registered.
+/// <c>AddKeryheTelemetryCollector</c> on every provider; ClickHouse has no
+/// <c>metric_last_seen</c> table, so its <see cref="IMetricTouchStore"/> is a no-op (see that
+/// interface's doc comment) rather than this worker being conditionally registered.
 ///
 /// Each drained batch is sorted by metric id and capped at
 /// <see cref="MetricTouchOptions.MaxBatchSize"/> rows per <see cref="IMetricTouchStore.TouchAsync"/>
