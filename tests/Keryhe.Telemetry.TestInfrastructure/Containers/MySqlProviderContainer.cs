@@ -48,14 +48,16 @@ public sealed class MySqlProviderContainer : ProviderContainer
 
     protected override async Task ApplySchemaAsync(CancellationToken cancellationToken)
     {
-        var script = await SchemaApplier.ReadScriptAsync("MySQL-Schema.sql", cancellationToken);
-
         await using var conn = new MySqlConnection(ConnectionString);
         await conn.OpenAsync(cancellationToken);
-        foreach (var statement in SchemaApplier.SplitStatements(script))
+        foreach (var file in new[] { "MySQL-ControlPlane.sql", "MySQL-Telemetry.sql" })
         {
-            await using var cmd = new MySqlCommand(statement, conn) { CommandTimeout = 120 };
-            await cmd.ExecuteNonQueryAsync(cancellationToken);
+            var script = await SchemaApplier.ReadScriptAsync(file, cancellationToken);
+            foreach (var statement in SchemaApplier.SplitStatements(script))
+            {
+                await using var cmd = new MySqlCommand(statement, conn) { CommandTimeout = 120 };
+                await cmd.ExecuteNonQueryAsync(cancellationToken);
+            }
         }
     }
 

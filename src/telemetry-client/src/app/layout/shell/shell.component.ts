@@ -31,7 +31,7 @@ interface NavItem {
 }
 
 /** Query params that name something belonging to one tenant, dropped on a tenant switch. */
-const TENANT_SCOPED_QUERY_PARAMS = ['service', 'op', 'q', 'severity', 'page', 'span', 'cursor', 'asOf'];
+const TENANT_SCOPED_QUERY_PARAMS = ['service', 'op', 'q', 'severity', 'page', 'span'];
 /** The time-range params — the only ones carried from a detail page back to its list. */
 const TIME_RANGE_QUERY_PARAMS = ['range', 'from', 'to'];
 /** Detail routes whose item belongs to one tenant, mapped to the list page to fall back to. */

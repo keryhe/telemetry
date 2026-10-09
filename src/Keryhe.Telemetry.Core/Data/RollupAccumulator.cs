@@ -21,7 +21,7 @@ public sealed class RollupAccumulator(TimeProvider? timeProvider = null)
     private readonly SortedDictionary<long, Dictionary<(long Tenant, string Service), RequestRollupRow>> _requests = new();
     private readonly SortedDictionary<long, Dictionary<(long Tenant, string Service, int Severity), LogRollupRow>> _logs = new();
 
-    /// <summary>False when the provider's materialized views write the rollup (ClickHouse): adds are then skipped.</summary>
+    /// <summary>False when the provider writes the rollup itself (ClickHouse, with each flush): adds are then skipped.</summary>
     public bool Enabled { get; set; } = true;
 
     public TimeProvider Clock { get; } = timeProvider ?? TimeProvider.System;

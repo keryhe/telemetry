@@ -30,8 +30,10 @@ public static class TelemetryApiServiceCollectionExtensions
     /// <param name="configuration">
     /// Host configuration. This does not register a database provider — the host must also
     /// call the active provider's <c>Add&lt;Provider&gt;ApiServices(configuration)</c> (e.g.
-    /// <c>AddPostgreSqlApiServices</c>), which supplies the Dapper read/alert repositories
-    /// (connection string comes from <c>ConnectionStrings:Api</c>).
+    /// <c>AddPostgreSqlApiServices</c>), which supplies the Dapper read repositories and the retention
+    /// sweeper (connection string from <c>ConnectionStrings:Api</c>), and the control plane's
+    /// <c>Add&lt;Provider&gt;ControlPlaneApiServices(configuration)</c>, which supplies the alert-rule,
+    /// tenant-catalog and retention-settings repositories (<c>ConnectionStrings:ControlPlane</c>).
     /// </param>
     /// <param name="configure">Optional overrides applied after binding the <c>Telemetry:Api</c> section.</param>
     public static IServiceCollection AddKeryheTelemetryApi(

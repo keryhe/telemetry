@@ -17,6 +17,8 @@ public sealed class MySqlFixture : ProviderFixture
     {
         services.AddMySqlCollectorServices(configuration);
         services.AddMySqlApiServices(configuration);
+        services.AddMySqlControlPlaneCollectorServices(configuration);
+        services.AddMySqlControlPlaneApiServices(configuration);
     }
 
     public override async Task ResetAsync()

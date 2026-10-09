@@ -4,14 +4,10 @@ namespace Keryhe.Telemetry.StressTests.Scenarios;
 
 /// <summary>What one ramp step measured, in the terms the stop criteria are written in.</summary>
 /// <param name="TraceLagsMs">Ingest-to-queryable lag of each marker probe sent during the step, in send order; null = never became visible.</param>
-/// <param name="LogLagsMs">The same for the log marker, as measured (including the <c>asOf</c> pin offset).</param>
-/// <param name="LogPinOffsetMs">
-/// The provider's declared <c>asOf</c> back-off (<c>GET /api/capabilities</c>'s <c>asOfBackoffSeconds</c>): the log probe reads through the
-/// pinned list page, so every log lag carries this constant. It is subtracted before any criterion is applied. The trace probe is not pinned.
-/// </param>
+/// <param name="LogLagsMs">The same for the log marker.</param>
 public sealed record StepMeasurements(
     IReadOnlyList<WindowSummary> Windows, double RecordsDropped, double GateWaitP95Ms,
-    IReadOnlyList<double?> TraceLagsMs, IReadOnlyList<double?> LogLagsMs, double LogPinOffsetMs = 0, double CommitLagP95Ms = 0);
+    IReadOnlyList<double?> TraceLagsMs, IReadOnlyList<double?> LogLagsMs, double CommitLagP95Ms = 0);
 
 /// <summary>Applies <see cref="RampCriteria"/> to one step. Pure, so the stop rules are tested without a run.</summary>
 public static class RampEvaluator
@@ -28,18 +24,13 @@ public static class RampEvaluator
         if (m.Windows.Any(w => w.Latency.P99Ms > c.MaxExportP99Seconds * 1000)) tripped.Add(ExportP99);
         if (m.Windows.Any(w => w.ErrorRatePercent > c.MaxErrorRatePercent)) tripped.Add(ErrorRate);
         if (c.MaxCommitLagP95Ms > 0 && m.CommitLagP95Ms > c.MaxCommitLagP95Ms) tripped.Add(CommitLag);
-        var logLags = AdjustForPin(m.LogLagsMs, m.LogPinOffsetMs);
-        if (LagGrows(m.TraceLagsMs, c) || LagGrows(logLags, c)) tripped.Add(LagGrowth);
-        if (LagTooHigh(m.TraceLagsMs, c) || LagTooHigh(logLags, c)) tripped.Add(LagAbsolute);
+        if (LagGrows(m.TraceLagsMs, c) || LagGrows(m.LogLagsMs, c)) tripped.Add(LagGrowth);
+        if (LagTooHigh(m.TraceLagsMs, c) || LagTooHigh(m.LogLagsMs, c)) tripped.Add(LagAbsolute);
         return tripped;
     }
 
-    /// <summary>Subtracts the constant <c>asOf</c> pin offset from each lag, never below zero; a probe that never appeared stays null.</summary>
-    public static IReadOnlyList<double?> AdjustForPin(IReadOnlyList<double?> lags, double offsetMs) =>
-        offsetMs <= 0 ? lags : lags.Select(l => l is { } v ? Math.Max(0, v - offsetMs) : (double?)null).ToList();
-
     /// <summary>
-    /// Whether the last third of a step's (pin-adjusted) probes averaged more than <see cref="RampCriteria.MaxLagSeconds"/>: data is taking too long
+    /// Whether the last third of a step's probes averaged more than <see cref="RampCriteria.MaxLagSeconds"/>: data is taking too long
     /// to become queryable even if the lag is steady rather than growing. Probes that never appeared are left to <see cref="LagGrows"/>.
     /// </summary>
     public static bool LagTooHigh(IReadOnlyList<double?> lags, RampCriteria c)

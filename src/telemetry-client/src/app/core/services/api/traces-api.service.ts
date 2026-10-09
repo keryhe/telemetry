@@ -9,6 +9,7 @@ import {
   InstrumentationScopeModel, OperationStats, ResourceModel, ServiceDependency, ServiceStats, SpanModel, TraceInfo,
 } from '../../models/trace.models';
 import { TimeBucket } from '../../../shared/utils/chart.utils';
+import { ListOrder } from './logs-api.service';
 
 /** Set by `samples` when its anchor scan ran out of time (`TracesController.TimedOutHeader`). */
 const TIMED_OUT_HEADER = 'X-Telemetry-Timed-Out';
@@ -19,13 +20,10 @@ export interface TraceSamplesResult {
   timedOut: boolean;
 }
 
-/** Filter shape shared by summary/page (list-pages-server-side plan, Phase 3 Target API). */
+/** Filter shape shared by list/export. */
 export interface TraceListFilter {
   start: Date;
   end: Date;
-  // Opaque and never parsed into a Date (same contract as LogFilter.asOf — see that type's own
-  // doc comment: the server's asOf carries sub-millisecond precision a JS Date can't hold).
-  asOf?: string;
   mode?: 'all' | 'errors' | 'slow';
   service?: string;
   operation?: string;
@@ -45,11 +43,10 @@ export interface RequestSummaryQuery {
   bucketCount?: number;
 }
 
-export interface TracePageQuery extends TraceListFilter {
-  size: number;
-  cursor?: string;
-  /** No `last`: the list has no exact total to compute the last page from. */
-  nav?: 'first' | 'next' | 'prev';
+export interface TraceListQuery extends TraceListFilter {
+  order?: ListOrder;
+  /** Fewer rows than the server's limit; omitted asks for as many as it allows. */
+  limit?: number;
 }
 
 /** One chart bucket of the request summary: a `TimeBucket` plus what it actually covers (an edge bucket can be partial). */
@@ -111,11 +108,10 @@ export interface RequestSummaryResult {
   timedOut: boolean;
 }
 
-export interface TracePageResult {
+export interface TraceListResult {
   items: TraceInfo[];
-  nextCursor: string | null;
-  prevCursor: string | null;
-  asOf: string;
+  /** More traces matched than `items` holds. */
+  truncated: boolean;
 }
 
 @Injectable({ providedIn: 'root' })
@@ -146,11 +142,11 @@ export class TracesApiService {
     );
   }
 
-  /** Keyset-paged trace rows (decision 1), pinned on `asOf` (decision 3). */
-  getTracePage(query: TracePageQuery): Observable<TracePageResult> {
-    let params = this.filterParams(query).set('size', query.size).set('nav', query.nav ?? 'first');
-    if (query.cursor) params = params.set('cursor', query.cursor);
-    return this.http.get<TracePageResult>(`${this.base}/page`, { params });
+  /** The newest (or oldest) traces matching the filters, one row per trace, capped by the server; `truncated` says more matched. */
+  getTraceList(query: TraceListQuery): Observable<TraceListResult> {
+    let params = this.filterParams(query).set('order', query.order ?? 'newest');
+    if (query.limit != null) params = params.set('limit', query.limit);
+    return this.http.get<TraceListResult>(`${this.base}/list`, { params });
   }
 
   /**
@@ -173,7 +169,7 @@ export class TracesApiService {
 
   /**
    * The trace's spans. `start` and `end` are the trace's extent as the list returned it (`traceStartTime`/`traceEndTime`): they
-   * only let a provider that cannot seek a trace id (Timescale, ClickHouse) read that range, so both are optional and a deep link
+   * only let a provider that cannot seek a trace id (ClickHouse) read that range, so both are optional and a deep link
    * without them still works (the read is then unbounded and the trace whole).
    */
   getSpans(traceId: string, start?: string, end?: string): Observable<SpanModel[]> {
@@ -222,7 +218,7 @@ export class TracesApiService {
 
   /**
    * Streaming export (list-pages-server-side plan, Phase 8): one trace-summary row per trace, same
-   * filters as {@link getTraceSummary}/{@link getTracePage}. Fetched as a Blob so the
+   * filters as {@link getTraceList}. Fetched as a Blob so the
    * auth interceptor still runs — see `downloadBlob`'s doc comment.
    */
   getTraceExport(query: TraceListFilter, format: 'ndjson' | 'csv'): Observable<Blob> {
@@ -235,7 +231,6 @@ export class TracesApiService {
       .set('start', query.start.toISOString())
       .set('end', query.end.toISOString())
       .set('mode', query.mode ?? 'all');
-    if (query.asOf) params = params.set('asOf', query.asOf);
     if (query.service) params = params.set('service', query.service);
     if (query.operation) params = params.set('operation', query.operation);
     if (query.minDurationMs != null) params = params.set('minDurationMs', query.minDurationMs);

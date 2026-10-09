@@ -72,31 +72,6 @@ public static class SeededDataBuilder
         return records;
     }
 
-    /// <summary>A batch whose event time falls well inside <paramref name="pinnedWindowStart"/>/<paramref name="pinnedWindowEnd"/> but is flushed "now" — for pinning/late-arrival tests.</summary>
-    public static List<LogRecordModel> LateArrivingLogs(long tenantId, DateTime pinnedWindowStart, DateTime pinnedWindowEnd, int count = 20)
-    {
-        var midpoint = pinnedWindowStart + (pinnedWindowEnd - pinnedWindowStart) / 2;
-        var scope = Scope();
-        var records = new List<LogRecordModel>(count);
-        for (var i = 0; i < count; i++)
-        {
-            var timestamp = midpoint.AddSeconds(i);
-            records.Add(new LogRecordModel
-            {
-                TimeUnixNano = ToUnixNano(timestamp),
-                ObservedTimeUnixNano = ToUnixNano(timestamp),
-                SeverityNumber = 9,
-                SeverityText = "INFO",
-                BodyType = AttributeType.STRING,
-                BodyValue = $"late-arriving log #{i}",
-                Attributes = new Dictionary<string, object>(),
-                Resource = Resource(tenantId, "late-arrivals-svc"),
-                InstrumentationScope = scope
-            });
-        }
-        return records;
-    }
-
     // =========================================================================
     // TRACES
     // =========================================================================
@@ -638,11 +613,11 @@ public static class SeededDataBuilder
     /// for the top-N + "other" fold check (default top = 8). <paramref name="metricName"/> and
     /// <paramref name="servicePrefix"/> default to the values <c>MetricPhase4TestsBase</c>'s own
     /// top-N test uses; a caller in a different test class sharing the same provider fixture
-    /// collection (e.g. Phase 8's export tests) should pass distinct values — <c>metrics</c> is
-    /// truncated between test classes but the process-lifetime <c>ResourceScopeCache</c> is not
+    /// collection (e.g. Phase 8's export tests) should pass distinct values — on the relational providers
+    /// <c>metrics</c> is truncated between test classes but the process-lifetime <c>ResourceScopeCache</c> is not
     /// (see each fixture's own <c>ResetAsync</c> doc comment), so reusing the exact same metric
     /// name/service pair across two test classes hands the second flush a cached metric id whose
-    /// row no longer exists, failing its data-point insert on the foreign key.
+    /// row no longer exists, failing its data-point insert on the foreign key. (ClickHouse has no such cache.)
     /// </summary>
     public static List<MetricModel> ManyStreamsForTopN(long tenantId, DateTime start, int streamCount = 10, string metricName = "phase4.topn.gauge", string servicePrefix = "svc")
     {

@@ -7,10 +7,8 @@ namespace Keryhe.Telemetry.Core.Data;
 
 /// <summary>
 /// Periodic background worker that drains <see cref="ApiKeyTouchTracker"/> and flushes it to the
-/// active provider's <see cref="IApiKeyTouchStore"/>. Runs unconditionally on all five providers —
-/// there is no per-provider flag here, because ClickHouse opting out is expressed by its
-/// <see cref="IApiKeyTouchStore"/> implementation being a no-op, not by this worker knowing which
-/// provider is active. A scope is created per cycle because the store is registered scoped,
+/// active control-plane provider's <see cref="IApiKeyTouchStore"/>. Runs unconditionally, with no
+/// per-provider flag. A scope is created per cycle because the store is registered scoped,
 /// whereas this <see cref="BackgroundService"/> is a singleton — the same shape
 /// <c>AlertEvaluationWorker</c> uses for the same reason.
 /// </summary>

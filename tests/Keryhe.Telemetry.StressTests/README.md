@@ -1,8 +1,12 @@
 # Keryhe.Telemetry.StressTests
 
-A provider stress harness. For each database provider (PostgreSQL, Timescale, SqlServer, MySql, ClickHouse), against the split collector + API
+A provider stress harness. For each database provider (PostgreSQL, SqlServer, MySql, ClickHouse), against the split collector + API
 topology, it ingests a large volume of logs, traces and metrics over OTLP/gRPC while headless Chromium walks every
 UI page, then reports what was slow, what locked, what it cost, and whether the rows in the database match what was sent.
+
+Each scenario also runs the control plane (tenants, API keys, alert rules, retention settings): on the relational
+providers it is the same database as the telemetry data; for ClickHouse the harness starts a PostgreSQL container for it
+(not observed, and not covered by `--db-cpuset`, so it shares the Docker VM's CPUs; the report lists its image).
 
 It reports **numbers, not verdicts**: there are no pass/fail thresholds and no baseline comparison. The design and the decisions behind it are in
 [`plans/stress-tests.md`](../../plans/stress-tests.md).
@@ -44,7 +48,7 @@ dotnet run --project tests/Keryhe.Telemetry.StressTests -- report --in stress-re
 
 | Option | Meaning |
 |---|---|
-| `--provider` | `PostgreSQL`, `Timescale`, `SqlServer`, `MySql`, `ClickHouse`, or `all` (default `PostgreSQL`) |
+| `--provider` | `PostgreSQL`, `SqlServer`, `MySql`, `ClickHouse`, or `all` (default `PostgreSQL`) |
 | `--topology` | `split` or `all` (default `split`; kept so existing scripts keep working) |
 | `--profile` | `smoke`, `standard`, `soak`, `ramp`, `all`, or the path of a profile JSON (default `smoke`, or `ramp` with `--scenario ramp`) |
 | `--scenario` | `fixed` or `ramp`; picks the default profile and rejects a mismatched one |
@@ -121,11 +125,8 @@ Ramp criteria (each applies to a whole step; the rate scale multiplies the profi
 | `maxLagSeconds` | 10 | `lag_absolute`: lag in the last third of the step's probes averages more than this, growing or not (0 disables) |
 | `maxCommitLagP95Ms` | 0 (off) | `commit_lag_p95`: the worst signal's commit lag (`ingest commit_lag`, enqueue to commit) p95 for the step is higher. The write-only profile sets 5,000; it does not depend on any read query |
 
-Both lag criteria judge the log lag **after subtracting the provider's `asOf` pin offset**. The log probe reads through the pinned list page, and
-PostgreSQL/Timescale pin `asOf` at `NOW() - 5 s` by design, so their log lag has a constant 5 s floor that would otherwise shrink the growth
-ratio and count against the absolute limit. The offset is read at scenario start from `GET /api/capabilities` (`asOfBackoffSeconds`), not
-hard-coded here, and recorded as `logPinOffsetMs` in `scenario.json`. The trace probe (`api/traces/{id}/spans`) is not pinned. A probe still
-polling when its step ends counts as a lower-bound lag once it has already been waiting longer than `maxLagSeconds`, so the criteria are not
+The log probe reads `api/logs/list?...&limit=1` and the trace probe `api/traces/{id}/spans`; neither is pinned or delayed, so each lag is
+judged as measured. A probe still polling when its step ends counts as a lower-bound lag once it has already been waiting longer than `maxLagSeconds`, so the criteria are not
 blind exactly when lag is worst.
 
 The report names the last step that sustained and which criterion tripped. That is a stop rule for finding the breaking point, not a verdict.
@@ -152,15 +153,15 @@ result, every time series, and the summary tables. Use it to compare runs by han
 
 - **Summary** cards and, for a ramp, the step table and breaking point. **Correctness** lists mismatched cells (table, tenant, expected, actual, delta); `ExplainedByDrops` means the shortfall is no bigger than `records_dropped`; `ExplainedByAbandonedExports` means a surplus no bigger than the rows of exports the client gave up on (deadline exceeded, cancelled, or cut off when the load stopped), which the server may have enqueued anyway; and a backdated outcome of `NotVerifiable` means no sweep started after quiescence so leftover rows prove nothing.
 - **Timelines** share one x-axis (time since warm-up began). Grey lines mark phase boundaries, orange dashed lines retention sweeps, blue dotted lines ramp steps; hover a line for its label. Line up a latency spike with a lock burst or a sweep by eye.
-- **Write side**: client Export latency, server gate wait / flush duration / batch size / **commit lag** (enqueue to commit, the write-path health signal that needs no read), retries and drops, ingest-to-queryable lag. Log lag sits near 5s on PostgreSQL and Timescale because list pages pin their query `asOf` to `NOW() - 5s`; trace lag is not pinned. The ramp step table shows the log lag with that offset removed.
+- **Write side**: client Export latency, server gate wait / flush duration / batch size / **commit lag** (enqueue to commit, the write-path health signal that needs no read), retries and drops, ingest-to-queryable lag. The log probe reads `logs/list?limit=1` and the trace probe fetches the trace's spans, so both lags are the time the data takes to become queryable.
 - **Read side**: per-page time to ready, and per endpoint the browser's timing next to the host's. Server percentiles are the count-weighted mean of per-second quantiles, so they are approximate, and the server count includes every caller of the route (including the marker probe). A `400` on a search is the documented answer outside the raw-search window (24 hours by default, every provider), not an error. A separate table lists **every API route's server-side latency**, whoever called it, apart from the write instruments; and in a matrix with both a write-only and a full ramp for the same provider and topology, `comparison.html` shows the two ceilings and commit lags side by side (the read/write isolation number).
-- **Database**: blocking chains, deadlocks, top statements by total and mean time, table sizes, then the provider's own diagnostics and the container's **effective server settings** (memory, WAL/redo, durability, isolation), so a comparison between providers can be checked for fairness. Diagnostics: PostgreSQL/Timescale foreign-key `FOR KEY SHARE` checks (`pg_stat_statements.track = all`, so checks fired inside `COPY` count), checkpoint/WAL deltas and "checkpoints are occurring too frequently" warnings, dead tuples and autovacuum per table, and on Timescale every policy job with its failures and errors; SQL Server `spans` index usage and operational stats, autogrowth events for the database and tempdb, file sizes; ClickHouse rows/bytes read per query shape, `part_log` merges and mutations, the mutation list, merges still running; MySQL buffer-pool hit ratio, redo and purge (history list length is also sampled every second), per-index I/O on `spans`, unused indexes. A section that could not be collected shows its error instead of failing the run. The "API reads run under SNAPSHOT" check for SQL Server reads `not checked` when no read request happened to be sampled (for example a run without browsers); that is unknown, not a failure.
+- **Database**: blocking chains, deadlocks, top statements by total and mean time, table sizes, then the provider's own diagnostics and the container's **effective server settings** (memory, WAL/redo, durability, isolation), so a comparison between providers can be checked for fairness. Diagnostics: PostgreSQL foreign-key `FOR KEY SHARE` checks (the control-plane tables only: the hot tables carry no foreign keys) (`pg_stat_statements.track = all`, so checks fired inside `COPY` count), checkpoint/WAL deltas and "checkpoints are occurring too frequently" warnings, dead tuples and autovacuum per table; SQL Server `spans` index usage and operational stats, autogrowth events for the database and tempdb, file sizes; ClickHouse rows/bytes read per query shape, `part_log` merges and mutations, the mutation list, merges still running; MySQL buffer-pool hit ratio, redo and purge (history list length is also sampled every second), per-index I/O on `spans`, unused indexes. A section that could not be collected shows its error instead of failing the run. The "API reads run under SNAPSHOT" check for SQL Server reads `not checked` when no read request happened to be sampled (for example a run without browsers); that is unknown, not a failure.
 
 ## Things worth knowing
 
 - The metrics catalog only lists a metric once `MetricTouchWorker` has flushed (60s by default), so the browser tour waits up to 90s at start for it. Use a warm-up of at least 70s with browsers.
 - The tour opens metric detail by clicking through the metrics list, not by URL, because a hard load of `/metrics/<dotted.name>` is answered 404 by the UI host.
-- ClickHouse deletes are asynchronous mutations, so after a sweep the correctness check re-counts for up to 60s before reporting leftover backdated rows.
+- ClickHouse retention drops partitions (no mutations), so leftover backdated rows are reported as counted. Its API host reads with `use_query_condition_cache = 0` (the 25.x cache makes a repeated predicate look free). The report adds `late_buffer_records` and `derived_rows_dropped` beside the write instruments.
 - There is no product endpoint to trigger a retention sweep (by design); the harness waits for a natural one.
 - The load tool is open-loop. If it falls behind its own schedule it reports `not sent` and skipped exports, so load-tool saturation is never mistaken for server slowness; check offered versus acked.
 

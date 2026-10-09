@@ -1,4 +1,5 @@
 using Keryhe.Telemetry.Core.Data;
+using Microsoft.Extensions.Configuration;
 
 namespace Keryhe.Telemetry.Core.Data.Read;
 
@@ -69,6 +70,50 @@ public sealed class QueryOptions
 }
 
 /// <summary>
+/// The most rows each capped list returns, from <c>Telemetry:Query:Limits</c>. A request may ask for fewer, never more.
+/// Read once at registration by <see cref="ProviderCapabilities.FromConfiguration"/>, which also reports them to the UI
+/// through <c>GET /api/capabilities</c>.
+/// </summary>
+public sealed class QueryLimitsOptions
+{
+    /// <summary>Configuration section name these options bind from.</summary>
+    public const string SectionName = QueryOptions.SectionName + ":Limits";
+
+    /// <summary>Logs list. Default 1,000.</summary>
+    public int Logs { get; set; } = 1_000;
+
+    /// <summary>Traces list. Default 500.</summary>
+    public int Traces { get; set; } = 500;
+
+    /// <summary>Metrics catalog, in either grouping. Default 500.</summary>
+    public int MetricCatalog { get; set; } = 500;
+
+    /// <summary>A metric's exemplars. Default 500.</summary>
+    public int Exemplars { get; set; } = 500;
+
+    /// <summary>Reads the section; a value that is present but not a positive integer fails startup naming its key.</summary>
+    public static QueryLimitsOptions FromConfiguration(IConfiguration configuration)
+    {
+        var options = new QueryLimitsOptions();
+        options.Logs = Read(configuration, nameof(Logs), options.Logs);
+        options.Traces = Read(configuration, nameof(Traces), options.Traces);
+        options.MetricCatalog = Read(configuration, nameof(MetricCatalog), options.MetricCatalog);
+        options.Exemplars = Read(configuration, nameof(Exemplars), options.Exemplars);
+        return options;
+    }
+
+    private static int Read(IConfiguration configuration, string name, int fallback)
+    {
+        var key = $"{SectionName}:{name}";
+        var raw = configuration[key];
+        if (string.IsNullOrWhiteSpace(raw)) return fallback;
+        if (!int.TryParse(raw, out var value) || value < 1)
+            throw new InvalidOperationException($"{key} must be a positive integer (was '{raw}').");
+        return value;
+    }
+}
+
+/// <summary>
 /// Bound from the <c>Telemetry:Export</c> configuration section (list-pages-server-side plan,
 /// Phase 8). Holds the <see cref="ProviderCapabilities.ExportMaxWindowDays"/> override (decision
 /// 40, wired in Phase 1) plus <see cref="MaxConcurrent"/> (decision 17), which bounds how many
@@ -79,7 +124,7 @@ public sealed class ExportOptions
     /// <summary>Configuration section name these options bind from.</summary>
     public const string SectionName = "Telemetry:Export";
 
-    /// <summary>Overrides <see cref="ProviderCapabilities.ExportMaxWindowDays"/>'s tier default (7 days on PostgreSQL/Timescale/ClickHouse, 1 on SQL Server/MySQL) when set.</summary>
+    /// <summary>Overrides <see cref="ProviderCapabilities.ExportMaxWindowDays"/>'s tier default (7 days on PostgreSQL/ClickHouse, 1 on SQL Server/MySQL) when set.</summary>
     public int? MaxWindowDaysOverride { get; set; }
 
     /// <summary>

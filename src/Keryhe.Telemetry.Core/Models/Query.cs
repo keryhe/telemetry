@@ -1,11 +1,9 @@
 namespace Keryhe.Telemetry.Core.Models;
 
 /// <summary>
-/// Server-side filter for the logs list page's <c>summary</c>/<c>page</c>/<c>facets</c> endpoints
-/// (list-pages-server-side plan, Phase 2). Replaces the offset-paged <c>LogQuery</c>: <c>Search</c>
-/// carries the raw <c>q</c> text, parsed server-side by <see cref="Data.Read.SearchQueryParser"/>,
-/// and paging is keyset (<see cref="Cursor"/>/<see cref="Nav"/>) pinned on <see cref="AsOf"/>
-/// (decision 3) rather than offset-based.
+/// Server-side filter for the logs list endpoint. <c>Search</c> carries the raw <c>q</c> text, parsed server-side by
+/// <see cref="Data.Read.SearchQueryParser"/>. The list is capped, not paged: it returns at most <see cref="Limit"/> rows in
+/// <see cref="Order"/> and says whether more matched (<see cref="LogListResult.Truncated"/>).
 /// </summary>
 public sealed class LogQuery
 {
@@ -18,33 +16,39 @@ public sealed class LogQuery
     /// <summary>Minimum OTLP severity number (inclusive), when set.</summary>
     public int? MinSeverity { get; init; }
 
-    /// <summary>Raw search text (decision 10): free text, <c>key:value</c>/<c>key=value</c>, negation — parsed server-side.</summary>
+    /// <summary>Raw search text: free text, <c>key:value</c>/<c>key=value</c>, negation — parsed server-side.</summary>
     public string? Search { get; init; }
 
-    /// <summary>Page size, clamped 1-500 by the repository.</summary>
-    public int Size { get; init; } = 100;
+    /// <summary>Most rows to return. The API clamps it to the configured limit; the repository only keeps it at 1 or more.</summary>
+    public int Limit { get; init; } = DefaultLimit;
 
-    /// <summary>Opaque keyset cursor from a previous page, or null for the first page.</summary>
-    public string? Cursor { get; init; }
+    /// <summary>The limit when none is asked for, and the one a repository used on its own falls back to.</summary>
+    public const int DefaultLimit = 1_000;
 
-    /// <summary><c>first</c> | <c>next</c> | <c>prev</c> (decision 1; there is no <c>last</c>: the lists have no exact total).</summary>
-    public string Nav { get; init; } = "first";
-
-    /// <summary>
-    /// The ingestion-time pin (decision 3): rows with <c>created_at &gt; AsOf</c> are excluded from
-    /// every page. Null on the first request of a query, at which point the repository captures it
-    /// from the database clock and returns it for the client to echo on later requests.
-    /// </summary>
-    public DateTime? AsOf { get; init; }
+    /// <summary><c>newest</c> (default) | <c>oldest</c>: which end of the window the rows come from.</summary>
+    public string Order { get; init; } = ListOrder.Newest;
 }
 
-/// <summary><c>GET /api/logs/page</c>'s response (Target API): <c>{ items[], nextCursor, prevCursor }</c>.</summary>
-public sealed class LogPageResult
+/// <summary>The values of the <c>order</c> parameter shared by the logs and traces lists.</summary>
+public static class ListOrder
+{
+    public const string Newest = "newest";
+    public const string Oldest = "oldest";
+
+    /// <summary>True for <c>oldest</c> (case-insensitive); anything else is newest.</summary>
+    public static bool IsOldest(string? order) => string.Equals(order, Oldest, StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>True for a value the API accepts: <c>newest</c> or <c>oldest</c>, any case.</summary>
+    public static bool IsValid(string? order) => string.Equals(order, Newest, StringComparison.OrdinalIgnoreCase) || IsOldest(order);
+}
+
+/// <summary><c>GET .../logs/list</c>'s response: <c>{ items[], truncated }</c>.</summary>
+public sealed class LogListResult
 {
     public List<LogRecordModel> Items { get; init; } = [];
-    public string? NextCursor { get; init; }
-    public string? PrevCursor { get; init; }
-    public DateTime AsOf { get; init; }
+
+    /// <summary>More rows matched than <see cref="Items"/> holds.</summary>
+    public bool Truncated { get; init; }
 }
 
 /// <summary>Filter for <c>GET /api/logs/facets</c> (list-pages-server-side plan, Phase 2, decision 15).</summary>
@@ -89,12 +93,10 @@ public sealed class LogFacetsResult
 }
 
 /// <summary>
-/// Server-side filter + keyset paging for the traces list page (list-pages-server-side plan,
-/// Phase 3). Replaces the offset-paged <c>TraceQuery</c> of the list-page-scale plan: <c>Search</c>
-/// carries the raw <c>q</c> text (a <c>tag=key:value</c> token is absorbed into it as a
-/// <c>key:value</c> term — Target API), parsed server-side, and paging is keyset
-/// (<see cref="Cursor"/>/<see cref="Nav"/>) pinned on <see cref="AsOf"/> (decision 3) rather than
-/// offset-based. There is no <c>Sort</c>/<c>Dir</c> (decision 4): every mode pages newest-anchor-first.
+/// Server-side filter for the traces list endpoint. <c>Search</c> carries the raw <c>q</c> text, parsed server-side.
+/// The list is capped, not paged: one row per trace, at most <see cref="Limit"/> of them, from the newest or the oldest end
+/// of the window by the trace's anchor start (<see cref="Order"/>), and <see cref="TraceListResult.Truncated"/> says whether
+/// more matched.
 /// </summary>
 public sealed class TraceQuery
 {
@@ -119,26 +121,23 @@ public sealed class TraceQuery
     /// <summary>Raw search text: free text, <c>key:value</c>/<c>key=value</c>, negation, trace id — parsed server-side, matched against any span in the whole trace regardless of the service filter (decision 16).</summary>
     public string? Search { get; init; }
 
-    /// <summary>Page size, clamped 1-500 by the repository.</summary>
-    public int Size { get; init; } = 100;
+    /// <summary>Most rows to return. The API clamps it to the configured limit; the repository only keeps it at 1 or more.</summary>
+    public int Limit { get; init; } = DefaultLimit;
 
-    /// <summary>Opaque keyset cursor from a previous page, or null for the first page.</summary>
-    public string? Cursor { get; init; }
+    /// <summary>The limit when none is asked for, and the one a repository used on its own falls back to.</summary>
+    public const int DefaultLimit = 500;
 
-    /// <summary><c>first</c> | <c>next</c> | <c>prev</c> (decision 1; there is no <c>last</c>: the lists have no exact total).</summary>
-    public string Nav { get; init; } = "first";
-
-    /// <summary>The ingestion-time pin (decision 3) — see <see cref="LogQuery.AsOf"/>'s doc comment for the exact same contract.</summary>
-    public DateTime? AsOf { get; init; }
+    /// <summary><c>newest</c> (default) | <c>oldest</c>: which end of the window the rows come from.</summary>
+    public string Order { get; init; } = ListOrder.Newest;
 }
 
-/// <summary><c>GET /api/traces/page</c>'s response (Target API): <c>{ items[], nextCursor, prevCursor }</c>.</summary>
-public sealed class TracePageResult
+/// <summary><c>GET .../traces/list</c>'s response: <c>{ items[], truncated }</c>.</summary>
+public sealed class TraceListResult
 {
     public List<TraceInfo> Items { get; init; } = [];
-    public string? NextCursor { get; init; }
-    public string? PrevCursor { get; init; }
-    public DateTime AsOf { get; init; }
+
+    /// <summary>More traces matched than <see cref="Items"/> holds.</summary>
+    public bool Truncated { get; init; }
 }
 
 /// <summary>Filter for <c>GET /api/traces/samples</c> (Target API): the dashboard's Recent Errors/Slowest Traces widgets.</summary>

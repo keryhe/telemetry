@@ -17,6 +17,8 @@ public sealed class SqlServerFixture : ProviderFixture
     {
         services.AddSqlServerCollectorServices(configuration);
         services.AddSqlServerApiServices(configuration);
+        services.AddSqlServerControlPlaneCollectorServices(configuration);
+        services.AddSqlServerControlPlaneApiServices(configuration);
     }
 
     public override async Task ResetAsync()

@@ -49,14 +49,16 @@ public sealed class SqlServerProviderContainer : ProviderContainer
 
     protected override async Task ApplySchemaAsync(CancellationToken cancellationToken)
     {
-        var script = await SchemaApplier.ReadScriptAsync("SqlServer-Schema.sql", cancellationToken);
-
         await using var conn = new SqlConnection(_connectionString);
         await conn.OpenAsync(cancellationToken);
-        foreach (var batch in SchemaApplier.SplitGoBatches(script))
+        foreach (var file in new[] { "SqlServer-ControlPlane.sql", "SqlServer-Telemetry.sql" })
         {
-            await using var cmd = new SqlCommand(batch, conn) { CommandTimeout = 120 };
-            await cmd.ExecuteNonQueryAsync(cancellationToken);
+            var script = await SchemaApplier.ReadScriptAsync(file, cancellationToken);
+            foreach (var batch in SchemaApplier.SplitGoBatches(script))
+            {
+                await using var cmd = new SqlCommand(batch, conn) { CommandTimeout = 120 };
+                await cmd.ExecuteNonQueryAsync(cancellationToken);
+            }
         }
     }
 

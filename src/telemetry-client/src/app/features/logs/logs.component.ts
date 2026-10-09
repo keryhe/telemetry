@@ -11,7 +11,7 @@ import { MatProgressBarModule } from '@angular/material/progress-bar';
 import { MatSelectModule } from '@angular/material/select';
 import { MatTableModule } from '@angular/material/table';
 import { MatButtonModule } from '@angular/material/button';
-import { MatPaginatorIntl, MatPaginatorModule, PageEvent } from '@angular/material/paginator';
+import { MatButtonToggleModule } from '@angular/material/button-toggle';
 import { MatChipsModule } from '@angular/material/chips';
 import { MatTooltipModule } from '@angular/material/tooltip';
 import { MatDialog, MatDialogModule } from '@angular/material/dialog';
@@ -20,8 +20,7 @@ import { NgApexchartsModule } from 'ng-apexcharts';
 import type { ApexOptions } from 'ng-apexcharts';
 import { FormsModule } from '@angular/forms';
 
-import { LogsApiService, LogSummaryResult, LogPageResult, LogFacetsResult } from '../../core/services/api/logs-api.service';
-import { GroupedPaginatorIntl, lowerBoundTotalLabel } from '../../shared/utils/paginator-intl';
+import { LogsApiService, LogSummaryResult, LogListResult, LogFacetsResult, ListOrder } from '../../core/services/api/logs-api.service';
 import { SUMMARY_TIMEOUT_TOOLTIP, formatSummaryTotal } from '../../shared/utils/summary-total';
 import { ResourcesApiService } from '../../core/services/api/resources-api.service';
 import { TimeRangeService } from '../../core/services/time-range.service';
@@ -31,6 +30,7 @@ import { LogRecord, getSeverityLabel, getSeverityColor, getSeverityBg, getServic
 import { StatCardComponent } from '../../shared/components/stat-card/stat-card.component';
 import { EmptyStateComponent } from '../../shared/components/empty-state/empty-state.component';
 import { PageHeaderComponent } from '../../shared/components/page-header/page-header.component';
+import { ListCapNoticeComponent } from '../../shared/components/list-cap-notice/list-cap-notice.component';
 import { buildLogSeriesOptions, timeRangeZoom } from '../../shared/utils/chart.utils';
 import { parseSearchQuery, ParsedSearchQuery } from '../../shared/utils/search-query.parser';
 import { LogSearchHelpDialogComponent } from './log-search-help-dialog/log-search-help-dialog.component';
@@ -85,12 +85,10 @@ function inferFacetType(values: { value: string }[]): FacetValueType {
     DatePipe, DecimalPipe, SlicePipe, PercentPipe, FormsModule, RouterLink,
     MatCardModule, MatTableModule, MatIconModule,
     MatFormFieldModule, MatInputModule, MatSelectModule, MatProgressBarModule,
-    MatButtonModule, MatPaginatorModule, MatChipsModule, MatDialogModule,
+    MatButtonModule, MatButtonToggleModule, MatChipsModule, MatDialogModule,
     MatMenuModule, MatTooltipModule, NgApexchartsModule,
-    StatCardComponent, EmptyStateComponent, PageHeaderComponent,
+    StatCardComponent, EmptyStateComponent, PageHeaderComponent, ListCapNoticeComponent,
   ],
-  // Its own paginator intl, so a lower-bound total can print "of 10,000+" without touching other pages' paginators.
-  providers: [{ provide: MatPaginatorIntl, useClass: GroupedPaginatorIntl }],
   templateUrl: './logs.component.html',
   styleUrl: './logs.component.scss',
 })
@@ -108,16 +106,15 @@ export class LogsComponent implements OnDestroy {
     searchText: '',
     selectedService: '',
     selectedSeverity: -1,
-    pageSize: 100,
     facetsCollapsed: true,
   });
 
   protected summaryLoading = signal(true);
-  protected pageLoading = signal(true);
+  protected listLoading = signal(true);
   protected summary = signal<LogSummaryResult | null>(null);
-  protected page = signal<LogPageResult | null>(null);
+  protected list = signal<LogListResult | null>(null);
   protected facetsResult = signal<LogFacetsResult | null>(null);
-  private pageSub?: Subscription;
+  private listSub?: Subscription;
   private summarySub?: Subscription;
   private facetsSub?: Subscription;
 
@@ -166,10 +163,8 @@ export class LogsComponent implements OnDestroy {
   protected contextLoading = signal(false);
   protected contextAnchor = signal<LogRecord | null>(null);
 
-  /** Tracked client-side (decision 1: keyset paging has no server-side page number). Reset on any filter change. */
-  protected pageIndex = signal(0);
-  protected pageSize = signal(this.readNum('size') ?? this.saved.pageSize);
-  protected readonly pageSizeOptions = [100, 250, 500];
+  /** Which end of the window the list shows (kept in the URL as `order`; newest is the default and is left out of it). */
+  protected order = signal<ListOrder>(this.readOrder());
 
   /** Distinct services in range for the dropdown — fetched independently of the paged rows. */
   protected services = signal<string[]>([]);
@@ -193,13 +188,13 @@ export class LogsComponent implements OnDestroy {
   /** True while the search box holds a trace id: all of that trace's logs, whatever the time range. */
   protected traceFilterActive = computed(() => this.isTraceIdSearch());
 
-  /** Rows for the current page: the trace-filter's full unbounded set, or the current server page. */
+  /** Rows shown: the trace-filter's full unbounded set, or the server's capped list. */
   protected displayRows = computed<LogRecord[]>(() =>
-    this.traceFilterActive() ? this.traceLogs() : (this.page()?.items ?? [])
+    this.traceFilterActive() ? this.traceLogs() : (this.list()?.items ?? [])
   );
 
   protected loading = computed(() => this.traceFilterActive() ? this.traceLogsLoading() : this.summaryLoading());
-  protected rowsLoading = computed(() => this.traceFilterActive() ? this.traceLogsLoading() : this.pageLoading());
+  protected rowsLoading = computed(() => this.traceFilterActive() ? this.traceLogsLoading() : this.listLoading());
 
   /** The server's summary ran out of time: the severity cards and the chart have no data (which is not "zero"). */
   protected summaryTimedOut = computed(() => !this.traceFilterActive() && (this.summary()?.timedOut ?? false));
@@ -208,15 +203,8 @@ export class LogsComponent implements OnDestroy {
   protected readonly summaryTooltip =
     'Counted from the log rollup for the time range, service and minimum severity. The search box narrows the list below, not this.';
   private readonly locale = inject(LOCALE_ID);
-  /**
-   * The paginator's length. The list has no exact total (decision 10), so outside trace-id mode it is the rows seen so far,
-   * one more while the server offers a next page, and the label says "of many". A trace-id search shows its whole set at once.
-   */
-  protected paginatorLength = computed(() => {
-    if (this.traceFilterActive()) return this.traceLogs().length;
-    return this.pageIndex() * this.pageSize() + (this.page()?.items.length ?? 0) + (this.page()?.nextCursor ? 1 : 0);
-  });
-  private readonly paginatorIntl = inject(MatPaginatorIntl) as GroupedPaginatorIntl;
+  /** The list holds fewer rows than matched, so say so above it. A trace-id search shows its whole set. */
+  protected listTruncated = computed(() => !this.traceFilterActive() && (this.list()?.truncated ?? false));
   /** The Total Logs card: the rollup's count for the range, service and severity ("—" when the summary timed out). */
   protected totalLabel = computed(() => {
     if (this.traceFilterActive()) return formatSummaryTotal(this.traceLogs().length, false, this.locale);
@@ -311,12 +299,6 @@ export class LogsComponent implements OnDestroy {
   protected readonly getTimestamp = getTimestamp;
 
   constructor() {
-    // "of many" outside trace-id mode, where the whole set is shown and the exact count is known (see paginatorLength).
-    effect(() => {
-      this.paginatorIntl.totalOverride = this.traceFilterActive() ? null : lowerBoundTotalLabel(0, this.locale);
-      this.paginatorIntl.changes.next();
-    });
-
     // Slide relative preset windows to "now" on (re)entry so navigating back refreshes.
     this.timeRange.refreshRelativeWindow();
 
@@ -328,18 +310,17 @@ export class LogsComponent implements OnDestroy {
       next: (services) => this.services.set(services),
     });
 
-    // Reload summary + page (in parallel) whenever the time range or any server-side filter
-    // changes, or the trace-id-filter query param toggles. asOf resets so a fresh one is
-    // captured for the new query (decision 3's handshake).
+    // Reload summary + list (in parallel) whenever the time range, the order or any server-side filter
+    // changes, or the trace-id-filter query param toggles.
     effect(() => {
       const trace = this.traceFilterActive();
       this.selectedService();
       this.selectedSeverity();
       this.serverQuery();
+      this.order();
       if (!trace) this.timeRange.range();
 
       untracked(() => {
-        this.pageIndex.set(0);
         if (trace) this.loadByTraceFilter(this.traceIdFilter());
         else this.reloadAll();
       });
@@ -360,14 +341,13 @@ export class LogsComponent implements OnDestroy {
       });
     });
 
-    // Mirror filter state into the URL (shareable/deep-linkable). No `page`/`offset` (decision:
-    // keyset paging has no such parameter); the cursor itself isn't persisted across navigation.
+    // Mirror filter state into the URL (shareable/deep-linkable).
     effect(() => {
       this.urlState.patch({
         q: this.searchText() || null,
         service: this.selectedService() || null,
         severity: this.selectedSeverity() >= 0 ? this.selectedSeverity() : null,
-        size: this.pageSize() !== 100 ? this.pageSize() : null,
+        order: this.order() !== 'newest' ? this.order() : null,
       });
     });
 
@@ -386,14 +366,13 @@ export class LogsComponent implements OnDestroy {
         searchText: this.isTraceIdSearch() ? '' : this.searchText(),
         selectedService: this.selectedService(),
         selectedSeverity: this.selectedSeverity(),
-        pageSize: this.pageSize(),
         facetsCollapsed: this.facetsCollapsed(),
       });
     });
   }
 
   ngOnDestroy(): void {
-    this.pageSub?.unsubscribe();
+    this.listSub?.unsubscribe();
     this.summarySub?.unsubscribe();
     this.facetsSub?.unsubscribe();
   }
@@ -411,8 +390,8 @@ export class LogsComponent implements OnDestroy {
   /** Fires `summary` and `page` in parallel for the first page of a (new) query. */
   private reloadAll(): void {
     this.summaryLoading.set(true);
-    this.pageLoading.set(true);
-    this.page.set(null);
+    this.listLoading.set(true);
+    this.list.set(null);
 
     this.summarySub?.unsubscribe();
     // The summary follows the range, service and severity; the search narrows the list only.
@@ -422,10 +401,10 @@ export class LogsComponent implements OnDestroy {
       error: () => this.summaryLoading.set(false),
     });
 
-    this.pageSub?.unsubscribe();
-    this.pageSub = this.api.getLogPage({ ...this.currentFilter(), size: this.pageSize(), nav: 'first' }).subscribe({
-      next: (result) => { this.page.set(result); this.pageLoading.set(false); },
-      error: () => this.pageLoading.set(false),
+    this.listSub?.unsubscribe();
+    this.listSub = this.api.getLogList({ ...this.currentFilter(), order: this.order() }).subscribe({
+      next: (result) => { this.list.set(result); this.listLoading.set(false); },
+      error: () => this.listLoading.set(false),
     });
   }
 
@@ -439,8 +418,8 @@ export class LogsComponent implements OnDestroy {
   private loadByTraceFilter(traceId: string): void {
     this.traceLogsLoading.set(true);
     this.traceLogs.set([]);
-    this.pageSub?.unsubscribe();
-    this.pageSub = this.api.getLogsByTrace(traceId).subscribe({
+    this.listSub?.unsubscribe();
+    this.listSub = this.api.getLogsByTrace(traceId).subscribe({
       next: (logs) => {
         this.traceLogs.set(logs);
         this.traceLogsLoading.set(false);
@@ -465,6 +444,10 @@ export class LogsComponent implements OnDestroy {
     });
   }
 
+  private readOrder(): ListOrder {
+    return this.urlState.get('order') === 'oldest' ? 'oldest' : 'newest';
+  }
+
   private readNum(key: string): number | null {
     const raw = this.urlState.get(key);
     if (raw == null) return null;
@@ -477,11 +460,11 @@ export class LogsComponent implements OnDestroy {
     const q = this.urlState.get('q') ?? '';
     const service = this.urlState.get('service') ?? '';
     const severity = this.readNum('severity') ?? -1;
-    const size = this.readNum('size') ?? this.saved.pageSize;
+    const order = this.readOrder();
     if (this.searchText() !== q) { this.searchText.set(q); this.searchInput.set(q); }
     if (this.selectedService() !== service) this.selectedService.set(service);
     if (this.selectedSeverity() !== severity) this.selectedSeverity.set(severity);
-    if (this.pageSize() !== size) this.pageSize.set(size);
+    if (this.order() !== order) this.order.set(order);
   }
 
   protected toggleRow(row: LogRecord): void {
@@ -495,50 +478,7 @@ export class LogsComponent implements OnDestroy {
     return this.expandedRow() === row;
   }
 
-  /**
-   * Maps MatPaginator's page event onto a keyset `nav` (decision 1: no arbitrary page jump).
-   * The last-page button is hidden (no exact total to jump to), so the direction is unambiguous from the index delta.
-   */
-  protected onPage(e: PageEvent): void {
-    if (e.pageSize !== this.pageSize()) {
-      this.pageSize.set(e.pageSize);
-      this.pageIndex.set(0);
-      this.fetchPage('first');
-      return;
-    }
-
-    let nav: 'first' | 'next' | 'prev';
-    if (e.pageIndex === 0) nav = 'first';
-    else if (e.pageIndex > (e.previousPageIndex ?? 0)) nav = 'next';
-    else nav = 'prev';
-
-    this.pageIndex.set(e.pageIndex);
-    this.fetchPage(nav);
-  }
-
-  private fetchPage(nav: 'first' | 'next' | 'prev'): void {
-    const current = this.page();
-    const cursor = nav === 'next' ? current?.nextCursor ?? undefined
-      : nav === 'prev' ? current?.prevCursor ?? undefined
-      : undefined;
-
-    this.pageLoading.set(true);
-    this.pageSub?.unsubscribe();
-    this.pageSub = this.api.getLogPage({
-      ...this.currentFilter(),
-      // The page's own resolved asOf: the cursor being sent was minted against the page response's asOf, and the
-      // server rejects a cursor whose filter hash (which covers asOf) does not match the request's.
-      asOf: current?.asOf,
-      size: this.pageSize(),
-      cursor,
-      nav,
-    }).subscribe({
-      next: (result) => { this.page.set(result); this.pageLoading.set(false); },
-      error: () => this.pageLoading.set(false),
-    });
-  }
-
-  // Filter edits reset to the first page.
+  // Filter edits reload the list.
   protected onSearchChange(value: string): void {
     this.searchInput.set(value);
     this.searchText.set(value);
@@ -561,14 +501,14 @@ export class LogsComponent implements OnDestroy {
   // =========================================================================
 
   /**
-   * The current page's rows — a full-result export needs the streamed endpoint Phase 7 adds;
+   * The shown rows — a full-result export needs the streamed endpoint Phase 7 adds;
    * until then this exports what's on screen, and the export menu is labelled accordingly.
    */
   private exportRows(): LogRecord[] {
     return this.displayRows();
   }
 
-  /** Download the current page's logs as CSV (one row per log; attributes JSON-encoded). */
+  /** Download the shown logs as CSV (one row per log; attributes JSON-encoded). */
   protected exportCsv(): void {
     const rows = this.exportRows();
     if (!rows.length) return;
@@ -585,7 +525,7 @@ export class LogsComponent implements OnDestroy {
     downloadCsv(`logs_${fileStamp()}.csv`, headers, data);
   }
 
-  /** Download the current page's logs as raw JSON. */
+  /** Download the shown logs as raw JSON. */
   protected exportJson(): void {
     const rows = this.exportRows();
     if (!rows.length) return;

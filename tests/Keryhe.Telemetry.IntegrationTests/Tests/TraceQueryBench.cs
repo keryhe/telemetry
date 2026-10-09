@@ -12,7 +12,7 @@ namespace Keryhe.Telemetry.IntegrationTests.Tests;
 /// <summary>
 /// Opt-in lab benchmark for the trace list and trace detail reads (trace-list-detail-performance plan, Phase 0): seeds
 /// a stress-harness-sized volume (default 60,000 traces of ~10 spans = ~600k spans over six hours) into the provider's
-/// container and times the repository's real queries (summary, first page, keyset next page, errors, slow, search,
+/// container and times the repository's real queries (list newest and oldest, errors, slow, search,
 /// samples, detail), writing one table to the file named by <c>TRACE_BENCH_OUT</c> (a no-op unless it is set), e.g.
 /// <c>TRACE_BENCH_OUT=/tmp/bench.txt TRACE_BENCH_LABEL=phase2 dotnet test --filter TraceQueryBench</c>.
 /// <c>TRACE_BENCH_TRACES</c> overrides the trace count, <c>TRACE_BENCH_RUNS</c> the timed runs per operation (default 7).
@@ -43,7 +43,7 @@ public abstract class TraceQueryBenchBase(ProviderFixture fixture) : IAsyncLifet
 
         // Data ends "now" and spans six hours back, so windows are relative to the data like a real list page.
         // TRACE_BENCH_SPREAD_HOURS spreads the same traces over a longer history (default 6 h): the point of a multi-day table
-        // is the by-trace-id probe of every Timescale chunk. The list windows stay the last hour and six hours of it.
+        // is the by-trace-id probe of every ClickHouse partition. The list windows stay the last hour and six hours of it.
         var spreadHours = int.TryParse(Environment.GetEnvironmentVariable("TRACE_BENCH_SPREAD_HOURS"), out var sh) && sh >= 1 ? sh : 6;
         var dataEnd = DateTime.UtcNow;
         var dataStart = dataEnd.AddHours(-spreadHours);
@@ -54,7 +54,6 @@ public abstract class TraceQueryBenchBase(ProviderFixture fixture) : IAsyncLifet
 
         using var scope = fixture.Services.CreateScope();
         var repo = scope.ServiceProvider.GetRequiredService<ITraceReadRepository>();
-        var asOf = DateTime.UtcNow.AddMinutes(5);
         var end = dataEnd;
         var rows = new List<(string Op, double P50, double Max, string Note)>();
 
@@ -77,23 +76,16 @@ public abstract class TraceQueryBenchBase(ProviderFixture fixture) : IAsyncLifet
         {
             var start = end - window;
             var w = $"{window.TotalHours:0}h";
-            await Time($"page first {w}", async () =>
-                (await repo.GetTracePageAsync(new TraceQuery { Start = start, End = end, AsOf = asOf, Size = 100 })).Items.Count.ToString());
-            await Time($"page first {w} service", async () =>
-                (await repo.GetTracePageAsync(new TraceQuery { Start = start, End = end, AsOf = asOf, Size = 100, Service = "order-service" })).Items.Count.ToString());
-            var first = await repo.GetTracePageAsync(new TraceQuery { Start = start, End = end, AsOf = asOf, Size = 100 });
-            await Time($"page next {w}", async () =>
-                (await repo.GetTracePageAsync(new TraceQuery { Start = start, End = end, AsOf = first.AsOf, Size = 100, Nav = "next", Cursor = first.NextCursor })).Items.Count.ToString());
-            await Time($"errors page {w}", async () =>
-                (await repo.GetTracePageAsync(new TraceQuery { Start = start, End = end, AsOf = asOf, Size = 100, Mode = "errors" })).Items.Count.ToString());
-            await Time($"errors page {w} service", async () =>
-                (await repo.GetTracePageAsync(new TraceQuery { Start = start, End = end, AsOf = asOf, Size = 100, Mode = "errors", Service = "order-service" })).Items.Count.ToString());
-            await Time($"slow page {w}", async () =>
-                (await repo.GetTracePageAsync(new TraceQuery { Start = start, End = end, AsOf = asOf, Size = 100, Mode = "slow", MinDurationMs = 500 })).Items.Count.ToString());
-            await Time($"search page {w}", async () =>
-                (await repo.GetTracePageAsync(new TraceQuery { Start = start, End = end, AsOf = asOf, Size = 100, Search = "inventory" })).Items.Count.ToString());
-            await Time($"operation page {w}", async () =>
-                (await repo.GetTracePageAsync(new TraceQuery { Start = start, End = end, AsOf = asOf, Size = 100, Service = "order-service", Operation = "POST /orders" })).Items.Count.ToString());
+            async Task<string> List(TraceQuery q) => (await repo.GetTraceListAsync(q)).Items.Count.ToString();
+            const int limit = 500;
+            await Time($"list newest {w}", () => List(new TraceQuery { Start = start, End = end, Limit = limit }));
+            await Time($"list oldest {w}", () => List(new TraceQuery { Start = start, End = end, Limit = limit, Order = ListOrder.Oldest }));
+            await Time($"list newest {w} service", () => List(new TraceQuery { Start = start, End = end, Limit = limit, Service = "order-service" }));
+            await Time($"errors list {w}", () => List(new TraceQuery { Start = start, End = end, Limit = limit, Mode = "errors" }));
+            await Time($"errors list {w} service", () => List(new TraceQuery { Start = start, End = end, Limit = limit, Mode = "errors", Service = "order-service" }));
+            await Time($"slow list {w}", () => List(new TraceQuery { Start = start, End = end, Limit = limit, Mode = "slow", MinDurationMs = 500 }));
+            await Time($"search list {w}", () => List(new TraceQuery { Start = start, End = end, Limit = limit, Search = "inventory" }));
+            await Time($"operation list {w}", () => List(new TraceQuery { Start = start, End = end, Limit = limit, Service = "order-service", Operation = "POST /orders" }));
             await Time($"samples errors {w}", async () =>
                 (await repo.GetTraceSamplesAsync(new TraceSamplesQuery { Start = start, End = end, Kind = "errors", Limit = 5 })).Items.Count.ToString());
             await Time($"samples slowest {w}", async () =>
@@ -170,7 +162,7 @@ public abstract class TraceQueryBenchBase(ProviderFixture fixture) : IAsyncLifet
     /// Experiment mode (<c>TRACE_BENCH_SQL</c>): runs each SQL variant in the file (variants start at a line <c>-- ### name</c>; a
     /// provider-specific file is chosen by the caller) over the seeded data, timing it and reporting the row count. Parameters
     /// available to the SQL: tenantId, start/end (the last hour, in unix nanos), anchorFrom (start minus five minutes),
-    /// sliceStart (end minus 60 s), asOf, service.
+    /// sliceStart (end minus 60 s), service.
     /// </summary>
     private async Task RunVariantsAsync(string file, DateTime dataEnd, int runs, StringBuilder sb, string sampleTraceId, long sampleTraceStart)
     {
@@ -180,7 +172,7 @@ public abstract class TraceQueryBenchBase(ProviderFixture fixture) : IAsyncLifet
         var parameters = new Dictionary<string, object>
         {
             ["tenantId"] = fixture.TenantId, ["start"] = start, ["end"] = end, ["anchorFrom"] = start - 300_000_000_000L,
-            ["sliceStart"] = end - 60_000_000_000L, ["asOf"] = DateTime.UtcNow.AddMinutes(5), ["service"] = "order-service",
+            ["sliceStart"] = end - 60_000_000_000L, ["service"] = "order-service",
             ["operation"] = "POST /orders", ["minDurationNano"] = 500_000_000L, ["traceId"] = sampleTraceId, ["traceStart"] = sampleTraceStart, ["traceLo"] = sampleTraceStart - 300_000_000_000L, ["traceHi"] = sampleTraceStart + 86_400_000_000_000L, ["traceEnd"] = sampleTraceStart + 5_000_000_000L, ["rangeFrom"] = start, ["rangeTo"] = end + 1
         };
         sb.AppendLine($"---- SQL variants ({fixture.ProviderName})");
@@ -360,35 +352,6 @@ public sealed class PostgreSqlTraceQueryBench(PostgreSqlFixture fixture) : Trace
         // index-only scans depend on it.
         await using var cmd = new Npgsql.NpgsqlCommand("VACUUM (ANALYZE) spans", conn) { CommandTimeout = 600 };
         await cmd.ExecuteNonQueryAsync();
-    }
-}
-
-[Collection(ProviderNames.Timescale)]
-[Trait("Provider", ProviderNames.Timescale)]
-public sealed class TimescaleTraceQueryBench(TimescaleFixture fixture) : TraceQueryBenchBase(fixture)
-{
-    protected override async Task<System.Data.Common.DbConnection> OpenRawAsync()
-    {
-        var c = new Npgsql.NpgsqlConnection(fixture.DatabaseConnectionString);
-        await c.OpenAsync();
-        return c;
-    }
-
-    protected override async Task AfterSeedAsync()
-    {
-        await using var conn = new Npgsql.NpgsqlConnection(fixture.DatabaseConnectionString);
-        await conn.OpenAsync();
-        await using var cmd = new Npgsql.NpgsqlCommand("VACUUM (ANALYZE) spans", conn) { CommandTimeout = 600 };
-        await cmd.ExecuteNonQueryAsync();
-
-        // TRACE_BENCH_COMPRESS=1: compress the chunks older than seven days, as the compression policy would, so a by-trace
-        // probe of an old chunk pays for decompression.
-        if (Environment.GetEnvironmentVariable("TRACE_BENCH_COMPRESS") == "1")
-        {
-            await using var compress = new Npgsql.NpgsqlCommand(
-                "SELECT compress_chunk(c, if_not_compressed => true) FROM show_chunks('spans', older_than => (EXTRACT(EPOCH FROM NOW() - INTERVAL '7 days') * 1000000000)::bigint) c", conn) { CommandTimeout = 1200 };
-            await compress.ExecuteNonQueryAsync();
-        }
     }
 }
 

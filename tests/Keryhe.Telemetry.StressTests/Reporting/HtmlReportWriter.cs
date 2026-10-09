@@ -99,13 +99,13 @@ public static class HtmlReportWriter
             ("write.commit_lag", "Commit lag p95 (enqueue to commit)", true),
             ("write.batch_size", "Flush batch size p95", false),
             ("write.resident", "Records resident in the ingestion queue", true),
+            ("write.late_buffer", "Late buffer (ClickHouse: records held for a closed day)", true),
             ("write.retries", "Flush retries and dropped records", true)]);
         Charts(sb, s, "Database timelines", [
             ("db.lock_waits", "Lock waits sampled", true),
             ("db.parts", "ClickHouse active parts", true),
             ("db.merges", "ClickHouse merges running", true),
-            ("db.mutations", "ClickHouse mutations pending", true),
-            ("db.chunks", "Timescale chunks", false)]);
+            ("db.mutations", "ClickHouse mutations pending (the metric catalog sweep)", true)]);
         Charts(sb, s, "Resource timelines", [
             ("db.container_cpu", "Database container CPU", true),
             ("db.container_memory", "Database container memory", false),
@@ -201,14 +201,12 @@ public static class HtmlReportWriter
             sb.Append("<p>").Append(ramp.TrippedStep is { } t
                 ? $"Ramp: last sustained step {(ramp.LastSustainedStep is { } l ? $"{l} (x{ramp.Steps[l].Scale:0.##})" : "none")}; step {t} (x{ramp.Steps[t].Scale:0.##}) tripped <b>{E(string.Join(", ", ramp.TrippedCriteria))}</b>. This is the breaking point on this machine."
                 : $"Ramp: reached the step limit ({ramp.Steps.Count} steps, up to x{ramp.Steps[^1].Scale:0.##}) with no stop criterion tripped; no breaking point found.").Append("</p>");
-            var pin = s.Scenario.LogPinOffsetMs ?? 0;
-            sb.Append("<p class=\"keyline\">Lag columns are the mean over the step's probes; the log lag has the provider's <code>asOf</code> pin offset (")
-              .Append(N(pin)).Append(" ms) subtracted, which is what the lag criteria judge.</p>");
-            sb.Append("<table><thead><tr><th>Step</th><th>Scale</th><th>Offered/s</th><th>Acked/s</th><th>Export p99 (ms)</th><th>Gate wait p95 (ms)</th><th>Commit lag p95 (ms)</th><th>Dropped</th><th>Log lag, adjusted (ms)</th><th>Trace lag (ms)</th><th class=\"l\">Tripped</th></tr></thead><tbody>");
+            sb.Append("<p class=\"keyline\">Lag columns are the mean over the step's probes, which is what the lag criteria judge.</p>");
+            sb.Append("<table><thead><tr><th>Step</th><th>Scale</th><th>Offered/s</th><th>Acked/s</th><th>Export p99 (ms)</th><th>Gate wait p95 (ms)</th><th>Commit lag p95 (ms)</th><th>Dropped</th><th>Log lag (ms)</th><th>Trace lag (ms)</th><th class=\"l\">Tripped</th></tr></thead><tbody>");
             foreach (var st in ramp.Steps)
                 sb.Append("<tr><td>").Append(st.Step).Append("</td><td>x").Append(N(st.Scale, "0.##")).Append("</td><td>").Append(N(st.Windows.Sum(w => w.OfferedPerSecond))).Append("</td><td>").Append(N(st.Windows.Sum(w => w.AckedPerSecond)))
                   .Append("</td><td>").Append(N(st.Windows.Max(w => w.Latency.P99Ms))).Append("</td><td>").Append(N(st.GateWaitP95Ms, "N1")).Append("</td><td>").Append(N(st.CommitLagP95Ms, "N1")).Append("</td><td>").Append(N(st.RecordsDropped))
-                  .Append("</td><td>").Append(MeanLag(RampEvaluator.AdjustForPin(st.LogLagsMs, pin))).Append("</td><td>").Append(MeanLag(st.TraceLagsMs))
+                  .Append("</td><td>").Append(MeanLag(st.LogLagsMs)).Append("</td><td>").Append(MeanLag(st.TraceLagsMs))
                   .Append("</td><td class=\"l\">").Append(E(string.Join(", ", st.Tripped))).Append("</td></tr>");
             sb.Append("</tbody></table>");
         }

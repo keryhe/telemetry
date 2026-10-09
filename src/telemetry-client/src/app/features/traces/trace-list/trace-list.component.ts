@@ -11,7 +11,6 @@ import { MatInputModule } from '@angular/material/input';
 import { MatProgressBarModule } from '@angular/material/progress-bar';
 import { MatProgressSpinnerModule } from '@angular/material/progress-spinner';
 import { MatSelectModule } from '@angular/material/select';
-import { MatPaginatorIntl, MatPaginatorModule, PageEvent } from '@angular/material/paginator';
 import { MatSort, MatSortModule, Sort } from '@angular/material/sort';
 import { MatTableModule } from '@angular/material/table';
 import { MatTabsModule } from '@angular/material/tabs';
@@ -25,8 +24,8 @@ import { NgApexchartsModule } from 'ng-apexcharts';
 import { Subscription } from 'rxjs';
 import type { ApexOptions } from 'ng-apexcharts';
 
-import { TracesApiService, RequestLatencyCell, RequestSummaryResult, TracePageResult } from '../../../core/services/api/traces-api.service';
-import { GroupedPaginatorIntl, lowerBoundTotalLabel } from '../../../shared/utils/paginator-intl';
+import { ListOrder } from '../../../core/services/api/logs-api.service';
+import { TracesApiService, RequestLatencyCell, RequestSummaryResult, TraceListResult } from '../../../core/services/api/traces-api.service';
 import { SUMMARY_TIMEOUT_TOOLTIP, formatSummaryTotal } from '../../../shared/utils/summary-total';
 import { ResourcesApiService } from '../../../core/services/api/resources-api.service';
 import { TimeRangeService } from '../../../core/services/time-range.service';
@@ -36,6 +35,7 @@ import { TraceInfo, ServiceDependency, OperationStats } from '../../../core/mode
 import { StatCardComponent } from '../../../shared/components/stat-card/stat-card.component';
 import { EmptyStateComponent } from '../../../shared/components/empty-state/empty-state.component';
 import { PageHeaderComponent } from '../../../shared/components/page-header/page-header.component';
+import { ListCapNoticeComponent } from '../../../shared/components/list-cap-notice/list-cap-notice.component';
 import { formatDuration, parseDotnetTimespan, timeRangeZoom } from '../../../shared/utils/chart.utils';
 import { bubbleTarget } from '../../../shared/utils/latency-bands';
 import { parseSearchQuery, ParsedSearchQuery } from '../../../shared/utils/search-query.parser';
@@ -77,14 +77,12 @@ const REQUEST_TRACES_TOOLTIP =
   standalone: true,
   imports: [
     DatePipe, DecimalPipe, LowerCasePipe, FormsModule,
-    MatCardModule, MatPaginatorModule, MatTableModule, MatSortModule, MatTabsModule, MatIconModule,
+    MatCardModule, MatTableModule, MatSortModule, MatTabsModule, MatIconModule,
     MatButtonToggleModule, MatButtonModule, MatSelectModule, MatFormFieldModule,
     MatInputModule, MatProgressBarModule, MatProgressSpinnerModule, MatChipsModule, MatTooltipModule,
     MatDialogModule, MatMenuModule, NgxGraphModule, NgApexchartsModule,
-    StatCardComponent, EmptyStateComponent, PageHeaderComponent,
+    StatCardComponent, EmptyStateComponent, PageHeaderComponent, ListCapNoticeComponent,
   ],
-  // Its own paginator intl, so a lower-bound total can print "of 10,000+" without touching other pages' paginators.
-  providers: [{ provide: MatPaginatorIntl, useClass: GroupedPaginatorIntl }],
   templateUrl: './trace-list.component.html',
   styleUrl: './trace-list.component.scss',
 })
@@ -107,15 +105,14 @@ export class TraceListComponent implements OnDestroy {
     searchText: '',
     minDurationMs: 500,
     maxDurationMs: 0,
-    pageSize: 100,
     chartView: 'volume' as ChartView,
   });
 
   protected summaryLoading = signal(true);
-  protected pageLoading = signal(true);
+  protected listLoading = signal(true);
   protected summary = signal<RequestSummaryResult | null>(null);
-  protected page = signal<TracePageResult | null>(null);
-  private pageSub?: Subscription;
+  protected list = signal<TraceListResult | null>(null);
+  private listSub?: Subscription;
   private summarySub?: Subscription;
 
   protected capabilities = this.capabilitiesService.capabilities;
@@ -147,10 +144,8 @@ export class TraceListComponent implements OnDestroy {
   /** Transient "Link copied!" affordance for the copy-permalink button. */
   protected linkCopied = signal(false);
 
-  /** Tracked client-side (decision 1: keyset paging has no server-side page number). Reset on any filter change. */
-  protected pageIndex = signal(0);
-  protected pageSize = signal(this.readNum('size') ?? this.saved.pageSize);
-  protected readonly pageSizeOptions = [100, 250, 500];
+  /** Which end of the window the list shows (kept in the URL as `order`; newest is the default and is left out of it). */
+  protected order = signal<ListOrder>(this.readOrder());
 
   protected parsedQuery = computed<ParsedSearchQuery>(() => parseSearchQuery(this.searchText()));
   protected isTraceIdSearch = computed(() => this.parsedQuery().isTraceIdSearch);
@@ -158,20 +153,15 @@ export class TraceListComponent implements OnDestroy {
   /** The whole raw search text goes to the server now (decision 10: parsed server-side). */
   private serverQuery = computed(() => this.searchText().trim());
 
-  protected displayRows = computed<TraceInfo[]>(() => this.page()?.items ?? []);
+  protected displayRows = computed<TraceInfo[]>(() => this.list()?.items ?? []);
   protected loading = computed(() => this.summaryLoading());
 
-  private readonly paginatorIntl = inject(MatPaginatorIntl) as GroupedPaginatorIntl;
   /** The Requests card: the rollup's inbound-span count for the range and service (not a trace count, and not the list's total). */
   protected requestCount = computed(() => this.summary()?.summary.count ?? 0);
   protected requestCountLabel = computed(() =>
     this.summaryTimedOut() ? '—' : formatSummaryTotal(this.requestCount(), false, this.locale));
-  /**
-   * The list has no exact total (plans/summary-rollups.md, decision 10), so the paginator's length is the rows seen so far,
-   * one row more while the server offers a next page; its label says "of many".
-   */
-  protected paginatorLength = computed(() =>
-    this.pageIndex() * this.pageSize() + this.displayRows().length + (this.page()?.nextCursor ? 1 : 0));
+  /** More traces matched than the list holds, so say so above it. */
+  protected listTruncated = computed(() => this.list()?.truncated ?? false);
   /** The summary ran out of time: the request cards and charts have no data (which is not "zero"). */
   protected summaryTimedOut = computed(() => this.summary()?.timedOut ?? false);
   protected readonly summaryTimeoutTooltip = SUMMARY_TIMEOUT_TOOLTIP;
@@ -318,7 +308,6 @@ export class TraceListComponent implements OnDestroy {
   protected onNodeClick(node: GraphNode): void {
     this.selectedService.set(node.id);
     this.selectedOperation.set('');
-    this.pageIndex.set(0);
     this.selectedTab.set(0);
   }
 
@@ -328,14 +317,10 @@ export class TraceListComponent implements OnDestroy {
 
   constructor() {
     effect((onCleanup) => {
-      if (!this.pageLoading()) { this.slowLoad.set(false); return; }
+      if (!this.listLoading()) { this.slowLoad.set(false); return; }
       const t = setTimeout(() => this.slowLoad.set(true), 3000);
       onCleanup(() => clearTimeout(t));
     });
-
-    // The list has no exact total: the paginator says "of many" (see paginatorLength).
-    this.paginatorIntl.totalOverride = lowerBoundTotalLabel(0, this.locale);
-    this.paginatorIntl.changes.next();
 
     // Slide relative preset windows to "now" on (re)entry so navigating back refreshes.
     this.timeRange.refreshRelativeWindow();
@@ -352,20 +337,17 @@ export class TraceListComponent implements OnDestroy {
       untracked(() => this.reloadSummary());
     });
 
-    // Reload the page whenever the time range or any server-side filter changes. asOf resets so a fresh one is
-    // captured for the new query (decision 3's handshake).
+    // Reload the list whenever the time range, the order or any server-side filter changes.
     effect(() => {
       this.timeRange.range();
+      this.order();
       this.filterMode();
       this.selectedService();
       this.selectedOperation();
       this.minDurationMs();
       this.maxDurationMs();
       this.serverQuery();
-      untracked(() => {
-        this.pageIndex.set(0);
-        this.reloadPage();
-      });
+      untracked(() => this.reloadList());
     });
 
     // Dependencies (service map): only the Service Map tab needs this.
@@ -384,9 +366,7 @@ export class TraceListComponent implements OnDestroy {
       untracked(() => this.loadOperations());
     });
 
-    // Mirror filter/paging/view state into the URL (shareable/deep-linkable). No sort/dir
-    // (decision 4) and no `page` (decision 1: keyset paging has no page number); `cursor` isn't
-    // persisted across navigation either.
+    // Mirror filter/view state into the URL (shareable/deep-linkable).
     effect(() => {
       this.urlState.patch({
         mode: this.filterMode() !== 'all' ? this.filterMode() : null,
@@ -396,7 +376,7 @@ export class TraceListComponent implements OnDestroy {
         minDur: this.filterMode() === 'slow' ? this.minDurationMs() : null,
         maxDur: this.filterMode() === 'slow' && this.maxDurationMs() > 0 ? this.maxDurationMs() : null,
         chart: this.chartView() !== 'volume' ? this.chartView() : null,
-        size: this.pageSize() !== 100 ? this.pageSize() : null,
+        order: this.order() !== 'newest' ? this.order() : null,
       });
     });
 
@@ -411,7 +391,6 @@ export class TraceListComponent implements OnDestroy {
         searchText: this.searchText(),
         minDurationMs: this.minDurationMs(),
         maxDurationMs: this.maxDurationMs(),
-        pageSize: this.pageSize(),
         chartView: this.chartView(),
       });
     });
@@ -428,7 +407,7 @@ export class TraceListComponent implements OnDestroy {
   }
 
   ngOnDestroy(): void {
-    this.pageSub?.unsubscribe();
+    this.listSub?.unsubscribe();
     this.summarySub?.unsubscribe();
   }
 
@@ -459,15 +438,15 @@ export class TraceListComponent implements OnDestroy {
     });
   }
 
-  /** The first page of a (new) query. */
-  private reloadPage(): void {
-    this.pageLoading.set(true);
-    this.page.set(null);
+  /** The list for a (new) query. */
+  private reloadList(): void {
+    this.listLoading.set(true);
+    this.list.set(null);
 
-    this.pageSub?.unsubscribe();
-    this.pageSub = this.api.getTracePage({ ...this.currentFilter(), size: this.pageSize(), nav: 'first' }).subscribe({
-      next: (result) => { this.page.set(result); this.pageLoading.set(false); },
-      error: () => this.pageLoading.set(false),
+    this.listSub?.unsubscribe();
+    this.listSub = this.api.getTraceList({ ...this.currentFilter(), order: this.order() }).subscribe({
+      next: (result) => { this.list.set(result); this.listLoading.set(false); },
+      error: () => this.listLoading.set(false),
     });
   }
 
@@ -582,9 +561,12 @@ export class TraceListComponent implements OnDestroy {
       this.minDurationMs.set(target.minDurationMs);
       this.maxDurationMs.set(target.maxDurationMs ?? 0);
       this.filterMode.set('slow');
-      this.pageIndex.set(0);
       this.timeRange.setCustom(target.start, target.end);
     });
+  }
+
+  private readOrder(): ListOrder {
+    return this.urlState.get('order') === 'oldest' ? 'oldest' : 'newest';
   }
 
   private readNum(key: string): number | null {
@@ -603,7 +585,7 @@ export class TraceListComponent implements OnDestroy {
     const minDur = this.readNum('minDur') ?? this.saved.minDurationMs;
     const maxDur = this.readNum('maxDur') ?? this.saved.maxDurationMs;
     const chart = (this.urlState.get('chart') as ChartView) ?? 'volume';
-    const size = this.readNum('size') ?? this.saved.pageSize;
+    const order = this.readOrder();
     if (this.filterMode() !== mode) this.filterMode.set(mode);
     if (this.selectedService() !== service) this.selectedService.set(service);
     if (this.selectedOperation() !== operation) this.selectedOperation.set(operation);
@@ -611,25 +593,23 @@ export class TraceListComponent implements OnDestroy {
     if (this.minDurationMs() !== minDur) this.minDurationMs.set(minDur);
     if (this.maxDurationMs() !== maxDur) this.maxDurationMs.set(maxDur);
     if (this.chartView() !== chart) this.chartView.set(chart);
-    if (this.pageSize() !== size) this.pageSize.set(size);
+    if (this.order() !== order) this.order.set(order);
   }
 
-  // Filter edits reset to the first page.
-  protected onModeChange(mode: FilterMode): void { this.filterMode.set(mode); this.pageIndex.set(0); }
+  // Filter edits reload the list.
+  protected onModeChange(mode: FilterMode): void { this.filterMode.set(mode) }
   protected onServiceChange(value: string): void {
     this.selectedService.set(value);
     this.selectedOperation.set('');
-    this.pageIndex.set(0);
   }
-  protected onOperationChange(value: string): void { this.selectedOperation.set(value); this.pageIndex.set(0); }
+  protected onOperationChange(value: string): void { this.selectedOperation.set(value) }
   protected onSearchChange(value: string): void {
     this.searchInput.set(value);
     this.searchText.set(value);
-    this.pageIndex.set(0);
   }
   protected submitSearch(): void { this.onSearchChange(this.searchInput().trim()); }
-  protected onMinDurationChange(value: number): void { this.minDurationMs.set(value); this.pageIndex.set(0); }
-  protected onMaxDurationChange(value: number): void { this.maxDurationMs.set(value); this.pageIndex.set(0); }
+  protected onMinDurationChange(value: number): void { this.minDurationMs.set(value) }
+  protected onMaxDurationChange(value: number): void { this.maxDurationMs.set(value) }
   protected onAnalyticsSort(s: Sort): void {
     this.analyticsSort.set({ col: s.active, dir: (s.direction || 'desc') as SortDir });
   }
@@ -649,52 +629,10 @@ export class TraceListComponent implements OnDestroy {
     });
   }
 
-  /** `start` and `end` are the trace's own extent from the row, passed on so the detail read can be bounded (Timescale, ClickHouse). */
+  /** `start` and `end` are the trace's own extent from the row, passed on so the detail read can be bounded (ClickHouse). */
   protected navigate(traceId: string, start?: string, end?: string): void {
-    if (this.pageLoading()) return; // the grid is mid-load: its rows are about to be replaced
+    if (this.listLoading()) return; // the grid is mid-load: its rows are about to be replaced
     this.router.navigate(this.tenant.link('traces', traceId), start && end ? { queryParams: { start, end } } : undefined);
-  }
-
-  /**
-   * Maps MatPaginator's page event onto a keyset `nav` (decision 1: no arbitrary page jump): first, next or prev.
-   * The last-page button is hidden (the list has no exact total to jump to).
-   */
-  protected onPage(e: PageEvent): void {
-    if (e.pageSize !== this.pageSize()) {
-      this.pageSize.set(e.pageSize);
-      this.pageIndex.set(0);
-      this.fetchPage('first');
-      return;
-    }
-
-    let nav: 'first' | 'next' | 'prev';
-    if (e.pageIndex === 0) nav = 'first';
-    else if (e.pageIndex > (e.previousPageIndex ?? 0)) nav = 'next';
-    else nav = 'prev';
-
-    this.pageIndex.set(e.pageIndex);
-    this.fetchPage(nav);
-  }
-
-  private fetchPage(nav: 'first' | 'next' | 'prev'): void {
-    const current = this.page();
-    const cursor = nav === 'next' ? current?.nextCursor ?? undefined
-      : nav === 'prev' ? current?.prevCursor ?? undefined
-      : undefined;
-
-    this.pageLoading.set(true);
-    this.pageSub?.unsubscribe();
-    this.pageSub = this.api.getTracePage({
-      ...this.currentFilter(),
-      // The page's own resolved asOf: the cursor being sent was minted against it.
-      asOf: current?.asOf,
-      size: this.pageSize(),
-      cursor,
-      nav,
-    }).subscribe({
-      next: (result) => { this.page.set(result); this.pageLoading.set(false); },
-      error: () => this.pageLoading.set(false),
-    });
   }
 
   // =========================================================================
@@ -702,14 +640,14 @@ export class TraceListComponent implements OnDestroy {
   // =========================================================================
 
   /**
-   * The current page's rows — a full-result export needs the streamed endpoint Phase 7 adds;
+   * The shown rows — a full-result export needs the streamed endpoint Phase 7 adds;
    * until then this exports what's on screen, and the export menu is labelled accordingly.
    */
   private exportRows(): TraceInfo[] {
     return this.displayRows();
   }
 
-  /** Download the current page's traces as CSV (one row per trace). */
+  /** Download the shown traces as CSV (one row per trace). */
   protected exportCsv(): void {
     const rows = this.exportRows();
     if (!rows.length) return;
@@ -727,7 +665,7 @@ export class TraceListComponent implements OnDestroy {
     downloadCsv(`traces_${fileStamp()}.csv`, headers, data);
   }
 
-  /** Download the current page's traces as raw JSON. */
+  /** Download the shown traces as raw JSON. */
   protected exportJson(): void {
     const rows = this.exportRows();
     if (!rows.length) return;

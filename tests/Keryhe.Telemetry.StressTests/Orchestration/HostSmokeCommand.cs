@@ -62,7 +62,7 @@ public static class HostSmokeCommand
 
         Console.WriteLine($"Launching {topology}...");
         await using var hosts = await HostLauncher.LaunchAsync(published,
-            new HostLaunchOptions(provider, db.ConnectionString, db.ConnectionString, topology, outDir, retentionSeconds));
+            new HostLaunchOptions(provider, db.ConnectionString, db.ConnectionString, db.ControlPlaneProviderName, db.ControlPlaneConnectionString, topology, outDir, retentionSeconds));
         foreach (var h in hosts.Hosts)
             Console.WriteLine($"  {h.Role}: pid {h.Pid}, grpc {h.GrpcUri?.ToString() ?? "-"}, api {h.ApiUri?.ToString() ?? "-"}, ui {h.UiUri?.ToString() ?? "-"}");
 

@@ -147,7 +147,7 @@ public class RollupSummaryBuilderTests
     [InlineData(-1, 2)]   // no severity counts as Info, even though Trace is <= 4
     [InlineData(0, 0)] [InlineData(4, 0)] [InlineData(5, 1)] [InlineData(8, 1)] [InlineData(9, 2)] [InlineData(12, 2)]
     [InlineData(13, 3)] [InlineData(16, 3)] [InlineData(17, 4)] [InlineData(20, 4)] [InlineData(21, 5)] [InlineData(24, 5)]
-    public void SeverityGroup_MatchesLogSeverityGroupSql_WithTheNullSentinelAsInfo(int severity, int group)
+    public void SeverityGroup_UsesTheOtlpRanges_WithTheNullSentinelAsInfo(int severity, int group)
         => Assert.Equal(group, RollupSummaryBuilder.SeverityGroup(severity));
 
     [Fact]

@@ -9,10 +9,11 @@ namespace Keryhe.Telemetry.Api.Retention;
 
 /// <summary>
 /// Periodic background worker that drives the retention sweeps. On each cycle it creates a
-/// fresh DI scope, resolves the scoped <see cref="IRetentionSettingsRepository"/>, reads the
-/// current windows via <see cref="IRetentionSettingsRepository.GetSettingsAsync"/>, then runs
-/// the three <c>Delete*</c> sweeps against them. A scope is required because the repository (and
-/// the provider connection it holds) is registered scoped, whereas a <see cref="BackgroundService"/>
+/// fresh DI scope, resolves the scoped <see cref="IRetentionSettingsRepository"/> (control plane) and
+/// <see cref="IRetentionSweeper"/> (telemetry database), reads the current windows via
+/// <see cref="IRetentionSettingsRepository.GetSettingsAsync"/>, then runs the three <c>Delete*</c>
+/// sweeps against them. A scope is required because the repositories (and the provider
+/// connections they hold) are registered scoped, whereas a <see cref="BackgroundService"/>
 /// is a singleton — structurally a copy of <c>AlertEvaluationWorker</c>.
 /// </summary>
 public sealed class RetentionWorker(
@@ -39,14 +40,15 @@ public sealed class RetentionWorker(
             {
                 var sweepTimer = Stopwatch.StartNew();
                 await using var scope = scopeFactory.CreateAsyncScope();
-                var repository = scope.ServiceProvider.GetRequiredService<IRetentionSettingsRepository>();
-                var settings = await repository.GetSettingsAsync(stoppingToken);
+                var settingsRepository = scope.ServiceProvider.GetRequiredService<IRetentionSettingsRepository>();
+                var sweeper = scope.ServiceProvider.GetRequiredService<IRetentionSweeper>();
+                var settings = await settingsRepository.GetSettingsAsync(stoppingToken);
 
-                var tracesRemoved = await repository.DeleteOldTracesAsync(
+                var tracesRemoved = await sweeper.DeleteOldTracesAsync(
                     TimeSpan.FromDays(settings.TraceRetentionDays), stoppingToken);
-                var metricsRemoved = await repository.DeleteOldMetricDataPointsAsync(
+                var metricsRemoved = await sweeper.DeleteOldMetricDataPointsAsync(
                     TimeSpan.FromDays(settings.MetricRetentionDays), stoppingToken);
-                var logsRemoved = await repository.DeleteOldLogRecordsAsync(
+                var logsRemoved = await sweeper.DeleteOldLogRecordsAsync(
                     TimeSpan.FromDays(settings.LogRetentionDays), stoppingToken);
 
                 logger.LogInformation(

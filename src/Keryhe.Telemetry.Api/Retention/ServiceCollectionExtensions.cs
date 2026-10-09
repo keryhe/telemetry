@@ -8,9 +8,9 @@ namespace Microsoft.Extensions.DependencyInjection;
 /// Registration for the retention subsystem. <see cref="AddRetention"/> wires up the periodic
 /// <see cref="RetentionWorker"/> hosted service. Mirrors <c>AddAlerting</c>.
 ///
-/// The caller must have already registered the active provider's
-/// <c>IRetentionSettingsRepository</c> — in the API host this comes from
-/// <c>AddKeryheTelemetryApi</c>.
+/// The caller must have already registered the telemetry provider's <c>IRetentionSweeper</c> (from
+/// its <c>Add&lt;Provider&gt;ApiServices</c>) and the control plane's <c>IRetentionSettingsRepository</c>
+/// (from its <c>Add&lt;Provider&gt;ControlPlaneApiServices</c>).
 /// </summary>
 public static class RetentionServiceCollectionExtensions
 {

@@ -8,44 +8,63 @@ alerting and retention subsystems. See the [README](../README.md) for a quick st
 
 - [.NET 10 SDK](https://dotnet.microsoft.com/download)
 - [Node.js](https://nodejs.org/) (for the Angular client dev server; a publish of the API host also builds the UI with it)
-- One of the supported database backends:
-  - PostgreSQL 14+ (plain or with the TimescaleDB extension)
+- A database for the telemetry data, and one for the control plane (tenants, API keys, alert rules, retention settings). Supported backends:
+  - PostgreSQL 14+
   - SQL Server 2022
   - MySQL 8.0.19+ (MariaDB is not supported)
-  - ClickHouse 23.3+
+  - ClickHouse 25.8 (fresh install; no migration from an earlier layout)
 - Docker, only to run the integration and stress tests or the Docker recipes below
 
-## 1. Create the database and apply the schema
+## 1. Create the database(s) and apply the schemas
 
-Choose the schema file that matches your database provider:
+The schema has two components, each with its own script per provider and its own version table:
+
+- **Control plane** (`tenants`, `api_keys`, `alert_rules`, `alert_events`, `retention_settings`): PostgreSQL, SQL Server or
+  MySQL only. Apply `schema/<Provider>-ControlPlane.sql`.
+- **Telemetry data** (resources, spans, logs, metrics, rollups): PostgreSQL, SQL Server, MySQL or ClickHouse. Apply
+  `schema/<Provider>-Telemetry.sql`.
+
+No foreign key crosses the two, so either may be applied first; apply the control plane first, since a running
+collector needs keys before it accepts data.
+
+On PostgreSQL, SQL Server and MySQL both go to the **same database**:
 
 ```bash
 createdb telemetry
 
-# Plain PostgreSQL
-psql -d telemetry -f schema/PostgreSQL-Schema.sql
-
-# PostgreSQL + TimescaleDB (TimescaleDB extension must be installed first)
-psql -d telemetry -f schema/Timescale-Schema.sql
+# PostgreSQL
+psql -d telemetry -f schema/PostgreSQL-ControlPlane.sql
+psql -d telemetry -f schema/PostgreSQL-Telemetry.sql
 
 # SQL Server
-sqlcmd -d telemetry -i schema/SqlServer-Schema.sql
+sqlcmd -d telemetry -i schema/SqlServer-ControlPlane.sql
+sqlcmd -d telemetry -i schema/SqlServer-Telemetry.sql
 
 # MySQL
-mysql telemetry < schema/MySQL-Schema.sql
-
-# ClickHouse (creates the database first if needed)
-clickhouse-client --database telemetry --multiquery < schema/ClickHouse-Schema.sql
+mysql telemetry < schema/MySQL-ControlPlane.sql
+mysql telemetry < schema/MySQL-Telemetry.sql
 ```
 
-Or use the runner script (skips if the target `schema_version`, currently 3.1.0, is already recorded):
+**ClickHouse** holds telemetry only. Apply its script to ClickHouse and the control plane to a separate PostgreSQL,
+SQL Server or MySQL database (a small one: it holds a handful of rows):
 
 ```bash
-schema/apply-schema.sh <postgresql|timescale|sqlserver|mysql|clickhouse> [database]
+clickhouse-client --database telemetry --multiquery < schema/ClickHouse-Telemetry.sql
+createdb keryhe_control
+psql -d keryhe_control -f schema/PostgreSQL-ControlPlane.sql
 ```
 
-> **Schema 3.x is a fresh-install schema.** There is no migration from 2.x: an existing 2.x database must be
-> recreated. Within 3.x, `CLAUDE.md` lists the one-statement upgrades (3.0.0 to 3.0.1 to 3.1.0).
+Or use the runner script, which skips a component whose target version (`control_plane_schema_version` /
+`telemetry_schema_version`, both currently 4.0.0) is already recorded:
+
+```bash
+schema/apply-schema.sh <controlplane|telemetry> <postgresql|sqlserver|mysql|clickhouse> [database]
+# controlplane: postgresql | sqlserver | mysql        telemetry: postgresql | sqlserver | mysql | clickhouse
+```
+
+> **Schema 4.x is a fresh-install schema.** There is no migration from 2.x or 3.x: an existing database must be
+> recreated, and existing tenants and API keys re-created with the Admin tool. After 4.0.0 the two components are
+> versioned independently, and a change bumps only its own component's third digit.
 
 ## 2. Configure connection strings
 
@@ -53,10 +72,14 @@ Update `src/Keryhe.Telemetry.Collector.Server/appsettings.json` (gRPC ingestion 
 ```json
 {
   "Database": {
-    "Provider": "Timescale"
+    "Provider": "PostgreSQL"
+  },
+  "ControlPlane": {
+    "Provider": "PostgreSQL"
   },
   "ConnectionStrings": {
-    "Collector": "Host=localhost;Port=5432;Database=telemetry;Username=postgres;Password=<password>"
+    "Collector": "Host=localhost;Port=5432;Database=telemetry;Username=postgres;Password=<password>",
+    "ControlPlane": "Host=localhost;Port=5432;Database=telemetry;Username=postgres;Password=<password>"
   }
 }
 ```
@@ -65,15 +88,24 @@ Update `src/Keryhe.Telemetry.Api.Server/appsettings.json` (REST API / read path)
 ```json
 {
   "Database": {
-    "Provider": "Timescale"
+    "Provider": "PostgreSQL"
+  },
+  "ControlPlane": {
+    "Provider": "PostgreSQL"
   },
   "ConnectionStrings": {
-    "Api": "Host=localhost;Port=5432;Database=telemetry;Username=postgres;Password=<password>"
+    "Api": "Host=localhost;Port=5432;Database=telemetry;Username=postgres;Password=<password>",
+    "ControlPlane": "Host=localhost;Port=5432;Database=telemetry;Username=postgres;Password=<password>"
   }
 }
 ```
 
-Set `Database:Provider` to `PostgreSQL`, `Timescale`, `SqlServer`, `MySql`, or `ClickHouse` to match your chosen backend (both hosts must agree). For SQL Server use a standard ADO.NET connection string. For MySQL use a MySqlConnector connection string, e.g. `Server=localhost;Port=3306;Database=telemetry;User ID=root;Password=<password>`. For ClickHouse use a ClickHouse.Client connection string over the HTTP interface (port 8123), e.g. `Host=localhost;Port=8123;Username=default;Password=<password>;Database=telemetry`.
+Set `Database:Provider` to `PostgreSQL`, `SqlServer`, `MySql`, or `ClickHouse` to match your telemetry backend, and
+`ControlPlane:Provider` to `PostgreSQL`, `SqlServer`, or `MySql` for the control plane (both hosts must agree on both). Both
+keys and `ConnectionStrings:ControlPlane` are **required**: a missing or unknown value fails startup with the key
+named, and there is no fallback from `ControlPlane` to `Collector`/`Api`. On the relational backends the control-plane
+string normally points at the same database as the data strings; with ClickHouse it points at the separate control-plane
+database. For SQL Server use a standard ADO.NET connection string. For MySQL use a MySqlConnector connection string, e.g. `Server=localhost;Port=3306;Database=telemetry;User ID=root;Password=<password>`. For ClickHouse use a ClickHouse.Client connection string over the HTTP interface (port 8123), e.g. `Host=localhost;Port=8123;Username=default;Password=<password>;Database=telemetry`.
 
 > **During development, connection strings should live in User Secrets, not `appsettings.json`.** Both hosts ship with an
 > empty `ConnectionStrings` value and read the real value from .NET User Secrets so credentials
@@ -81,19 +113,23 @@ Set `Database:Provider` to `PostgreSQL`, `Timescale`, `SqlServer`, `MySql`, or `
 > ```bash
 > dotnet user-secrets --project src/Keryhe.Telemetry.Api.Server \
 >   set "ConnectionStrings:Api"  "Host=localhost;Port=5432;Database=telemetry;Username=postgres;Password=<password>"
+> dotnet user-secrets --project src/Keryhe.Telemetry.Api.Server \
+>   set "ConnectionStrings:ControlPlane"  "Host=localhost;Port=5432;Database=telemetry;Username=postgres;Password=<password>"
 > dotnet user-secrets --project src/Keryhe.Telemetry.Collector.Server \
 >   set "ConnectionStrings:Collector" "Host=localhost;Port=5432;Database=telemetry;Username=postgres;Password=<password>"
+> dotnet user-secrets --project src/Keryhe.Telemetry.Collector.Server \
+>   set "ConnectionStrings:ControlPlane" "Host=localhost;Port=5432;Database=telemetry;Username=postgres;Password=<password>"
 > ```
-> A local TimescaleDB is easy to run via Docker:
+> A local PostgreSQL is easy to run via Docker:
 > ```bash
-> docker run -d --name timescaledb -p 5432:5432 \
->   -e POSTGRES_PASSWORD=<password> -e POSTGRES_DB=telemetry timescale/timescaledb-ha:pg18
+> docker run -d --name postgres -p 5432:5432 \
+>   -e POSTGRES_PASSWORD=<password> -e POSTGRES_DB=telemetry postgres:16-alpine
 > ```
-> Or ClickHouse (the stock image's `default` user is localhost-only, so create a
-> network-accessible user for the app):
+> Or ClickHouse for the telemetry data, with the PostgreSQL above (in its own database) as the control plane (the stock
+> image's `default` user is localhost-only, so create a network-accessible user for the app):
 > ```bash
 > docker run -d --name clickhouse -p 8123:8123 -p 9000:9000 \
->   -e CLICKHOUSE_DB=telemetry clickhouse/clickhouse-server
+>   -e CLICKHOUSE_DB=telemetry clickhouse/clickhouse-server:25.8
 > docker exec clickhouse clickhouse-client -q \
 >   "CREATE USER keryhe IDENTIFIED WITH plaintext_password BY '<password>' HOST ANY; \
 >    GRANT ALL ON telemetry.* TO keryhe;"
@@ -102,10 +138,10 @@ Set `Database:Provider` to `PostgreSQL`, `Timescale`, `SqlServer`, `MySql`, or `
 ## 3. Create a tenant and an API key
 
 Ingestion is multi-tenant: the collector resolves the tenant by hashing the
-`Authorization: Bearer <key>` header against the `api_keys` table, so every OTLP sender
+`Authorization: Bearer <key>` header against the control plane's `api_keys` table, so every OTLP sender
 needs a valid key. **No tenant or key is seeded**; create them before sending data.
 
-### With the Admin tool (PostgreSQL, Timescale, SQL Server)
+### With the Admin tool (PostgreSQL, SQL Server, MySQL)
 
 ```bash
 dotnet user-secrets --project src/Keryhe.Telemetry.Admin \
@@ -113,24 +149,18 @@ dotnet user-secrets --project src/Keryhe.Telemetry.Admin \
 dotnet run --project src/Keryhe.Telemetry.Admin
 ```
 
-Its `appsettings.json` carries `Database:Provider` (set it to your provider). The menus create a tenant, create
-an API key (optionally expiring in 30, 90 or 365 days or on a date, UTC), list keys, activate/deactivate and delete
-them. The plaintext key (`ktel_` plus 43 characters) is shown once; only its SHA-256 hash is stored. MySQL and
-ClickHouse are not supported by the tool; use SQL as below.
+The tool talks to the **control plane** only, so `ConnectionStrings:Admin` is the control-plane database (also for a
+ClickHouse deployment). Its `appsettings.json` carries `ControlPlane:Provider` (set it to `PostgreSQL`, `SqlServer` or
+`MySql`). The menus create a tenant, create an API key (optionally expiring in 30, 90 or 365 days or on a date, UTC),
+list keys, activate/deactivate and delete them. The plaintext key (`ktel_` plus 43 characters) is shown once; only its
+SHA-256 hash is stored.
 
-### With SQL (any provider)
+### With SQL (any control-plane provider)
 
-Create a tenant. On the relational schemas (PostgreSQL, TimescaleDB, SQL Server, MySQL) the `id` is
-auto-generated:
+Run these against the control-plane database. Create a tenant (the `id` is auto-generated):
 
 ```sql
 INSERT INTO tenants (name) VALUES ('default');
-```
-
-ClickHouse has no auto-increment, so supply an explicit `id`:
-
-```sql
-INSERT INTO tenants (id, name) VALUES (1, 'default');
 ```
 
 Generate a random key and its SHA-256 hash with the helper script in `scripts/`:
@@ -152,9 +182,8 @@ INSERT INTO api_keys (tenant_id, key_hash, name, is_active)
 VALUES (<tenant_id>, '<key_hash>', '<key_name>', TRUE);
 ```
 
-ClickHouse's `api_keys` also needs an explicit `id`. To revoke a key set `is_active` to false (on ClickHouse,
-`ALTER TABLE api_keys UPDATE is_active = 0 WHERE ... SETTINGS mutations_sync = 1`); a running collector honors it
-within 30 seconds (`Telemetry:TenantResolution:PositiveCacheTtlSeconds`).
+To revoke a key set `is_active` to false; a running collector honors it within 30 seconds
+(`Telemetry:TenantResolution:PositiveCacheTtlSeconds`).
 
 ### Sending data
 
@@ -220,7 +249,11 @@ See [CONFIGURATION.md](CONFIGURATION.md#test-data-generator-generator) for every
 The collector and the API are separate hosts, on a single node or many: `Keryhe.Telemetry.Collector.Server`
 (gRPC OTLP ingestion) and `Keryhe.Telemetry.Api.Server` (REST API, the compiled Angular UI, alerting and
 retention). They share only the database, and each reads its own connection string
-(`ConnectionStrings:Collector`, `ConnectionStrings:Api`), so they can point at different endpoints.
+(`ConnectionStrings:Collector`, `ConnectionStrings:Api`), so they can point at different endpoints; both also read
+`ConnectionStrings:ControlPlane`. The collector's key lookup depends on the control-plane database: its cache (30 s
+positive, 5 s negative) and the retryable `UNAVAILABLE` it returns when a lookup fails cover a brief outage, but one
+longer than the positive TTL stops ingestion for keys that are not cached. Keep the control plane highly available
+when it is separate from the telemetry database.
 
 ```bash
 dotnet publish src/Keryhe.Telemetry.Collector.Server -c Release -o ./publish-collector
@@ -281,7 +314,7 @@ when unauthenticated and 403 for a refused tenant or operation. See
 
 ## Database Schema
 
-### Key Tables
+### Telemetry tables
 
 - `resources` — Entities producing telemetry (services, hosts, etc.)
 - `instrumentation_scopes` — Library/instrumentation information
@@ -290,28 +323,33 @@ when unauthenticated and 403 for a refused tenant or operation. See
 - `metric_last_seen` — Newest data point per metric, so the metrics catalog can tell which metrics have data in a range
 - `gauge_data_points`, `sum_data_points`, `histogram_data_points`, `exponential_histogram_data_points`, `summary_data_points` — Type-specific metric data, each carrying its own exemplars (with trace correlation) in an `exemplars_json` column
 - `log_records` — Log entries with severity and trace correlation
+- `request_rollup_minute`, `log_rollup_minute` — Per-minute rollups of inbound spans and log records that the dashboard, trace list and logs page read for their cards and charts (rows are partial and summed on read; forward-only, so ranges before an upgrade show empty charts)
+- `telemetry_schema_version` — Applied telemetry schema versions
+- MySQL only: `request_rollup_hour`, `log_rollup_hour` and `rollup_compaction` — the hour tier of those rollups
+- ClickHouse has its own table set (see below): `spans`, `log_records`, one points table per metric type, `trace_index`, `metric_catalog`, `metric_series` and the two rollup tables; it has no `resources`, `instrumentation_scopes`, `metrics` or `metric_last_seen`
+
+### Control-plane tables
+
+Relational only (PostgreSQL, SQL Server, MySQL), in their own script and version table:
+
 - `tenants` — Tenant registry (none is seeded; see step 3)
 - `api_keys` — Hashed API keys scoped to a tenant, with an optional `expires_at`, used for ingestion auth
 - `alert_rules` — Alert rule definitions (type, condition JSON, webhook URL, cooldown)
 - `alert_events` — Audit log of all fired alert events
 - `retention_settings` — The single row holding the retention windows (traces 90 days, logs 90, metrics 180 by default)
-- `schema_version` — Applied schema versions
-- `request_rollup_minute`, `log_rollup_minute` — Per-minute rollups of inbound spans and log records that the dashboard, trace list and logs page read for their cards and charts (rows are partial and summed on read; forward-only, so ranges before an upgrade show empty charts)
-- MySQL only: `request_rollup_hour`, `log_rollup_hour` and `rollup_compaction` — the hour tier of those rollups
-- ClickHouse only: `trace_index` (per-trace time bounds used to locate a trace) and the materialized views feeding it, `metric_last_seen` and the two rollup tables
+- `control_plane_schema_version` — Applied control-plane schema versions
+
+No foreign key crosses the boundary (`resources.tenant_id` is a plain column), so the two may share a database or live in
+two. The retention sweep takes its tenants from `resources`, so data whose tenant has been removed from the control plane
+still expires.
 
 Spans, log records and data points are plain appends with no unique key and no foreign keys, so a re-delivered
 batch is stored again and reads tolerate it. The trace and log lists are computed from the raw rows; the cards and
 charts above them come from the rollups, which count **requests** (inbound server and consumer spans), not traces.
 
-When using the TimescaleDB provider, `spans`, `log_records` and the five data-point tables are hypertables
-(6 hour chunks for spans and logs, 12-24 hours for data points). Compression activates at 7 days, and retention
-drops whole chunks (`drop_chunks`), so a row survives until its entire chunk is older than the cutoff. There are no
-continuous aggregates.
-
 When using the MySQL provider (MySQL 8.0.19+), the schema mirrors the SQL Server relational layout with MySQL-native types (`AUTO_INCREMENT` surrogate keys, `JSON` columns for attributes, `DATETIME(6)` timestamps). Hash-based deduplication of resources/scopes uses `INSERT ... ON DUPLICATE KEY UPDATE`, and writes are batched as multi-row inserts.
 
-When using the ClickHouse provider, tables use the `MergeTree` family with day partitioning. Because ClickHouse has no auto-increment or `RETURNING`, surrogate `id` values are generated by the application. Resources, scopes, metrics and the control-plane tables are `ReplacingMergeTree`, so their dedup is *eventual* (a merge, or `OPTIMIZE ... FINAL`, resolves duplicates); spans and logs are plain appends. Retention drops fully expired day partitions. Control-plane operations are best-effort: alert-rule edits use `ALTER TABLE ... UPDATE` mutations and the cooldown fire-claim is not atomic. See `../CLAUDE.md` for the full list of ClickHouse-specific behaviors.
+When using the ClickHouse provider (25.8), each row carries its own resource and scope attributes, so there are no reference tables and no surrogate ids. Tables are plain `MergeTree` (the derived `trace_index` and rollups are `AggregatingMergeTree`) partitioned by day; attributes are `Map(LowCardinality(String), String)` (values are text, the original type is not kept); trace ids are `UUID` and span ids `UInt64`. The collector writes the derived tables itself after the raw insert, so a failed derived insert under-counts the cards, charts and metric catalog (`derived_rows_dropped`). Retention drops fully expired day partitions. ClickHouse has no control plane of its own (tenants, keys, alert rules and retention settings live in the PostgreSQL, SQL Server or MySQL database named by `ControlPlane:Provider`), so alert-rule edits and the cooldown fire-claim are as atomic as on those. See the ClickHouse package README and `../CLAUDE.md` for the full list of ClickHouse-specific behaviors.
 
 Free-text and `key:value` search is unindexed on every provider, so a search or "slow" request is limited to
 `Telemetry:Query:RawSearchWindowHours` (default 24); exports are limited to a provider-dependent window
@@ -351,16 +389,16 @@ automatic evaluation.
 
 `RetentionWorker` in `Keryhe.Telemetry.Api.Server` sweeps old telemetry every `Telemetry:Retention:IntervalSeconds`
 (default 3600; `Enabled=false` stops it). How many days to keep is not configuration: it is the
-`retention_settings` row, edited on the **Settings** page in the UI. The mechanism depends on the provider:
-bounded-batch deletes per tenant (PostgreSQL, SQL Server, MySQL), `drop_chunks` (Timescale) or dropping whole day
-partitions (ClickHouse). Each sweep logs "Retention sweep complete" with the rows removed and how long it took.
+control plane's `retention_settings` row, edited on the **Settings** page in the UI. The sweep runs against the telemetry
+database, and the mechanism depends on its provider: bounded-batch deletes per tenant (PostgreSQL, SQL Server, MySQL; the
+tenants are those with rows in `resources`) or dropping whole day partitions (ClickHouse). Each sweep logs "Retention sweep complete" with the rows removed and how long it took.
 
 ## Testing
 
 ```bash
 # Every provider against real Testcontainers databases (requires Docker)
 dotnet test tests/Keryhe.Telemetry.IntegrationTests
-# One provider: PostgreSQL | Timescale | SqlServer | MySql | ClickHouse
+# One provider: PostgreSQL | SqlServer | MySql | ClickHouse (ClickHouse also starts a PostgreSQL container for its control plane)
 dotnet test tests/Keryhe.Telemetry.IntegrationTests --filter Provider=SqlServer
 
 # Test data generator simulation tests (no database or Docker)

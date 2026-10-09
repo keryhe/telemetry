@@ -15,10 +15,12 @@ to both.
 
 | Key | Default | Host | Description |
 |---|---|---|---|
-| `Database:Provider` | none (required) | collector, API, Admin | `PostgreSQL`, `Timescale`, `SqlServer`, `ClickHouse` or `MySql`. Unknown or missing fails startup. |
-| `ConnectionStrings:Collector` | none (required) | collector | Write path: bulk writer, tenant resolution, API-key and metric touch workers. |
-| `ConnectionStrings:Api` | none (required) | API | Read path: every read repository, alert rules, retention settings. |
-| `ConnectionStrings:Admin` | none (required) | Admin tool | `Keryhe.Telemetry.Admin`'s connection. |
+| `Database:Provider` | none (required) | collector, API | The telemetry data provider: `PostgreSQL`, `SqlServer`, `ClickHouse` or `MySql`. Unknown or missing fails startup. |
+| `ControlPlane:Provider` | none (required) | collector, API, Admin | The control-plane provider (tenants, API keys, alert rules, retention settings): `PostgreSQL`, `SqlServer` or `MySql`. ClickHouse is not a control-plane provider. Unknown or missing fails startup naming the key. |
+| `ConnectionStrings:Collector` | none (required) | collector | Write path: the telemetry bulk writer, metric-touch and rollup stores. |
+| `ConnectionStrings:Api` | none (required) | API | Read path: every telemetry read repository and the retention sweeper. |
+| `ConnectionStrings:ControlPlane` | none (required) | collector, API | The control-plane database: the collector's API-key lookup and touch, the API's alert rules, tenant catalog and retention settings. No fallback to `Collector`/`Api`; missing fails startup naming the key. On PostgreSQL, SQL Server and MySQL it normally points at the same database as the data strings. |
+| `ConnectionStrings:Admin` | none (required) | Admin tool | `Keryhe.Telemetry.Admin`'s connection (the control-plane database). |
 
 The committed `appsettings.json` files leave the connection strings empty; local values live in User Secrets.
 
@@ -32,8 +34,8 @@ The committed `appsettings.json` files leave the connection strings empty; local
 
 ## Collector
 
-Host: `Keryhe.Telemetry.Collector.Server` (gRPC OTLP ingestion, the write path). Uses `Database:Provider` and
-`ConnectionStrings:Collector` above.
+Host: `Keryhe.Telemetry.Collector.Server` (gRPC OTLP ingestion, the write path). Uses `Database:Provider`,
+`ControlPlane:Provider`, `ConnectionStrings:Collector` and `ConnectionStrings:ControlPlane` above.
 
 ```json
 {
@@ -131,6 +133,33 @@ Don't use `ASPNETCORE_URLS` or `ASPNETCORE_HTTP_PORTS`/`HTTPS_PORTS` for the col
 | `RetryBaseDelayMilliseconds` | 200 | First retry delay; doubles each attempt, with jitter. |
 | `RetryMaxDelayMilliseconds` | 5000 | Cap on the retry delay. |
 
+On ClickHouse the `MaxQueued*` gates and the retry keys apply, but `MaxLogFlushBatchSize`, `MaxMetricFlushBatchSize`,
+`MaxTraceFlushSpanBatchSize`, `FlushConcurrency` and `FlushLingerMilliseconds` do not: see the next section.
+
+### ClickHouse ingestion (`Telemetry:ClickHouse:Ingestion`)
+
+`ClickHouseIngestionOptions`, read by the collector when `Database:Provider` is `ClickHouse`. Records are sorted into
+per-day buffers (by the UTC day of their time) and flushed as one insert per day per table.
+
+| Key | Default | Description |
+|---|---|---|
+| `LingerMilliseconds` | 2500 | How long the current day's buffer collects records after its first before flushing. |
+| `LateLingerMilliseconds` | 30000 | The same for an earlier day's buffer (late data). |
+| `MaxSpanBatchRecords` | 300000 | A buffer flushes at once when it holds this many spans; a larger one is cut into pieces. |
+| `MaxLogBatchRecords` | 300000 | The same, for log records. |
+| `MaxMetricBatchRecords` | 300000 | The same, for metrics (counted as metrics, not data points). |
+| `MaxLateDayBuffers` | 8 | With more late-day buffers than this, the oldest flushes early. |
+| `CatalogRefreshSeconds` | 300 | A metric or series that keeps reporting has its `metric_catalog`/`metric_series` row re-written at most this often (and once when first seen). |
+| `MaxTrackedSeries` | 1000000 | Series and metrics remembered between flushes; past it the collector forgets and simply re-writes. |
+| `ParallelFlushMinRows` | 50000 | A raw-table insert of at least this many rows is split into concurrent inserts, and spans, logs and metrics (by data points) are built into rows on several threads; a smaller batch is one insert, as before. Set it very high to turn splitting off. |
+| `InsertPieceRows` | 25000 | The fewest rows in a piece of a split insert. |
+| `MaxParallelInserts` | 4 | The most concurrent inserts per table for one split batch, and the most row-building threads. |
+| `RetentionRefreshSeconds` | 300 | How often the retention windows are re-read from the control plane. Records older than their window are dropped at ingest (`records_dropped`, `reason=out_of_retention`); if the windows cannot be read, nothing is dropped. |
+
+All values must be greater than 0. Extra instrument: `late_buffer_records` (records waiting in non-current day buffers).
+`derived_rows_dropped` (tag `table`) counts `trace_index`, rollup and catalog rows lost because their insert failed after the raw rows were stored.
+`records_dropped` carries a `reason` tag on ClickHouse (`retries_exhausted`, `out_of_retention`, `shutdown`).
+
 ### Tenant resolution (`Telemetry:TenantResolution`)
 
 `TenantResolutionOptions`.
@@ -143,8 +172,8 @@ Don't use `ASPNETCORE_URLS` or `ASPNETCORE_HTTP_PORTS`/`HTTPS_PORTS` for the col
 
 ### Metric touch (`Telemetry:MetricTouch`)
 
-`MetricTouchOptions`. Writes `metric_last_seen` on the relational providers (a no-op on
-ClickHouse, where materialized views do it).
+`MetricTouchOptions`. Writes `metric_last_seen` on the relational providers (ClickHouse has no such table: its metric
+catalog is written by the collector, see the ClickHouse ingestion section).
 
 | Key | Default | Description |
 |---|---|---|
@@ -156,7 +185,7 @@ ClickHouse, where materialized views do it).
 `RollupOptions`. The collector keeps a per-minute rollup of inbound spans and log records
 (`request_rollup_minute`, `log_rollup_minute`) that the dashboard, trace list, logs page and the error-rate and
 log-spike alerts read. On the relational providers an in-memory accumulator is appended to the database once a minute
-has closed (ClickHouse maintains the same tables with materialized views and ignores these keys). **The API host reads
+has closed (ClickHouse writes the same tables from the ingestion worker, with no materialized views, and ignores these keys). **The API host reads
 `FlushIntervalSeconds`, `CloseGraceSeconds` and `ArrivalMarginSeconds` from the same section, so a host that changes
 the first two on the collector must change them on the API too.**
 
@@ -172,14 +201,14 @@ the first two on the collector must change them on the API too.**
 
 ## API
 
-Host: `Keryhe.Telemetry.Api.Server` (REST API, background workers and the UI). Uses `Database:Provider` and
-`ConnectionStrings:Api` above.
+Host: `Keryhe.Telemetry.Api.Server` (REST API, background workers and the UI). Uses `Database:Provider`,
+`ControlPlane:Provider`, `ConnectionStrings:Api` and `ConnectionStrings:ControlPlane` above.
 
 ```json
 {
   "Telemetry": {
     "Api": { "BasePath": "/api" },
-    "Query": { "SummaryTimeoutSeconds": 5 },
+    "Query": { "SummaryTimeoutSeconds": 5, "Limits": { "Logs": 1000, "Traces": 500 } },
     "Export": { "MaxConcurrent": 2 },
     "AlertEvaluation": { "Enabled": true, "IntervalSeconds": 60 },
     "Retention": { "Enabled": true, "IntervalSeconds": 3600 }
@@ -211,8 +240,22 @@ API host. `QueryOptions`.
 | `AnchorLookbackMinutes` | 5 | How far before a trace-list window the anchor derivation looks, so a trace that began just before the window is not listed on a later span. |
 | `PageSliceSeconds` | 2 | First slice of trace start times a trace-list page scans (relational providers). |
 | `PageSliceGrowth` | 4 | Factor each further slice widens by (minimum 2). |
-| `TraceHintMarginMinutes` | 1 | Margin either side of a trace-detail `?start=&end=` hint (Timescale, ClickHouse). |
+| `TraceHintMarginMinutes` | 1 | Margin either side of a trace-detail `?start=&end=` hint (ClickHouse). |
 | `TraceHintEnabled` | true | `false` ignores every trace-detail time hint. |
+
+### List caps (`Telemetry:Query:Limits`)
+
+API host. `QueryLimitsOptions`. The most rows each list returns; a request's `limit` may ask for fewer, never more. A list that
+matched more says `truncated` and the UI suggests narrowing the time range or adding filters. Each must be a positive integer, or
+the host fails at startup naming the key. `GET {base}/capabilities` reports them as `logListLimit`, `traceListLimit`,
+`metricCatalogLimit` and `exemplarLimit`. Export is not capped.
+
+| Key | Default | Description |
+|---|---|---|
+| `Logs` | 1000 | `GET .../logs/list` |
+| `Traces` | 500 | `GET .../traces/list` |
+| `MetricCatalog` | 500 | `GET .../metrics/catalog`, in either grouping |
+| `Exemplars` | 500 | `GET .../metrics/exemplars` |
 
 ### Export (`Telemetry:Export`)
 
@@ -220,7 +263,7 @@ API host. `ExportOptions`.
 
 | Key | Default | Description |
 |---|---|---|
-| `MaxWindowDaysOverride` | unset (7 on PostgreSQL/Timescale/ClickHouse, 1 on SQL Server/MySQL) | Widest window an export may cover; wider is a `400`. |
+| `MaxWindowDaysOverride` | unset (7 on PostgreSQL/ClickHouse, 1 on SQL Server/MySQL) | Widest window an export may cover; wider is a `400`. |
 | `MaxConcurrent` | 2 | Exports streaming at once per API instance; beyond it a request gets `429`. |
 
 ### Alert evaluation (`Telemetry:AlertEvaluation`)

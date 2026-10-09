@@ -99,10 +99,17 @@ public sealed class IngestionMetrics : IDisposable
     /// measures that signal in -- log/metric records for "logs"/"metrics", SPANS (not traces)
     /// for "traces".
     /// </param>
-    public void RecordDropped(string signal, int count)
+    /// <param name="reason">
+    /// Optional <c>reason</c> tag (the ClickHouse worker sets <c>retries_exhausted</c>, <c>out_of_retention</c> or
+    /// <c>shutdown</c>); untagged when null, as the shared worker records it.
+    /// </param>
+    public void RecordDropped(string signal, int count, string? reason = null)
     {
         if (count <= 0) return;
-        _recordsDropped.Add(count, new KeyValuePair<string, object?>("signal", signal));
+        if (reason is null)
+            _recordsDropped.Add(count, new KeyValuePair<string, object?>("signal", signal));
+        else
+            _recordsDropped.Add(count, new KeyValuePair<string, object?>("signal", signal), new KeyValuePair<string, object?>("reason", reason));
     }
 
     public void RecordGateWait(string signal, double milliseconds) =>
@@ -166,6 +173,40 @@ public sealed class IngestionMetrics : IDisposable
     {
         foreach (var (signal, read) in _residentRecords)
             yield return new Measurement<long>(read(), new KeyValuePair<string, object?>("signal", signal));
+    }
+
+    // signal -> reader of the records waiting in non-current day buffers; see RegisterLateBufferRecords.
+    private readonly ConcurrentDictionary<string, Func<int>> _lateBufferRecords = new();
+    private int _lateGaugeCreated;
+
+    /// <summary>
+    /// Registers how to read a signal's count of records waiting in non-current day buffers, for the
+    /// <c>late_buffer_records</c> gauge (the ClickHouse worker only; the instrument is created on first use).
+    /// </summary>
+    public void RegisterLateBufferRecords(string signal, Func<int> read)
+    {
+        _lateBufferRecords[signal] = read;
+        if (Interlocked.Exchange(ref _lateGaugeCreated, 1) == 0)
+            _meter.CreateObservableGauge(
+                "keryhe.telemetry.ingestion.late_buffer_records",
+                () => _lateBufferRecords.Select(kv => new Measurement<long>(kv.Value(), new KeyValuePair<string, object?>("signal", kv.Key))).ToList(),
+                unit: "{record}",
+                description: "Records waiting in non-current day buffers (late data), tagged by signal.");
+    }
+
+    private Counter<long>? _derivedRowsDropped;
+
+    /// <summary>
+    /// Derived rows (ClickHouse's <c>trace_index</c>, rollups, catalog) lost because their insert still failed after
+    /// the raw rows were stored, tagged by <c>table</c>. Created on first use.
+    /// </summary>
+    public void RecordDerivedRowsDropped(string table, int count)
+    {
+        if (count <= 0) return;
+        (_derivedRowsDropped ??= _meter.CreateCounter<long>(
+            "keryhe.telemetry.ingestion.derived_rows_dropped",
+            unit: "{row}",
+            description: "Derived rows lost after a failed derived insert, tagged by table.")).Add(count, new KeyValuePair<string, object?>("table", table));
     }
 
     public void Dispose() => _meter.Dispose();

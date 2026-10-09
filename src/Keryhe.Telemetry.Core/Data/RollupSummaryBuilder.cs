@@ -186,9 +186,9 @@ public static class RollupSummaryBuilder
     }
 
     /// <summary>
-    /// The six severity groups of <c>LogSeverityGroupSql</c> (0 trace, 1 debug, 2 info, 3 warn, 4 error, 5 fatal),
-    /// with the rollup's -1 for "no severity" counted as Info first: today's grouping counts NULL as Info while
-    /// its Trace group is <c>&lt;= 4</c>, which -1 would otherwise fall into.
+    /// The six severity groups (0 trace, 1 debug, 2 info, 3 warn, 4 error, 5 fatal), with the rollup's -1 for
+    /// "no severity" counted as Info first: no severity is Info, while the Trace group is <c>&lt;= 4</c>, which -1
+    /// would otherwise fall into.
     /// </summary>
     public static int SeverityGroup(int severityNumber) => severityNumber switch
     {

@@ -12,7 +12,7 @@ namespace Keryhe.Telemetry.Core.Data.Read;
 /// <c>resources</c>), joining <c>resources</c> only where its attributes are actually selected
 /// (span detail, resource-attribute search).
 ///
-/// The list page's summary/page/samples/export endpoints share one derived table, the
+/// The list, samples and export endpoints share one derived table, the
 /// <b>anchors</b> (see <see cref="AnchorsSql"/>): one row per trace, being the trace's EARLIEST span
 /// in scope -- the selected service's own earliest span when a service is selected, the whole
 /// trace's otherwise (schema-simplification decision 10). That replaces the 2.x root-plus-orphan
@@ -29,12 +29,6 @@ public abstract class TraceReadRepositoryBase : DapperReadRepository, ITraceRead
     private readonly long _pageSliceNanos = QueryOptions.DefaultPageSliceSeconds * NanosPerSecond;
     private readonly int _pageSliceGrowth = QueryOptions.DefaultPageSliceGrowth;
     private const long NanosPerSecond = 1_000_000_000L;
-
-    /// <summary>How far either side of a trace time hint a hinted trace read looks.</summary>
-    protected long TraceHintMarginNanos { get; } = QueryOptions.DefaultTraceHintMarginMinutes * NanosPerMinute;
-
-    /// <summary>False ignores every trace time hint (<c>Telemetry:Query:TraceHintEnabled</c>): a switch for a deployment where bounding the read does not pay.</summary>
-    private readonly bool _traceHintEnabled = true;
 
     private const long NanosPerMinute = 60_000_000_000L;
 
@@ -56,9 +50,6 @@ public abstract class TraceReadRepositoryBase : DapperReadRepository, ITraceRead
         _pageSliceGrowth = int.TryParse(configuration[$"{QueryOptions.SectionName}:PageSliceGrowth"], out var growth) && growth >= 2
             ? growth
             : QueryOptions.DefaultPageSliceGrowth;
-        _traceHintEnabled = !bool.TryParse(configuration[$"{QueryOptions.SectionName}:TraceHintEnabled"], out var hintEnabled) || hintEnabled;
-        TraceHintMarginNanos = (int.TryParse(configuration[$"{QueryOptions.SectionName}:TraceHintMarginMinutes"], out var margin) && margin >= 0
-            ? margin : QueryOptions.DefaultTraceHintMarginMinutes) * NanosPerMinute;
     }
 
     // =========================================================================
@@ -82,33 +73,6 @@ public abstract class TraceReadRepositoryBase : DapperReadRepository, ITraceRead
         return $"{column} IN ({string.Join(",", names)})";
     }
 
-    /// <summary>
-    /// Optional <c>[min, max]</c> start-time bounds of the given traces, used to narrow a by-trace-id
-    /// read of <c>spans</c>. The relational providers seek <c>(trace_id, span_id)</c> and need none
-    /// (null). ClickHouse, whose <c>spans</c> sort key is <c>(tenant_id, service_name, start_time)</c>
-    /// and has no trace-id seek, overrides it to read <c>trace_index</c>, so a by-trace read touches
-    /// only the partitions and granules that can hold the trace.
-    /// </summary>
-    protected virtual Task<(long Min, long Max)?> ResolveTraceTimeBoundsAsync(
-        System.Data.Common.DbConnection conn, IReadOnlyList<string> traceIds, CancellationToken ct)
-        => Task.FromResult<(long Min, long Max)?>(null);
-
-    /// <summary>
-    /// Start-time bounds for a by-trace read derived from the caller's own hint (the trace's start and end), without asking the
-    /// database (null: this provider does not use a hint). Timescale overrides it so a trace read touches only the chunks around the
-    /// trace instead of probing all of them; ClickHouse so it can skip the <c>trace_index</c> round trip.
-    /// </summary>
-    protected virtual (long Min, long Max)? HintedTraceTimeBounds(long startHintNano, long endHintNano) => null;
-
-    /// <summary>Appends <c>start_time_unix_nano</c> bounds (parameters <c>@boundMin</c>/<c>@boundMax</c>) to a by-trace-id WHERE when the provider supplied them.</summary>
-    private static string BoundsClause(string alias, (long Min, long Max)? bounds, DynamicParameters parameters)
-    {
-        if (bounds is not { } b) return "";
-        parameters.Add("boundMin", b.Min);
-        parameters.Add("boundMax", b.Max);
-        return $" AND {alias}.start_time_unix_nano >= @boundMin AND {alias}.start_time_unix_nano <= @boundMax";
-    }
-
     // =========================================================================
     // FULL SPAN READS (span + resource + scope + events + links)
     // =========================================================================
@@ -122,15 +86,8 @@ public abstract class TraceReadRepositoryBase : DapperReadRepository, ITraceRead
             throw new ArgumentException("Trace ID cannot be null or empty", nameof(traceIdHex));
 
         await using var conn = await OpenConnectionAsync(cancellationToken);
-        var hinted = _traceHintEnabled && hint is { } h
-            ? HintedTraceTimeBounds(TimeConversion.DateTimeToUnixNano(h.Start), TimeConversion.DateTimeToUnixNano(h.End)) : null;
-        var spans = await LoadTraceSpansAsync(conn, traceIdHex,
-            hinted ?? await ResolveTraceTimeBoundsAsync(conn, [traceIdHex], cancellationToken), cancellationToken);
-
-        // A hint that finds nothing (a wrong start, or a trace whose first span is not the one the caller knew about) must not
-        // turn an existing trace into a 404: read it again without the hint's bounds.
-        if (spans.Count == 0 && hinted is not null)
-            spans = await LoadTraceSpansAsync(conn, traceIdHex, await ResolveTraceTimeBoundsAsync(conn, [traceIdHex], cancellationToken), cancellationToken);
+        // The start/end hint is for providers that cannot seek a trace id; this one seeks (trace_id, span_id) and ignores it.
+        var spans = await LoadTraceSpansAsync(conn, traceIdHex, cancellationToken);
 
         // A re-delivered span batch is stored again (no unique key, schema-simplification decision 7);
         // the detail view shows each span once, keeping the first stored copy.
@@ -138,13 +95,13 @@ public abstract class TraceReadRepositoryBase : DapperReadRepository, ITraceRead
     }
 
     private async Task<List<SpanModel>> LoadTraceSpansAsync(
-        System.Data.Common.DbConnection conn, string traceIdHex, (long Min, long Max)? bounds, CancellationToken ct)
+        System.Data.Common.DbConnection conn, string traceIdHex, CancellationToken ct)
     {
         var parameters = new DynamicParameters();
         parameters.Add("tenantId", TenantId);
         parameters.Add("traceId", IdParam(traceIdHex, 32));
         return await LoadFullSpansAsync(conn,
-            "s.trace_id = @traceId" + BoundsClause("s", bounds, parameters), "ORDER BY s.start_time_unix_nano",
+            "s.trace_id = @traceId", "ORDER BY s.start_time_unix_nano",
             parameters, ct);
     }
 
@@ -156,13 +113,12 @@ public abstract class TraceReadRepositoryBase : DapperReadRepository, ITraceRead
             throw new ArgumentException("Span ID cannot be null or empty", nameof(spanIdHex));
 
         await using var conn = await OpenConnectionAsync(cancellationToken);
-        var bounds = await ResolveTraceTimeBoundsAsync(conn, [traceIdHex], cancellationToken);
         var parameters = new DynamicParameters();
         parameters.Add("tenantId", TenantId);
         parameters.Add("traceId", IdParam(traceIdHex, 32));
         parameters.Add("spanId", IdParam(spanIdHex, 16));
         var spans = await LoadFullSpansAsync(conn,
-            "s.trace_id = @traceId AND s.span_id = @spanId" + BoundsClause("s", bounds, parameters), null,
+            "s.trace_id = @traceId AND s.span_id = @spanId", null,
             parameters, cancellationToken);
         return spans.FirstOrDefault();
     }
@@ -175,13 +131,12 @@ public abstract class TraceReadRepositoryBase : DapperReadRepository, ITraceRead
             throw new ArgumentException("Parent Span ID cannot be null or empty", nameof(parentSpanIdHex));
 
         await using var conn = await OpenConnectionAsync(cancellationToken);
-        var bounds = await ResolveTraceTimeBoundsAsync(conn, [traceIdHex], cancellationToken);
         var parameters = new DynamicParameters();
         parameters.Add("tenantId", TenantId);
         parameters.Add("traceId", IdParam(traceIdHex, 32));
         parameters.Add("parentSpanId", IdParam(parentSpanIdHex, 16));
         var spans = await LoadFullSpansAsync(conn,
-            "s.trace_id = @traceId AND s.parent_span_id = @parentSpanId" + BoundsClause("s", bounds, parameters), "ORDER BY s.start_time_unix_nano",
+            "s.trace_id = @traceId AND s.parent_span_id = @parentSpanId", "ORDER BY s.start_time_unix_nano",
             parameters, cancellationToken);
         return DistinctSpans(spans);
     }
@@ -220,24 +175,6 @@ public abstract class TraceReadRepositoryBase : DapperReadRepository, ITraceRead
                 s.scope_id                  AS ScopeId
             """;
 
-        if (!JoinsReferenceRows)
-        {
-            // ClickHouse: no join (its reference tables are ReplacingMergeTree, see ReferenceRowsSql); the resources and scopes are
-            // read by id in their own queries.
-            var plainSql = $"""
-                SELECT
-                {spanColumns}
-                FROM spans s
-                WHERE s.tenant_id = @tenantId AND {whereClause}
-                {orderClause}
-                """;
-            var plainRows = (await conn.QueryAsync<FullSpanRow>(new CommandDefinition(plainSql, parameters, cancellationToken: ct))).ToList();
-            if (plainRows.Count == 0) return new List<SpanModel>();
-            var resourcesById = await LoadResourcesAsync(conn, plainRows.Select(r => r.ResourceId).Distinct().ToList(), ct);
-            var scopesById = await LoadScopesAsync(conn, plainRows.Select(r => r.ScopeId).Distinct().ToList(), ct);
-            return plainRows.Select(r => MapSpan(r, resourcesById, scopesById)).ToList();
-        }
-
         // One statement, the same single join the read always used. Window functions to send each resource's attributes once
         // (ROW_NUMBER per resource and scope) and batched sub-selects were both measured: the windows sort every row (20,000 spans:
         // 551 ms on SQL Server, 392 on MySQL against about 190 for the plain join) and the sub-selects repeat the trace predicate (a
@@ -253,8 +190,8 @@ public abstract class TraceReadRepositoryBase : DapperReadRepository, ITraceRead
                 sc.schema_url     AS ScopeSchemaUrl,
                 sc.attributes_json AS ScopeAttributesJson
             FROM spans s
-            JOIN {ResourcesTable} r ON s.resource_id = r.id
-            JOIN {ScopesTable} sc ON s.scope_id = sc.id
+            JOIN resources r ON s.resource_id = r.id
+            JOIN instrumentation_scopes sc ON s.scope_id = sc.id
             WHERE s.tenant_id = @tenantId AND {whereClause}
             {orderClause}
             """;
@@ -283,67 +220,10 @@ public abstract class TraceReadRepositoryBase : DapperReadRepository, ITraceRead
         return rows.Select(r => MapSpan(r, resources, scopes)).ToList();
     }
 
-    /// <summary>
-    /// Whether trace detail reads the resource and scope rows with a join in the span query (every relational provider). ClickHouse
-    /// reads them in their own queries by id (<see cref="ReferenceRowsSql"/>).
-    /// </summary>
-    protected virtual bool JoinsReferenceRows => true;
-
-    /// <summary>
-    /// The reference-table rows for <paramref name="ids"/>: <c>id</c> plus <paramref name="columns"/>. ClickHouse overrides it
-    /// because its reference tables are <c>ReplacingMergeTree</c> (a not-yet-merged duplicate is collapsed with
-    /// <c>LIMIT 1 BY id</c>, which must filter on the raw table, not a subquery of it).
-    /// </summary>
-    protected virtual string ReferenceRowsSql(bool resources, string columns, string idPredicate)
-        => $"SELECT r.id AS Id, {columns} FROM {(resources ? ResourcesTable : ScopesTable)} r WHERE {idPredicate}";
-
-    private async Task<Dictionary<long, ResourceModel>> LoadResourcesAsync(System.Data.Common.DbConnection conn, List<long> ids, CancellationToken ct)
-    {
-        var parameters = new DynamicParameters();
-        var sql = ReferenceRowsSql(resources: true, "r.schema_url AS SchemaUrl, r.attributes_json AS AttributesJson", LongInPredicate("r.id", "resId", ids, parameters));
-        return ToResourceMap(await conn.QueryAsync<ReferenceRow>(new CommandDefinition(sql, parameters, cancellationToken: ct)));
-    }
-
-    // ToDictionaryFirst: a ClickHouse reference row can exist twice until a merge.
-    private static Dictionary<long, ResourceModel> ToResourceMap(IEnumerable<ReferenceRow> rows) => ToDictionaryFirst(rows, r => r.Id, r => new ResourceModel
-    {
-        SchemaUrl = r.SchemaUrl,
-        Attributes = DeserializeAttributes(r.AttributesJson) ?? new Dictionary<string, object>()
-    });
-
-    private async Task<Dictionary<long, InstrumentationScopeModel>> LoadScopesAsync(System.Data.Common.DbConnection conn, List<long> ids, CancellationToken ct)
-    {
-        var parameters = new DynamicParameters();
-        var sql = ReferenceRowsSql(resources: false, "r.name AS Name, r.version AS Version, r.schema_url AS SchemaUrl, r.attributes_json AS AttributesJson",
-            LongInPredicate("r.id", "scopeId", ids, parameters));
-        return ToScopeMap(await conn.QueryAsync<ReferenceRow>(new CommandDefinition(sql, parameters, cancellationToken: ct)));
-    }
-
-    private static Dictionary<long, InstrumentationScopeModel> ToScopeMap(IEnumerable<ReferenceRow> rows) => ToDictionaryFirst(rows, r => r.Id, r => new InstrumentationScopeModel
-    {
-        Name = r.Name ?? "",
-        Version = r.Version,
-        SchemaUrl = r.SchemaUrl,
-        Attributes = DeserializeAttributes(r.AttributesJson) ?? new Dictionary<string, object>()
-    });
-
-    private static string LongInPredicate(string column, string prefix, IReadOnlyList<long> ids, DynamicParameters parameters)
-    {
-        var names = new List<string>(ids.Count);
-        for (var i = 0; i < ids.Count; i++)
-        {
-            parameters.Add($"{prefix}{i}", ids[i]);
-            names.Add($"@{prefix}{i}");
-        }
-        return $"{column} IN ({string.Join(",", names)})";
-    }
-
     private static SpanModel MapSpan(FullSpanRow r, Dictionary<long, ResourceModel> resources, Dictionary<long, InstrumentationScopeModel> scopes) => new()
     {
         TraceIdHex = r.TraceId,
         SpanIdHex = r.SpanId,
-        // ClickHouse stores "no parent" / "no state" / "no message" as '' (non-Nullable columns);
-        // the API model keeps them null.
         ParentSpanIdHex = string.IsNullOrEmpty(r.ParentSpanId) ? null : r.ParentSpanId,
         Name = r.Name,
         Kind = Enum.Parse<SpanKind>(r.Kind),
@@ -367,19 +247,17 @@ public abstract class TraceReadRepositoryBase : DapperReadRepository, ITraceRead
     // =========================================================================
     // ANCHORS (schema-simplification plan, decisions 10-12, 15-18)
     //
-    // Every summary/page/samples/export query below anchors on this derived table: one row per
-    // trace, carrying the trace's earliest span in scope (its start, end, kind, name, service and
-    // created_at) plus whether any span in scope has status ERROR. Duration everywhere is the
-    // anchor's own end - start, so the row, the slow filter and the summary charts all agree.
+    // Every list/samples/export query below anchors on this derived table: one row per
+    // trace, carrying the trace's earliest span in scope (its start, end, kind, name and
+    // service) plus whether any span in scope has status ERROR. Duration everywhere is the
+    // anchor's own end - start, so the row and the slow filter agree.
     // =========================================================================
 
     /// <summary>
     /// The anchors derived table, for a whole window: one row per trace, being the trace's earliest span in scope
     /// (ranked by <c>(start, id)</c>), with the in-scope error flag. Parameters: <c>@tenantId</c>, <c>@anchorFrom</c>
     /// (<c>@start</c> minus the look-back margin, <see cref="QueryOptions.AnchorLookbackMinutes"/>), <c>@start</c>,
-    /// <c>@end</c>, plus <c>@service</c> when <paramref name="hasService"/> and <c>@asOf</c> when
-    /// <paramref name="pinAsOf"/> (spans created after the pin are excluded BEFORE ranking, so a root that arrives late is
-    /// not the anchor within a pinned query).
+    /// <c>@end</c>, plus <c>@service</c> when <paramref name="hasService"/>.
     ///
     /// Shaped as a hash aggregate joined back to the anchor span, not a <c>ROW_NUMBER()</c> window: one pass groups each
     /// trace's spans in <c>[@anchorFrom, @end]</c> for their earliest start and error flag (dropping traces that start before
@@ -387,44 +265,40 @@ public abstract class TraceReadRepositoryBase : DapperReadRepository, ITraceRead
     /// at the same instant keeps the lowest <c>id</c>. That avoids sorting every span by trace id, which is what made the
     /// window function 2x (PostgreSQL, SQL Server) to 5x (MySQL) slower in the lab benchmark. With
     /// <paramref name="errorsOnly"/> the group is restricted to traces with an ERROR span in scope, found through the errors
-    /// index, so errors mode never ranks the traces that cannot qualify. ClickHouse overrides this with its own
-    /// <c>GROUP BY trace_id</c> form and ignores <paramref name="errorsOnly"/> (its callers still filter on
-    /// <c>has_error</c>).
+    /// index, so errors mode never ranks the traces that cannot qualify.
     /// </summary>
-    protected virtual string AnchorsSql(bool hasService, bool pinAsOf, bool errorsOnly = false)
+    protected string AnchorsSql(bool hasService, bool errorsOnly = false)
     {
         // A selected service narrows the scan to its own index range (<c>idx_spans_tenant_service_time</c>), small enough
         // that the window form below beat the hash aggregate in the lab benchmark (a service-scoped 6h summary: 203 vs 299 ms
         // on PostgreSQL, 599 vs 796 ms on MySQL); errors mode has no such narrowing and always uses the aggregate.
-        if (hasService && !errorsOnly) return WindowAnchorsSql(pinAsOf);
+        if (hasService && !errorsOnly) return WindowAnchorsSql();
 
         var service = hasService ? " AND service_name = @service" : "";
-        var pin = pinAsOf ? " AND created_at <= @asOf" : "";
         var joinService = hasService ? " AND s.service_name = @service" : "";
-        var joinPin = pinAsOf ? " AND s.created_at <= @asOf" : "";
         var errorTraces = errorsOnly
-            ? $" AND trace_id IN (SELECT e.trace_id FROM spans e WHERE e.tenant_id = @tenantId AND e.status_code = 'ERROR' AND e.start_time_unix_nano >= @anchorFrom AND e.start_time_unix_nano <= @end{(hasService ? " AND e.service_name = @service" : "")}{(pinAsOf ? " AND e.created_at <= @asOf" : "")})"
+            ? $" AND trace_id IN (SELECT e.trace_id FROM spans e WHERE e.tenant_id = @tenantId AND e.status_code = 'ERROR' AND e.start_time_unix_nano >= @anchorFrom AND e.start_time_unix_nano <= @end{(hasService ? " AND e.service_name = @service" : "")})"
             : "";
         return $"""
             (
                 SELECT x.trace_id, x.anchor_span_pk, x.anchor_span_id, x.service_name, x.root_name, x.anchor_kind,
-                       x.anchor_start, x.anchor_end, x.anchor_created_at, x.has_error
+                       x.anchor_start, x.anchor_end, x.has_error
                 FROM (
                     SELECT s.trace_id AS trace_id, s.id AS anchor_span_pk, s.span_id AS anchor_span_id,
                            s.service_name AS service_name, s.name AS root_name, s.kind AS anchor_kind,
                            s.start_time_unix_nano AS anchor_start, s.end_time_unix_nano AS anchor_end,
-                           s.created_at AS anchor_created_at, g.has_error AS has_error,
+                           g.has_error AS has_error,
                            ROW_NUMBER() OVER (PARTITION BY s.trace_id ORDER BY s.id) AS rn
                     FROM (
                         SELECT trace_id, MIN(start_time_unix_nano) AS min_start,
                                MAX(CASE WHEN status_code = 'ERROR' THEN 1 ELSE 0 END) AS has_error
                         FROM spans
                         WHERE tenant_id = @tenantId
-                          AND start_time_unix_nano >= @anchorFrom AND start_time_unix_nano <= @end{service}{pin}{errorTraces}
+                          AND start_time_unix_nano >= @anchorFrom AND start_time_unix_nano <= @end{service}{errorTraces}
                         GROUP BY trace_id
                         HAVING MIN(start_time_unix_nano) >= @start
                     ) g
-                    JOIN spans s ON s.trace_id = g.trace_id AND s.start_time_unix_nano = g.min_start AND s.tenant_id = @tenantId{joinService}{joinPin}
+                    JOIN spans s ON s.trace_id = g.trace_id AND s.start_time_unix_nano = g.min_start AND s.tenant_id = @tenantId{joinService}
                 ) x
                 WHERE x.rn = 1
             )
@@ -432,34 +306,26 @@ public abstract class TraceReadRepositoryBase : DapperReadRepository, ITraceRead
     }
 
     /// <summary>The window-function form of <see cref="AnchorsSql"/> for a selected service: rank each trace's in-scope spans and keep the first.</summary>
-    private static string WindowAnchorsSql(bool pinAsOf)
+    private static string WindowAnchorsSql()
     {
-        var pin = pinAsOf ? " AND s.created_at <= @asOf" : "";
         return $"""
             (
                 SELECT x.trace_id, x.anchor_span_pk, x.anchor_span_id, x.service_name, x.root_name, x.anchor_kind,
-                       x.anchor_start, x.anchor_end, x.anchor_created_at, x.has_error
+                       x.anchor_start, x.anchor_end, x.has_error
                 FROM (
                     SELECT s.trace_id AS trace_id, s.id AS anchor_span_pk, s.span_id AS anchor_span_id,
                            s.service_name AS service_name, s.name AS root_name, s.kind AS anchor_kind,
                            s.start_time_unix_nano AS anchor_start, s.end_time_unix_nano AS anchor_end,
-                           s.created_at AS anchor_created_at,
                            ROW_NUMBER() OVER (PARTITION BY s.trace_id ORDER BY s.start_time_unix_nano, s.id) AS rn,
                            MAX(CASE WHEN s.status_code = 'ERROR' THEN 1 ELSE 0 END) OVER (PARTITION BY s.trace_id) AS has_error
                     FROM spans s
                     WHERE s.tenant_id = @tenantId
-                      AND s.start_time_unix_nano >= @anchorFrom AND s.start_time_unix_nano <= @end AND s.service_name = @service{pin}
+                      AND s.start_time_unix_nano >= @anchorFrom AND s.start_time_unix_nano <= @end AND s.service_name = @service
                 ) x
                 WHERE x.rn = 1 AND x.anchor_start >= @start
             )
             """;
     }
-
-    /// <summary>
-    /// Whether this provider can verify an anchor with a correlated <c>NOT EXISTS</c> seek, which
-    /// <see cref="SeekAnchorsSql"/> needs. ClickHouse has no <c>(trace_id)</c> seek, so it keeps reading whole-window anchors.
-    /// </summary>
-    protected virtual bool SupportsSeekAnchors => true;
 
     /// <summary>
     /// The anchors whose start lies in <c>[@rangeFrom, @rangeTo)</c>, found by the anchor's own definition rather than by
@@ -468,29 +334,27 @@ public abstract class TraceReadRepositoryBase : DapperReadRepository, ITraceRead
     /// seek, so the cost follows the number of candidate spans in the range -- not the window -- which is what lets a page
     /// read only the slice it needs (<see cref="QueryOptions.PageSliceSeconds"/>). <paramref name="candidatePredicate"/>
     /// is extra <c>AND ...</c> terms on the candidate span <c>s</c> (the anchor's own name or duration), evaluated before
-    /// the seek. The error flag is not computed here (it is <c>0</c>); the page reads it for just its own rows.
-    /// Parameters: <c>@tenantId</c>, <c>@anchorFrom</c>, <c>@rangeFrom</c>, <c>@rangeTo</c>, plus <c>@service</c> and
-    /// <c>@asOf</c> as for <see cref="AnchorsSql"/>.
+    /// the seek. The error flag is not computed here (it is <c>0</c>); the list reads it for just its own rows.
+    /// Parameters: <c>@tenantId</c>, <c>@anchorFrom</c>, <c>@rangeFrom</c>, <c>@rangeTo</c>, plus <c>@service</c>
+    /// as for <see cref="AnchorsSql"/>.
     /// </summary>
-    protected virtual string SeekAnchorsSql(bool hasService, bool pinAsOf, string candidatePredicate = "")
+    protected string SeekAnchorsSql(bool hasService, string candidatePredicate = "")
     {
         var service = hasService ? " AND s.service_name = @service" : "";
-        var pin = pinAsOf ? " AND s.created_at <= @asOf" : "";
         var earlierService = hasService ? " AND p.service_name = @service" : "";
-        var earlierPin = pinAsOf ? " AND p.created_at <= @asOf" : "";
         return $"""
             (
                 SELECT s.trace_id AS trace_id, s.id AS anchor_span_pk, s.span_id AS anchor_span_id,
                        s.service_name AS service_name, s.name AS root_name, s.kind AS anchor_kind,
                        s.start_time_unix_nano AS anchor_start, s.end_time_unix_nano AS anchor_end,
-                       s.created_at AS anchor_created_at, 0 AS has_error
+                       0 AS has_error
                 FROM spans s
                 WHERE s.tenant_id = @tenantId
-                  AND s.start_time_unix_nano >= @rangeFrom AND s.start_time_unix_nano < @rangeTo{service}{pin}{candidatePredicate}
+                  AND s.start_time_unix_nano >= @rangeFrom AND s.start_time_unix_nano < @rangeTo{service}{candidatePredicate}
                   AND NOT EXISTS (
                       SELECT 1 FROM spans p
                       WHERE p.trace_id = s.trace_id AND p.tenant_id = @tenantId
-                        AND p.start_time_unix_nano >= @anchorFrom{earlierService}{earlierPin}
+                        AND p.start_time_unix_nano >= @anchorFrom{earlierService}
                         AND (p.start_time_unix_nano < s.start_time_unix_nano
                              OR (p.start_time_unix_nano = s.start_time_unix_nano AND p.id < s.id)))
             )
@@ -498,119 +362,50 @@ public abstract class TraceReadRepositoryBase : DapperReadRepository, ITraceRead
     }
 
     // =========================================================================
-    // PAGE (keyset paging)
+    // LIST (capped, newest or oldest first)
     // =========================================================================
 
-    public async Task<TracePageResult> GetTracePageAsync(TraceQuery query, CancellationToken cancellationToken = default)
+    public async Task<TraceListResult> GetTraceListAsync(TraceQuery query, CancellationToken cancellationToken = default)
     {
         if (query.Start >= query.End)
             throw new ArgumentException("Start time must be before end time");
 
-        return await ExecuteWithRetryAsync(() => GetTracePageCoreAsync(query, cancellationToken));
+        return await ExecuteWithRetryAsync(() => GetTraceListCoreAsync(query, cancellationToken));
     }
 
-    private async Task<TracePageResult> GetTracePageCoreAsync(TraceQuery query, CancellationToken cancellationToken)
+    private async Task<TraceListResult> GetTraceListCoreAsync(TraceQuery query, CancellationToken cancellationToken)
     {
-        var size = Math.Clamp(query.Size, 1, 500);
+        var limit = Math.Max(1, query.Limit);
+        var descending = !ListOrder.IsOldest(query.Order);
         var parsed = SearchQueryParser.Parse(query.Search);
         var hasService = !string.IsNullOrEmpty(query.Service);
 
         await using var conn = await OpenConnectionAsync(cancellationToken);
-        var asOf = await ResolveAsOfAsync(conn, query.AsOf, cancellationToken);
 
         var startNano = TimeConversion.DateTimeToUnixNano(query.Start);
         var endNano = TimeConversion.DateTimeToUnixNano(query.End);
         var (clauses, parameters) = BuildAnchorFilterClauses(query.Mode, query.Service, query.Operation, query.MinDurationMs, query.MaxDurationMs, parsed, startNano, endNano);
-        parameters.Add("asOf", asOf);
         // Whole-window anchors: errors mode (restricted to traces with an ERROR span, found through the errors index).
-        // Every other page reads a slice of seek-verified anchors instead.
+        // Every other list reads slices of seek-verified anchors instead.
         var errorsMode = query.Mode == "errors";
-        var anchors = AnchorsSql(hasService, pinAsOf: true, errorsOnly: errorsMode);
-        var useSlices = SupportsSeekAnchors && !errorsMode;
+        var useSlices = !errorsMode;
 
-        var filterHashText = $"{query.Start:O}|{query.End:O}|{asOf:O}|{query.Mode}|{query.Service}|{query.Operation}|{query.MinDurationMs}|{query.MaxDurationMs}|{query.Search}";
-        var filterHash = KeysetCursor.ComputeFilterHash(filterHashText);
+        // limit + 1 anchors: the extra one only says that more matched.
+        var rows = useSlices
+            ? await FetchSlicedAnchorPageAsync(conn, query, hasService, clauses, parameters, limit + 1, descending,
+                rangeFrom: startNano, rangeTo: endNano + 1, cancellationToken)
+            : await FetchAnchorPageAsync(conn, AnchorsSql(hasService, errorsOnly: errorsMode), clauses, parameters, limit, descending, cancellationToken);
 
-        var nav = (query.Nav ?? "first").ToLowerInvariant();
-        DecodedCursor? cursor = null;
-        if (nav is "next" or "prev")
-        {
-            cursor = KeysetCursor.Decode(query.Cursor);
-            if (cursor == null || !KeysetCursor.MatchesFilterHash(cursor, filterHashText))
-                throw new ArgumentException("Invalid or stale cursor.");
-        }
+        var truncated = rows.Count > limit;
+        if (truncated) rows.RemoveAt(rows.Count - 1);
 
-        List<AnchorRow> rows;
-        bool forward;
-        int requestedSize;
-
-        switch (nav)
-        {
-            case "next":
-                forward = true;
-                requestedSize = size;
-                clauses.Add(KeysetCursor.Predicate("a.anchor_start", "a.anchor_span_pk", "cursorK", "cursorId", descending: true));
-                parameters.Add("cursorK", cursor!.K);
-                parameters.Add("cursorId", cursor.Id);
-                rows = useSlices
-                    ? await FetchSlicedAnchorPageAsync(conn, query, hasService, clauses, parameters, requestedSize + 1, descending: true,
-                        rangeFrom: startNano, rangeTo: Math.Min(endNano + 1, cursor.K + 1), cancellationToken)
-                    : await FetchAnchorPageAsync(conn, anchors, clauses, parameters, requestedSize, descending: true, cancellationToken);
-                break;
-
-            case "prev":
-                forward = false;
-                requestedSize = size;
-                clauses.Add(KeysetCursor.Predicate("a.anchor_start", "a.anchor_span_pk", "cursorK", "cursorId", descending: false));
-                parameters.Add("cursorK", cursor!.K);
-                parameters.Add("cursorId", cursor.Id);
-                rows = useSlices
-                    ? await FetchSlicedAnchorPageAsync(conn, query, hasService, clauses, parameters, requestedSize + 1, descending: false,
-                        rangeFrom: Math.Max(startNano, cursor.K), rangeTo: endNano + 1, cancellationToken)
-                    : await FetchAnchorPageAsync(conn, anchors, clauses, parameters, requestedSize, descending: false, cancellationToken);
-                break;
-
-            default: // "first"
-                forward = true;
-                requestedSize = size;
-                rows = useSlices
-                    ? await FetchSlicedAnchorPageAsync(conn, query, hasService, clauses, parameters, requestedSize + 1, descending: true,
-                        rangeFrom: startNano, rangeTo: endNano + 1, cancellationToken)
-                    : await FetchAnchorPageAsync(conn, anchors, clauses, parameters, requestedSize, descending: true, cancellationToken);
-                break;
-        }
-
-        var hasExtra = rows.Count > requestedSize;
-        if (hasExtra) rows.RemoveAt(rows.Count - 1);
-
-        List<AnchorRow> displayRows;
-        string? nextCursor;
-        string? prevCursor;
-
-        if (forward)
-        {
-            displayRows = rows;
-            nextCursor = hasExtra ? Encode(displayRows[^1], filterHash) : null;
-            prevCursor = nav == "first" ? null : (displayRows.Count > 0 ? Encode(displayRows[0], filterHash) : null);
-        }
-        else
-        {
-            displayRows = [.. rows];
-            displayRows.Reverse();
-            // prev
-            nextCursor = displayRows.Count > 0 ? Encode(displayRows[^1], filterHash) : null;
-            prevCursor = hasExtra && displayRows.Count > 0 ? Encode(displayRows[0], filterHash) : null;
-        }
-
-        // Exact span counts and whole-trace bounds for just this page's anchors (bounded by `size`). A sliced page did not
+        // Exact span counts and whole-trace bounds for just these anchors (bounded by `limit`). A sliced list did not
         // compute the error flag per anchor, so it is read here, for these traces only.
-        var items = await LoadPageTraceInfosAsync(conn, displayRows, query.Service, cancellationToken,
-            errorScope: useSlices ? new ErrorScope(startNano - _anchorLookbackNanos, endNano, asOf) : null);
+        var items = await LoadPageTraceInfosAsync(conn, rows, query.Service, cancellationToken,
+            errorScope: useSlices ? new ErrorScope(startNano - _anchorLookbackNanos, endNano) : null);
 
-        return new TracePageResult { Items = items, NextCursor = nextCursor, PrevCursor = prevCursor, AsOf = asOf };
+        return new TraceListResult { Items = items, Truncated = truncated };
     }
-
-    private static string Encode(AnchorRow row, string filterHash) => KeysetCursor.Encode(row.AnchorStart, row.AnchorSpanPk, filterHash);
 
     private const string AnchorSelectColumns = """
         a.trace_id AS TraceId, a.anchor_span_pk AS AnchorSpanPk, a.anchor_span_id AS AnchorSpanId, a.service_name AS ServiceName,
@@ -619,10 +414,10 @@ public abstract class TraceReadRepositoryBase : DapperReadRepository, ITraceRead
         """;
 
     /// <summary>
-    /// Fills one page from slices of seek-verified anchors (<see cref="SeekAnchorsSql"/>) instead of ranking the whole
-    /// window. Descending (first and next pages) walks back from <paramref name="rangeTo"/>; ascending (the previous page)
+    /// Fills the list from slices of seek-verified anchors (<see cref="SeekAnchorsSql"/>) instead of ranking the whole
+    /// window. Descending (newest first) walks back from <paramref name="rangeTo"/>; ascending (oldest first)
     /// walks forward from <paramref name="rangeFrom"/>. Each step reads one slice of trace start times, applies the same
-    /// filters and keyset predicate as a whole-window read, and the slices are disjoint, so their rows concatenate in the
+    /// filters as a whole-window read, and the slices are disjoint, so their rows concatenate in the
     /// final order. A slice starts at <see cref="QueryOptions.PageSliceSeconds"/> and grows by
     /// <see cref="QueryOptions.PageSliceGrowth"/>; once the next slice would cover at least half of what is left, it takes
     /// all of it, which bounds a sparse filter (a rare search or operation) at about one extra partial scan. Slow mode
@@ -648,7 +443,7 @@ public abstract class TraceReadRepositoryBase : DapperReadRepository, ITraceRead
             selective = true;
         }
 
-        var anchors = SeekAnchorsSql(hasService, pinAsOf: true, candidate.ToString());
+        var anchors = SeekAnchorsSql(hasService, candidate.ToString());
         var where = clauses.Count == 0 ? "1 = 1" : string.Join(" AND ", clauses);
         var order = descending ? "DESC" : "ASC";
         var rows = new List<AnchorRow>(need);
@@ -705,7 +500,7 @@ public abstract class TraceReadRepositoryBase : DapperReadRepository, ITraceRead
     }
 
     /// <summary>
-    /// Shapes the page's anchors into <see cref="TraceInfo"/> rows. Duration, error flag, service,
+    /// Shapes the list's anchors into <see cref="TraceInfo"/> rows. Duration, error flag, service,
     /// operation and kind come straight from the anchor (decisions 10-11); the follow-up query supplies
     /// only the exact span count (decisions 14, 18) and the whole trace's start/end for the detail link.
     /// </summary>
@@ -715,7 +510,6 @@ public abstract class TraceReadRepositoryBase : DapperReadRepository, ITraceRead
         if (anchors.Count == 0) return [];
 
         var traceIds = anchors.Select(a => a.TraceId).Distinct().ToList();
-        var bounds = await ResolveTraceTimeBoundsAsync(conn, traceIds, ct);
 
         var parameters = new DynamicParameters();
         parameters.Add("tenantId", TenantId);
@@ -728,22 +522,21 @@ public abstract class TraceReadRepositoryBase : DapperReadRepository, ITraceRead
         var spanCount = scoped
             ? "COUNT(DISTINCT CASE WHEN fs.service_name = @service THEN fs.span_id END)"
             : "COUNT(DISTINCT fs.span_id)";
-        // A sliced page carries no error flag on its anchors; it is "any span in scope has ERROR", the same scope the
-        // whole-window anchors use (service, the look-back range, the pin), computed here for this page's traces only.
+        // A sliced list carries no error flag on its anchors; it is "any span in scope has ERROR", the same scope the
+        // whole-window anchors use (service, the look-back range), computed here for these traces only.
         var errorFlag = "0";
         if (errorScope is { } scope)
         {
             parameters.Add("errFrom", scope.From);
             parameters.Add("errTo", scope.To);
-            if (scope.AsOf is { } errAsOf) parameters.Add("errAsOf", errAsOf);
             errorFlag = "MAX(CASE WHEN fs.status_code = 'ERROR' AND fs.start_time_unix_nano >= @errFrom AND fs.start_time_unix_nano <= @errTo"
-                        + (scoped ? " AND fs.service_name = @service" : "") + (scope.AsOf is null ? "" : " AND fs.created_at <= @errAsOf") + " THEN 1 ELSE 0 END)";
+                        + (scoped ? " AND fs.service_name = @service" : "") + " THEN 1 ELSE 0 END)";
         }
         var aggSql = $"""
             SELECT fs.trace_id AS TraceId, {spanCount} AS SpanCount,
                    MIN(fs.start_time_unix_nano) AS MinStart, MAX(fs.end_time_unix_nano) AS MaxEnd, {errorFlag} AS HasError
             FROM spans fs
-            WHERE fs.tenant_id = @tenantId AND {inList}{BoundsClause("fs", bounds, parameters)}
+            WHERE fs.tenant_id = @tenantId AND {inList}
             GROUP BY fs.trace_id
             """;
         var aggRows = (await conn.QueryAsync<TraceAggRow>(new CommandDefinition(
@@ -781,11 +574,11 @@ public abstract class TraceReadRepositoryBase : DapperReadRepository, ITraceRead
     /// <summary>
     /// Streams one <see cref="TraceInfo"/> row per matching trace, oldest first, with no row cap.
     /// Reuses <see cref="BuildAnchorFilterClauses"/> -- the same filter compilation the summary and
-    /// page endpoints use -- so export can never see a different population than the list.
+    /// list endpoint uses -- so export can never see a different population than the list.
     ///
     /// The anchors are derived ONCE and streamed through a data reader (ordered by anchor start);
     /// every <see cref="ExportChunkSize"/> anchors a second connection fetches that chunk's exact span
-    /// counts and bounds. Re-running the anchor query per chunk with a keyset cursor would repeat the
+    /// counts and bounds. Re-running the anchor query per chunk would repeat the
     /// whole window scan for every chunk. Memory stays bounded to one chunk; the cancellation token
     /// reaches the reader's command, so a client disconnect cancels the database work too.
     /// </summary>
@@ -803,7 +596,7 @@ public abstract class TraceReadRepositoryBase : DapperReadRepository, ITraceRead
         var where = clauses.Count == 0 ? "1 = 1" : string.Join(" AND ", clauses);
         var sql = $"""
             SELECT {AnchorSelectColumns}
-            FROM {AnchorsSql(!string.IsNullOrEmpty(query.Service), pinAsOf: false, errorsOnly: query.Mode == "errors")} a
+            FROM {AnchorsSql(!string.IsNullOrEmpty(query.Service), errorsOnly: query.Mode == "errors")} a
             WHERE {where}
             ORDER BY a.anchor_start ASC, a.anchor_span_pk ASC
             """;
@@ -853,13 +646,13 @@ public abstract class TraceReadRepositoryBase : DapperReadRepository, ITraceRead
         parameters.Add("limit", limit);
         parameters.Add("offset", 0);
 
-        // Both widgets read the unpinned, unscoped anchors of the window: the newest traces with an
+        // Both widgets read the unscoped anchors of the window: the newest traces with an
         // error span, and the slowest anchors (by the anchor's own duration, above a 500 ms floor).
         string anchors, filter, order;
         if (query.Kind == "errors")
         {
             // Only traces with an ERROR span can qualify, so the anchors are derived for just those (errors index).
-            anchors = AnchorsSql(hasService: false, pinAsOf: false, errorsOnly: true);
+            anchors = AnchorsSql(hasService: false, errorsOnly: true);
             filter = "a.has_error = 1";
             order = "a.anchor_start DESC, a.anchor_span_pk DESC";
         }
@@ -868,16 +661,9 @@ public abstract class TraceReadRepositoryBase : DapperReadRepository, ITraceRead
             // The anchor must itself be over the floor, so candidates are the long spans of the window, each checked for
             // being its trace's earliest by one seek, instead of ranking every trace to find them.
             const string floor = "(s.end_time_unix_nano - s.start_time_unix_nano) > 500000000";
-            if (SupportsSeekAnchors)
-            {
-                anchors = SeekAnchorsSql(hasService: false, pinAsOf: false, $" AND {floor}");
-                parameters.Add("rangeFrom", startNano);
-                parameters.Add("rangeTo", endNano + 1);
-            }
-            else
-            {
-                anchors = AnchorsSql(hasService: false, pinAsOf: false);
-            }
+            anchors = SeekAnchorsSql(hasService: false, $" AND {floor}");
+            parameters.Add("rangeFrom", startNano);
+            parameters.Add("rangeTo", endNano + 1);
             filter = "(a.anchor_end - a.anchor_start) > 500000000";
             order = "(a.anchor_end - a.anchor_start) DESC, a.anchor_span_pk DESC";
         }
@@ -890,7 +676,7 @@ public abstract class TraceReadRepositoryBase : DapperReadRepository, ITraceRead
             {PagingClause}
             """;
         // Bounded like the summaries: this derives anchors over the whole window too, and without a budget it ran into the
-        // driver's 30 s default and answered 500 under load (Timescale, 3.0.1 ramp). On timeout the follow-up below is
+        // driver's 30 s default and answered 500 under load (3.0.1 ramp). On timeout the follow-up below is
         // skipped, so nothing else runs on the aborted connection (see TimedQuery).
         var (rows, timedOut) = await TimedQuery.RunAsync(
             async (timeoutSeconds, ct) => (await conn.QueryAsync<AnchorRow>(new CommandDefinition(
@@ -898,11 +684,11 @@ public abstract class TraceReadRepositoryBase : DapperReadRepository, ITraceRead
             _summaryTimeoutSeconds, cancellationToken);
         if (timedOut || rows == null) return new TraceSamplesResult { TimedOut = true };
 
-        var seekRows = query.Kind != "errors" && SupportsSeekAnchors;
+        var seekRows = query.Kind != "errors";
         return new TraceSamplesResult
         {
             Items = await LoadPageTraceInfosAsync(conn, rows, null, cancellationToken,
-                errorScope: seekRows ? new ErrorScope(startNano - _anchorLookbackNanos, endNano, null) : null)
+                errorScope: seekRows ? new ErrorScope(startNano - _anchorLookbackNanos, endNano) : null)
         };
     }
 
@@ -949,10 +735,10 @@ public abstract class TraceReadRepositoryBase : DapperReadRepository, ITraceRead
     // =========================================================================
 
     /// <summary>
-    /// Builds the WHERE clauses shared by the page, export and samples queries,
+    /// Builds the WHERE clauses shared by the list, export and samples queries,
     /// all scoped to the <see cref="AnchorsSql"/> alias <c>a</c>, plus the parameters the anchors
     /// derived table and the clauses reference (<c>@tenantId</c>, <c>@start</c>, <c>@end</c>,
-    /// <c>@anchorFrom</c>, <c>@service</c>). The time/service/pin scoping itself lives inside the
+    /// <c>@anchorFrom</c>, <c>@service</c>). The time/service scoping itself lives inside the
     /// anchors derived table; what is left here is what applies to an anchor row:
     /// <list type="bullet">
     /// <item>operation filter = the anchor span's own name (decision 15), no per-trace subquery;</item>
@@ -1043,10 +829,9 @@ public abstract class TraceReadRepositoryBase : DapperReadRepository, ITraceRead
     /// <summary>
     /// <see cref="DapperReadRepository.SpanLevelMatchPredicate"/> joined to the matching span's own
     /// resource (aliased <c>rs2</c>), for a search term whose <c>innerPredicate</c> references a
-    /// resource-attribute check as well as a span-attribute one. The relational providers use a
-    /// correlated <c>EXISTS</c> with an extra join; ClickHouse overrides with its uncorrelated form.
+    /// resource-attribute check as well as a span-attribute one: a correlated <c>EXISTS</c> with an extra join.
     /// </summary>
-    protected virtual string SpanLevelMatchPredicateWithResource(string traceIdColumn, string innerTimeClause, string innerPredicate)
+    protected string SpanLevelMatchPredicateWithResource(string traceIdColumn, string innerTimeClause, string innerPredicate)
         => $"EXISTS (SELECT 1 FROM spans s2 JOIN resources rs2 ON rs2.id = s2.resource_id WHERE s2.trace_id = {traceIdColumn}{innerTimeClause} AND {innerPredicate})";
 
     // =========================================================================
@@ -1254,8 +1039,8 @@ public abstract class TraceReadRepositoryBase : DapperReadRepository, ITraceRead
         public int HasError { get; set; }
     }
 
-    /// <summary>The scope the error flag of a sliced page is read in: the look-back range, the window end and the pin (null: unpinned).</summary>
-    private readonly record struct ErrorScope(long From, long To, DateTime? AsOf);
+    /// <summary>The scope the error flag of a sliced list is read in: the look-back range and the window end.</summary>
+    private readonly record struct ErrorScope(long From, long To);
 
     private sealed class FullSpanRow
     {
@@ -1285,16 +1070,6 @@ public abstract class TraceReadRepositoryBase : DapperReadRepository, ITraceRead
         public string? ScopeVersion { get; set; }
         public string? ScopeSchemaUrl { get; set; }
         public string? ScopeAttributesJson { get; set; }
-    }
-
-    /// <summary>A resource or scope row: the columns not used by one of the two stay null.</summary>
-    private sealed class ReferenceRow
-    {
-        public long Id { get; set; }
-        public string? Name { get; set; }
-        public string? Version { get; set; }
-        public string? SchemaUrl { get; set; }
-        public string? AttributesJson { get; set; }
     }
 
     private sealed class DependencyRow

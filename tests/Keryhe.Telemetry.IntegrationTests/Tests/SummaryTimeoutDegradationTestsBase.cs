@@ -94,10 +94,6 @@ public abstract class SummaryTimeoutDegradationTestsBase : IAsyncLifetime
 [Trait("Provider", ProviderNames.PostgreSql)]
 public sealed class PostgreSqlSummaryTimeoutDegradationTests(PostgreSqlFixture fixture) : SummaryTimeoutDegradationTestsBase(fixture);
 
-[Collection(ProviderNames.Timescale)]
-[Trait("Provider", ProviderNames.Timescale)]
-public sealed class TimescaleSummaryTimeoutDegradationTests(TimescaleFixture fixture) : SummaryTimeoutDegradationTestsBase(fixture);
-
 [Collection(ProviderNames.SqlServer)]
 [Trait("Provider", ProviderNames.SqlServer)]
 public sealed class SqlServerSummaryTimeoutDegradationTests(SqlServerFixture fixture) : SummaryTimeoutDegradationTestsBase(fixture);

@@ -49,9 +49,9 @@ public abstract class PlanSurveyBase : IAsyncLifetime
 
         using var scope = _fixture.Services.CreateScope();
         var repo = scope.ServiceProvider.GetRequiredService<ITraceReadRepository>();
-        string Anchors(bool service, bool pin) => (string)repo.GetType()
+        string Anchors(bool service) => (string)repo.GetType()
             .GetMethod("AnchorsSql", BindingFlags.Instance | BindingFlags.NonPublic)!
-            .Invoke(repo, [service, pin])!;
+            .Invoke(repo, [service, false])!;
 
         // The last 1000 s of 60,000 s of data: a selective window, the shape a real trace-list page asks for.
         var start = SeededDataBuilder.ToUnixNano(WindowStart.AddSeconds(59_000));
@@ -59,7 +59,7 @@ public abstract class PlanSurveyBase : IAsyncLifetime
         var parameters = new Dictionary<string, object>
         {
             ["tenantId"] = _fixture.TenantId, ["start"] = start, ["end"] = end, ["anchorFrom"] = start - 300_000_000_000L,
-            ["service"] = "checkout-api", ["asOf"] = DateTime.UtcNow.AddMinutes(5)
+            ["service"] = "checkout-api"
         };
 
         var sb = new StringBuilder();
@@ -72,15 +72,15 @@ public abstract class PlanSurveyBase : IAsyncLifetime
 
         string Page(bool service) => $"""
             SELECT a.trace_id, a.anchor_span_pk, a.anchor_span_id, a.service_name, a.root_name, a.anchor_kind, a.anchor_start, a.anchor_end, a.has_error
-            FROM {Anchors(service, pin: true)} a
+            FROM {Anchors(service)} a
             ORDER BY a.anchor_start DESC, a.anchor_span_pk DESC
             {Limit(51)}
             """;
-        await Section("trace page, unscoped (first page)", Page(false));
-        await Section("trace page, service-scoped (first page)", Page(true));
+        await Section("trace list, unscoped (newest)", Page(false));
+        await Section("trace list, service-scoped (newest)", Page(true));
         await Section("trace summary rows, unscoped, inbound only", $"""
             SELECT a.trace_id, a.anchor_start, a.anchor_end, a.service_name, a.has_error
-            FROM {Anchors(false, pin: false)} a WHERE a.anchor_kind IN ('SERVER', 'CONSUMER')
+            FROM {Anchors(false)} a WHERE a.anchor_kind IN ('SERVER', 'CONSUMER')
             """);
 
         var anyTrace = SeededDataBuilder.BasicTraceWindow(_fixture.TenantId, WindowStart, traceCount: 1)[0].TraceIdHex;

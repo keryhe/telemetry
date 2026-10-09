@@ -31,4 +31,9 @@
         <PackageReference Include="Microsoft.Extensions.Options" Version="10.0.10" />
     </ItemGroup>
 
+  <ItemGroup>
+    <InternalsVisibleTo Include="Keryhe.Telemetry.ClickHouse" />
+    <InternalsVisibleTo Include="Keryhe.Telemetry.IntegrationTests" />
+  </ItemGroup>
+
 </Project>

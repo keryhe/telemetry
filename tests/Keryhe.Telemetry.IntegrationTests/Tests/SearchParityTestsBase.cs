@@ -49,16 +49,15 @@ public abstract class SearchParityTestsBase : IAsyncLifetime
 
         using var readScope = Scope();
         var repo = readScope.ServiceProvider.GetRequiredService<ILogReadRepository>();
-        var page = await repo.GetLogPageAsync(new LogQuery
+        var page = await repo.GetLogListAsync(new LogQuery
         {
             Start = WindowStart,
             End = WindowStart.AddSeconds(count + 5),
             Search = search,
-            Size = 500,
-            AsOf = DateTime.UtcNow.AddMinutes(1)
+            Limit = 500
         });
 
-        Assert.Null(page.NextCursor); // 300 rows fit in one 500-row page -- sanity check the fixture stays inside this test's own assumptions
+        Assert.False(page.Truncated); // 300 rows fit under the 500-row limit -- sanity check the fixture stays inside this test's own assumptions
         return page.Items.Select(l => l.BodyValue!).ToHashSet();
     }
 

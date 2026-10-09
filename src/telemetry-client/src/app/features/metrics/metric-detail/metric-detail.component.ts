@@ -16,7 +16,6 @@ import { MatFormFieldModule } from '@angular/material/form-field';
 import { MatIconModule } from '@angular/material/icon';
 import { MatInputModule } from '@angular/material/input';
 import { MatMenuModule } from '@angular/material/menu';
-import { MatPaginatorModule, PageEvent } from '@angular/material/paginator';
 import { MatProgressBarModule } from '@angular/material/progress-bar';
 import { MatSelectModule } from '@angular/material/select';
 import { MatTableModule } from '@angular/material/table';
@@ -29,6 +28,7 @@ import { MetricsApiService } from '../../../core/services/api/metrics-api.servic
 import { ResourcesApiService } from '../../../core/services/api/resources-api.service';
 import { TimeRangeService } from '../../../core/services/time-range.service';
 import { ThemeService } from '../../../core/services/theme.service';
+import { ListCapNoticeComponent } from '../../../shared/components/list-cap-notice/list-cap-notice.component';
 import { CapabilitiesService } from '../../../core/services/capabilities.service';
 import {
   ExemplarModel, MetricBucketPoint, MetricExemplar, MetricExemplarPage,
@@ -123,8 +123,8 @@ function connectAcrossEmptyBuckets(
     DatePipe, DecimalPipe, KeyValuePipe, SlicePipe, RouterLink, FormsModule,
     MatCardModule, MatButtonModule, MatButtonToggleModule, MatIconModule,
     MatTabsModule, MatTableModule, MatChipsModule, MatFormFieldModule, MatInputModule,
-    MatSelectModule, MatProgressBarModule, MatTooltipModule, MatPaginatorModule, MatMenuModule, NgApexchartsModule,
-    StatCardComponent, EmptyStateComponent, PageHeaderComponent,
+    MatSelectModule, MatProgressBarModule, MatTooltipModule, MatMenuModule, NgApexchartsModule,
+    StatCardComponent, EmptyStateComponent, PageHeaderComponent, ListCapNoticeComponent,
   ],
   templateUrl: './metric-detail.component.html',
   styleUrl: './metric-detail.component.scss',
@@ -415,23 +415,12 @@ export class MetricDetailComponent implements OnInit, AfterViewInit, OnDestroy {
     return rows;
   });
 
-  /**
-   * Exemplars — tier-aware (decision 26). Analytics tier: real server keyset paging, mirroring the
-   * Logs/Traces paginator pattern. Standard tier: the newest-500 capped response, paged client-side.
-   */
+  /** Exemplars: the newest ones the server returns (capped), with `truncated` when more exist. */
   protected exemplarsPage = signal<MetricExemplarPage | null>(null);
   protected exemplarsLoading = signal(false);
   protected exemplarsLoaded = signal(false);
   private exemplarSub?: Subscription;
   private static readonly EXEMPLARS_TAB = 3;
-
-  protected isAnalyticsExemplars = computed(() => this.capabilities().exemplarPaging);
-
-  /** Tracked client-side (decision 1: keyset paging has no server page number); also used as the
-   *  standard-tier client-paginator index over the capped newest-500 list. */
-  protected exemplarPageIndex = signal(0);
-  protected exemplarPageSize = signal(25);
-  protected readonly exemplarPageSizeOptions = [25, 50, 100];
 
   private toExemplarRow(e: MetricExemplar): ExemplarRow {
     const measured = e.exemplar.valueDouble ?? e.exemplar.valueInt;
@@ -447,31 +436,16 @@ export class MetricDetailComponent implements OnInit, AfterViewInit, OnDestroy {
     };
   }
 
-  /** Rows currently on screen: server-paged on the analytics tier, client-sliced on the standard tier. */
-  protected pagedExemplars = computed<ExemplarRow[]>(() => {
-    const page = this.exemplarsPage();
-    if (!page) return [];
-    const rows = page.exemplars.map((e) => this.toExemplarRow(e));
-    if (this.isAnalyticsExemplars()) return rows;
-    const start = this.exemplarPageIndex() * this.exemplarPageSize();
-    return rows.slice(start, start + this.exemplarPageSize());
-  });
+  /** Rows on screen: every exemplar the server returned. */
+  protected exemplarRows = computed<ExemplarRow[]>(() =>
+    (this.exemplarsPage()?.exemplars ?? []).map((e) => this.toExemplarRow(e)));
 
-  /** Paginator length: the server's own total on the analytics tier (a lower bound if it timed
-   *  out under the summary timeout), the capped list length on the standard tier. */
-  protected exemplarsTotal = computed(() => {
-    const page = this.exemplarsPage();
-    if (!page) return 0;
-    if (this.isAnalyticsExemplars()) return page.total ?? page.exemplars.length;
-    return page.exemplars.length;
-  });
-  protected exemplarsTotalIsLowerBound = computed(() => this.isAnalyticsExemplars() && (this.exemplarsPage()?.totalIsLowerBound ?? false));
-  protected exemplarsCapped = computed(() => !this.isAnalyticsExemplars() && (this.exemplarsPage()?.capped ?? false));
+  protected exemplarsTruncated = computed(() => this.exemplarsPage()?.truncated ?? false);
 
   protected exemplarsTabLabel = computed(() => {
     if (!this.exemplarsLoaded()) return 'Exemplars';
-    const n = this.exemplarsTotal();
-    return this.exemplarsTotalIsLowerBound() ? `Exemplars (${n}+)` : `Exemplars (${n})`;
+    const n = this.exemplarRows().length;
+    return this.exemplarsTruncated() ? `Exemplars (${n}+)` : `Exemplars (${n})`;
   });
 
   protected readonly exemplarColumns = ['time', 'value', 'series', 'point', 'traceId', 'spanId', 'attrs'];
@@ -486,25 +460,19 @@ export class MetricDetailComponent implements OnInit, AfterViewInit, OnDestroy {
     return { name, start, end, svc, metricId, labelFilters, q };
   }
 
-  private loadExemplars(nav: 'first' | 'next' | 'prev' | 'last' = 'first'): void {
+  private loadExemplars(): void {
     const { name, start, end, svc, metricId, labelFilters, q } = this.currentFilter();
 
     if (svc && metricId === undefined) {
-      this.exemplarsPage.set({ name, type: this.metricType(), exemplars: [], totalIsLowerBound: false, capped: false });
+      this.exemplarsPage.set({ name, type: this.metricType(), exemplars: [], truncated: false });
       this.exemplarsLoaded.set(true);
       return;
     }
-
-    const current = this.exemplarsPage();
-    const cursor = nav === 'next' ? current?.nextCursor ?? undefined
-      : nav === 'prev' ? current?.prevCursor ?? undefined
-      : undefined;
 
     this.exemplarsLoading.set(true);
     this.exemplarSub?.unsubscribe();
     this.exemplarSub = this.api.getExemplars({
       metricName: name, start, end, metricId, labelFilters, q,
-      size: this.exemplarPageSize(), cursor, nav,
     }).subscribe({
       next: (page) => {
         this.exemplarsPage.set(page);
@@ -560,8 +528,7 @@ export class MetricDetailComponent implements OnInit, AfterViewInit, OnDestroy {
       this.searchText();
       untracked(() => {
         if (tab === MetricDetailComponent.EXEMPLARS_TAB) {
-          this.exemplarPageIndex.set(0);
-          this.loadExemplars('first');
+          this.loadExemplars();
         } else {
           this.exemplarsLoaded.set(false);
         }
@@ -878,35 +845,6 @@ export class MetricDetailComponent implements OnInit, AfterViewInit, OnDestroy {
 
   protected onChartStyleChange(style: ChartStyle): void {
     this.chartStyle.set(style);
-  }
-
-  /**
-   * Maps MatPaginator's page event onto a keyset `nav` on the analytics tier (decision 1: no
-   * arbitrary page jump); a plain client-side slice on the standard tier (already-capped list).
-   */
-  protected onExemplarsPage(e: PageEvent): void {
-    if (!this.isAnalyticsExemplars()) {
-      this.exemplarPageIndex.set(e.pageIndex);
-      this.exemplarPageSize.set(e.pageSize);
-      return;
-    }
-
-    if (e.pageSize !== this.exemplarPageSize()) {
-      this.exemplarPageSize.set(e.pageSize);
-      this.exemplarPageIndex.set(0);
-      this.loadExemplars('first');
-      return;
-    }
-
-    const lastIndex = Math.max(0, Math.ceil(this.exemplarsTotal() / this.exemplarPageSize()) - 1);
-    let nav: 'first' | 'next' | 'prev' | 'last';
-    if (e.pageIndex === 0) nav = 'first';
-    else if (!this.exemplarsTotalIsLowerBound() && e.pageIndex >= lastIndex) nav = 'last';
-    else if (e.pageIndex > (e.previousPageIndex ?? 0)) nav = 'next';
-    else nav = 'prev';
-
-    this.exemplarPageIndex.set(e.pageIndex);
-    this.loadExemplars(nav);
   }
 
   /** Build and download a per-type CSV of the currently charted bucket points. */

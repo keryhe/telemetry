@@ -334,7 +334,7 @@ export class DashboardComponent {
   protected navigateToTrace(traceId: string, spanId?: string | null, start?: string, end?: string): void {
     const queryParams: Record<string, string> = {};
     if (spanId) queryParams['span'] = spanId;
-    if (start && end) { queryParams['start'] = start; queryParams['end'] = end; } // lets the detail read be bounded (Timescale, ClickHouse)
+    if (start && end) { queryParams['start'] = start; queryParams['end'] = end; } // lets the detail read be bounded (ClickHouse)
     this.router.navigate(this.tenant.link('traces', traceId), Object.keys(queryParams).length ? { queryParams } : undefined);
   }
 

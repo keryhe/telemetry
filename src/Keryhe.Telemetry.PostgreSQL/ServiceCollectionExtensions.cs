@@ -7,9 +7,11 @@ using Keryhe.Telemetry.PostgreSQL.Services;
 namespace Microsoft.Extensions.DependencyInjection;
 
 /// <summary>
-/// PostgreSQL (plain) provider registration extensions. The host selects this provider via
-/// <c>Database:Provider = "PostgreSQL"</c>. A singleton <see cref="NpgsqlDataSource"/> is
-/// built from the relevant connection string and owns the connection pool.
+/// PostgreSQL provider registration extensions. The host selects this provider for telemetry data via
+/// <c>Database:Provider = "PostgreSQL"</c> and/or for the control plane via
+/// <c>ControlPlane:Provider = "PostgreSQL"</c>. Each side owns its pool: the telemetry side registers an
+/// unkeyed singleton <see cref="NpgsqlDataSource"/>, the control plane a keyed one
+/// (<see cref="PostgreSqlControlPlane.ServiceKey"/>), so both can be PostgreSQL in one container.
 /// </summary>
 public static class PostgreSqlServiceCollectionExtensions
 {
@@ -18,11 +20,6 @@ public static class PostgreSqlServiceCollectionExtensions
     {
         services.AddSingleton(_ => NpgsqlDataSource.Create(configuration.GetConnectionString("Collector")!));
         services.AddSingleton<ITelemetryBulkWriter, PostgreSqlBulkWriter>();
-        // The raw api_keys lookup and last_used_at bulk update. CachingTenantResolver (the
-        // ITenantResolver every gRPC service actually resolves) and ApiKeyTouchWorker are
-        // provider-agnostic and registered once, in AddKeryheTelemetryCollector.
-        services.AddScoped<IApiKeyLookup, TenantResolver>();
-        services.AddScoped<IApiKeyTouchStore, PostgreSqlApiKeyTouchStore>();
         // metric_last_seen maintenance (list-pages-server-side plan, Phase 5). MetricTouchWorker
         // is provider-agnostic and registered once, in AddKeryheTelemetryCollector.
         services.AddScoped<IMetricTouchStore, PostgreSqlMetricTouchStore>();
@@ -40,14 +37,45 @@ public static class PostgreSqlServiceCollectionExtensions
         services.AddScoped<ILogReadRepository, PostgreSqlLogReadRepository>();
         services.AddScoped<IRollupReadRepository, PostgreSqlRollupReadRepository>();
         services.AddScoped<IResourceReadRepository, PostgreSqlResourceReadRepository>();
+        services.AddScoped<IRetentionSweeper, PostgreSqlRetentionSweeper>();
+        services.AddSingleton(ProviderCapabilities.FromConfiguration(ProviderCapabilities.Default(), configuration));
+        return services;
+    }
+
+    /// <summary>
+    /// Control-plane services for the gRPC ingestion server (uses <c>ConnectionStrings:ControlPlane</c>): the API-key
+    /// lookup and <c>last_used_at</c> update. <c>CachingTenantResolver</c> (the <c>ITenantResolver</c> every gRPC
+    /// service actually resolves) and <c>ApiKeyTouchWorker</c> are provider-agnostic and registered once, in
+    /// <c>AddKeryheTelemetryCollector</c>.
+    /// </summary>
+    public static IServiceCollection AddPostgreSqlControlPlaneCollectorServices(this IServiceCollection services, IConfiguration configuration)
+    {
+        AddControlPlaneDataSource(services, configuration);
+        services.AddScoped<IApiKeyLookup, TenantResolver>();
+        services.AddScoped<IApiKeyTouchStore, PostgreSqlApiKeyTouchStore>();
+        return services;
+    }
+
+    /// <summary>Control-plane services for the API (uses <c>ConnectionStrings:ControlPlane</c>): alert rules, the tenant catalog and retention settings.</summary>
+    public static IServiceCollection AddPostgreSqlControlPlaneApiServices(this IServiceCollection services, IConfiguration configuration)
+    {
+        AddControlPlaneDataSource(services, configuration);
         services.AddScoped<IAlertRuleRepository, PostgreSqlAlertRuleRepository>();
         services.AddScoped<ITenantCatalogRepository, PostgreSqlTenantCatalogRepository>();
         services.AddScoped<IRetentionSettingsRepository, PostgreSqlRetentionSettingsRepository>();
-        services.AddSingleton(ProviderCapabilities.FromConfiguration(ProviderCapabilities.Default(), configuration) with
-        {
-            // The read repositories keep DapperReadRepository's default asOf expression, which backs off this far.
-            AsOfBackoffSeconds = DapperReadRepository.PostgresAsOfBackoffSeconds
-        });
         return services;
     }
+
+    private static void AddControlPlaneDataSource(IServiceCollection services, IConfiguration configuration)
+    {
+        // Read now, so a missing ConnectionStrings:ControlPlane fails at startup with the key named.
+        var connectionString = ControlPlaneConnection.FromConfiguration(configuration).ConnectionString;
+        services.AddKeyedSingleton(PostgreSqlControlPlane.ServiceKey, (_, _) => NpgsqlDataSource.Create(connectionString));
+    }
+}
+
+/// <summary>Names the control-plane <see cref="NpgsqlDataSource"/> in the container, apart from the telemetry one.</summary>
+public static class PostgreSqlControlPlane
+{
+    public const string ServiceKey = "ControlPlane";
 }

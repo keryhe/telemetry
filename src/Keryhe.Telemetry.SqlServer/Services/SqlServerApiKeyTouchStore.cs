@@ -12,9 +12,9 @@ namespace Keryhe.Telemetry.SqlServer.Services;
 /// the count of distinct keys touched in one flush interval is realistically small, but this keeps
 /// a pathological tenant count safe without a special case.
 /// </summary>
-public class SqlServerApiKeyTouchStore(IConfiguration configuration) : IApiKeyTouchStore
+public class SqlServerApiKeyTouchStore(ControlPlaneConnection controlPlane) : IApiKeyTouchStore
 {
-    private readonly string _connectionString = configuration.GetConnectionString("Collector")!;
+    private readonly string _connectionString = controlPlane.ConnectionString;
 
     private const int ChunkSize = 1000;
 

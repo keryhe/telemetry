@@ -164,7 +164,7 @@ export class TraceDetailComponent implements OnInit, OnDestroy {
   @Input() id!: string;
 
   /**
-   * The trace's start and end from the list row that linked here (`?start=&end=`): lets Timescale and ClickHouse read only that
+   * The trace's start and end from the list row that linked here (`?start=&end=`): lets ClickHouse read only that
    * range. Optional; a deep link without them loads the trace the slower way.
    */
   @Input() start?: string;

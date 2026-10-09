@@ -58,19 +58,10 @@ public abstract class LogReadRepositoryBase : DapperReadRepository, ILogReadRepo
             sc.schema_url                AS ScopeSchemaUrl,
             sc.attributes_json           AS ScopeAttributesJson
         FROM log_records lr
-        JOIN {ResourcesTable} r               ON lr.resource_id = r.id
-        JOIN {ScopesTable} sc ON lr.scope_id = sc.id
+        JOIN resources r               ON lr.resource_id = r.id
+        JOIN instrumentation_scopes sc ON lr.scope_id = sc.id
         WHERE lr.tenant_id = @tenantId
         """;
-
-    public async Task<LogRecordModel?> GetLogRecordByIdAsync(long id, CancellationToken cancellationToken = default)
-    {
-        await using var conn = await OpenConnectionAsync(cancellationToken);
-        var row = await conn.QuerySingleOrDefaultAsync<LogRow>(new CommandDefinition(
-            BaseSelect + " AND lr.id = @id",
-            new { tenantId = TenantId, id }, cancellationToken: cancellationToken));
-        return row == null ? null : Map(row);
-    }
 
     public async Task<IEnumerable<LogRecordModel>> GetLogRecordsByTraceIdAsync(string traceIdHex, CancellationToken cancellationToken = default)
     {
@@ -81,21 +72,6 @@ public abstract class LogReadRepositoryBase : DapperReadRepository, ILogReadRepo
         var rows = await conn.QueryAsync<LogRow>(new CommandDefinition(
             BaseSelect + " AND lr.trace_id = @traceId ORDER BY lr.time_unix_nano DESC",
             new { tenantId = TenantId, traceId = IdParam(traceIdHex, 32) }, cancellationToken: cancellationToken));
-        return rows.Select(Map).ToList();
-    }
-
-    public async Task<IEnumerable<LogRecordModel>> GetLogRecordsByTimeRangeAsync(DateTime startTime, DateTime endTime, CancellationToken cancellationToken = default)
-    {
-        if (startTime >= endTime)
-            throw new ArgumentException("Start time must be before end time");
-
-        var startNano = TimeConversion.DateTimeToUnixNano(startTime);
-        var endNano = TimeConversion.DateTimeToUnixNano(endTime);
-
-        await using var conn = await OpenConnectionAsync(cancellationToken);
-        var rows = await conn.QueryAsync<LogRow>(new CommandDefinition(
-            BaseSelect + " AND lr.time_unix_nano >= @start AND lr.time_unix_nano <= @end ORDER BY lr.time_unix_nano DESC",
-            new { tenantId = TenantId, start = startNano, end = endNano }, cancellationToken: cancellationToken));
         return rows.Select(Map).ToList();
     }
 
@@ -126,122 +102,51 @@ public abstract class LogReadRepositoryBase : DapperReadRepository, ILogReadRepo
     }
 
     // =========================================================================
-    // PAGE (list-pages-server-side plan, Phase 2, keyset paging)
+    // LIST (capped, newest or oldest first)
     // =========================================================================
 
-    public async Task<LogPageResult> GetLogPageAsync(LogQuery query, CancellationToken cancellationToken = default)
+    public async Task<LogListResult> GetLogListAsync(LogQuery query, CancellationToken cancellationToken = default)
     {
         if (query.Start >= query.End)
             throw new ArgumentException("Start time must be before end time");
 
-        return await ExecuteWithRetryAsync(() => GetLogPageCoreAsync(query, cancellationToken));
+        return await ExecuteWithRetryAsync(() => GetLogListCoreAsync(query, cancellationToken));
     }
 
-    private async Task<LogPageResult> GetLogPageCoreAsync(LogQuery query, CancellationToken cancellationToken)
+    private async Task<LogListResult> GetLogListCoreAsync(LogQuery query, CancellationToken cancellationToken)
     {
-        var size = Math.Clamp(query.Size, 1, 500);
+        var limit = Math.Max(1, query.Limit);
         var parsed = SearchQueryParser.Parse(query.Search);
-
-        await using var conn = await OpenConnectionAsync(cancellationToken);
-        var asOf = await ResolveAsOfAsync(conn, query.AsOf, cancellationToken);
 
         var startNano = TimeConversion.DateTimeToUnixNano(query.Start);
         var endNano = TimeConversion.DateTimeToUnixNano(query.End);
         var (clauses, parameters) = BuildFilterClauses(query.Service, query.MinSeverity, parsed, startNano, endNano);
-        clauses.Add("lr.created_at <= @asOf");
-        parameters.Add("asOf", asOf);
 
-        var filterHashText = $"{query.Start:O}|{query.End:O}|{asOf:O}|{query.Service}|{query.Search}|{query.MinSeverity}";
-        var filterHash = KeysetCursor.ComputeFilterHash(filterHashText);
+        await using var conn = await OpenConnectionAsync(cancellationToken);
 
-        var nav = (query.Nav ?? "first").ToLowerInvariant();
-        DecodedCursor? cursor = null;
-        if (nav is "next" or "prev")
-        {
-            cursor = KeysetCursor.Decode(query.Cursor);
-            if (cursor == null || !KeysetCursor.MatchesFilterHash(cursor, filterHashText))
-                throw new ArgumentException("Invalid or stale cursor.");
-        }
-
-        List<SlimLogRow> rows;
-        bool forward;
-        int requestedSize;
-
-        switch (nav)
-        {
-            case "next":
-                forward = true;
-                requestedSize = size;
-                clauses.Add(KeysetCursor.Predicate("lr.time_unix_nano", "lr.id", "cursorK", "cursorId", descending: true));
-                parameters.Add("cursorK", cursor!.K);
-                parameters.Add("cursorId", cursor.Id);
-                rows = await FetchPageAsync(conn, clauses, parameters, requestedSize, descending: true, cancellationToken);
-                break;
-
-            case "prev":
-                forward = false;
-                requestedSize = size;
-                clauses.Add(KeysetCursor.Predicate("lr.time_unix_nano", "lr.id", "cursorK", "cursorId", descending: false));
-                parameters.Add("cursorK", cursor!.K);
-                parameters.Add("cursorId", cursor.Id);
-                rows = await FetchPageAsync(conn, clauses, parameters, requestedSize, descending: false, cancellationToken);
-                break;
-
-            default: // "first"
-                forward = true;
-                requestedSize = size;
-                rows = await FetchPageAsync(conn, clauses, parameters, requestedSize, descending: true, cancellationToken);
-                break;
-        }
-
-        // FetchPageAsync always fetches requestedSize+1 rows in its own query order, so a
-        // (requestedSize+1)th row (whichever end it lands on doesn't matter — it's always the last
-        // element returned) means there is more data beyond this page in that direction.
-        var hasExtra = rows.Count > requestedSize;
-        if (hasExtra) rows.RemoveAt(rows.Count - 1);
-
-        List<SlimLogRow> displayRows;
-        string? nextCursor;
-        string? prevCursor;
-
-        if (forward)
-        {
-            displayRows = rows;
-            nextCursor = hasExtra ? Encode(displayRows[^1], filterHash) : null;
-            prevCursor = nav == "first" ? null : (displayRows.Count > 0 ? Encode(displayRows[0], filterHash) : null);
-        }
-        else
-        {
-            displayRows = [.. rows];
-            displayRows.Reverse();
-            // prev
-            nextCursor = displayRows.Count > 0 ? Encode(displayRows[^1], filterHash) : null;
-            prevCursor = hasExtra && displayRows.Count > 0 ? Encode(displayRows[0], filterHash) : null;
-        }
+        // limit + 1 rows: the extra one only says that more matched.
+        var rows = await FetchListAsync(conn, clauses, parameters, limit + 1, ListOrder.IsOldest(query.Order), cancellationToken);
+        var truncated = rows.Count > limit;
+        if (truncated) rows.RemoveAt(rows.Count - 1);
 
         var resourceById = await LoadResourcesAsync(conn, cancellationToken);
         var scopeById = await LoadScopesAsync(conn, cancellationToken);
 
-        return new LogPageResult
+        return new LogListResult
         {
-            Items = displayRows.Select(r => MapSlim(r, resourceById, scopeById)).ToList(),
-            NextCursor = nextCursor,
-            PrevCursor = prevCursor,
-            AsOf = asOf
+            Items = rows.Select(r => MapSlim(r, resourceById, scopeById)).ToList(),
+            Truncated = truncated
         };
     }
 
-    private static string Encode(SlimLogRow row, string filterHash) => KeysetCursor.Encode(row.TimeUnixNano ?? 0, row.Id, filterHash);
-
-    private async Task<List<SlimLogRow>> FetchPageAsync(
+    private async Task<List<SlimLogRow>> FetchListAsync(
         System.Data.Common.DbConnection conn, List<string> clauses, DynamicParameters parameters,
-        int size, bool descending, CancellationToken cancellationToken)
+        int rowCount, bool oldestFirst, CancellationToken cancellationToken)
     {
         var where = string.Join(" AND ", clauses);
-        var order = descending ? "DESC" : "ASC";
+        var order = oldestFirst ? "ASC" : "DESC";
         var sql = $"""
             SELECT
-                lr.id                        AS Id,
                 lr.time_unix_nano            AS TimeUnixNano,
                 lr.observed_time_unix_nano   AS ObservedTimeUnixNano,
                 lr.severity_number           AS SeverityNumber,
@@ -262,7 +167,7 @@ public abstract class LogReadRepositoryBase : DapperReadRepository, ILogReadRepo
             {PagingClause}
             """;
         var clone = new DynamicParameters(parameters);
-        clone.Add("limit", size + 1);
+        clone.Add("limit", rowCount);
         clone.Add("offset", 0);
         var rows = await conn.QueryAsync<SlimLogRow>(new CommandDefinition(sql, clone, cancellationToken: cancellationToken));
         return rows.ToList();
@@ -296,7 +201,7 @@ public abstract class LogReadRepositoryBase : DapperReadRepository, ILogReadRepo
         await using var conn = await OpenConnectionAsync(cancellationToken);
         // Bounded like the summaries: the sample is the newest matching rows, but finding them can mean scanning the
         // window (a search term, a narrow service), and without a budget it ran into the driver's 30 s default and
-        // answered 500 under load (Timescale, the 2026-10-03 timeout-work ramp).
+        // answered 500 under load (the 2026-10-03 timeout-work ramp).
         var (attributeJsonRows, timedOut) = await TimedQuery.RunAsync(
             async (timeoutSeconds, ct) => (await conn.QueryAsync<string?>(new CommandDefinition(
                 sql, parameters, commandTimeout: timeoutSeconds, cancellationToken: ct))).ToList(),
@@ -344,7 +249,7 @@ public abstract class LogReadRepositoryBase : DapperReadRepository, ILogReadRepo
     /// <summary>
     /// Streams every matching log record, oldest first, with no row cap. Reuses
     /// <see cref="BuildFilterClauses"/> — the exact same time/service/severity/search compilation
-    /// the summary and page endpoints use — so export can never see a different population than the
+    /// the list endpoint uses — so export can never see a different population than the
     /// list it's exporting from.
     ///
     /// Reads via <c>SqlMapper.ExecuteReaderAsync(CommandDefinition)</c> +
@@ -389,7 +294,7 @@ public abstract class LogReadRepositoryBase : DapperReadRepository, ILogReadRepo
 
     /// <summary>
     /// Builds the common time/service/minSeverity/search WHERE clauses (plus their parameters)
-    /// shared by the summary, page and facets queries. A trace-id-shaped <c>q</c> (decision 10)
+    /// shared by the list and facets queries. A trace-id-shaped <c>q</c> (decision 10)
     /// filters on <c>lr.trace_id</c> exactly rather than through <see cref="DapperReadRepository.CompileSearch"/>,
     /// whose free-text/attribute compiler has no trace-id concept of its own.
     /// </summary>
@@ -448,7 +353,7 @@ public abstract class LogReadRepositoryBase : DapperReadRepository, ILogReadRepo
         return ToDictionaryFirst(scopeRows, s => s.Id, s => s);
     }
 
-    // ClickHouse stores an absent trace id/span id/event name as '' (non-Nullable columns); the model keeps null.
+    // An empty trace id/span id/event name is absent: the model keeps null.
     private static string? NullIfEmpty(string? value) => string.IsNullOrEmpty(value) ? null : value;
 
     private static LogRecordModel Map(LogRow r) => new()
@@ -536,7 +441,6 @@ public abstract class LogReadRepositoryBase : DapperReadRepository, ILogReadRepo
 
     private sealed class SlimLogRow
     {
-        public long Id { get; set; }
         public long? TimeUnixNano { get; set; }
         public long? ObservedTimeUnixNano { get; set; }
         public int? SeverityNumber { get; set; }

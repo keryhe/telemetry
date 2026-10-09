@@ -49,9 +49,9 @@ public class BrowserTourTests
         Assert.Equal("dashboard", names[0]);
         foreach (var page in new[] { "traces", "trace-detail", "metrics", "metric-detail", "logs", "alerts", "settings" })
             Assert.Contains(steps, s => s.Page == page);
-        Assert.Equal(["traces:next-1", "traces:next-2", "traces:next-3"], names.Where(n => n.StartsWith("traces:next")));
-        Assert.Equal(["logs:next-1", "logs:next-2", "logs:next-3"], names.Where(n => n.StartsWith("logs:next")));
-        Assert.True(names.IndexOf("traces:next-1") > names.IndexOf("traces:list"));
+        Assert.Equal(["traces:oldest", "traces:newest"], names.Where(n => n.StartsWith("traces:") && n.EndsWith("est")));
+        Assert.Equal(["logs:oldest", "logs:newest"], names.Where(n => n.StartsWith("logs:") && n.EndsWith("est")));
+        Assert.True(names.IndexOf("traces:oldest") > names.IndexOf("traces:list"));
 
         Assert.All(steps.Where(s => s.RelativeUrl is not null && s.Page is not ("alerts" or "settings")),
             s => Assert.Contains("range=6h", s.RelativeUrl));

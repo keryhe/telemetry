@@ -17,6 +17,8 @@ public sealed class PostgreSqlFixture : ProviderFixture
     {
         services.AddPostgreSqlCollectorServices(configuration);
         services.AddPostgreSqlApiServices(configuration);
+        services.AddPostgreSqlControlPlaneCollectorServices(configuration);
+        services.AddPostgreSqlControlPlaneApiServices(configuration);
     }
 
     public override async Task ResetAsync()

@@ -55,12 +55,12 @@ public sealed class SqlServerSchemaTests(SqlServerFixture fixture) : IAsyncLifet
             await insert.ExecuteNonQueryAsync();
         }
 
-        // The page query reads the same table and range. Under plain READ COMMITTED it would wait for
+        // The list query reads the same table and range. Under plain READ COMMITTED it would wait for
         // the open transaction's exclusive lock; under row versioning it returns the committed rows.
         using var read = fixture.Services.CreateScope();
-        var page = read.ServiceProvider.GetRequiredService<ITraceReadRepository>().GetTracePageAsync(new TraceQuery
+        var page = read.ServiceProvider.GetRequiredService<ITraceReadRepository>().GetTraceListAsync(new TraceQuery
         {
-            Start = WindowStart.AddMinutes(-1), End = WindowStart.AddHours(1), Size = 100, Mode = "all", AsOf = DateTime.UtcNow.AddMinutes(5)
+            Start = WindowStart.AddMinutes(-1), End = WindowStart.AddHours(1), Limit = 100, Mode = "all"
         });
 
         var finished = await Task.WhenAny(page, Task.Delay(TimeSpan.FromSeconds(15)));

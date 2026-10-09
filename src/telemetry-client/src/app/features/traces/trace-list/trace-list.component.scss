@@ -128,25 +128,6 @@
   --mat-table-header-container-height: 40px;
 }
 
-.capped-notice {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 8px 12px;
-  margin-bottom: 8px;
-  font-size: 13px;
-  color: var(--mat-sys-on-surface-variant);
-  background: var(--mat-sys-surface-container-high);
-  border-radius: 6px;
-
-  mat-icon {
-    font-size: 18px;
-    width: 18px;
-    height: 18px;
-    color: var(--mat-sys-primary);
-  }
-}
-
 .search-limit-message {
   display: flex;
   align-items: center;
@@ -200,19 +181,14 @@
   }
 }
 
-// The list has no exact total, so there is no last page to jump to (plans/summary-rollups.md, decision 10).
-.no-last-button ::ng-deep .mat-mdc-paginator-navigation-last {
-  display: none;
-}
 
-// Grid loading state: skeleton rows on a first load, dimmed + click-blocked rows while paging.
+// Grid loading state: skeleton rows on a first load, dimmed + click-blocked rows while reloading.
 .grid-wrap {
   position: relative;
 
-  &.loading table,
-  &.loading mat-paginator {
+  &.loading table {
     opacity: 0.5;
-    pointer-events: none; // no row clicks / paging while the rows are about to be replaced
+    pointer-events: none; // no row clicks while the rows are about to be replaced
   }
 }
 
@@ -258,4 +234,15 @@
 
 @media (prefers-reduced-motion: reduce) {
   .skeleton-row .bar { animation: none; }
+}
+
+.list-controls {
+  display: flex;
+  justify-content: flex-end;
+  padding: 8px 12px 0;
+
+  mat-button-toggle-group {
+    --mat-button-toggle-height: 32px;
+    font-size: 13px;
+  }
 }

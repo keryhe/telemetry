@@ -34,39 +34,7 @@ public abstract class DapperReadRepository
     protected abstract Task<DbConnection> OpenConnectionAsync(CancellationToken cancellationToken);
 
     /// <summary>
-    /// Database-clock expression for the <c>asOf</c> pin (list-pages-server-side plan, Phase 1
-    /// decision 3/Phase 2): read once per summary/page request when the caller supplies no
-    /// <c>asOf</c> of its own, then echoed back opaquely and never converted. PostgreSQL/Timescale
-    /// subtract 5 seconds to cover the transaction-start race documented on
-    /// <see cref="ResolveAsOfAsync"/>; SqlServer/MySql/ClickHouse have no equivalent race (their
-    /// <c>created_at</c> defaults are evaluated at statement execution, not transaction start) so
-    /// their overrides use the bare clock function. A provider that keeps this default must also
-    /// declare <see cref="PostgresAsOfBackoffSeconds"/> as its
-    /// <see cref="ProviderCapabilities.AsOfBackoffSeconds"/>, so callers that measure ingest-to-query
-    /// lag through a pinned list (the stress harness) can subtract it.
-    /// </summary>
-    protected virtual string DatabaseClockNowExpr => $"NOW() - INTERVAL '{PostgresAsOfBackoffSeconds} seconds'";
-
-    /// <summary>How far behind the database clock the default <see cref="DatabaseClockNowExpr"/> pins <c>asOf</c>.</summary>
-    public const int PostgresAsOfBackoffSeconds = 5;
-
-    /// <summary>
-    /// Resolves the <c>asOf</c> pin: the caller's own value when supplied (a later page of the
-    /// same query, or the "new since" banner reset), otherwise the database's own clock via
-    /// <see cref="DatabaseClockNowExpr"/> — never the API host's clock, which can drift from the
-    /// database's and, on SqlServer/MySql, may not even share its time zone.
-    /// </summary>
-    protected async Task<DateTime> ResolveAsOfAsync(DbConnection conn, DateTime? requestedAsOf, CancellationToken cancellationToken)
-    {
-        if (requestedAsOf.HasValue)
-            return requestedAsOf.Value;
-
-        return await conn.ExecuteScalarAsync<DateTime>(new CommandDefinition(
-            $"SELECT {DatabaseClockNowExpr}", cancellationToken: cancellationToken));
-    }
-
-    /// <summary>
-    /// Wraps an idempotent read (summary/page/facets) so a provider can retry it once on a
+    /// Wraps an idempotent read (summary/list/facets) so a provider can retry it once on a
     /// transient error — SqlServer's read repositories override this to retry error 1205 (snapshot
     /// update conflict / deadlock victim) with a short jittered delay (decision 35). Every other
     /// provider's reads don't take locks that produce an equivalent transient failure, so the base
@@ -75,7 +43,7 @@ public abstract class DapperReadRepository
     protected virtual Task<T> ExecuteWithRetryAsync<T>(Func<Task<T>> operation) => operation();
 
     // =========================================================================
-    // SQL DIALECT HOOKS (defaults are PostgreSQL/Timescale; SqlServer overrides)
+    // SQL DIALECT HOOKS (defaults are PostgreSQL; SqlServer overrides)
     // =========================================================================
 
     /// <summary>Case-insensitive LIKE operator. Postgres uses <c>ILIKE</c>; SqlServer uses <c>LIKE</c> (case-insensitive collation).</summary>
@@ -92,10 +60,6 @@ public abstract class DapperReadRepository
     /// conversion of the <c>varchar</c> column and turn every id seek into a scan.
     /// </summary>
     protected virtual object IdParam(string? value, int length) => value!;
-
-    /// <summary>The table expressions a fact row's resource and scope are joined from. ClickHouse overrides them to collapse the not-yet-merged duplicate rows of its eventually-deduplicated reference tables, so a duplicate cannot multiply the fact rows.</summary>
-    protected virtual string ResourcesTable => "resources";
-    protected virtual string ScopesTable => "instrumentation_scopes";
 
     /// <summary>
     /// SQL boolean expression: does the JSON column <paramref name="jsonColumn"/> contain the key
@@ -114,9 +78,9 @@ public abstract class DapperReadRepository
     /// <summary>
     /// Integer floor-division SQL expression, <c>numerator / denominator</c>, used to compute
     /// histogram bucket indices from nanosecond timestamps. The default (<c>bigint / bigint</c>)
-    /// truncates toward zero on Postgres/Timescale/SqlServer, which is correct floor division
-    /// since the numerator is always &gt;= 0. ClickHouse and MySQL promote <c>/</c> to a
-    /// floating-point result and must override this with their integer-division operator.
+    /// truncates toward zero on Postgres/SqlServer, which is correct floor division
+    /// since the numerator is always &gt;= 0. MySQL promotes <c>/</c> to a
+    /// floating-point result and must override this with its integer-division operator.
     /// </summary>
     protected virtual string BucketIndexExpr(string numerator, string denominator) => $"({numerator} / {denominator})";
 
@@ -139,16 +103,16 @@ public abstract class DapperReadRepository
     /// <summary>
     /// Substring-match predicate for a free-text search term (decision 5/6). The caller binds
     /// <paramref name="valueParam"/> to a <c>%</c>-wrapped, <see cref="EscapeLike"/>-escaped
-    /// pattern. Postgres/Timescale default to case-insensitive <c>ILIKE</c>; SqlServer/MySql
+    /// pattern. Postgres default to case-insensitive <c>ILIKE</c>; SqlServer/MySql
     /// override <see cref="LikeOperator"/> to plain <c>LIKE</c> (case-insensitive under their
     /// default collation already), so this hook needs no per-provider override of its own.
     /// </summary>
-    protected virtual string FreeTextPredicate(string column, string valueParam) => $"{column} {LikeOperator} {valueParam}";
+    protected string FreeTextPredicate(string column, string valueParam) => $"{column} {LikeOperator} {valueParam}";
 
     /// <summary>
     /// The parameter VALUE to bind for a <c>key:value</c>/<c>key=value</c> attribute filter's key
-    /// (list-pages-server-side plan, Phase 1, decision 7). PostgreSQL, Timescale and ClickHouse
-    /// take the raw key: their extraction functions (<c>-&gt;&gt;</c>, <c>JSONExtractRaw</c>) treat
+    /// (list-pages-server-side plan, Phase 1, decision 7). PostgreSQL
+    /// takes the raw key: its extraction function (<c>-&gt;&gt;</c>) treats
     /// it as an object member name literal. SQL Server's <c>JSON_VALUE</c> and MySQL's
     /// <c>JSON_EXTRACT</c> instead take a JSON *path*, and an OpenTelemetry key routinely contains
     /// dots (e.g. <c>service.name</c>) that a naive path would read as nesting — so those two
@@ -175,8 +139,8 @@ public abstract class DapperReadRepository
     ///
     /// Negation keeps rows that lack the key (decision 10): <c>NOT (x = @v)</c> evaluates to NULL
     /// for a missing key and would drop the row, so negation is compiled as an explicit
-    /// null-tolerant form per provider (<c>IS DISTINCT FROM</c> on Postgres/Timescale;
-    /// <c>IS NULL OR &lt;&gt;</c> on SqlServer/MySql; <c>JSONHas(...) = 0 OR !=</c> on ClickHouse).
+    /// null-tolerant form per provider (<c>IS DISTINCT FROM</c> on Postgres;
+    /// <c>IS NULL OR &lt;&gt;</c> on SqlServer/MySql).
     /// </summary>
     protected virtual string AttributePredicate(string column, string keyParam, string valueParam, bool negated)
     {
@@ -192,14 +156,12 @@ public abstract class DapperReadRepository
     /// expression (typically an <see cref="AttributePredicate"/> or <see cref="FreeTextPredicate"/>
     /// result) referencing the correlated alias <paramref name="spanAlias"/> (default <c>s2</c>,
     /// matching <c>TraceReadRepositoryBase</c>'s existing correlated-subquery convention). The time
-    /// range is mandatory: on Timescale a subquery without it checks every chunk, and it is what
-    /// keeps this narrowing rather than an unbounded scan on every provider.
+    /// range is mandatory: it is what keeps this narrowing rather than an unbounded scan on every
+    /// provider.
     ///
-    /// PostgreSQL/Timescale/SqlServer/MySql use a correlated <c>EXISTS</c>; ClickHouse — which
-    /// doesn't reliably support correlated <c>EXISTS</c> — uses an uncorrelated <c>trace_id IN
-    /// (...)</c> instead, overridden below.
+    /// A correlated <c>EXISTS</c> on every provider.
     /// </summary>
-    protected virtual string SpanLevelMatchPredicate(string traceIdColumn, string innerTimeClause, string innerPredicate, string spanAlias = "s2")
+    protected string SpanLevelMatchPredicate(string traceIdColumn, string innerTimeClause, string innerPredicate, string spanAlias = "s2")
         => $"EXISTS (SELECT 1 FROM spans {spanAlias} WHERE {spanAlias}.trace_id = {traceIdColumn}{innerTimeClause} AND {innerPredicate})";
 
     // =========================================================================
@@ -257,9 +219,9 @@ public abstract class DapperReadRepository
 
     /// <summary>
     /// <c>ToDictionary</c> that keeps the first row per key instead of throwing on a duplicate. The reference
-    /// tables (<c>resources</c>, <c>instrumentation_scopes</c>, <c>metrics</c>) are <c>ReplacingMergeTree</c> on
-    /// ClickHouse, whose dedup is eventual: two flushes that both missed the cache can store the same id twice
-    /// until a merge, and a plain <c>ToDictionary</c> over those rows turned that into a 400 on every logs page.
+    /// tables (<c>resources</c>, <c>instrumentation_scopes</c>, <c>metrics</c>) are keyed by a unique constraint, but a
+    /// lookup built from joined or aggregated rows can still repeat an id; a plain <c>ToDictionary</c> would turn that
+    /// repeat into a 400.
     /// </summary>
     protected static Dictionary<TKey, TValue> ToDictionaryFirst<TSource, TKey, TValue>(
         IEnumerable<TSource> source, Func<TSource, TKey> key, Func<TSource, TValue> value) where TKey : notnull
@@ -320,7 +282,7 @@ public abstract class DapperReadRepository
         return attributes["service.name"]?.ToString();
     }
 
-    protected static string ConvertAttributeValueToString(object value)
+    protected internal static string ConvertAttributeValueToString(object value)
     {
         return value switch
         {

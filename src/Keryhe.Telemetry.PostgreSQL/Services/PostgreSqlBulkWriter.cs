@@ -40,14 +40,10 @@ namespace Keryhe.Telemetry.PostgreSQL.Services;
 /// separately-committed statement against the same connection, rather than inside the same
 /// transaction as the bulk data insert. This used to be one transaction end to end, with
 /// <see cref="ResourceScopeCache"/> writes deferred until after commit to avoid caching an id
-/// that a later failure in the same flush would roll back. That shape deadlocked under
-/// concurrent flushes: on Timescale specifically, inserting into a time range with no existing
-/// chunk creates the chunk inside the same transaction, and attaching that chunk's foreign keys
-/// takes a lock on <c>resources</c>/<c>instrumentation_scopes</c> that conflicts with the
-/// upsert's own row lock on those tables -- two flushes, one creating a chunk while holding an
-/// upsert lock the other needs and vice versa, deadlock. Resolving the upserts first, each in
-/// its own auto-committed statement, means the data transaction that goes on to (maybe) create a
-/// chunk never itself holds a lock on the reference tables.
+/// that a later failure in the same flush would roll back. Resolving the upserts first, each in
+/// its own auto-committed statement, keeps the upsert row locks on the reference tables from being
+/// held for the length of the bulk data insert, so concurrent flushes do not wait on one another
+/// for them.
 ///
 /// A consequence: an upserted resource, scope, or metric-catalog row can survive even when the
 /// data insert that needed it fails and the batch is retried. That is fine -- these are
@@ -128,8 +124,7 @@ public sealed class PostgreSqlBulkWriter(
         // Group data points by target table across the WHOLE batch, attaching each row's already
         // -resolved metric_id as it is grouped. This is what turns a metric flush into AT MOST
         // FIVE bulk inserts instead of one per metric: a naive per-metric loop here defeats the
-        // whole point of batching (up to MaxMetricFlushBatchSize round trips per flush), and on
-        // ClickHouse it also explodes into one tiny part per metric.
+        // whole point of batching (up to MaxMetricFlushBatchSize round trips per flush).
         var gaugeRows = new List<(long MetricId, GaugeDataPointModel DataPoint)>();
         var sumRows = new List<(long MetricId, SumDataPointModel DataPoint)>();
         var histogramRows = new List<(long MetricId, HistogramDataPointModel DataPoint)>();

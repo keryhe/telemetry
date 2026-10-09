@@ -64,26 +64,28 @@ public class TracesController : ControllerBase
         return Ok(RollupSummaryBuilder.BuildRequestSummary(window, read.Rows.ToList(), writtenThrough, read.TimedOut));
     }
 
-    // GET /api/tenants/{tenantId}/traces/page?start=&end=&asOf=&mode=&service=&operation=&minDurationMs=&maxDurationMs=&q=&size=&cursor=&nav=
+    // GET /api/tenants/{tenantId}/traces/list?start=&end=&mode=&service=&operation=&minDurationMs=&maxDurationMs=&q=&order=newest|oldest&limit=
+    // At most `limit` traces (clamped to Telemetry:Query:Limits:Traces) from the newest or oldest end of the window; `truncated` says more matched.
     [TelemetryOperation(TelemetryOperation.Read)]
-    [HttpGet("page")]
-    public async Task<ActionResult<TracePageResult>> GetPage(
+    [HttpGet("list")]
+    public async Task<ActionResult<TraceListResult>> GetList(
         [FromQuery] DateTime start,
         [FromQuery] DateTime end,
-        [FromQuery] DateTime? asOf = null,
         [FromQuery] string mode = "all",
         [FromQuery] string? service = null,
         [FromQuery] string? operation = null,
         [FromQuery] double? minDurationMs = null,
         [FromQuery] double? maxDurationMs = null,
         [FromQuery] string? q = null,
-        [FromQuery] int size = 100,
-        [FromQuery] string? cursor = null,
-        [FromQuery] string nav = "first",
+        [FromQuery] string order = ListOrder.Newest,
+        [FromQuery] int? limit = null,
         CancellationToken ct = default)
     {
         if (start >= end)
             return BadRequest("Start time must be before end time.");
+
+        if (!ListOrder.IsValid(order))
+            return BadRequest("order must be 'newest' or 'oldest'.");
 
         var guard = CheckRawSearchWindow(q, mode, start, end);
         if (!guard.Allowed)
@@ -91,7 +93,7 @@ public class TracesController : ControllerBase
 
         try
         {
-            var result = await _traces.GetTracePageAsync(new TraceQuery
+            var result = await _traces.GetTraceListAsync(new TraceQuery
             {
                 Start = start,
                 End = end,
@@ -101,10 +103,8 @@ public class TracesController : ControllerBase
                 MinDurationMs = minDurationMs,
                 MaxDurationMs = maxDurationMs,
                 Search = q,
-                Size = size,
-                Cursor = cursor,
-                Nav = nav,
-                AsOf = asOf
+                Order = order.ToLowerInvariant(),
+                Limit = Math.Clamp(limit ?? _capabilities.Limits.Traces, 1, _capabilities.Limits.Traces)
             }, ct);
             return Ok(result);
         }
@@ -161,7 +161,7 @@ public class TracesController : ControllerBase
     /// <summary>
     /// The trace's spans, with each distinct resource and instrumentation scope listed once (<see cref="TraceDetailResponse"/>).
     /// <c>start</c> and <c>end</c> are optional and used together: the trace's extent as the list returns it
-    /// (<c>traceStartTime</c>/<c>traceEndTime</c>), which lets a provider that cannot seek a trace id (Timescale, ClickHouse) read only
+    /// (<c>traceStartTime</c>/<c>traceEndTime</c>), which lets a provider that cannot seek a trace id (ClickHouse) read only
     /// that range. With either one missing the read is unbounded and the trace whole.
     /// </summary>
     [TelemetryOperation(TelemetryOperation.Read)]

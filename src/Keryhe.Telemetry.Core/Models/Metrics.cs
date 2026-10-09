@@ -155,11 +155,9 @@ public sealed class MetricCatalogQuery
     public MetricType? Type { get; set; }
     /// <summary>"instance" (default) | "name" — no other sort/group option (decision 4/28).</summary>
     public string GroupBy { get; set; } = "instance";
-    public int Size { get; set; } = 50;
-    /// <summary>Opaque, unparsed keyset cursor.</summary>
-    public string? Cursor { get; set; }
-    /// <summary>first | next | prev | last.</summary>
-    public string Nav { get; set; } = "first";
+    /// <summary>Most rows (or names) to return. The API clamps it to the configured limit.</summary>
+    public int Limit { get; set; } = DefaultLimit;
+    public const int DefaultLimit = 500;
 }
 
 /// <summary>
@@ -171,11 +169,8 @@ public sealed class MetricCatalogPage
 {
     public List<MetricInfo> Items { get; set; } = new();
     public List<UniqueMetricSummary> Names { get; set; } = new();
-    public string? NextCursor { get; set; }
-    public string? PrevCursor { get; set; }
-    /// <summary>Exact total under the summary timeout; null (with <see cref="TotalIsLowerBound"/> true) on timeout (decision 31).</summary>
-    public long? Total { get; set; }
-    public bool TotalIsLowerBound { get; set; }
+    /// <summary>More rows (or names) matched than were returned.</summary>
+    public bool Truncated { get; set; }
 }
 
 /// <summary>

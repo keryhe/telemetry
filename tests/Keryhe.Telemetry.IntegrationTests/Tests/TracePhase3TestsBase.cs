@@ -1,4 +1,5 @@
 using Keryhe.Telemetry.Core;
+using Keryhe.Telemetry.Core.Data;
 using Keryhe.Telemetry.Core.Models;
 using Keryhe.Telemetry.IntegrationTests.Fixtures;
 using Keryhe.Telemetry.IntegrationTests.Seeding;
@@ -12,8 +13,8 @@ namespace Keryhe.Telemetry.IntegrationTests.Tests;
 /// 7, 10-12 and 14-18): each trace is anchored on its EARLIEST span in scope (the selected service's
 /// own earliest span when a service is selected); duration, error flag and span count are scoped to
 /// the row; the operation filter matches the anchor's name; search matches any span in the whole
-/// trace; and a re-delivered span batch is stored twice but counted and shown once. Also the keyset
-/// paging and ingestion-time pin checks carried over from the list-pages plan.
+/// trace; and a re-delivered span batch is stored twice but counted and shown once. Also the capped
+/// list's order, limit and truncation (plans/list-caps.md).
 /// </summary>
 public abstract class TracePhase3TestsBase : IAsyncLifetime
 {
@@ -26,12 +27,6 @@ public abstract class TracePhase3TestsBase : IAsyncLifetime
     private static readonly DateTime WindowStart = new(2026, 3, 1, 0, 0, 0, DateTimeKind.Utc);
 
     private IServiceScope Scope() => _fixture.Services.CreateScope();
-
-    /// <summary>
-    /// A pin far enough in the future to include everything just written, so a test exercises anchor
-    /// semantics rather than the pin's own 5-second PostgreSQL/Timescale safety margin.
-    /// </summary>
-    private static DateTime FutureAsOf() => DateTime.UtcNow.AddMinutes(5);
 
     private async Task FlushAsync(params SpanModel[] spans) => await FlushAsync((IEnumerable<SpanModel>)spans);
 
@@ -61,17 +56,17 @@ public abstract class TracePhase3TestsBase : IAsyncLifetime
             InstrumentationScope = SeededDataBuilder.Scope()
         };
 
-    private async Task<TracePageResult> PageAsync(
+    private async Task<TraceListResult> ListAsync(
         string? service = null, string? operation = null, string? search = null, string mode = "all",
-        DateTime? start = null, DateTime? end = null, DateTime? asOf = null, bool useDbAsOf = false, double? minDurationMs = null)
+        DateTime? start = null, DateTime? end = null, double? minDurationMs = null, string order = ListOrder.Newest, int limit = 500)
     {
         using var scope = Scope();
-        return await scope.ServiceProvider.GetRequiredService<ITraceReadRepository>().GetTracePageAsync(new TraceQuery
+        return await scope.ServiceProvider.GetRequiredService<ITraceReadRepository>().GetTraceListAsync(new TraceQuery
         {
             Start = start ?? WindowStart.AddMinutes(-1),
             End = end ?? WindowStart.AddHours(1),
-            Service = service, Operation = operation, Search = search, Mode = mode, Size = 500,
-            AsOf = useDbAsOf ? null : asOf ?? FutureAsOf(), MinDurationMs = minDurationMs
+            Service = service, Operation = operation, Search = search, Mode = mode, Limit = limit, Order = order,
+            MinDurationMs = minDurationMs
         });
     }
 
@@ -94,7 +89,7 @@ public abstract class TracePhase3TestsBase : IAsyncLifetime
             Span(rootless, "svc-a", "rootless-late", SpanKind.CLIENT, WindowStart.AddSeconds(3), 20, parent: NewSpanId()),
             Span(rootless, "svc-a", "rootless-early", SpanKind.SERVER, WindowStart.AddSeconds(1), 200, parent: NewSpanId()));
 
-        var page = await PageAsync();
+        var page = await ListAsync();
 
         Assert.Equal(2, page.Items.Count);
         var a = Assert.Single(page.Items, t => t.TraceIdHex == withRoot);
@@ -108,26 +103,19 @@ public abstract class TracePhase3TestsBase : IAsyncLifetime
     }
 
     [Fact]
-    public async Task RootArrivingLater_BecomesTheAnchorOnTheNextFreshQuery_NotWithinAPinnedAsOf()
+    public async Task RootArrivingLater_BecomesTheAnchorOnTheNextQuery()
     {
         var traceId = NewTraceId();
         await FlushAsync(Span(traceId, "svc-a", "late-span", SpanKind.SERVER, WindowStart.AddSeconds(5), 30, parent: NewSpanId()));
 
-        // Wait past PostgreSQL/Timescale's 5-second "now minus 5s" pin margin, then pin.
-        await Task.Delay(TimeSpan.FromSeconds(6));
-        var pinned = await PageAsync(useDbAsOf: true);
-        var asOf = pinned.AsOf;
-        Assert.Equal("late-span", Assert.Single(pinned.Items).RootOperationName);
+        var before = await ListAsync();
+        Assert.Equal("late-span", Assert.Single(before.Items).RootOperationName);
 
-        // The true root (earlier start) arrives after the pin.
+        // The true root (earlier start) arrives after the first read.
         await FlushAsync(Span(traceId, "svc-a", "the-root", SpanKind.SERVER, WindowStart, 500));
 
-        var stillPinned = await PageAsync(asOf: asOf);
-        Assert.Equal("late-span", Assert.Single(stillPinned.Items).RootOperationName);
-
-        await Task.Delay(TimeSpan.FromSeconds(6));
-        var fresh = await PageAsync(useDbAsOf: true);
-        var item = Assert.Single(fresh.Items);
+        var after = await ListAsync();
+        var item = Assert.Single(after.Items);
         Assert.Equal("the-root", item.RootOperationName);
         Assert.Equal(TimeSpan.FromMilliseconds(500), item.TraceDuration);
     }
@@ -143,7 +131,7 @@ public abstract class TracePhase3TestsBase : IAsyncLifetime
             Span(traceId, "svc-backend", "backend-work", SpanKind.INTERNAL, WindowStart.AddMilliseconds(70), 20),
             Span(traceId, "svc-db", "SELECT", SpanKind.CLIENT, WindowStart.AddMilliseconds(80), 10, status: SpanStatusCode.ERROR));
 
-        var backend = Assert.Single((await PageAsync(service: "svc-backend")).Items);
+        var backend = Assert.Single((await ListAsync(service: "svc-backend")).Items);
         Assert.Equal(traceId, backend.TraceIdHex);
         Assert.Equal("svc-backend", backend.ServiceName);
         Assert.Equal("handle", backend.RootOperationName);
@@ -151,12 +139,12 @@ public abstract class TracePhase3TestsBase : IAsyncLifetime
         Assert.Equal(2, backend.SpanCount);          // the service's own spans, not the whole trace's four
         Assert.False(backend.HasErrors);              // the error span belongs to another service
 
-        var db = Assert.Single((await PageAsync(service: "svc-db")).Items);
+        var db = Assert.Single((await ListAsync(service: "svc-db")).Items);
         Assert.Equal("CLIENT", db.AnchorKind);
         Assert.True(db.HasErrors);
         Assert.Equal(1, db.SpanCount);
 
-        var whole = Assert.Single((await PageAsync()).Items);
+        var whole = Assert.Single((await ListAsync()).Items);
         Assert.Equal("svc-gateway", whole.ServiceName);
         Assert.Equal(4, whole.SpanCount);
         Assert.True(whole.HasErrors);
@@ -173,13 +161,13 @@ public abstract class TracePhase3TestsBase : IAsyncLifetime
             Span(fast, "svc-a", "fast-op", SpanKind.SERVER, WindowStart.AddSeconds(1), 20),
             Span(fast, "svc-a", "long-tail", SpanKind.CLIENT, WindowStart.AddSeconds(1).AddMilliseconds(5), 5000));
 
-        var page = await PageAsync(mode: "slow", minDurationMs: 1000);
+        var page = await ListAsync(mode: "slow", minDurationMs: 1000);
         var row = Assert.Single(page.Items);
         Assert.Equal(slow, row.TraceIdHex);
         Assert.Equal(TimeSpan.FromMilliseconds(1234), row.TraceDuration);
 
         // Unfiltered, both anchors are listed (the fast trace's anchor is 20 ms even though a late child makes the whole trace long).
-        var all = await PageAsync();
+        var all = await ListAsync();
         Assert.Equal(2, all.Items.Count);
         Assert.Equal(new[] { 20.0, 1234.0 }, all.Items.Select(i => i.TraceDuration.TotalMilliseconds).Order().ToArray());
     }
@@ -193,8 +181,8 @@ public abstract class TracePhase3TestsBase : IAsyncLifetime
             Span(traceId, "svc-a", "POST /pay", SpanKind.SERVER, WindowStart, 200, spanId: rootId),
             Span(traceId, "svc-a", "GET /cart", SpanKind.CLIENT, WindowStart.AddMilliseconds(20), 50, parent: rootId));
 
-        Assert.Empty((await PageAsync(operation: "GET /cart")).Items);
-        Assert.Equal(traceId, Assert.Single((await PageAsync(operation: "POST /pay")).Items).TraceIdHex);
+        Assert.Empty((await ListAsync(operation: "GET /cart")).Items);
+        Assert.Equal(traceId, Assert.Single((await ListAsync(operation: "POST /pay")).Items).TraceIdHex);
     }
 
     [Fact]
@@ -207,12 +195,12 @@ public abstract class TracePhase3TestsBase : IAsyncLifetime
             Span(errTrace, "svc-a", "err-op", SpanKind.SERVER, WindowStart.AddSeconds(1), 10),
             Span(errTrace, "svc-b", "boom", SpanKind.CLIENT, WindowStart.AddSeconds(1).AddMilliseconds(2), 5, status: SpanStatusCode.ERROR));
 
-        var unscoped = await PageAsync(mode: "errors");
+        var unscoped = await ListAsync(mode: "errors");
         Assert.Equal(errTrace, Assert.Single(unscoped.Items).TraceIdHex);
 
         // Scoped to svc-a the error span (svc-b's) is out of scope, so the trace is not an error row.
-        Assert.Empty((await PageAsync(service: "svc-a", mode: "errors")).Items);
-        Assert.Equal(errTrace, Assert.Single((await PageAsync(service: "svc-b", mode: "errors")).Items).TraceIdHex);
+        Assert.Empty((await ListAsync(service: "svc-a", mode: "errors")).Items);
+        Assert.Equal(errTrace, Assert.Single((await ListAsync(service: "svc-b", mode: "errors")).Items).TraceIdHex);
     }
 
     [Fact]
@@ -224,14 +212,14 @@ public abstract class TracePhase3TestsBase : IAsyncLifetime
             Span(traceId, "svc-gateway", "GET /api", SpanKind.SERVER, WindowStart, 300, spanId: gatewayId),
             Span(traceId, "svc-backend", "rare-needle-span", SpanKind.SERVER, WindowStart.AddMilliseconds(50), 100, parent: gatewayId));
 
-        var page = await PageAsync(service: "svc-gateway", search: "rare-needle");
+        var page = await ListAsync(service: "svc-gateway", search: "rare-needle");
         var item = Assert.Single(page.Items);
         Assert.Equal(traceId, item.TraceIdHex);
         // Still anchored on the SELECTED service's earliest span, not on the span that matched.
         Assert.Equal("svc-gateway", item.ServiceName);
         Assert.Equal("GET /api", item.RootOperationName);
 
-        Assert.Empty((await PageAsync(service: "svc-gateway", search: "no-such-text-anywhere")).Items);
+        Assert.Empty((await ListAsync(service: "svc-gateway", search: "no-such-text-anywhere")).Items);
     }
 
     [Fact]
@@ -248,7 +236,7 @@ public abstract class TracePhase3TestsBase : IAsyncLifetime
             Span(early, "svc-a", "continues-inside", SpanKind.CLIENT, windowStart.AddMinutes(1), 20),
             Span(inside, "svc-a", "began-inside", SpanKind.SERVER, windowStart.AddMinutes(1), 50));
 
-        var page = await PageAsync(start: windowStart, end: windowEnd);
+        var page = await ListAsync(start: windowStart, end: windowEnd);
         Assert.Equal(inside, Assert.Single(page.Items).TraceIdHex);
     }
 
@@ -259,15 +247,15 @@ public abstract class TracePhase3TestsBase : IAsyncLifetime
         await FlushAsync(kinds.Select((kind, i) =>
             Span(NewTraceId(), "svc-a", $"op-{kind}", kind, WindowStart.AddSeconds(i), 30)));
 
-        var page = await PageAsync();
+        var page = await ListAsync();
         Assert.Equal(4, page.Items.Count);
         Assert.Equal(kinds.Select(k => k.ToString()).Order(), page.Items.Select(t => t.AnchorKind!).Order());
     }
 
     // ---------------------------------------------------------------------------------------------
-    // Sliced paging (trace-list-detail-performance plan, Phase 4): the page is read from slices of the
-    // window instead of ranking all of it, and must agree with the anchor DEFINITION for every nav,
-    // filter, page size and slice width. The expected rows are computed here in LINQ from the seeded
+    // Sliced reads (trace-list-detail-performance plan, Phase 4): the list is read from slices of the
+    // window instead of ranking all of it, and must agree with the anchor DEFINITION for every
+    // filter, order, limit and slice width. The expected rows are computed here in LINQ from the seeded
     // spans, independently of any SQL.
     // ---------------------------------------------------------------------------------------------
 
@@ -305,7 +293,7 @@ public abstract class TracePhase3TestsBase : IAsyncLifetime
     }
 
     [Fact]
-    public async Task SlicedPaging_MatchesTheAnchorDefinition_ForEveryNavFilterPageSizeAndSliceWidth()
+    public async Task SlicedList_MatchesTheAnchorDefinition_ForEveryFilterOrderLimitAndSliceWidth()
     {
         var rng = new Random(7);
         var windowStart = WindowStart;
@@ -343,8 +331,6 @@ public abstract class TracePhase3TestsBase : IAsyncLifetime
         }
         await FlushAsync(spans);
         var spansById = spans.ToDictionary(s => s.SpanIdHex);
-        // One pin for the whole test: a cursor carries a hash of the filter including asOf.
-        var pin = FutureAsOf();
 
         var filters = new (string Name, string? Service, string? Operation, string Mode, string? Search)[]
         {
@@ -374,53 +360,38 @@ public abstract class TracePhase3TestsBase : IAsyncLifetime
                     .ToDictionary(e => e.TraceId);
                 Assert.NotEmpty(expected); // a vacuous comparison would prove nothing
 
-                foreach (var size in new[] { 7, 50 })
+                foreach (var order in new[] { ListOrder.Newest, ListOrder.Oldest })
+                foreach (var limit in new[] { 7, 50, expected.Count, 1000 })
                 {
-                    string Context(string nav) => $"slice={sliceSeconds}s x{growth}, filter={f.Name}, size={size}, {nav}";
-                    TraceQuery Q(string nav, string? cursor = null) => new()
+                    var ctx = $"slice={sliceSeconds}s x{growth}, filter={f.Name}, order={order}, limit={limit}";
+                    var result = await repo.GetTraceListAsync(new TraceQuery
                     {
                         Start = windowStart, End = windowEnd, Service = f.Service, Operation = f.Operation, Mode = f.Mode, Search = f.Search,
-                        MinDurationMs = f.Mode == "slow" ? 500 : null, Size = size, Nav = nav, Cursor = cursor, AsOf = pin,
-                    };
+                        MinDurationMs = f.Mode == "slow" ? 500 : null, Limit = limit, Order = order,
+                    });
+                    var items = result.Items;
 
-                    // Forward: first, then next until the end.
-                    var forward = new List<TraceInfo>();
-                    var page = await repo.GetTracePageAsync(Q("first"));
-                    forward.AddRange(page.Items);
-                    for (var guard = 0; page.NextCursor != null && guard < 100; guard++)
+                    // The list is the first `limit` anchors from the requested end of the window. Traces that tie on the anchor's
+                    // start can be cut either way at the boundary, so the order is checked on the start times, and every row
+                    // is checked against its own expected anchor.
+                    var oldest = ListOrder.IsOldest(order);
+                    var expectedStarts = (oldest ? expected.Values.OrderBy(e => e.AnchorStart) : expected.Values.OrderByDescending(e => e.AnchorStart))
+                        .Take(limit).Select(e => e.AnchorStart).ToList();
+                    var actualStarts = items.Select(i => spansById[i.DisplaySpanIdHex!].StartTimeUnixNano).ToList();
+                    Assert.True(expectedStarts.SequenceEqual(actualStarts), $"{ctx}: the list is not the {order} {limit} anchors");
+                    Assert.True(result.Truncated == expected.Count > limit, $"{ctx}: truncated was {result.Truncated} with {expected.Count} matching");
+                    Assert.Equal(items.Count, items.Select(i => i.TraceIdHex).Distinct().Count()); // one row per trace
+
+                    foreach (var item in items)
                     {
-                        page = await repo.GetTracePageAsync(Q("next", page.NextCursor));
-                        forward.AddRange(page.Items);
-                    }
-
-                    // Backward: from the last forward page, prev until the start; pages are prepended to restore the descending order.
-                    var backward = new List<TraceInfo>(page.Items);
-                    for (var guard = 0; page.PrevCursor != null && guard < 100; guard++)
-                    {
-                        page = await repo.GetTracePageAsync(Q("prev", page.PrevCursor));
-                        backward.InsertRange(0, page.Items);
-                    }
-
-                    foreach (var (direction, items) in new[] { ("forward", forward), ("backward", backward) })
-                    {
-                        var ctx = Context(direction);
-                        Assert.True(expected.Count == items.Count, $"{ctx}: expected {expected.Count} traces, got {items.Count}");
-                        Assert.Equal(expected.Keys.Order(), items.Select(i => i.TraceIdHex).Order());
-
-                        long previousStart = long.MaxValue;
-                        foreach (var item in items)
-                        {
-                            var e = expected[item.TraceIdHex];
-                            var anchorStart = spansById[item.DisplaySpanIdHex!].StartTimeUnixNano;
-                            Assert.True(anchorStart <= previousStart, $"{ctx}: rows are not in descending anchor-start order");
-                            previousStart = anchorStart;
-                            Assert.True(e.AnchorStart == anchorStart, $"{ctx}: trace {item.TraceIdHex} anchored on a span starting at {anchorStart}, expected {e.AnchorStart}");
-                            Assert.Equal(e.Service, item.ServiceName);
-                            Assert.Equal(e.Name, item.RootOperationName);
-                            Assert.Equal(TimeSpan.FromTicks(e.DurationNs / 100), item.TraceDuration);
-                            Assert.True(e.HasError == item.HasErrors, $"{ctx}: trace {item.TraceIdHex} error flag");
-                            Assert.True(e.SpanCount == item.SpanCount, $"{ctx}: trace {item.TraceIdHex} span count {item.SpanCount}, expected {e.SpanCount}");
-                        }
+                        var e = expected[item.TraceIdHex];
+                        var anchorStart = spansById[item.DisplaySpanIdHex!].StartTimeUnixNano;
+                        Assert.True(e.AnchorStart == anchorStart, $"{ctx}: trace {item.TraceIdHex} anchored on a span starting at {anchorStart}, expected {e.AnchorStart}");
+                        Assert.Equal(e.Service, item.ServiceName);
+                        Assert.Equal(e.Name, item.RootOperationName);
+                        Assert.Equal(TimeSpan.FromTicks(e.DurationNs / 100), item.TraceDuration);
+                        Assert.True(e.HasError == item.HasErrors, $"{ctx}: trace {item.TraceIdHex} error flag");
+                        Assert.True(e.SpanCount == item.SpanCount, $"{ctx}: trace {item.TraceIdHex} span count {item.SpanCount}, expected {e.SpanCount}");
                     }
                 }
             }
@@ -431,7 +402,7 @@ public abstract class TracePhase3TestsBase : IAsyncLifetime
     // Trace detail (trace-list-detail-performance plan, Phase 6): the start-time hint and the shared resources/scopes.
     // ---------------------------------------------------------------------------------------------
 
-    /// <summary>Whether this provider reads only the range of a trace-time hint (Timescale's chunks, ClickHouse's partitions); the others ignore it.</summary>
+    /// <summary>Whether this provider reads only the range of a trace-time hint (ClickHouse's partitions); the others ignore it.</summary>
     protected virtual bool HonorsStartHint => false;
 
     private async Task<List<SpanModel>> DetailAsync(string traceId, TraceTimeHint? hint, IReadOnlyDictionary<string, string?>? config = null)
@@ -552,7 +523,7 @@ public abstract class TracePhase3TestsBase : IAsyncLifetime
         await FlushAsync(batch);
         await FlushAsync(batch);   // re-delivery: no unique key, so both copies are stored
 
-        var page = await PageAsync();
+        var page = await ListAsync();
         var item = Assert.Single(page.Items);        // one trace, one row
         Assert.Equal(2, item.SpanCount);              // COUNT(DISTINCT span_id), not 4
 
@@ -564,89 +535,46 @@ public abstract class TracePhase3TestsBase : IAsyncLifetime
     }
 
     // ---------------------------------------------------------------------------------------------
-    // Paging and the ingestion-time pin
+    // The capped list: order, limit and truncation
     // ---------------------------------------------------------------------------------------------
 
-    /// <summary>Paging forward through every anchor then back reproduces the same rows in reverse, with no gaps/duplicates (mirrors LogPhase2TestsBase's identical check).</summary>
-    [Fact]
-    public async Task TracePage_Keyset_Forward_Then_Back_NoGapsOrOverlaps()
+    private static List<DateTime> ExpectedStarts(IEnumerable<SpanModel> spans) =>
+        spans.GroupBy(s => s.TraceIdHex)
+            .Select(g => TimeConversion.UnixNanoToDateTime(g.Min(s => s.StartTimeUnixNano)))
+            .ToList();
+
+    [Theory]
+    [InlineData(ListOrder.Newest)]
+    [InlineData(ListOrder.Oldest)]
+    public async Task TraceList_ReturnsTheRequestedEndOfTheWindow_InOrder(string order)
     {
         var spans = SeededDataBuilder.BasicTraceWindow(_fixture.TenantId, WindowStart, traceCount: 150);
         await FlushAsync(spans);
+        var all = ExpectedStarts(spans);
 
-        using var readScope = Scope();
-        var repo = readScope.ServiceProvider.GetRequiredService<ITraceReadRepository>();
-        var windowEnd = WindowStart.AddMinutes(5);
-        var expectedTraceCount = spans.Select(s => s.TraceIdHex).Distinct().Count();
+        var result = await ListAsync(start: WindowStart, end: WindowStart.AddMinutes(5), order: order, limit: 25);
 
-        const int size = 25;
-        var asOf = (DateTime?)DateTime.UtcNow.AddMinutes(1);
-        var forwardPages = new List<TracePageResult>();
-        string? cursor = null;
-        var nav = "first";
-        for (var i = 0; i < 10 && forwardPages.Sum(p => p.Items.Count) < expectedTraceCount; i++)
-        {
-            var page = await repo.GetTracePageAsync(new TraceQuery
-            {
-                Start = WindowStart, End = windowEnd, Size = size, Cursor = cursor, Nav = nav, AsOf = asOf, Mode = "all"
-            });
-            forwardPages.Add(page);
-            if (page.NextCursor == null) break;
-            cursor = page.NextCursor;
-            nav = "next";
-        }
-
-        var forwardIds = forwardPages.SelectMany(p => p.Items.Select(t => t.TraceIdHex)).ToList();
-        Assert.Equal(expectedTraceCount, forwardIds.Count);
-        Assert.Equal(forwardIds.Distinct().Count(), forwardIds.Count);
-
-        var forwardStarts = forwardPages.SelectMany(p => p.Items.Select(t => t.TraceStartTime)).ToList();
-        Assert.Equal(forwardStarts, forwardStarts.OrderByDescending(x => x));
-
-        var lastPage = forwardPages[^1];
-        if (forwardPages.Count > 1 && lastPage.PrevCursor != null)
-        {
-            var backPage = await repo.GetTracePageAsync(new TraceQuery
-            {
-                Start = WindowStart, End = windowEnd, Size = size, Cursor = lastPage.PrevCursor, Nav = "prev", AsOf = asOf, Mode = "all"
-            });
-            var expected = forwardPages[^2].Items.Select(t => t.TraceIdHex).ToList();
-            var actual = backPage.Items.Select(t => t.TraceIdHex).ToList();
-            Assert.Equal(expected, actual);
-        }
-
-        Assert.Null(lastPage.NextCursor);
+        var expected = ListOrder.IsOldest(order) ? all.Order().Take(25).ToList() : all.OrderDescending().Take(25).ToList();
+        Assert.Equal(expected, result.Items.Select(t => t.TraceStartTime).ToList());
+        Assert.True(result.Truncated);
     }
 
-    /// <summary>A trace whose event time is inside the pinned window but which arrives after `asOf` is excluded from a pinned page and included once a fresh pin passes it (mirrors LogPhase2TestsBase's identical check).</summary>
-    [Fact]
-    public async Task Pin_ExcludesLateArrivals_From_Page()
+    [Theory]
+    [InlineData(ListOrder.Newest)]
+    [InlineData(ListOrder.Oldest)]
+    public async Task TraceList_Truncated_IsFalseAtExactlyN_AndTrueAtNPlusOne(string order)
     {
-        var windowEnd = WindowStart.AddMinutes(30);
-        var baseline = SeededDataBuilder.BasicTraceWindow(_fixture.TenantId, WindowStart, traceCount: 30);
-        await FlushAsync(baseline);
+        var spans = SeededDataBuilder.BasicTraceWindow(_fixture.TenantId, WindowStart, traceCount: 40);
+        await FlushAsync(spans);
+        var traceCount = spans.Select(s => s.TraceIdHex).Distinct().Count();
+        var end = WindowStart.AddMinutes(5);
 
-        using var readScope = Scope();
-        var repo = readScope.ServiceProvider.GetRequiredService<ITraceReadRepository>();
+        var exact = await ListAsync(start: WindowStart, end: end, order: order, limit: traceCount);
+        Assert.Equal(traceCount, exact.Items.Count);
+        Assert.False(exact.Truncated);
 
-        // Same PostgreSQL/Timescale transaction-start-race margin as the log test.
-        await Task.Delay(TimeSpan.FromSeconds(6));
-
-        var firstPage = await repo.GetTracePageAsync(new TraceQuery { Start = WindowStart, End = windowEnd, Size = 500, Mode = "all" });
-        var asOf = firstPage.AsOf;
-        var baselineTraceCount = baseline.Select(s => s.TraceIdHex).Distinct().Count();
-        Assert.Equal(baselineTraceCount, firstPage.Items.Count);
-
-        // Distinct trace ids (seedOffset) so the "late" batch doesn't collide with the baseline.
-        var late = SeededDataBuilder.BasicTraceWindow(_fixture.TenantId, WindowStart.AddSeconds(1), traceCount: 10, seedOffset: 100_000);
-        await FlushAsync(late);
-        var lateTraceCount = late.Select(s => s.TraceIdHex).Distinct().Count();
-
-        var pinnedPage = await repo.GetTracePageAsync(new TraceQuery { Start = WindowStart, End = windowEnd, Size = 500, AsOf = asOf, Mode = "all" });
-        Assert.Equal(baselineTraceCount, pinnedPage.Items.Count);
-
-        await Task.Delay(TimeSpan.FromSeconds(6));
-        var laterPage = await repo.GetTracePageAsync(new TraceQuery { Start = WindowStart, End = windowEnd, Size = 500, Mode = "all" });
-        Assert.Equal(baselineTraceCount + lateTraceCount, laterPage.Items.Count);
+        var oneShort = await ListAsync(start: WindowStart, end: end, order: order, limit: traceCount - 1);
+        Assert.Equal(traceCount - 1, oneShort.Items.Count);
+        Assert.True(oneShort.Truncated);
     }
 }

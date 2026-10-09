@@ -12,12 +12,16 @@ public enum HostTopology { Split }
 /// <param name="Provider">The <c>Database:Provider</c> value.</param>
 /// <param name="CollectorConnectionString">Becomes <c>ConnectionStrings:Collector</c> (ingestion side).</param>
 /// <param name="ApiConnectionString">Becomes <c>ConnectionStrings:Api</c>.</param>
+/// <param name="ControlPlaneProvider">The <c>ControlPlane:Provider</c> value (PostgreSQL for a ClickHouse run, the telemetry provider otherwise).</param>
+/// <param name="ControlPlaneConnectionString">Becomes <c>ConnectionStrings:ControlPlane</c> on both hosts.</param>
 /// <param name="RunDirectory">Where each host's console output is written (<c>host-&lt;role&gt;.log</c>).</param>
 /// <param name="RetentionIntervalSeconds">Short, so a retention sweep lands inside the measured window (Decision 11). Every other worker setting stays at its default.</param>
 public sealed record HostLaunchOptions(
     string Provider,
     string CollectorConnectionString,
     string ApiConnectionString,
+    string ControlPlaneProvider,
+    string ControlPlaneConnectionString,
     HostTopology Topology,
     string RunDirectory,
     int RetentionIntervalSeconds = 60,
@@ -232,6 +236,8 @@ public static class HostLauncher
         var env = new Dictionary<string, string>
         {
             ["Database__Provider"] = options.Provider,
+            ["ControlPlane__Provider"] = options.ControlPlaneProvider,
+            ["ConnectionStrings__ControlPlane"] = options.ControlPlaneConnectionString,
             ["Telemetry__Retention__IntervalSeconds"] = options.RetentionIntervalSeconds.ToString(),
             // One line per entry with a UTC timestamp, which HostLogScanner parses.
             ["Logging__Console__FormatterName"] = "simple",
@@ -267,7 +273,11 @@ public static class HostLauncher
                 var port = PortFinder.GetFreePorts(1)[0];
                 Endpoint("Api", port, "Http1");
                 api = new Uri($"http://127.0.0.1:{port}");
-                env["ConnectionStrings__Api"] = options.ApiConnectionString;
+                // ClickHouse 25.x caches a predicate's matching granules, so a repeated read looks free in a measurement (Phase 0, spike 4):
+                // the harness's API host reads with the cache off. Production queries do not.
+                env["ConnectionStrings__Api"] = options.Provider == "ClickHouse"
+                    ? options.ApiConnectionString + ";set_use_query_condition_cache=0"
+                    : options.ApiConnectionString;
                 // The harness calls the API at the option default /api (the readiness probe, ScenarioRunner, TourDiscovery,
                 // MarkerProbe, DetailProbe; ApiRequestNormalizer assumes it), but the shipped Api.Server appsettings mount it
                 // at /telemetry/api. Without this every readiness probe is a 404. The UI follows (TelemetryUi:ApiBasePath unset).

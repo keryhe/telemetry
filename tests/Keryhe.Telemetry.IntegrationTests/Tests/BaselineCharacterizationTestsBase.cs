@@ -54,9 +54,10 @@ public abstract class BaselineCharacterizationTestsBase : IAsyncLifetime
 
         using var readScope = Scope();
         var repo = readScope.ServiceProvider.GetRequiredService<ILogReadRepository>();
-        var records = await repo.GetLogRecordsByTimeRangeAsync(WindowStart.AddMinutes(-1), WindowStart.AddHours(1));
+        var records = await repo.GetLogListAsync(new LogQuery { Start = WindowStart.AddMinutes(-1), End = WindowStart.AddHours(1), Limit = 1000 });
 
-        Assert.Equal(logs.Count, records.Count());
+        Assert.Equal(logs.Count, records.Items.Count);
+        Assert.False(records.Truncated);
     }
 
     [Fact]

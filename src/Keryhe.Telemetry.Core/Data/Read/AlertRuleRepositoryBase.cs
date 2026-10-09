@@ -10,9 +10,17 @@ namespace Keryhe.Telemetry.Core.Data.Read;
 /// the atomic cooldown UPDATE — are supplied by the provider subclass. This replaces the
 /// former EF implementation whose <c>TryClaimFireAsync</c> hardcoded Postgres SQL.
 /// </summary>
-public abstract class AlertRuleRepositoryBase : DapperReadRepository, IAlertRuleRepository
+public abstract class AlertRuleRepositoryBase : ControlPlaneRepositoryBase, IAlertRuleRepository
 {
-    protected AlertRuleRepositoryBase(ITenantContext tenantContext) : base(tenantContext) { }
+    private readonly ITenantContext _tenantContext;
+
+    protected AlertRuleRepositoryBase(ITenantContext tenantContext)
+    {
+        _tenantContext = tenantContext ?? throw new ArgumentNullException(nameof(tenantContext));
+    }
+
+    /// <summary>The active tenant id; rule CRUD is scoped to it.</summary>
+    protected long TenantId => _tenantContext.GetRequiredTenantId();
 
     /// <summary>Wraps a parameter for a JSON column (e.g. <c>CAST(@p AS jsonb)</c> for Postgres, <c>@p</c> for SqlServer).</summary>
     protected abstract string JsonParam(string parameterName);

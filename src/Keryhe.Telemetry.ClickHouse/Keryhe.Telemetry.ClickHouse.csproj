@@ -23,6 +23,10 @@
   </ItemGroup>
 
   <ItemGroup>
+    <InternalsVisibleTo Include="Keryhe.Telemetry.IntegrationTests" />
+  </ItemGroup>
+
+  <ItemGroup>
     <ProjectReference Include="../Keryhe.Telemetry.Core/Keryhe.Telemetry.Core.csproj" />
   </ItemGroup>
 

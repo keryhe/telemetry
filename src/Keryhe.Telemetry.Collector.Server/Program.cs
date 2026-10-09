@@ -21,11 +21,21 @@ public class Program
         {
             case "SqlServer":  builder.Services.AddSqlServerCollectorServices(builder.Configuration);  break;
             case "PostgreSQL": builder.Services.AddPostgreSqlCollectorServices(builder.Configuration); break;
-            case "Timescale":  builder.Services.AddTimescaleCollectorServices(builder.Configuration);  break;
             case "ClickHouse": builder.Services.AddClickHouseCollectorServices(builder.Configuration); break;
             case "MySql":      builder.Services.AddMySqlCollectorServices(builder.Configuration);      break;
             default: throw new InvalidOperationException(
-                "Unknown or missing Database:Provider (expected SqlServer, PostgreSQL, Timescale, ClickHouse, or MySql).");
+                "Unknown or missing Database:Provider (expected SqlServer, PostgreSQL, ClickHouse, or MySql).");
+        }
+
+        // The control plane (tenants and API keys): ControlPlane:Provider + ConnectionStrings:ControlPlane, both
+        // required. It may be a different provider (and database) from the telemetry data above.
+        switch (builder.Configuration["ControlPlane:Provider"])
+        {
+            case "SqlServer":  builder.Services.AddSqlServerControlPlaneCollectorServices(builder.Configuration);  break;
+            case "PostgreSQL": builder.Services.AddPostgreSqlControlPlaneCollectorServices(builder.Configuration); break;
+            case "MySql":      builder.Services.AddMySqlControlPlaneCollectorServices(builder.Configuration);      break;
+            default: throw new InvalidOperationException(
+                "Unknown or missing ControlPlane:Provider (expected SqlServer, PostgreSQL, or MySql).");
         }
 
         // Add CORS for web clients if needed

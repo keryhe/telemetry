@@ -25,7 +25,7 @@ public class MetricsController : ControllerBase
     }
 
     /// <summary>
-    /// GET /api/tenants/{tenantId}/metrics/catalog?start=&end=&q=&service=&type=&groupBy=name|instance&size=&cursor=&nav=
+    /// GET /api/tenants/{tenantId}/metrics/catalog?start=&end=&q=&service=&type=&groupBy=name|instance&limit=
     /// Phase 5 (list-pages-server-side plan): replaces the former unbounded-with-a-cap
     /// <c>GET /api/metrics</c> (removed — its only caller, the metrics list page, now calls this).
     /// <c>start</c>/<c>end</c> are required — every "seen in range" check runs against them
@@ -40,9 +40,7 @@ public class MetricsController : ControllerBase
         [FromQuery] string? service,
         [FromQuery] MetricType? type,
         [FromQuery] string groupBy = "instance",
-        [FromQuery] int size = 50,
-        [FromQuery] string? cursor = null,
-        [FromQuery] string nav = "first",
+        [FromQuery] int? limit = null,
         CancellationToken ct = default)
     {
         if (start >= end)
@@ -56,9 +54,7 @@ public class MetricsController : ControllerBase
             Service = service,
             Type = type,
             GroupBy = groupBy,
-            Size = Math.Clamp(size, 1, 500),
-            Cursor = cursor,
-            Nav = nav
+            Limit = Math.Clamp(limit ?? _capabilities.Limits.MetricCatalog, 1, _capabilities.Limits.MetricCatalog)
         };
 
         var page = await _metrics.GetMetricCatalogPageAsync(query, ct);
@@ -141,12 +137,8 @@ public class MetricsController : ControllerBase
     }
 
     /// <summary>
-    /// GET /api/tenants/{tenantId}/metrics/exemplars?metricName=&start=&end=&metricId=&labelFilter=key:value&q=&size=&cursor=&nav=
-    /// Analytics tier (<see cref="ProviderCapabilities.ExemplarPaging"/>): real keyset paging —
-    /// <c>cursor</c>/<c>nav</c> are honored and the response carries <c>nextCursor</c>/
-    /// <c>prevCursor</c>/<c>total</c>/<c>totalIsLowerBound</c>. Standard tier: the newest 500,
-    /// <c>capped</c> flagged, no cursor (decision 26). <c>end</c> is the pin the exemplar scan
-    /// itself uses, not a server-echoed clock value (see the repository's own doc comment).
+    /// GET /api/tenants/{tenantId}/metrics/exemplars?metricName=&start=&end=&metricId=&labelFilter=key:value&q=&limit=
+    /// The newest exemplars first, at most <c>limit</c> (clamped to <c>Telemetry:Query:Limits:Exemplars</c>); <c>truncated</c> says more exist.
     /// </summary>
     [TelemetryOperation(TelemetryOperation.Read)]
     [HttpGet("exemplars")]
@@ -157,9 +149,7 @@ public class MetricsController : ControllerBase
         [FromQuery] long? metricId,
         [FromQuery(Name = "labelFilter")] List<string>? labelFilter,
         [FromQuery] string? q,
-        [FromQuery] int size = 100,
-        [FromQuery] string? cursor = null,
-        [FromQuery] string nav = "first",
+        [FromQuery] int? limit = null,
         CancellationToken ct = default)
     {
         if (string.IsNullOrWhiteSpace(metricName))
@@ -173,9 +163,7 @@ public class MetricsController : ControllerBase
             Start = start,
             End = end,
             LabelFilters = filters,
-            Size = _capabilities.ExemplarPaging ? Math.Clamp(size, 1, 1000) : 500,
-            Cursor = cursor,
-            Nav = nav
+            Limit = Math.Clamp(limit ?? _capabilities.Limits.Exemplars, 1, _capabilities.Limits.Exemplars)
         };
 
         var page = await _metrics.GetMetricExemplarsAsync(query, ct);

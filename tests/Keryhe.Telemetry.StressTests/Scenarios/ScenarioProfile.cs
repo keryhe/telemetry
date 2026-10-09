@@ -26,9 +26,7 @@ public sealed class RampCriteria
     public double LagGrowthMinMs { get; set; } = 3000;
 
     /// <summary>
-    /// Stop when the last third of a step's probes averaged more than this many seconds of lag, growing or not (0 disables). Both lag
-    /// criteria see the log lag with the provider's <c>asOf</c> pin offset already subtracted, so PostgreSQL/Timescale's constant 5 s
-    /// back-off neither inflates the growth ratio's denominator nor counts against this limit.
+    /// Stop when the last third of a step's probes averaged more than this many seconds of lag, growing or not (0 disables).
     /// </summary>
     public double MaxLagSeconds { get; set; } = 10;
 
@@ -150,7 +148,7 @@ public sealed class ScenarioProfile
 
     /// <summary>
     /// Days of backdated history sent (through the real OTLP path) before the warm-up, so reads run over a table with history (many
-    /// Timescale chunks, many ClickHouse partitions) instead of the minutes a run itself produces. 0 = none (trace-list-detail-performance
+    /// ClickHouse partitions) instead of the minutes a run itself produces. 0 = none (trace-list-detail-performance
     /// plan, Phase 0). Seeded spans are ledgered as current, so the correctness check still balances. The report records the parameters:
     /// a run with history is never comparable with one without.
     /// </summary>

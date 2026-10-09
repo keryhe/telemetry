@@ -9,12 +9,12 @@ namespace Keryhe.Telemetry.StressTests.Load;
 /// </summary>
 public static class LedgerSemantics
 {
-    /// <summary>The <c>TARGET_VERSION</c> in <c>schema/apply-schema.sh</c>, or null when the script or the line is missing.</summary>
+    /// <summary>The <c>TELEMETRY_TARGET_VERSION</c> in <c>schema/apply-schema.sh</c>, or null when the script or the line is missing.</summary>
     public static string? TargetSchemaVersion(string repoRoot)
     {
         var path = Path.Combine(repoRoot, "schema", "apply-schema.sh");
         if (!File.Exists(path)) return null;
-        var match = Regex.Match(File.ReadAllText(path), "^TARGET_VERSION=\"([^\"]+)\"", RegexOptions.Multiline);
+        var match = Regex.Match(File.ReadAllText(path), "^TELEMETRY_TARGET_VERSION=\"([^\"]+)\"", RegexOptions.Multiline);
         return match.Success ? match.Groups[1].Value : null;
     }
 

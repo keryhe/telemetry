@@ -9,8 +9,8 @@ using Xunit;
 namespace Keryhe.Telemetry.IntegrationTests.Tests;
 
 /// <summary>
-/// Phase 5 correctness checks (list-pages-server-side plan): the metrics catalog's server-side
-/// paging (instances and groupBy=name), the <c>metric_last_seen</c> "seen in range" approximation
+/// Phase 5 correctness checks (list-pages-server-side plan): the metrics catalog's capped
+/// list (instances and groupBy=name), the <c>metric_last_seen</c> "seen in range" approximation
 /// vs. its exact-EXISTS fallback past a 1-hour-old window end (decision 27), the touch worker
 /// advancing <c>last_seen_unix_nano</c> within one flush interval, and deadlock safety under two
 /// concurrent touch batches.
@@ -20,14 +20,20 @@ namespace Keryhe.Telemetry.IntegrationTests.Tests;
 /// the same two steps that worker performs on its interval: drain <see cref="MetricTouchTracker"/>
 /// (populated automatically by each relational bulk writer's <c>FlushMetricsAsync</c>) and call
 /// <see cref="IMetricTouchStore.TouchAsync"/> directly. On ClickHouse this manual step is a
-/// deliberate no-op (see <c>ClickHouseMetricTouchStore</c>) — its <c>metric_last_seen</c> is kept
-/// current by materialized views firing on the data-point INSERTs already performed by
-/// <c>FlushMetricsAsync</c>, so no extra step is needed there at all.
+/// deliberate no-op (see <c>ClickHouseMetricTouchStore</c>) — its <c>metric_catalog</c> is written
+/// by <c>FlushMetricsAsync</c> itself, so no extra step is needed there at all.
 /// </summary>
 public abstract class MetricPhase5TestsBase : IAsyncLifetime
 {
     private readonly ProviderFixture _fixture;
     protected MetricPhase5TestsBase(ProviderFixture fixture) => _fixture = fixture;
+
+    /// <summary>
+    /// Whether a catalog "instance" is one resource of a service (every relational provider) or the service itself (ClickHouse, whose
+    /// catalog is keyed by tenant, service, metric and type: plans/clickhouse-redesign README R6). Only the assertions that count
+    /// instances depend on it.
+    /// </summary>
+    protected virtual bool CatalogInstanceIsPerResource => true;
 
     public Task InitializeAsync() => _fixture.ResetAsync();
     public Task DisposeAsync() => Task.CompletedTask;
@@ -53,7 +59,7 @@ public abstract class MetricPhase5TestsBase : IAsyncLifetime
     }
 
     [Fact]
-    public async Task Catalog_InstanceView_PagesAllRowsWithNoGapsOrDuplicates()
+    public async Task Catalog_InstanceView_ReturnsTheFirstRowsOfTheFullOrder_AndSaysWhenTruncated()
     {
         const int count = 25;
         var metrics = Enumerable.Range(0, count)
@@ -64,61 +70,60 @@ public abstract class MetricPhase5TestsBase : IAsyncLifetime
         using var readScope = Scope();
         var repo = readScope.ServiceProvider.GetRequiredService<IMetricReadRepository>();
 
-        var seenIds = new HashSet<long>();
-        string? cursor = null;
-        var nav = "first";
-        long? lastTotal = null;
-        for (var guard = 0; guard < count + 5; guard++)
+        Task<MetricCatalogPage> Catalog(int limit) => repo.GetMetricCatalogPageAsync(new MetricCatalogQuery
         {
-            var page = await repo.GetMetricCatalogPageAsync(new MetricCatalogQuery
-            {
-                Start = WindowStart.AddDays(-1),
-                End = WindowStart.AddDays(1),
-                GroupBy = "instance",
-                Size = 7,
-                Cursor = cursor,
-                Nav = nav
-            });
-            lastTotal = page.Total;
+            Start = WindowStart.AddDays(-1), End = WindowStart.AddDays(1), GroupBy = "instance", Limit = limit
+        });
 
-            foreach (var item in page.Items)
-                Assert.True(seenIds.Add(item.Id), "instance catalog paging must not repeat a row");
+        // 25 pods of one service over 5 metric names: 25 instances, or 5 where an instance is a service's metric.
+        var expected = CatalogInstanceIsPerResource ? count : 5;
 
-            if (page.NextCursor == null) break;
-            cursor = page.NextCursor;
-            nav = "next";
+        // All share (nearly) one creation time, so the order leans on the id tiebreak: a shorter list must still be
+        // the head of the full one, with no row repeated.
+        var all = await Catalog(expected);
+        Assert.Equal(expected, all.Items.Count);
+        Assert.Equal(expected, all.Items.Select(i => i.Id).Distinct().Count());
+        Assert.False(all.Truncated); // exactly N rows matched: nothing more
 
-            // KNOWN LIMITATIONS (not fixed in this pass), both specific to this test's shape —
-            // 25 metrics inserted in one flush, so many rows share (or nearly share) the same
-            // metrics.created_at, exercising the keyset tiebreak (m.id) heavily:
-            //
-            // - ClickHouse: a "next" page against the exact-seen-in-range fallback WHERE
-            //   (decision 27; this test's WindowStart-based window is always >1h in the past)
-            //   comes back with ZERO rows, even though the cursor decodes to sane values matching
-            //   the previous page's last row. Confirmed NOT a parameter-binding gap (tried both
-            //   anonymous-object AddDynamicParams and direct DynamicParameters.Add), NOT the
-            //   DateTime64(9) precision loss it initially looked like (fixed via CatalogTimeExpr/
-            //   CatalogCursorKeyParam, which did not resolve this), NOT the read-in-order LIMIT
-            //   optimizer (disabled via CatalogQuerySettingsClause, also no effect), and NOT a
-            //   data-visibility race (reproduces identically after a 3s delay).
-            // - SQL Server: a "next" page instead comes back with the WRONG boundary — it
-            //   re-includes rows the previous page already returned (confirmed deterministic:
-            //   reproduces the exact same duplicate ids on every run, e.g. re-including ids 20 and
-            //   19 after a first page ending at id 19), pointing at the OFFSET/FETCH cursor
-            //   predicate resolving against a different row than the one actually encoded into the
-            //   cursor when many rows tie on created_at, rather than a data or parameter issue.
-            //
-            // Both need a follow-up with direct provider query-plan access this pass didn't have
-            // time for. Bail out here rather than asserting a page count these two providers
-            // cannot currently deliver past the first page; single-page fetches at every size,
-            // total counts, filters, groupBy and the seen-in-range/touch-worker mechanics are all
-            // still verified correct on every provider including these two (see the other tests in
-            // this class).
-            if (guard == 0 && (_fixture.ProviderName == ProviderNames.ClickHouse || _fixture.ProviderName == ProviderNames.SqlServer))
-                return;
-        }
+        var head = await Catalog(3);
+        Assert.Equal(all.Items.Take(3).Select(i => i.Id), head.Items.Select(i => i.Id));
+        Assert.True(head.Truncated);
 
-        Assert.True(count == seenIds.Count, $"expected {count} rows, saw {seenIds.Count}, server Total={lastTotal}");
+        var oneShort = await Catalog(expected - 1);
+        Assert.Equal(expected - 1, oneShort.Items.Count);
+        Assert.True(oneShort.Truncated);
+
+        var roomToSpare = await Catalog(expected + 50);
+        Assert.Equal(expected, roomToSpare.Items.Count);
+        Assert.False(roomToSpare.Truncated);
+    }
+
+    [Fact]
+    public async Task Catalog_NameView_ReturnsTheFirstNamesOfTheFullOrder_AndSaysWhenTruncated()
+    {
+        var metrics = Enumerable.Range(0, 12)
+            .Select(i => SeededDataBuilder.CatalogMetric(_fixture.TenantId, $"phase5.names.metric{i:D2}", MetricType.GAUGE, "phase5-svc", WindowStart.AddSeconds(i), instanceId: $"pod-{i}"))
+            .ToArray();
+        await FlushAndTouchAsync(metrics);
+
+        using var readScope = Scope();
+        var repo = readScope.ServiceProvider.GetRequiredService<IMetricReadRepository>();
+
+        Task<MetricCatalogPage> Catalog(int limit) => repo.GetMetricCatalogPageAsync(new MetricCatalogQuery
+        {
+            Start = WindowStart.AddDays(-1), End = WindowStart.AddDays(1), GroupBy = "name", Q = "phase5.names", Limit = limit
+        });
+
+        var all = await Catalog(12);
+        Assert.Equal(12, all.Names.Count);
+        Assert.Equal(12, all.Names.Select(n => n.Name).Distinct().Count());
+        Assert.False(all.Truncated);
+
+        var head = await Catalog(5);
+        Assert.Equal(all.Names.Take(5).Select(n => n.Name), head.Names.Select(n => n.Name));
+        Assert.True(head.Truncated);
+
+        Assert.True((await Catalog(11)).Truncated);
     }
 
     [Fact]
@@ -139,13 +144,13 @@ public abstract class MetricPhase5TestsBase : IAsyncLifetime
             End = WindowStart.AddDays(1),
             GroupBy = "name",
             Q = "phase5.grouped",
-            Size = 10
+            Limit = 10
         });
 
         var row = Assert.Single(page.Names);
         Assert.Equal("phase5.grouped.metric", row.Name);
         Assert.Equal(MetricType.SUM, row.Type);
-        Assert.Equal(3, row.InstanceCount);
+        Assert.Equal(CatalogInstanceIsPerResource ? 3 : 2, row.InstanceCount); // a1, a2, b1 -- or the two services
         Assert.Equal(new[] { "svc-a", "svc-b" }, row.Services.OrderBy(s => s).ToArray());
     }
 
@@ -163,7 +168,7 @@ public abstract class MetricPhase5TestsBase : IAsyncLifetime
         var byService = await repo.GetMetricCatalogPageAsync(new MetricCatalogQuery
         {
             Start = WindowStart.AddDays(-1), End = WindowStart.AddDays(1),
-            GroupBy = "instance", Service = "filter-svc-a", Q = "phase5.filter", Size = 10
+            GroupBy = "instance", Service = "filter-svc-a", Q = "phase5.filter", Limit = 10
         });
         var item = Assert.Single(byService.Items);
         Assert.Equal("phase5.filter.gauge", item.Name);
@@ -171,7 +176,7 @@ public abstract class MetricPhase5TestsBase : IAsyncLifetime
         var byType = await repo.GetMetricCatalogPageAsync(new MetricCatalogQuery
         {
             Start = WindowStart.AddDays(-1), End = WindowStart.AddDays(1),
-            GroupBy = "instance", Type = MetricType.SUM, Q = "phase5.filter", Size = 10
+            GroupBy = "instance", Type = MetricType.SUM, Q = "phase5.filter", Limit = 10
         });
         var typeItem = Assert.Single(byType.Items);
         Assert.Equal("phase5.filter.sum", typeItem.Name);
@@ -196,7 +201,7 @@ public abstract class MetricPhase5TestsBase : IAsyncLifetime
             End = WindowStart.AddHours(1),
             GroupBy = "instance",
             Q = "phase5.exact",
-            Size = 10
+            Limit = 10
         });
 
         var names = page.Items.Select(i => i.Name).ToList();
@@ -237,7 +242,7 @@ public abstract class MetricPhase5TestsBase : IAsyncLifetime
                 // actual (DB-assigned, necessarily later than the pre-insert C# clock read) insert
                 // time, or this would spuriously fail on providers whose write and read clocks are
                 // close enough for the pre-insert timestamp to land before it.
-                Start = now.AddHours(-1), End = DateTime.UtcNow, GroupBy = "instance", Q = "phase5.approx", Size = 10
+                Start = now.AddHours(-1), End = DateTime.UtcNow, GroupBy = "instance", Q = "phase5.approx", Limit = 10
             });
             // Not yet touched: the approximate join finds no metric_last_seen row, so it is excluded
             // — documented in SeenInRangeClause's own doc comment.
@@ -255,16 +260,14 @@ public abstract class MetricPhase5TestsBase : IAsyncLifetime
         using (var readScope = Scope())
         {
             var repo = readScope.ServiceProvider.GetRequiredService<IMetricReadRepository>();
-            // ClickHouse's metric_last_seen materialized views are ordinarily synchronous with
-            // their source INSERT, but this test observed a brief propagation lag under the test
-            // container for a single-row flush; a short bounded poll accommodates that without
-            // weakening the assertion itself (still requires exactly one matching row).
+            // A short bounded poll tolerates a brief propagation lag under the test container for a
+            // single-row flush, without weakening the assertion itself (still exactly one matching row).
             MetricCatalogPage afterTouch = null!;
             for (var attempt = 0; attempt < 10; attempt++)
             {
                 afterTouch = await repo.GetMetricCatalogPageAsync(new MetricCatalogQuery
                 {
-                    Start = now.AddHours(-1), End = DateTime.UtcNow, GroupBy = "instance", Q = "phase5.approx", Size = 10
+                    Start = now.AddHours(-1), End = DateTime.UtcNow, GroupBy = "instance", Q = "phase5.approx", Limit = 10
                 });
                 if (afterTouch.Items.Count > 0) break;
                 await Task.Delay(200);
@@ -317,7 +320,7 @@ public abstract class MetricPhase5TestsBase : IAsyncLifetime
         // entirely (decision 27) and the page would come back empty.
         var page = await repo.GetMetricCatalogPageAsync(new MetricCatalogQuery
         {
-            Start = earlier.AddMinutes(5), End = DateTime.UtcNow, GroupBy = "instance", Q = "phase5.advance", Size = 10
+            Start = earlier.AddMinutes(5), End = DateTime.UtcNow, GroupBy = "instance", Q = "phase5.advance", Limit = 10
         });
         Assert.Single(page.Items);
     }

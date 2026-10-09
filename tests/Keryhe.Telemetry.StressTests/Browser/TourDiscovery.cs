@@ -45,7 +45,7 @@ public static class TourDiscovery
 
         async Task<string?> MetricAsync(string type)
         {
-            if (await GetAsync($"api/tenants/{tenantId}/metrics/catalog?{range}&type={type}&groupBy=name&size=1") is not { ValueKind: JsonValueKind.Object } page) return null;
+            if (await GetAsync($"api/tenants/{tenantId}/metrics/catalog?{range}&type={type}&groupBy=name&limit=1") is not { ValueKind: JsonValueKind.Object } page) return null;
             foreach (var p in page.EnumerateObject())
                 if (p.NameEquals("names") && p.Value.ValueKind == JsonValueKind.Array && p.Value.GetArrayLength() > 0)
                     foreach (var n in p.Value[0].EnumerateObject())

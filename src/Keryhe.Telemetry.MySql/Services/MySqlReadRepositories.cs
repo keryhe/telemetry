@@ -61,10 +61,6 @@ public class MySqlTraceReadRepository(IConfiguration configuration, ITenantConte
     // MySqlLogReadRepository's identical override.
     protected override string LikeOperator => "LIKE";
 
-    // Decision 3/Phase 3 pin helper: MySQL's created_at default is evaluated at statement
-    // execution, so no 5-second back-off is needed here -- see MySqlLogReadRepository's identical
-    // override.
-    protected override string DatabaseClockNowExpr => "CURRENT_TIMESTAMP(6)";
 
     // MySQL's `/` always yields a DECIMAL result even for integer operands; DIV keeps bucket-index
     // math as true integer floor division -- see MySqlLogReadRepository's identical override.
@@ -92,7 +88,7 @@ public class MySqlMetricReadRepository(IConfiguration configuration, ITenantCont
 
     // MySQL's `/` always yields a DECIMAL result even for integer operands; DIV keeps Phase 4's
     // bucket-index math as true integer floor division — see MySqlLogReadRepository's identical
-    // override. Same real bug shape as the ClickHouse BucketIndexExpr gap this phase also fixed.
+    // override.
     protected override string BucketIndexExpr(string numerator, string denominator) => $"({numerator} DIV {denominator})";
 
     // Load-bearing for the metrics catalog's service/name filters (list-pages-server-side plan,
@@ -100,10 +96,6 @@ public class MySqlMetricReadRepository(IConfiguration configuration, ITenantCont
     // same reason; MetricReadRepositoryBase's catalog query calls them polymorphically too.
     protected override string LikeOperator => "LIKE";
 
-    // Standard tier (decision 26): newest-500, no cursor — not the analytics-tier keyset default.
-    public override Task<Keryhe.Telemetry.Core.Models.MetricExemplarPage?> GetMetricExemplarsAsync(
-        Keryhe.Telemetry.Core.Models.MetricExemplarQuery query, CancellationToken cancellationToken = default)
-        => GetMetricExemplarsCappedAsync(query, cancellationToken);
 }
 
 public class MySqlLogReadRepository(IConfiguration configuration, ITenantContext tenantContext)
@@ -125,10 +117,6 @@ public class MySqlLogReadRepository(IConfiguration configuration, ITenantContext
     protected override string PagingClause => "LIMIT @limit OFFSET @offset";
     // MySQL LIKE uses backslash as the default escape character (matches the Postgres base default).
 
-    // Decision 3/Phase 2 pin helper: MySQL's created_at default is evaluated at statement
-    // execution (not transaction start like Postgres/Timescale), so no 5-second back-off is
-    // needed here. Microsecond precision matches the column's DATETIME(6).
-    protected override string DatabaseClockNowExpr => "CURRENT_TIMESTAMP(6)";
 
     // MySQL's `/` always yields a DECIMAL result even for integer operands; DIV keeps histogram
     // bucket-index math as true integer floor division.
@@ -151,10 +139,10 @@ public class MySqlResourceReadRepository(IConfiguration configuration, ITenantCo
     }
 }
 
-public class MySqlTenantCatalogRepository(IConfiguration configuration)
+public class MySqlTenantCatalogRepository(ControlPlaneConnection controlPlane)
     : TenantCatalogRepositoryBase
 {
-    private readonly string _connectionString = configuration.GetConnectionString("Api")!;
+    private readonly string _connectionString = controlPlane.ConnectionString;
 
     protected override async Task<DbConnection> OpenConnectionAsync(CancellationToken cancellationToken)
     {
@@ -164,10 +152,10 @@ public class MySqlTenantCatalogRepository(IConfiguration configuration)
     }
 }
 
-public class MySqlAlertRuleRepository(IConfiguration configuration, ITenantContext tenantContext)
+public class MySqlAlertRuleRepository(ControlPlaneConnection controlPlane, ITenantContext tenantContext)
     : AlertRuleRepositoryBase(tenantContext)
 {
-    private readonly string _connectionString = configuration.GetConnectionString("Api")!;
+    private readonly string _connectionString = controlPlane.ConnectionString;
 
     protected override async Task<DbConnection> OpenConnectionAsync(CancellationToken cancellationToken)
     {
@@ -193,14 +181,31 @@ public class MySqlAlertRuleRepository(IConfiguration configuration, ITenantConte
 }
 
 /// <summary>
-/// MySQL implementation of the <see cref="IRetentionSettingsRepository"/> sweeps: the shared
-/// batched, per-tenant shape from <see cref="RetentionSettingsRepositoryBase"/>. The batch is
+/// MySQL implementation of <see cref="IRetentionSettingsRepository"/>: the shared settings read/write
+/// from <see cref="RetentionSettingsRepositoryBase"/>, against the control-plane database.
+/// </summary>
+public class MySqlRetentionSettingsRepository(ControlPlaneConnection controlPlane)
+    : RetentionSettingsRepositoryBase
+{
+    private readonly string _connectionString = controlPlane.ConnectionString;
+
+    protected override async Task<DbConnection> OpenConnectionAsync(CancellationToken cancellationToken)
+    {
+        var conn = new MySqlConnection(_connectionString);
+        await conn.OpenAsync(cancellationToken);
+        return conn;
+    }
+}
+
+/// <summary>
+/// MySQL implementation of the <see cref="IRetentionSweeper"/> sweeps: the shared
+/// batched, per-tenant shape from <see cref="RetentionSweeperBase"/>. The batch is
 /// <c>DELETE ... LIMIT n</c>, which InnoDB serves from the clustered primary key
 /// (<c>(tenant_id, time, id)</c> on spans and log records) or the data-point time index, bounded so
 /// a sweep cannot escalate to a table lock or build an enormous undo log while ingestion appends.
 /// </summary>
-public class MySqlRetentionSettingsRepository(IConfiguration configuration)
-    : RetentionSettingsRepositoryBase
+public class MySqlRetentionSweeper(IConfiguration configuration)
+    : RetentionSweeperBase
 {
     private readonly string _connectionString = configuration.GetConnectionString("Api")!;
 

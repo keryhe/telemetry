@@ -9,6 +9,11 @@ namespace Keryhe.Telemetry.TestInfrastructure.Containers;
 /// No first-party Testcontainers module exists for ClickHouse, so this builds the container
 /// directly against the official image, waiting on the HTTP interface (port 8123) that
 /// <c>ClickHouse.Client</c> (and this provider) talks to.
+///
+/// ClickHouse holds telemetry only. Its control plane (tenants, API keys, alert rules, retention
+/// settings) runs on a PostgreSQL container composed here, started and disposed with it; the tenants
+/// and keys are seeded there. The <see cref="ContainerOptions"/> diagnostics and limits apply to the
+/// ClickHouse container only.
 /// </summary>
 public sealed class ClickHouseProviderContainer : ProviderContainer
 {
@@ -16,16 +21,18 @@ public sealed class ClickHouseProviderContainer : ProviderContainer
 
     private IContainer? _container;
     private string? _connectionString;
-
-    // ClickHouse has no auto-increment: the schema takes explicit ids, so the seeder hands them out.
-    private long _nextId;
+    private readonly PostgreSqlProviderContainer _controlPlane = new(controlPlaneOnly: true);
 
     public override string ProviderName => "ClickHouse";
-    public override string ImageName => "clickhouse/clickhouse-server:24.8";
+    public override string ImageName => "clickhouse/clickhouse-server:25.8";
     public override string ConnectionString => _connectionString!;
+    public override string ControlPlaneConnectionString => _controlPlane.ConnectionString;
+    public override string ControlPlaneProviderName => _controlPlane.ProviderName;
 
     protected override async Task StartContainerAsync(CancellationToken cancellationToken)
     {
+        await _controlPlane.StartAsync(ContainerOptions.Default, cancellationToken);
+
         _container = new ContainerBuilder(ImageName)
             .WithPortBinding(HttpPort, true)
             .WithEnvironment("CLICKHOUSE_SKIP_USER_SETUP", "1")
@@ -80,7 +87,7 @@ public sealed class ClickHouseProviderContainer : ProviderContainer
     }
 
     protected override async Task ApplySchemaAsync(CancellationToken cancellationToken) =>
-        await ExecuteSqlAsync(await SchemaApplier.ReadScriptAsync("ClickHouse-Schema.sql", cancellationToken), cancellationToken);
+        await ExecuteSqlAsync(await SchemaApplier.ReadScriptAsync("ClickHouse-Telemetry.sql", cancellationToken), cancellationToken);
 
     public override async Task ExecuteSqlAsync(string script, CancellationToken cancellationToken = default)
     {
@@ -96,23 +103,9 @@ public sealed class ClickHouseProviderContainer : ProviderContainer
 
     protected override async Task<long> InsertTenantAndApiKeyAsync(string tenantName, string apiKeyName, string keyHash, DateTime? expiresAtUtc, CancellationToken cancellationToken)
     {
-        var id = Interlocked.Increment(ref _nextId);
-
-        await using var conn = new ClickHouseConnection(_connectionString);
-        await conn.OpenAsync(cancellationToken);
-
-        var tenantCmd = conn.CreateCommand();
-        tenantCmd.CommandText = $"INSERT INTO tenants (id, name) VALUES ({id}, '{Escape(tenantName)}')";
-        await tenantCmd.ExecuteNonQueryAsync(cancellationToken);
-
-        var keyCmd = conn.CreateCommand();
-        keyCmd.CommandText = $"INSERT INTO api_keys (id, tenant_id, key_hash, name, expires_at) VALUES ({id}, {id}, '{keyHash}', '{Escape(apiKeyName)}', {(expiresAtUtc is { } e ? $"toDateTime64('{e.ToUniversalTime():yyyy-MM-dd HH:mm:ss}', 9, 'UTC')" : "NULL")})";
-        await keyCmd.ExecuteNonQueryAsync(cancellationToken);
-
-        return id;
+        // The control plane's own container seeds the tenant and key.
+        return await _controlPlane.InsertTenantWithHashedKeyAsync(tenantName, apiKeyName, keyHash, expiresAtUtc, cancellationToken);
     }
-
-    private static string Escape(string value) => value.Replace("\\", "\\\\").Replace("'", "\\'");
 
     public override string ContainerId => _container!.Id;
 
@@ -123,5 +116,6 @@ public sealed class ClickHouseProviderContainer : ProviderContainer
     {
         if (_container is not null)
             await _container.DisposeAsync();
+        await _controlPlane.DisposeAsync();
     }
 }

@@ -14,7 +14,7 @@ public interface ITraceReadRepository
     /// <summary>
     /// <see cref="GetTraceByIdAsync(string, CancellationToken)"/> with a time hint: the trace's extent as the trace list returned it
     /// (<see cref="TraceInfo.TraceStartTime"/>/<see cref="TraceInfo.TraceEndTime"/>). A provider that cannot seek a trace id
-    /// (Timescale's chunks, ClickHouse's sort key) reads only that range, widened by <c>Telemetry:Query:TraceHintMarginMinutes</c>
+    /// (ClickHouse's sort key) reads only that range, widened by <c>Telemetry:Query:TraceHintMarginMinutes</c>
     /// (default 1) either side, instead of probing everything. A hint that finds nothing falls back to the unbounded read. A span that
     /// arrives after the list was read and lies beyond the margin is missing from a hinted read, which is the limit of a hint; an
     /// unhinted read is always whole. Every other provider ignores the hint.
@@ -24,8 +24,8 @@ public interface ITraceReadRepository
     Task<SpanModel?> GetSpanByIdAsync(string traceIdHex, string spanIdHex, CancellationToken cancellationToken = default);
     Task<List<SpanModel>> GetSpansByParentAsync(string traceIdHex, string parentSpanIdHex, CancellationToken cancellationToken = default);
 
-    /// <summary>Keyset-paged trace rows for the traces list page (decision 1), anchored on each trace's earliest span in scope (decision 10), pinned on <see cref="TraceQuery.AsOf"/> (decision 3).</summary>
-    Task<TracePageResult> GetTracePageAsync(TraceQuery query, CancellationToken cancellationToken = default);
+    /// <summary>The newest (or oldest) <see cref="TraceQuery.Limit"/> traces matching the filters, one row per trace anchored on its earliest span in scope, with whether more matched.</summary>
+    Task<TraceListResult> GetTraceListAsync(TraceQuery query, CancellationToken cancellationToken = default);
 
     /// <summary>
     /// The dashboard's Recent Errors/Slowest Traces widgets — newest errors or the slowest anchors, over the unfiltered
@@ -51,7 +51,7 @@ public interface ITraceReadRepository
 
     /// <summary>
     /// Streaming export (list-pages-server-side plan, Phase 8, decision 17): one <see cref="TraceInfo"/>
-    /// row per trace matching the same filters as <see cref="GetTracePageAsync"/>, with no row cap. Span-level export is out of scope. Memory
+    /// row per trace matching the same filters as <see cref="GetTraceListAsync"/>, with no row cap. Span-level export is out of scope. Memory
     /// stays bounded to one internal chunk at a time (see <c>TraceReadRepositoryBase</c>'s own doc
     /// comment on this method for why it chunks rather than issuing one unbuffered query), not the
     /// whole matching population.

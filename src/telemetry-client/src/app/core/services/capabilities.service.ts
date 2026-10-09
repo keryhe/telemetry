@@ -9,16 +9,23 @@ import { APP_CONFIG } from '../config/app-config';
  */
 export interface Capabilities {
   provider: string;
-  exemplarPaging: boolean;
   rawSearchWindowHours: number | null;
   exportMaxWindowDays: number;
+  /** The most rows each capped list returns (`Telemetry:Query:Limits`). */
+  logListLimit: number;
+  traceListLimit: number;
+  metricCatalogLimit: number;
+  exemplarLimit: number;
 }
 
 const DEFAULT_CAPABILITIES: Capabilities = {
   provider: 'Unknown',
-  exemplarPaging: true,
   rawSearchWindowHours: null,
   exportMaxWindowDays: 7,
+  logListLimit: 1000,
+  traceListLimit: 500,
+  metricCatalogLimit: 500,
+  exemplarLimit: 500,
 };
 
 /**
