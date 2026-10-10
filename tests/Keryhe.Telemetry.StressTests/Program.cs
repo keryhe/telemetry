@@ -74,6 +74,10 @@ foreach (var s in snapshot.Signals)
     Console.WriteLine($"{s.Signal,-8} offered {s.OfferedPerSecond,8:F0}/s  acked {s.AckedPerSecond,8:F0}/s  " +
                       $"ok {s.ExportsOk} rejected {s.ExportsRejected} failed {s.ExportsFailed} not-sent {s.NotSentRecords}  " +
                       $"latency p50 {s.Latency.P50Ms:F1} p95 {s.Latency.P95Ms:F1} p99 {s.Latency.P99Ms:F1} max {s.Latency.MaxMs:F1} ms");
+foreach (var s in snapshot.Signals)
+    foreach (var t in s.Tenants ?? [])
+        Console.WriteLine($"  {s.Signal,-8} tenant {t.Tenant}: acked {t.AckedPerSecond,8:F0}/s ok {t.ExportsOk} throttled attempts {t.ThrottledAttempts} refused at deadline {t.ExportsThrottled} failed {t.ExportsFailed} " +
+                          $"p50 {t.Latency.P50Ms:F0} p95 {t.Latency.P95Ms:F0} ms");
 if (probe is not null)
 {
     var results = probe.Results;

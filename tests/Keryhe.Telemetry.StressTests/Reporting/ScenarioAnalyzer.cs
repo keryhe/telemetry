@@ -239,6 +239,12 @@ public static class ScenarioAnalyzer
             }
             Add(all, "write.retries", $"{host} flush retries", "per s", Sum(samples, Ingestion + "flush_retries", t));
             Add(all, "write.retries", $"{host} records dropped", "per s", Sum(samples, Ingestion + "records_dropped", t));
+            // The same drops by reason (retries_exhausted, permanent, split_cap, out_of_retention, shutdown), and what the collector refused or accepted.
+            foreach (var reason in new[] { "retries_exhausted", "permanent", "split_cap", "out_of_retention", "shutdown" })
+                Add(all, "write.dropped_by_reason", $"{host} {reason}", "per s", Sum(samples.Where(s => s.Tags.GetValueOrDefault("reason") == reason).ToList(), Ingestion + "records_dropped", t));
+            foreach (var reason in new[] { "throttled", "shutting_down", "invalid" })
+                Add(all, "write.refused", $"{host} {reason}", "per s", Sum(samples.Where(s => s.Tags.GetValueOrDefault("reason") == reason).ToList(), Ingestion + "records_refused", t));
+            Add(all, "write.refused", $"{host} accepted", "per s", Sum(samples, Ingestion + "records_accepted", t));
             // ClickHouse only (absent on the other providers, which then add no series): rows held for a closed day, and derived rows lost
             // (the rollups and catalog under-count, the raw rows do not).
             Add(all, "write.retries", $"{host} derived rows dropped", "per s", Sum(samples, Ingestion + "derived_rows_dropped", t));

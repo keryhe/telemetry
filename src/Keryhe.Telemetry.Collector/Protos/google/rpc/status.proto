@@ -1,0 +1,18 @@
+// The subset of google/rpc/status.proto the collector needs to attach details (RetryInfo) to a gRPC status.
+// Wire-compatible with the upstream definition (https://github.com/googleapis/googleapis), Apache-2.0.
+syntax = "proto3";
+
+package google.rpc;
+
+import "google/protobuf/any.proto";
+
+option csharp_namespace = "Google.Rpc";
+option java_multiple_files = true;
+option java_outer_classname = "StatusProto";
+option java_package = "com.google.rpc";
+
+message Status {
+  int32 code = 1;
+  string message = 2;
+  repeated google.protobuf.Any details = 3;
+}

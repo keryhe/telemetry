@@ -245,13 +245,16 @@ email provider behind them) for each configured tenant, and sends it to the coll
 ### Default ports
 
 - gRPC ingestion (`Keryhe.Telemetry.Collector.Server`): `http://localhost:5117` (h2c), `https://localhost:7057` (HTTP/2)
+- OTLP/HTTP (same host, `Collector.Server`): `POST /v1/traces|logs|metrics` on the TLS port 7057 (`Https` is `Http1AndHttp2`, so ALPN serves gRPC on h2 and OTLP/HTTP on HTTP/1.1); in Development a plaintext HTTP/1.1 endpoint `OtlpHttp` at `http://localhost:5118` (h2c and HTTP/1.1 cannot share a plaintext port)
 - REST API (`Keryhe.Telemetry.Api.Server`): `http://localhost:5188`, `https://localhost:7105` — also serves the UI. As shipped its `appsettings.json` sets `Telemetry:Api:BasePath=/telemetry/api` and `TelemetryUi:BasePath=/telemetry` (the options' defaults are `/api` and `/`), so the UI is at `http://localhost:5188/telemetry`
+- Collector management endpoint (health probes, plain HTTP/1.1, loopback): `http://127.0.0.1:5119` (`/healthz/live`, `/healthz/ready`)
 - Angular dev server (`src/telemetry-client`): `http://localhost:4201` — **development only**
 
 `Collector.Server` configures its endpoints as named Kestrel endpoints, not `launchSettings.json`'s
 `applicationUrl` (which `Kestrel:Endpoints` overrides, so it would be dead): `appsettings.json` has `Https`
-(7057, `Http2`, no certificate: the Collector README shows the `Certificate` override), and `appsettings.Development.json` adds `Http`
-(`http://localhost:5117`, h2c/`Http2`), the plaintext endpoint the TestDataGenerator and stress harness use. The two
+(7057, `Http1AndHttp2` so ALPN serves gRPC and OTLP/HTTP on one port, no certificate: the Collector README shows the `Certificate` override), and
+`appsettings.Development.json` adds `Http` (`http://localhost:5117`, h2c/`Http2`), the plaintext endpoint the TestDataGenerator and stress harness
+use, and `OtlpHttp` (`http://localhost:5118`, `Http1`) for plaintext OTLP/HTTP. The two
 files merge by endpoint name. **Do not set `ASPNETCORE_URLS`** on it: it overrides `Kestrel:Endpoints` wholesale and
 would collapse the per-endpoint `Protocols`, breaking h2c gRPC on 5117 (and outside Development a plaintext address
 fails startup anyway, see "Collector authentication"). The collector also omits `UseHttpsRedirection()`.
@@ -543,6 +546,64 @@ regardless of outcome. A batch that still fails after retries are exhausted is d
 on `IngestionMetrics`'s `records_dropped` counter — the three gRPC `Export` methods' partial-success
 responses reflect only enqueue success, never this later, asynchronous drop; each documents that
 explicitly. This isolates gRPC latency from DB write latency and provides backpressure.
+
+**Backpressure and bad records** (collector improvements phase 1). A full queue no longer holds an export open:
+the write repositories call `TelemetryIngestionChannel.AcquireOrRejectAsync` (`RecordCountGate.TryAcquireAsync`, waiting at most
+`Telemetry:Ingestion:MaxGateWaitMilliseconds`: unset = 2 s, ClickHouse = its linger + 2 s since its worker frees room a whole day
+buffer at a time) and throw `IngestionRejectedException`; the three gRPC services map it to `UNAVAILABLE` + `google.rpc.RetryInfo`
+(`ExportRejections`, protos in `Collector/Protos/google/rpc`). A service first calls `ThrottleIfSaturated`'s pre-check
+(`ThrowIfSaturated`), which refuses before conversion once the gate has been refusing callers for the whole wait. Flush errors go
+through the provider's `IFlushErrorClassifier` (registered by each `Add<Provider>CollectorServices`; the default treats everything as
+transient): transient errors retry as before, a permanent one is not retried and `BatchBisector` splits the batch down to the
+refused records (`MaxSplitFlushes`), in both the shared worker and `ClickHouseIngestionWorker` (each split piece gets a new
+deduplication token). `records_dropped` always carries a `reason`; `records_accepted`/`records_refused` count per tenant. Health:
+gRPC `grpc.health.v1` on the OTLP endpoints and `/healthz/live|ready` on the `Management` Kestrel endpoint
+(`CollectorReadinessCheck`: shutting down, `ControlPlaneHealth` failing, a gate refusing longer than `ReadinessSaturatedSeconds`).
+The stress harness retries a throttled export after its `RetryInfo` delay and has a `throttled_rate` ramp criterion.
+
+**Load balancing and client Collector** (collector improvements phase 5). `ConnectionAgeMiddleware` (added at the start of the pipeline by an
+`IStartupFilter` from `AddKeryheTelemetryCollector`, so hosts need no call) calls `IConnectionLifetimeNotificationFeature.RequestClose()` on a
+connection older than `Telemetry:Collector:MaxConnectionAgeSeconds` (+ up to 10% jitter): an HTTP/2 `GOAWAY` the client reconnects on without losing
+an export (`ConnectionAgeTests`, real Kestrel). `deploy/otel-collector/` holds the tested client-side OpenTelemetry Collector configuration
+(`client-gateway.yaml`, contrib distribution for `file_storage`), a compose file with `telemetrygen`, and the record of the end-to-end check.
+
+**OTLP over HTTP** (collector improvements phase 4). The three gRPC services are thin adapters over `OtlpTraceIngestor`/`OtlpLogIngestor`/
+`OtlpMetricIngestor` (scoped; `IngestAsync(request, tenantId, protocol, ct)` returns an `IngestResult`, or throws `IngestionRejectedException`, which
+the gRPC services map to `UNAVAILABLE` + `RetryInfo`), and `OtlpHttpEndpoints` (`Collector/Http`, minimal-API `MapPost` routes at
+`{Telemetry:Collector:HttpBasePath}/v1/...`) are the HTTP adapters, behind the same `CollectorPolicy` and handler (`CollectorEndpointMetadata.Protocol`
+makes the handler's challenge an HTTP status with a `google.rpc.Status` body instead of gRPC trailers: 401, 429 without `Retry-After`, 503 with it).
+`OtlpHttpBodyReader` checks content type/encoding (415), reads the body streaming through `GZipStream` and stops at `MaxReceiveMessageSizeBytes` of
+DECOMPRESSED data (413), and `OtlpJsonReader` rewrites the hex id fields (`traceId`, `spanId`, `parentSpanId`) to base64 in a DOM pass before
+Google.Protobuf's `JsonParser` (unknown fields ignored). A queue that is already refusing callers refuses an HTTP export before its body is read.
+`Generator:Protocol=http/protobuf` makes the test data generator's live SDK export over HTTP. In a plaintext proxy setup the gRPC endpoint must be
+`Http2`-only and OTLP/HTTP needs its own `Http1` endpoint (Kestrel cannot negotiate protocols without TLS).
+
+**Tenant isolation and auth abuse** (collector improvements phase 3). `RecordCountGate` also keeps records and bytes **per tenant**:
+`TryAcquireAsync(tenantId, maxShare, ...)` refuses with `Result.TenantQuota` when the tenant would hold more than `maxShare` of the
+record (or byte) capacity unless it holds nothing, and the workers give a tenant its share back through a `TenantTally`
+(`gate.Release(tally)`: the shared worker tallies each merged export by `TenantOf.Of(items[0])`, `ClickHouseIngestionWorker` each record into
+its day buffer's tally). `TelemetryIngestionChannel.AcquireOrRejectAsync(signal, gate, count, ct, bytes, tenantId)` first applies the tenant's
+rate (`TenantRateLimiter`, a token bucket per tenant and signal) then the gate; `Telemetry:Ingestion:TenantQuota` (`TenantQuotaOptions`,
+`IOptionsMonitor`, per-tenant `Overrides`) supplies share and rate; the refusal reasons are `tenant_quota` and `tenant_rate`; a tenant
+refused for its share does not make `SaturatedFor` (readiness) grow. `tenant_resident_records` shows who holds the queue. In
+`ApiKeyAuthenticationHandler`, `AuthFailureLimiter` (a token bucket of failures per client address, IPv6 by /64, bounded, from
+`Telemetry:Collector:AuthFailureLimit`) refuses an address that has used up its failures with `RESOURCE_EXHAUSTED` and no `RetryInfo`
+(`auth_failures{reason=throttled}`) before any lookup, unless `ITenantResolver.IsCached` says the key is valid in the cache. Uncached lookups
+go through `ApiKeyLookupCoordinator` (singleton): same-key lookups coalesce, at most `MaxConcurrentLookups` run, and one that cannot start
+within `LookupQueueTimeoutMilliseconds` is `UNAVAILABLE` (the shared query runs in its own scope). The address is the connection's remote address;
+the collector does not trust `X-Forwarded-For`. The stress harness prints per-tenant lines and has a `noisy-tenant` profile.
+
+**Input limits** (collector improvements phase 2). Each gate also bounds resident **bytes** (`MaxQueuedBytesPerSignal`, the
+protobuf `CalculateSize()` of the request, passed by the services as `requestBytes` and carried to the release in the
+`TelemetryIngestionChannel.MarkEnqueued`/`TryTakeEnqueued` side table; `RecordCountGate` takes a records and a bytes argument and
+admits when both fit or it is empty). `ClickHouseIngestionWorker` apportions an export's bytes equally over its records (remainder on the
+first) so each day buffer, and each out-of-retention drop, releases its own share. `OtlpAttributeConverter` (Collector/Services) is the one
+place OTLP attributes and values are converted (it replaced three copies): it applies `Telemetry:Ingestion:Limits` (`IngestionLimitsOptions`,
+0 = unlimited), raises the record's dropped counts by what it cut and counts cuts on `records_truncated`; the services clip every sized-column
+value to `ColumnLimits` (resource `service.name` and schema URLs before the resource is hashed). `ColumnLimitsTests` parses the three
+relational schema scripts and fails when a sized client-text column is missing from `ColumnLimits` or its size differs. The gRPC receive
+limit is `Telemetry:Collector:MaxReceiveMessageSizeBytes` (4 MiB); because grpc-dotnet checks it against the wire size only,
+`BoundedGzipCompressionProvider` replaces its gzip and refuses a message that decompresses past the limit.
 
 The write path is instrumented on `IngestionMetrics`'s `Keryhe.Telemetry.Ingestion` meter, every
 instrument tagged by `signal` (`logs`/`traces`/`metrics`): `records_dropped` (counter),

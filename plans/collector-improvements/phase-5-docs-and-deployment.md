@@ -38,7 +38,9 @@ configs can quote phase 1's throttling and phase 2's limits; it does not depend 
 3. **Sample config** `deploy/otel-collector/client-gateway.yaml`:
    - `otlp` receiver on gRPC 4317 and HTTP 4318 (the client's own apps);
    - processors `memory_limiter`, then `batch` with `send_batch_size`/`send_batch_max_size` chosen to stay under the
-     collector's `MaxReceiveMessageSizeBytes` (phase 2) with a margin, and a `timeout` of a few seconds;
+     collector's `MaxReceiveMessageSizeBytes` (phase 2) with a margin, and a `timeout` of a few seconds (the batch
+     size only has to keep exports under the message limit and few: every provider re-merges exports into its own
+     flush batches, and ClickHouse's worker buffers them for its linger anyway, so larger client batches buy little);
    - `otlp` exporter to the Keryhe collector: `endpoint`, `headers: { authorization: "Bearer ${env:KERYHE_API_KEY}" }`,
      `compression: gzip`, `retry_on_failure` (enabled; `max_elapsed_time` raised from the 300 s default if the client
      prefers holding data to dropping it), `sending_queue` with `storage: file_storage` and a `queue_size`, and TLS
@@ -82,3 +84,13 @@ configs can quote phase 1's throttling and phase 2's limits; it does not depend 
 - An operator can run more than one collector and knows how traffic reaches all of them.
 - A client can copy the sample config, set one environment variable, and ship data through their own OTel Collector,
   with outages on our side absorbed by their file queue.
+
+## Implementation notes (2026-10-09)
+
+Built as planned, with these differences and results:
+
+- **Connection age** works as designed: `IConnectionLifetimeNotificationFeature.RequestClose()` gives a graceful HTTP/2 `GOAWAY` in Kestrel. Tested on a real Kestrel port (a client exporting steadily for 4 s at a 1 s age opened 3 to 5 connections and lost no export; with no age it opened exactly one), and end to end against the OpenTelemetry Collector's Go gRPC exporter (15 s age, 80 s of exports, 200 of 200 stored, zero failures). It is added by an `IStartupFilter`, so a host needs no extra call.
+- **Sample client configuration** is `deploy/otel-collector/client-gateway.yaml` with a compose file and a README recording the checks. It was written against otelcol 0.157.0, where the exporter is `otlp_grpc` (`otlp` is a deprecated alias there; older releases only have `otlp`).
+- **The `file_storage` queue was not run.** Docker could not pull the contrib image or `telemetrygen` (registry traffic stalled from Docker Desktop while the host's own network was fine), so the end-to-end checks ran on the core image with the same configuration minus `file_storage`, sending OTLP/JSON by script instead of `telemetrygen`. Outage, full-queue backoff, invalid key and reconnect checks all passed; the persistence across a client-Collector restart is the one thing left to verify, with steps in the README.
+- **The multi-tenant routing variant** is described in the Collector README but no sample file was written or run.
+- **Documentation** lives in the Collector README ("Running more than one collector", "Sending through an OpenTelemetry Collector"), linked from `docs/SETUP.md` and the top-level README, with `MaxConnectionAgeSeconds` in `docs/CONFIGURATION.md`.

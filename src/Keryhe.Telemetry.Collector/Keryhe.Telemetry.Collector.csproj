@@ -24,9 +24,12 @@
 
   <ItemGroup>
     <PackageReference Include="Grpc.AspNetCore" Version="2.80.0" />
+    <PackageReference Include="Grpc.AspNetCore.HealthChecks" Version="2.84.0" />
   </ItemGroup>
 
   <ItemGroup>
+        <Protobuf Include="Protos\google\rpc\status.proto" ProtoRoot="Protos" GrpcServices="None" />
+        <Protobuf Include="Protos\google\rpc\error_details.proto" ProtoRoot="Protos" GrpcServices="None" />
         <Protobuf Include="opentelemetry\proto\collector\logs\v1\logs_service.proto" GrpcServices="Both">
             <Generator>MSBuild:Compile</Generator>
         </Protobuf>

@@ -1,6 +1,7 @@
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.Extensions.Hosting;
+using Microsoft.Extensions.Options;
 using Keryhe.Telemetry.Core;
 using Keryhe.Telemetry.Core.Data;
 using Keryhe.Telemetry.ClickHouse.Services;
@@ -33,6 +34,11 @@ public static class ClickHouseServiceCollectionExtensions
             .Bind(configuration.GetSection(ClickHouseIngestionOptions.SectionName))
             .Validate(o => { o.Validate(); return true; })
             .ValidateOnStart();
+        // A full queue frees room a whole day buffer at a time, so the default bounded wait before refusing an export is
+        // the linger plus the usual 2 s (an explicit Telemetry:Ingestion:MaxGateWaitMilliseconds still wins).
+        services.AddOptions<TelemetryIngestionOptions>().PostConfigure<IOptions<ClickHouseIngestionOptions>>((o, ch) =>
+            o.MaxGateWaitMilliseconds ??= ch.Value.LingerMilliseconds + TelemetryIngestionOptions.DefaultMaxGateWaitMilliseconds);
+        services.AddSingleton<IFlushErrorClassifier, ClickHouseFlushErrorClassifier>();
         services.TryAddSingleton(TimeProvider.System);
         services.AddSingleton<IRetentionWindows, RetentionWindowCache>();
         var shared = services.FirstOrDefault(d => d.ServiceType == typeof(IHostedService) && d.ImplementationType == typeof(TelemetryIngestionWorker));

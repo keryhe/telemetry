@@ -28,11 +28,12 @@ public class MetricWriteRepository : IMetricWriteRepository
 
     public async Task<IEnumerable<long>> StoreMetricsBatchAsync(
         IEnumerable<MetricModel> metrics,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        long requestBytes = 0)
     {
         var list = (metrics ?? throw new ArgumentNullException(nameof(metrics))).ToList();
         if (list.Count == 0) return [];
-        await WriteMetricsAsync(list, cancellationToken);
+        await WriteMetricsAsync(list, cancellationToken, requestBytes);
         _logger.LogDebug("Enqueued {Count} metrics for async write", list.Count);
         return Enumerable.Empty<long>();
     }
@@ -42,17 +43,18 @@ public class MetricWriteRepository : IMetricWriteRepository
     /// writing, releasing on a failed write so a cancelled or otherwise-failed enqueue cannot leak
     /// the reservation forever.
     /// </summary>
-    private async Task WriteMetricsAsync(List<MetricModel> metrics, CancellationToken cancellationToken)
+    private async Task WriteMetricsAsync(List<MetricModel> metrics, CancellationToken cancellationToken, long requestBytes = 0)
     {
-        await _channel.MetricGate.AcquireAsync(metrics.Count, cancellationToken);
+        var tenantId = TenantOf.Of(metrics[0]);
+        await _channel.AcquireOrRejectAsync("metrics", _channel.MetricGate, metrics.Count, cancellationToken, requestBytes, tenantId);
         try
         {
-            _channel.MarkEnqueued(metrics);
+            _channel.MarkEnqueued(metrics, requestBytes);
             await _channel.Metrics.Writer.WriteAsync(metrics, cancellationToken);
         }
         catch
         {
-            _channel.MetricGate.Release(metrics.Count);
+            _channel.Release(_channel.MetricGate, metrics.Count, requestBytes, tenantId);
             throw;
         }
     }

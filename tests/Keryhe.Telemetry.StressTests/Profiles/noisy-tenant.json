@@ -1,0 +1,26 @@
+// Noisy tenant: three tenants share one collector; tenant 0 sends ten times what each of the others does, at a rate chosen to overrun the
+// collector's queue. Fixed rate, writes only. The point is the per-tenant lines in the summary: the quiet tenants should see no throttling
+// and no extra latency while the noisy one is refused ("throttled attempts", "refused at deadline").
+//
+// Run it twice and compare, with a queue small enough for the noisy tenant to fill (about two seconds of its traffic) and the quota on or off:
+//   dotnet run --project tests/Keryhe.Telemetry.StressTests -- run --provider PostgreSQL --topology split --profile noisy-tenant \
+//       --host-env Telemetry__Ingestion__MaxQueuedSpans=20000 --host-env Telemetry__Ingestion__MaxQueuedLogRecords=20000 \
+//       --host-env Telemetry__Ingestion__MaxQueuedMetrics=20000 --host-env Telemetry__Ingestion__MaxGateWaitMilliseconds=500 \
+//       --host-env Telemetry__Ingestion__FlushLingerMilliseconds=2000 --host-env Telemetry__Ingestion__TenantQuota__MaxShare=0.5
+//   ...and again with --host-env Telemetry__Ingestion__TenantQuota__MaxShare=1 for the comparison.
+{
+  "name": "noisy-tenant",
+  "tenants": 3,
+  "warmupSeconds": 20,
+  "measuredSeconds": 120,
+  "writeOnly": true,
+  "load": {
+    "tenantWeights": [10, 1, 1],
+    "traces": { "spansPerSecond": 6000 },
+    "logs": { "recordsPerSecond": 6000 },
+    "metrics": { "dataPointsPerSecond": 6000 },
+    // The client's own cap on exports in flight is shared by all tenants; with a noisy tenant retrying it would starve the quiet ones client-side.
+    "transport": { "channels": 4, "maxInFlightExports": 20000 },
+    "time": { "lateArrivalFraction": 0.0, "orphanFraction": 0.0, "backdatedFraction": 0.0, "redeliveryFraction": 0.0 }
+  }
+}

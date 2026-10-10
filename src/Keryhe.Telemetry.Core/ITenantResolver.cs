@@ -3,6 +3,12 @@ namespace Keryhe.Telemetry.Core;
 public interface ITenantResolver
 {
     Task<TenantResolution> ResolveAsync(string keyHash, CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Whether <paramref name="keyHash"/> is valid and unexpired in the resolver's cache, so resolving it costs no lookup. The handler
+    /// never throttles such a key: a valid client behind a NAT keeps working next to a misconfigured one.
+    /// </summary>
+    bool IsCached(string keyHash) => false;
 }
 
 /// <summary>Why a key was refused.</summary>

@@ -1,11 +1,16 @@
 using Keryhe.Telemetry.Collector;
 using Keryhe.Telemetry.Collector.Authentication;
+using Keryhe.Telemetry.Collector.Health;
+using Keryhe.Telemetry.Collector.Services;
+using Grpc.AspNetCore.Server;
+using Microsoft.Extensions.Options;
 using Keryhe.Telemetry.Core;
 using Keryhe.Telemetry.Core.Data;
 using Keryhe.Telemetry.Core.Data.Write;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection.Extensions;
+using Microsoft.Extensions.Diagnostics.HealthChecks;
 using Microsoft.Extensions.Hosting;
 
 namespace Microsoft.Extensions.DependencyInjection;
@@ -30,12 +35,38 @@ public static class TelemetryCollectorServiceCollectionExtensions
     /// </summary>
     public static IServiceCollection AddKeryheTelemetryCollector(this IServiceCollection services, IConfiguration configuration)
     {
+        // The receive limit is configuration (Telemetry:Collector:MaxReceiveMessageSizeBytes), so it is applied through options rather
+        // than a delegate here, where the configuration section is not yet bound.
         services.AddGrpc();
+        services.AddOptions<GrpcServiceOptions>().Configure<IOptions<TelemetryCollectorOptions>>((grpc, collector) =>
+        {
+            var max = collector.Value.MaxReceiveMessageSizeBytes;
+            grpc.MaxReceiveMessageSize = max > 0 ? max : null;
+            // grpc-dotnet checks the limit against the size on the wire only; replace its gzip with one that bounds the decompressed size.
+            grpc.CompressionProviders = [new BoundedGzipCompressionProvider(max)];
+        });
+
         services.AddLogging();
 
         // Ingestion queue/batch limits — see TelemetryIngestionOptions for why records (spans for
         // traces) rather than batches are what these bound. Bound from Telemetry:Ingestion.
-        services.Configure<TelemetryIngestionOptions>(configuration.GetSection(TelemetryIngestionOptions.SectionName));
+        services.AddOptions<TelemetryIngestionOptions>()
+            .Bind(configuration.GetSection(TelemetryIngestionOptions.SectionName))
+            .Validate(o => { o.Validate(); return true; })
+            .ValidateOnStart();
+        // Attribute / field limits applied while an export is converted (Telemetry:Ingestion:Limits), and the converter that applies them.
+        services.AddOptions<IngestionLimitsOptions>()
+            .Bind(configuration.GetSection(IngestionLimitsOptions.SectionName))
+            .Validate(o => { o.Validate(); return true; })
+            .ValidateOnStart();
+        services.AddSingleton<OtlpAttributeConverter>();
+        // What one tenant may take of the shared queue (Telemetry:Ingestion:TenantQuota); reloadable.
+        services.AddOptions<TenantQuotaOptions>()
+            .Bind(configuration.GetSection(TenantQuotaOptions.SectionName))
+            .Validate(o => { o.Validate(); return true; })
+            .ValidateOnStart();
+        // Every error is transient unless the provider registers a classifier that knows its driver's permanent ones.
+        services.TryAddSingleton<IFlushErrorClassifier>(DefaultFlushErrorClassifier.Instance);
 
         // Singletons shared across all gRPC requests and the background worker.
         services.AddSingleton<TelemetryIngestionChannel>();
@@ -47,8 +78,15 @@ public static class TelemetryCollectorServiceCollectionExtensions
         // UPDATE on every gRPC export against the one api_keys row a whole tenant's agents share.
         // Now every provider registers only the raw IApiKeyLookup / IApiKeyTouchStore this wraps
         // (via the host's Add<Provider>CollectorServices call). Bound from Telemetry:TenantResolution.
-        services.Configure<TenantResolutionOptions>(configuration.GetSection(TenantResolutionOptions.SectionName));
+        services.AddOptions<TenantResolutionOptions>()
+            .Bind(configuration.GetSection(TenantResolutionOptions.SectionName))
+            .Validate(o => { o.Validate(); return true; })
+            .ValidateOnStart();
         services.AddMemoryCache();
+        services.AddSingleton<ControlPlaneHealth>();
+        services.AddSingleton<ApiKeyLookupCoordinator>();
+        services.AddSingleton<Microsoft.AspNetCore.Hosting.IStartupFilter, ConnectionAgeStartupFilter>();
+        services.AddSingleton<AuthFailureLimiter>();
         services.AddSingleton<ApiKeyTouchTracker>();
         services.TryAddSingleton(TimeProvider.System);
         services.AddScoped<ITenantResolver, CachingTenantResolver>();
@@ -65,8 +103,18 @@ public static class TelemetryCollectorServiceCollectionExtensions
             .RequireClaim(TelemetryClaimTypes.TenantId)));
 
         // Refuses plaintext transport outside Development (decision 3). Bound from Telemetry:Collector.
-        services.Configure<TelemetryCollectorOptions>(configuration.GetSection(TelemetryCollectorOptions.SectionName));
+        services.AddOptions<TelemetryCollectorOptions>()
+            .Bind(configuration.GetSection(TelemetryCollectorOptions.SectionName))
+            .Validate(o => { o.AuthFailureLimit.Validate(); return true; })
+            .ValidateOnStart();
         services.AddHostedService<PlaintextTransportGuard>();
+
+        // Health: the same readiness check answers gRPC grpc.health.v1 on the OTLP endpoints (Kubernetes gRPC probes,
+        // gRPC-aware balancers) and HTTP /healthz/ready on the management endpoint. Liveness is "the process answers".
+        services.AddHealthChecks().AddCheck<CollectorReadinessCheck>("ready", tags: ["ready"]);
+        services.AddGrpcHealthChecks().AddCheck<CollectorReadinessCheck>("collector");
+        // The gRPC health service reports what the publisher last saw; the defaults (30 s period) are too slow to steer a balancer.
+        services.Configure<HealthCheckPublisherOptions>(o => { o.Delay = TimeSpan.FromSeconds(1); o.Period = TimeSpan.FromSeconds(5); });
 
         // metric_last_seen maintenance (list-pages-server-side plan, Phase 5, decision 27):
         // registered unconditionally on every provider, same shape as ApiKeyTouchWorker above —
@@ -95,6 +143,12 @@ public static class TelemetryCollectorServiceCollectionExtensions
             .AddScoped<ILogWriteRepository, LogWriteRepository>()
             .AddScoped<IMetricWriteRepository, MetricWriteRepository>()
             .AddScoped<ITraceWriteRepository, TraceWriteRepository>();
+
+        // Conversion and enqueueing, shared by the gRPC services and the HTTP endpoints.
+        services
+            .AddScoped<OtlpLogIngestor>()
+            .AddScoped<OtlpMetricIngestor>()
+            .AddScoped<OtlpTraceIngestor>();
 
         return services;
     }

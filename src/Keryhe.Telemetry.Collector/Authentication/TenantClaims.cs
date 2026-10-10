@@ -19,4 +19,10 @@ public static class TenantClaims
             return tenantId;
         throw new RpcException(new Status(StatusCode.Unauthenticated, "Not authenticated."));
     }
+
+    /// <summary>The authenticated tenant of an HTTP request, or null when there is none (the endpoint was mapped without the policy).</summary>
+    public static long? GetTenantId(Microsoft.AspNetCore.Http.HttpContext context) =>
+        long.TryParse(context.User.FindFirst(TelemetryClaimTypes.TenantId)?.Value, NumberStyles.None, CultureInfo.InvariantCulture, out var tenantId) && tenantId > 0
+            ? tenantId
+            : null;
 }

@@ -164,6 +164,11 @@ public static class RunCommand
 
         foreach (var w in r.MeasuredWindow)
             lines.Add($"  {w.Signal,-8} offered {w.OfferedPerSecond,8:F0}/s acked {w.AckedPerSecond,8:F0}/s not-sent {w.NotSentRecords} failed exports {w.ExportsFailed} export p50/p95/p99 {w.Latency.P50Ms:F0}/{w.Latency.P95Ms:F0}/{w.Latency.P99Ms:F0} ms");
+        // Whole-run, per tenant: how each tenant fared while the others (a noisy one, say) shared the collector.
+        foreach (var sig in r.Load?.Signals ?? [])
+            if ((sig.Tenants?.Count ?? 0) > 1)
+                foreach (var tenant in sig.Tenants!)
+                    lines.Add($"    {sig.Signal,-8} tenant {tenant.Tenant}: acked {tenant.AckedPerSecond,8:F0}/s ok {tenant.ExportsOk} throttled attempts {tenant.ThrottledAttempts} refused at deadline {tenant.ExportsThrottled} failed {tenant.ExportsFailed} p50/p95 {tenant.Latency.P50Ms:F0}/{tenant.Latency.P95Ms:F0} ms");
         if (r.Ramp is { } ramp)
         {
             lines.Add(ramp.TrippedStep is { } tripped

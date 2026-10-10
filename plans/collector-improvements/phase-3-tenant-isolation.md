@@ -35,9 +35,17 @@ once several organisations share one collector:
 ### Tenant quotas
 
 1. **Per-tenant accounting.** The gate (records and bytes, after phase 2) keeps a per-tenant resident count beside
-   the totals. Acquire checks the tenant's share and the total; release subtracts from both. The tenant and the
-   amounts of each export are already carried to the release by the side table on `TelemetryIngestionChannel`
-   (phase 2 step 2 adds bytes; add the tenant id). A merged batch releases per tenant.
+   the totals. Acquire checks the tenant's share and the total; release subtracts from both. Release per tenant from
+   the records themselves rather than from the per-export side table: every span, log record and metric carries its
+   resolved `Resource.TenantId` by the time it is enqueued, while an export's side-table entry no longer lines up with
+   what is released on ClickHouse, whose worker spreads one export over several day buffers and drops
+   out-of-retention records at drain (phase 2 step 2). A `ReleaseByTenant(IEnumerable<T>, Func<T, long> tenantOf, ...)`
+   on the gate, called by both workers in place of `Release(count)` (`TelemetryIngestionWorker` per merged batch,
+   `ClickHouseIngestionWorker` per day buffer and at the retention drop), counts per tenant in one pass. Bytes are
+   released per tenant the same way, from the per-record shares phase 2 apportions (carry the share on the buffer per
+   tenant, or a parallel list). On ClickHouse a tenant's share also counts records waiting out the linger, so a
+   tenant's effective share there is lower in steady state than on the relational providers; note it in the
+   documentation, and pick the share default from the stress run on both.
 2. **Options.** `TenantQuotaOptions` (`MaxShare`, `RecordsPerSecond`, `Overrides`), validated at startup (share in
    `(0, 1]`, rate `>= 0`), bound from `Telemetry:Ingestion:TenantQuota`, reloadable through `IOptionsMonitor` so an
    override can change without a restart.
@@ -48,7 +56,8 @@ once several organisations share one collector:
    so an operator can see who is holding the queue.
 5. **Stress harness.** A `noisy-tenant` profile: one tenant ramps past the database's ceiling while the others stay at
    a steady rate. Report each tenant's accepted, throttled and export latency. Expected: the steady tenants see no
-   throttling and no latency change beyond the shared database cost.
+   throttling and no latency change beyond the shared database cost. Like `ramp-write-only`, it should be runnable
+   with no browsers, so the result is the write path's.
 
 ### Auth abuse
 
@@ -66,14 +75,16 @@ once several organisations share one collector:
 ## Tests
 
 - **Unit:** gate share per tenant (one tenant capped at its share while another still gets in; release per tenant from
-  a merged batch; overrides; share 1.0 is today's behaviour); the rate limiter's retry delay; the failure limiter
+  a merged batch and from ClickHouse day buffers holding several tenants' records, including the retention drop;
+  overrides; share 1.0 is today's behaviour); the rate limiter's retry delay; the failure limiter
   (only failures take tokens, cached valid keys bypass, partition cap and overflow bucket).
 - **`CollectorAuth` suite (`TestServer`):** with a fake `IApiKeyLookup` counting calls: 1,000 requests with random
   keys from one IP make at most `Burst` + a few lookups and then get `RESOURCE_EXHAUSTED`; a valid cached key from
   the same IP still succeeds; 100 concurrent first requests with one valid key make one lookup; a lookup that blocks
   past the queue timeout gives `UNAVAILABLE`; a tenant over its share gets `UNAVAILABLE` + `RetryInfo` while another
   tenant's export succeeds.
-- **Stress:** the `noisy-tenant` profile on PostgreSQL, compared with the same run with `MaxShare` 1.0.
+- **Stress:** the `noisy-tenant` profile on PostgreSQL and on ClickHouse (different worker, linger-held records,
+  step 1), each compared with the same run with `MaxShare` 1.0.
 
 ## Documentation
 
@@ -92,3 +103,17 @@ once several organisations share one collector:
   customer asks; the natural shape is an optional certificate thumbprint or IP list per API key in the control plane.
 - **Mandatory key expiry.** A policy choice for the Admin tool (for example, refuse to create a key without an expiry),
   not collector work.
+
+## Implementation notes (2026-10-09)
+
+Built as planned, with these differences and results:
+
+- **Per-tenant accounting lives in the gate** (`RecordCountGate`, under its lock), keyed by tenant, with `TenantTally` for releases. Both workers release by tenant: the shared worker per merged export (an export is one tenant's), `ClickHouseIngestionWorker` per record into the day buffer's tally. The quota check is `held > 0 && held + count > share x capacity` (and the same for bytes), so a tenant holding nothing is always admitted.
+- **A tenant refused for its share is not "saturated".** It does not start the gate's saturation clock, so one noisy tenant being throttled does not make `/healthz/ready` fail.
+- **Default share 0.5 halves a single tenant's queue.** Documented in `docs/CONFIGURATION.md` and the Collector README (`MaxShare: 1` for one tenant). The defaults were not changed.
+- **Rate limit** is a small own token bucket (`TenantRateLimiter`) rather than `System.Threading.RateLimiting`, because it must report the time until tokens return and charge an oversized export the whole burst instead of never admitting it.
+- **Failure limiter** counts missing and malformed credentials as failures too (a flood of header-less requests costs nothing at the control plane but is still abuse), and treats an exhausted address as `throttled` before it reads the key. `unavailable` (the control plane's fault) never takes a token.
+- **`ITenantResolver.IsCached`** was added (default interface member returning false); `CachingTenantResolver` now depends on `ApiKeyLookupCoordinator` instead of `IApiKeyLookup`.
+- **Tests.** In process: the quota with two keys (and the override, share 1 and the rate), 1,000 random keys from one address, a cached valid key from an exhausted address, no `RetryInfo` on the failure refusal, 100 concurrent first requests making one lookup (negative-controlled by removing the coalescing), and the lookup cap with `UNAVAILABLE`. The test host's clock now drives `GetTimestamp` too, so the buckets are deterministic, and its meter listener only counts its own host.
+- **Stress (ClickHouse, `noisy-tenant`, 20,000-record queue, 4 s linger, 500 ms gate wait, 3 tenants at 10:1:1).** Share 0.5: tenants 1 and 2 saw 0 throttled attempts and p95 1.3 s (the linger) on traces and logs; tenant 0 had about 54,000 throttled attempts. Share 1: tenants 1 and 2 had 5,000+ throttled attempts each and 70 to 90 exports still refused at their deadline. PostgreSQL could not be made to fill the queue at these rates (its flushes keep resident records near zero), so its comparison was not run.
+- **Logging.** grpc-dotnet logs every `RpcException` status at Information; `Grpc.AspNetCore.Server.ServerCallHandler` is set to Warning in the collector's `appsettings.json` so a throttled client does not write a line per refusal.

@@ -5,6 +5,18 @@ queue and retry layer) and applied to `Keryhe.Telemetry.Collector`. The core wri
 gate, merged batches, concurrent flushes, jittered retry, drain on shutdown) already matches what the OTel Collector
 does; these plans close the gaps around it.
 
+Reviewed 2026-10-09 against `ec5b098` (after the list caps and the ClickHouse redesign). The main change since writing:
+ClickHouse now has its own ingestion worker (`ClickHouseIngestionWorker`: day buffers, a 2.5 s linger, dedup tokens,
+retention drop at ingest), so the worker-side steps of phases 1 to 3 are written for both workers, and phase 1 gives
+ClickHouse its own default gate wait. Phase 2's column audit was corrected (PostgreSQL's names are `VARCHAR(255)`
+too, so it has the same over-length failure as SQL Server and MySQL). None of the five phases has been started.
+
+## Status (2026-10-09)
+
+All five phases are implemented, tested and described in the "Implementation notes" at the end of each phase file. Open items, none blocking:
+the `file_storage` queue of the sample client configuration is unrun (phase 5), the stress harness cannot send over OTLP/HTTP (phase 4), and the
+durability section below is still deferred.
+
 ## Deployment decision
 
 - **No OTel Collector gateway on our side.** Keryhe's collector stays the only thing clients talk to, so it must
@@ -45,7 +57,8 @@ internet before then.
 ## Deferred: durability of accepted data
 
 Records are acknowledged when they are enqueued, so a crash or OOM kill loses whatever is queued in memory (up to
-`MaxQueued*` records per signal), and a batch dropped after its retries is lost too. The OTel Collector answers this
+`MaxQueued*` records per signal; on ClickHouse that includes records waiting out the linger in a day buffer, up to
+2.5 s for the current day and 30 s for late days), and a batch dropped after its retries is lost too. The OTel Collector answers this
 with a file-backed sending queue. Two options, neither scheduled:
 
 1. **Disk spill.** Append each accepted export to a local append-only file before acknowledging, delete segments once

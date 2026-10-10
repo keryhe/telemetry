@@ -191,6 +191,16 @@ Any OpenTelemetry SDK follows the same convention: set the OTLP exporter header
 `Authorization=Bearer <api_key>` (e.g. via `OTEL_EXPORTER_OTLP_HEADERS`). The test data generator takes one key
 per tenant, set in User Secrets (see step 6), not `appsettings.json`.
 
+The collector accepts OTLP over gRPC and over HTTP (`POST /v1/traces`, `/v1/logs`, `/v1/metrics`, protobuf or JSON), on the same TLS port; in
+Development gRPC is on `http://localhost:5117` and OTLP/HTTP on `http://localhost:5118`.
+
+**Through your own OpenTelemetry Collector.** An application need not hold a key: run an OpenTelemetry Collector on your side, send to it with
+no key, and let its `otlp` exporter add the tenant's key. It also queues on disk through a Keryhe outage. A tested configuration and a local
+`docker compose` setup are in [`deploy/otel-collector`](../deploy/otel-collector/README.md); the Collector README
+([Sending through an OpenTelemetry Collector](../src/Keryhe.Telemetry.Collector/README.md#sending-through-an-opentelemetry-collector)) explains
+the key handling and what the client sees when Keryhe is full. Running several collectors is in
+[Running more than one collector](../src/Keryhe.Telemetry.Collector/README.md#running-more-than-one-collector).
+
 ## 4. Build
 
 ```bash

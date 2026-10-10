@@ -56,39 +56,122 @@ public sealed class TelemetryIngestionChannel
     // stamp (a test writing straight to a channel) simply records no commit lag.
     private readonly ConditionalWeakTable<object, EnqueueStamp> _enqueued = new();
 
-    private sealed class EnqueueStamp(long timestamp) { public readonly long Timestamp = timestamp; }
+    private sealed class EnqueueStamp(long timestamp, long bytes) { public readonly long Timestamp = timestamp; public readonly long Bytes = bytes; }
 
     /// <summary>
     /// Stamps <paramref name="export"/> as enqueued now. Write repositories call this immediately
     /// before writing to a channel; <see cref="TelemetryIngestionWorker"/> reads the stamp back with
     /// <see cref="TryTakeEnqueued"/> to measure commit lag.
     /// </summary>
-    public void MarkEnqueued(object export) => _enqueued.AddOrUpdate(export, new EnqueueStamp(Stopwatch.GetTimestamp()));
+    public void MarkEnqueued(object export, long bytes = 0) => _enqueued.AddOrUpdate(export, new EnqueueStamp(Stopwatch.GetTimestamp(), bytes));
 
     /// <summary>The stamp's <see cref="Stopwatch"/> timestamp, removing it. False if the export was never stamped.</summary>
-    public bool TryTakeEnqueued(object export, out long timestamp)
+    public bool TryTakeEnqueued(object export, out long timestamp) => TryTakeEnqueued(export, out timestamp, out _);
+
+    /// <summary>
+    /// As <see cref="TryTakeEnqueued(object, out long)"/>, also returning the bytes the export reserved on its gate (0 when the
+    /// byte budget is off or the export was written without a size), which the worker releases with its records.
+    /// </summary>
+    public bool TryTakeEnqueued(object export, out long timestamp, out long bytes)
     {
         if (_enqueued.TryGetValue(export, out var stamp))
         {
             _enqueued.Remove(export);
             timestamp = stamp.Timestamp;
+            bytes = stamp.Bytes;
             return true;
         }
         timestamp = 0;
+        bytes = 0;
         return false;
     }
 
-    public TelemetryIngestionChannel(IOptions<TelemetryIngestionOptions> options, IngestionMetrics metrics)
+    private readonly TelemetryIngestionOptions _options;
+    private readonly IOptionsMonitor<TenantQuotaOptions>? _quota;
+    private readonly TenantRateLimiter _rates = new();
+    private volatile bool _shuttingDown;
+
+    /// <summary>True once the writers have been completed for host shutdown.</summary>
+    public bool IsShuttingDown => _shuttingDown;
+
+    /// <summary>The longest gate saturation, across signals, since the gate last had room.</summary>
+    public TimeSpan LongestSaturation => new[] { LogGate.SaturatedFor, TraceGate.SaturatedFor, MetricGate.SaturatedFor }.Max();
+
+    /// <summary>The delay a refused client is told to wait: the configured base plus up to 50% jitter.</summary>
+    public TimeSpan NextRetryDelay()
     {
+        var baseMs = _options.RejectRetryDelayMilliseconds;
+        return TimeSpan.FromMilliseconds(baseMs * (1 + Random.Shared.NextDouble() * 0.5));
+    }
+
+    /// <summary>
+    /// Refuses an export at once, before it is converted, when <paramref name="gate"/> is full and has been refusing callers
+    /// for at least the whole bounded wait: an export arriving now would very likely wait that long and be refused anyway,
+    /// so this spares the conversion and the held-open request. A gate that has only just filled does not trigger it (the
+    /// next flush may free room within the wait). The bounded wait in <see cref="AcquireOrRejectAsync"/> still applies
+    /// afterwards, when the exact count is known. A no-op when the wait is unbounded.
+    /// </summary>
+    public void ThrowIfSaturated(string signal, RecordCountGate gate)
+    {
+        if (_options.EffectiveMaxGateWait is { } wait && gate.IsSaturated && gate.SaturatedFor >= wait)
+            throw new IngestionRejectedException(signal, RefusalReasons.Throttled, NextRetryDelay());
+    }
+
+    /// <summary>
+    /// Reserves <paramref name="count"/> records (and <paramref name="bytes"/>) for <paramref name="tenantId"/> on <paramref name="gate"/>.
+    /// First the tenant's rate limit (<see cref="TenantQuotaOptions.RecordsPerSecond"/>), which refuses at once with the time until enough
+    /// tokens return; then the gate, waiting at most <see cref="TelemetryIngestionOptions.MaxGateWaitMilliseconds"/>. Throws
+    /// <see cref="IngestionRejectedException"/> (reason <c>tenant_rate</c>, <c>tenant_quota</c> when the tenant stayed over its share of the
+    /// queue, <c>throttled</c> when the whole queue stayed full) and reserves nothing in that case. Give the same tenant back with
+    /// <see cref="Release"/>.
+    /// </summary>
+    public async Task AcquireOrRejectAsync(string signal, RecordCountGate gate, int count, CancellationToken ct, long bytes = 0, long tenantId = ResourceModel.DefaultTenantId)
+    {
+        var quota = _quota?.CurrentValue;
+        if (quota is not null)
+        {
+            var rate = quota.RateFor(tenantId);
+            if (rate > 0 && !_rates.TryAcquire(tenantId, signal, count, rate, out var retryAfter))
+                throw new IngestionRejectedException(signal, RefusalReasons.TenantRate, Jitter(retryAfter));
+        }
+
+        var share = quota?.ShareFor(tenantId) ?? 1.0;
+        var wait = _options.EffectiveMaxGateWait ?? System.Threading.Timeout.InfiniteTimeSpan;
+        var result = await gate.TryAcquireAsync(tenantId, share, count, bytes, wait, ct);
+        if (result != RecordCountGate.Result.Admitted)
+            throw new IngestionRejectedException(signal,
+                result == RecordCountGate.Result.TenantQuota ? RefusalReasons.TenantQuota : RefusalReasons.Throttled, NextRetryDelay());
+    }
+
+    /// <summary>Gives back a reservation made by <see cref="AcquireOrRejectAsync"/> that was never queued.</summary>
+    public void Release(RecordCountGate gate, int count, long bytes, long tenantId)
+    {
+        var tally = new RecordCountGate.TenantTally();
+        tally.Add(tenantId, count, bytes);
+        gate.Release(tally);
+    }
+
+    private static TimeSpan Jitter(TimeSpan delay) => delay + TimeSpan.FromMilliseconds(delay.TotalMilliseconds * Random.Shared.NextDouble() * 0.25);
+
+    public TelemetryIngestionChannel(IOptions<TelemetryIngestionOptions> options, IngestionMetrics metrics, IOptionsMonitor<TenantQuotaOptions>? quota = null)
+    {
+        _quota = quota;
         var o = options.Value;
-        LogGate = new RecordCountGate(o.MaxQueuedLogRecords, metrics, "logs");
-        TraceGate = new RecordCountGate(o.MaxQueuedSpans, metrics, "traces");
-        MetricGate = new RecordCountGate(o.MaxQueuedMetrics, metrics, "metrics");
+        _options = o;
+        LogGate = new RecordCountGate(o.MaxQueuedLogRecords, metrics, "logs", o.MaxQueuedBytesPerSignal);
+        TraceGate = new RecordCountGate(o.MaxQueuedSpans, metrics, "traces", o.MaxQueuedBytesPerSignal);
+        MetricGate = new RecordCountGate(o.MaxQueuedMetrics, metrics, "metrics", o.MaxQueuedBytesPerSignal);
 
         // The channel owns the gates, so it hands their resident counts to the gauge.
         metrics.RegisterResidentRecords("logs", () => LogGate.Resident);
         metrics.RegisterResidentRecords("traces", () => TraceGate.Resident);
         metrics.RegisterResidentRecords("metrics", () => MetricGate.Resident);
+        metrics.RegisterTenantResident("logs", LogGate.TenantResident);
+        metrics.RegisterTenantResident("traces", TraceGate.TenantResident);
+        metrics.RegisterTenantResident("metrics", MetricGate.TenantResident);
+        metrics.RegisterResidentBytes("logs", () => LogGate.ResidentBytes);
+        metrics.RegisterResidentBytes("traces", () => TraceGate.ResidentBytes);
+        metrics.RegisterResidentBytes("metrics", () => MetricGate.ResidentBytes);
     }
 
     /// <summary>
@@ -100,6 +183,7 @@ public sealed class TelemetryIngestionChannel
     /// </summary>
     public void CompleteWriters()
     {
+        _shuttingDown = true;
         Logs.Writer.TryComplete();
         Traces.Writer.TryComplete();
         Metrics.Writer.TryComplete();

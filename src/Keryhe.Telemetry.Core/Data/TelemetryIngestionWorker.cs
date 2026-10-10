@@ -49,8 +49,11 @@ public sealed class TelemetryIngestionWorker(
     IOptions<TelemetryIngestionOptions> options,
     IngestionMetrics metrics,
     RollupAccumulator rollups,
-    ILogger<TelemetryIngestionWorker> logger) : BackgroundService
+    ILogger<TelemetryIngestionWorker> logger,
+    IFlushErrorClassifier? classifier = null) : BackgroundService
 {
+    private readonly IFlushErrorClassifier _classifier = classifier ?? DefaultFlushErrorClassifier.Instance;
+
     private readonly TelemetryIngestionOptions _options = options.Value;
 
     // Cancelled only when the host's shutdown deadline expires -- see the class doc comment.
@@ -109,7 +112,7 @@ public sealed class TelemetryIngestionWorker(
             count += items.Count;
         if (count == 0) return;
 
-        metrics.RecordDropped(signalName, count);
+        metrics.RecordDropped(signalName, count, "shutdown");
         logger.LogWarning(
             "Shutdown deadline reached before the {Signal} queue drained -- {Count} records were not persisted",
             signalName, count);
@@ -138,17 +141,17 @@ public sealed class TelemetryIngestionWorker(
                 ingestionChannel.Logs.Reader, writer.FlushLogsAsync,
                 static items => items.Count, _options.MaxLogFlushBatchSize,
                 ingestionChannel.LogGate, logDrainLock, _logsInFlight, "logs", stoppingToken, abortToken,
-                rollups.AddLogs));
+                rollups.AddLogs, static r => DroppedRecordDescription.Of(r!)));
             tasks.Add(ProcessChannelAsync(
                 ingestionChannel.Traces.Reader, writer.FlushTracesAsync,
                 static items => items.Count, _options.MaxTraceFlushSpanBatchSize,
                 ingestionChannel.TraceGate, traceDrainLock, _tracesInFlight, "traces", stoppingToken, abortToken,
-                rollups.AddSpans));
+                rollups.AddSpans, static r => DroppedRecordDescription.Of(r!)));
             tasks.Add(ProcessChannelAsync(
                 ingestionChannel.Metrics.Reader, writer.FlushMetricsAsync,
                 static items => items.Count, _options.MaxMetricFlushBatchSize,
                 ingestionChannel.MetricGate, metricDrainLock, _metricsInFlight, "metrics", stoppingToken, abortToken,
-                onFlushed: null));
+                onFlushed: null, static r => DroppedRecordDescription.Of(r!)));
         }
 
         return Task.WhenAll(tasks);
@@ -165,13 +168,15 @@ public sealed class TelemetryIngestionWorker(
         string signalName,
         CancellationToken stoppingToken,
         CancellationToken abortToken,
-        Action<List<T>>? onFlushed)
+        Action<List<T>>? onFlushed,
+        Func<T, string> describe)
     {
         while (true)
         {
             List<T>? batch = null;
             List<long> enqueuedAt = [];
             var batchSize = 0;
+            var batchTally = new RecordCountGate.TenantTally(); // what the merged exports reserved on the gate, by tenant, released with them
             try
             {
                 if (!stoppingToken.IsCancellationRequested)
@@ -203,6 +208,7 @@ public sealed class TelemetryIngestionWorker(
                     // write; at high load it merges many.
                     batch = new List<T>();
                     enqueuedAt = new List<long>();
+                    batchTally = new RecordCountGate.TenantTally();
                     while (reader.TryPeek(out var peeked))
                     {
                         var peekedSize = sizeOf(peeked);
@@ -211,8 +217,10 @@ public sealed class TelemetryIngestionWorker(
                         if (!reader.TryRead(out var items))
                             break;
 
-                        if (ingestionChannel.TryTakeEnqueued(items, out var stamp))
-                            enqueuedAt.Add(stamp);
+                        var hadStamp = ingestionChannel.TryTakeEnqueued(items, out var stamp, out var exportBytes);
+                        if (hadStamp) enqueuedAt.Add(stamp);
+                        // One export is one tenant's (the key that authenticated it), so its records and bytes are released to that tenant.
+                        batchTally.Add(TenantOf.Of(items[0]!), items.Count, hadStamp ? exportBytes : 0);
                         batch.AddRange(items);
                         batchSize += peekedSize;
                         if (batchSize >= maxBatchSize)
@@ -236,33 +244,38 @@ public sealed class TelemetryIngestionWorker(
                 metrics.RecordFlushBatchSize(signalName, batchSize);
                 try
                 {
-                    var flushed = await FlushWithRetryAsync(flush, batch, signalName, abortToken);
+                    var outcome = await FlushWithRetryAsync(flush, batch, signalName, abortToken);
+                    BisectResult<T>? split = null;
+                    if (outcome == FlushOutcome.Permanent)
+                        split = await BisectAsync(flush, batch, signalName, abortToken);
                     // Not in the finally: a flush cut off by the deadline (the only way
-                    // FlushWithRetryAsync throws) stays counted for StopAsync to report.
+                    // FlushWithRetryAsync or the split throws) stays counted for StopAsync to report.
                     Interlocked.Add(ref inFlight.Value, -batchSize);
-                    if (flushed)
+
+                    var storedAny = outcome == FlushOutcome.Ok || split is { Flushed.Count: > 0 };
+                    if (outcome == FlushOutcome.Ok)
+                        AfterFlushed(batch, signalName, onFlushed);
+                    else if (outcome == FlushOutcome.Exhausted)
+                        metrics.RecordDropped(signalName, batchSize, "retries_exhausted");
+                    else
                     {
-                        metrics.RecordFlushed(signalName, batchSize);
-                        // Only after a successful flush, so a dropped batch is never counted in the
-                        // summary rollups. A fault here must never fail the drain loop.
-                        if (onFlushed != null)
-                        {
-                            try { onFlushed(batch); }
-                            catch (Exception ex) { logger.LogError(ex, "Rollup accumulation failed for a {Signal} batch", signalName); }
-                        }
+                        foreach (var piece in split!.Flushed) AfterFlushed(piece, signalName, onFlushed);
+                        ReportSplit(signalName, batchSize, split, describe);
+                    }
+
+                    if (storedAny)
+                    {
                         var committed = Stopwatch.GetTimestamp();
                         foreach (var stamp in enqueuedAt)
                             metrics.RecordCommitLag(signalName, Stopwatch.GetElapsedTime(stamp, committed).TotalMilliseconds);
                     }
-                    else
-                        metrics.RecordDropped(signalName, batchSize);
                 }
                 finally
                 {
                     // Release regardless of outcome: a dropped batch still leaves the queue,
                     // and a gate that only releases on success leaks capacity on every error
                     // until ingestion deadlocks permanently.
-                    gate.Release(batchSize);
+                    gate.Release(batchTally);
                 }
             }
             catch (OperationCanceledException) when (abortToken.IsCancellationRequested)
@@ -277,7 +290,7 @@ public sealed class TelemetryIngestionWorker(
                 // batch/batchSize may be partially populated; release what was reserved so the
                 // gate does not leak, then back off briefly before the next iteration.
                 if (batch is { Count: > 0 })
-                    gate.Release(batchSize);
+                    gate.Release(batchTally);
                 logger.LogError(ex, "Unexpected error in the {Signal} drain loop", signalName);
                 try
                 {
@@ -289,6 +302,38 @@ public sealed class TelemetryIngestionWorker(
                 }
             }
         }
+    }
+
+    /// <summary>Counts a stored piece and feeds the summary rollups, which only ever see stored records.</summary>
+    private void AfterFlushed<T>(List<T> stored, string signalName, Action<List<T>>? onFlushed)
+    {
+        metrics.RecordFlushed(signalName, stored.Count);
+        // A fault here must never fail the drain loop.
+        if (onFlushed == null) return;
+        try { onFlushed(stored); }
+        catch (Exception ex) { logger.LogError(ex, "Rollup accumulation failed for a {Signal} batch", signalName); }
+    }
+
+    /// <summary>
+    /// A batch failed with an error retrying cannot fix: cut it down to the records the database refuses so the rest of a
+    /// merged batch (possibly other tenants' exports) is still stored. Each piece gets the full transient-retry policy.
+    /// </summary>
+    private Task<BisectResult<T>> BisectAsync<T>(
+        Func<List<T>, CancellationToken, Task> flush, List<T> batch, string signalName, CancellationToken ct) =>
+        BatchBisector.RunAsync(batch, (piece, token) => FlushWithRetryAsync(flush, piece, signalName, token), _options.MaxSplitFlushes, ct);
+
+    private void ReportSplit<T>(string signalName, int batchSize, BisectResult<T> split, Func<T, string> describe)
+    {
+        var stored = split.Flushed.Sum(p => p.Count);
+        foreach (var record in split.Permanent.Take(10))
+            logger.LogWarning("Dropped a {Signal} record the database refuses: {Record}", signalName, describe(record));
+        logger.LogWarning(
+            "Split a {Signal} batch of {Count} after a permanent flush error with {Flushes} extra flushes: {Stored} stored, " +
+            "{Permanent} refused by the database, {Exhausted} lost to exhausted retries, {Cap} dropped at the split cap",
+            signalName, batchSize, split.Flushes, stored, split.Permanent.Count, split.Exhausted, split.CapDropped);
+        metrics.RecordDropped(signalName, split.Permanent.Count, "permanent");
+        metrics.RecordDropped(signalName, split.Exhausted, "retries_exhausted");
+        metrics.RecordDropped(signalName, split.CapDropped, "split_cap");
     }
 
     /// <summary>
@@ -337,10 +382,11 @@ public sealed class TelemetryIngestionWorker(
     /// JSON columns on that same row rather than as separate <c>span_events</c>/<c>span_links</c>
     /// inserts, which were the one part of a trace flush a retry could genuinely duplicate.
     ///
-    /// Returns <c>true</c> if the flush eventually succeeded, <c>false</c> if every attempt
-    /// failed and the batch is being dropped.
+    /// Returns how the flush ended: <see cref="FlushOutcome.Ok"/>, <see cref="FlushOutcome.Exhausted"/> when
+    /// every attempt failed with a transient error, or <see cref="FlushOutcome.Permanent"/> when the
+    /// provider's <see cref="IFlushErrorClassifier"/> says retrying cannot help (the caller then splits the batch).
     /// </summary>
-    private async Task<bool> FlushWithRetryAsync<T>(
+    private async Task<FlushOutcome> FlushWithRetryAsync<T>(
         Func<List<T>, CancellationToken, Task> flush,
         List<T> batch,
         string signalName,
@@ -354,7 +400,7 @@ public sealed class TelemetryIngestionWorker(
             {
                 await flush(batch, ct);
                 metrics.RecordFlushDuration(signalName, Stopwatch.GetElapsedTime(started).TotalMilliseconds, "ok");
-                return true;
+                return FlushOutcome.Ok;
             }
             catch (OperationCanceledException) when (ct.IsCancellationRequested)
             {
@@ -363,13 +409,18 @@ public sealed class TelemetryIngestionWorker(
             catch (Exception ex)
             {
                 metrics.RecordFlushDuration(signalName, Stopwatch.GetElapsedTime(started).TotalMilliseconds, "failed");
+                if (_classifier.Classify(ex) == FlushErrorKind.Permanent)
+                {
+                    logger.LogWarning(ex, "Permanent error flushing {Signal} batch of {Count} -- not retrying", signalName, batch.Count);
+                    return FlushOutcome.Permanent;
+                }
                 attempt++;
                 if (attempt > _options.MaxFlushRetries)
                 {
                     logger.LogError(ex,
                         "Error flushing {Signal} batch of {Count} after {Attempts} attempts — batch dropped",
                         signalName, batch.Count, attempt);
-                    return false;
+                    return FlushOutcome.Exhausted;
                 }
 
                 metrics.RecordFlushRetry(signalName);

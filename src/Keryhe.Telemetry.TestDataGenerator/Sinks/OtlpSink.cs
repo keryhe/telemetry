@@ -106,6 +106,7 @@ public sealed class OtlpSink : ISink
     /// <summary>Sends with exponential backoff on the statuses that mean "slow down" or "try again".</summary>
     private async Task SendAsync(string signal, Func<CancellationToken, Task<long>> call, CancellationToken ct)
     {
+        TimeSpan? lastRetryAfter = null;
         for (var attempt = 1; ; attempt++)
         {
             try
@@ -123,12 +124,31 @@ public sealed class OtlpSink : ISink
             catch (RpcException ex) when (attempt < MaxAttempts && ex.StatusCode is StatusCode.Unavailable or StatusCode.ResourceExhausted
                 or StatusCode.DeadlineExceeded or StatusCode.Aborted or StatusCode.Internal)
             {
-                _logger.LogWarning("{Tenant}: {Signal} export failed ({Status}); retry {Attempt}", _tenant, signal, ex.StatusCode, attempt);
+                lastRetryAfter = RetryAfterOf(ex);
+                _logger.LogWarning("{Tenant}: {Signal} export failed ({Status}); retry {Attempt}{Told}", _tenant, signal, ex.StatusCode, attempt,
+                    lastRetryAfter is { } told ? $" (collector asked for {told.TotalSeconds:0.#} s)" : "");
             }
 
             var delay = TimeSpan.FromMilliseconds(Math.Min(30_000, 500 * Math.Pow(2, attempt - 1)) * (0.5 + Random.Shared.NextDouble() * 0.5));
+            if (lastRetryAfter is { } asked) delay = asked > delay ? asked : delay;   // never come back sooner than the collector asked
+            lastRetryAfter = null;
             await Task.Delay(delay, ct);
         }
+    }
+
+    /// <summary>The <c>RetryInfo</c> delay a refused export carries in <c>grpc-status-details-bin</c>, if any.</summary>
+    private static TimeSpan? RetryAfterOf(RpcException ex)
+    {
+        var bytes = ex.Trailers.GetValueBytes("grpc-status-details-bin");
+        if (bytes is null) return null;
+        try
+        {
+            foreach (var detail in Google.Rpc.Status.Parser.ParseFrom(bytes).Details)
+                if (detail.Is(Google.Rpc.RetryInfo.Descriptor))
+                    return detail.Unpack<Google.Rpc.RetryInfo>().RetryDelay?.ToTimeSpan();
+        }
+        catch (Google.Protobuf.InvalidProtocolBufferException) { }
+        return null;
     }
 
     public ValueTask DisposeAsync()

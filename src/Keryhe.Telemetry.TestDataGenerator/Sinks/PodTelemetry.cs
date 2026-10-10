@@ -28,7 +28,7 @@ internal sealed class PodTelemetry : IDisposable
     private readonly Dictionary<string, ILogger> _loggers = [];
     private readonly ConcurrentDictionary<(string Instrument, string AttrKey), SimSample> _samples = new();
 
-    public PodTelemetry(ServiceInstance instance, Uri endpoint, string apiKey, int metricIntervalMs)
+    public PodTelemetry(ServiceInstance instance, Uri endpoint, string apiKey, int metricIntervalMs, bool httpProtobuf = false)
     {
         _instance = instance;
         // One source/meter name per pod and tenant: a provider listens by name, so a shared name would
@@ -39,17 +39,28 @@ internal sealed class PodTelemetry : IDisposable
         var resource = ResourceFactory.Builder(instance);
         var headers = $"Authorization=Bearer {apiKey}";
 
-        void Configure(OtlpExporterOptions o)
+        // gRPC takes the endpoint as it is. OTLP/HTTP needs each signal's own path: set in code, the SDK uses the address verbatim.
+        Action<OtlpExporterOptions> For(string signal) => o =>
         {
-            o.Endpoint = endpoint;
             o.Headers = headers;
-            o.Protocol = OtlpExportProtocol.Grpc;
-        }
+            if (httpProtobuf)
+            {
+                o.Protocol = OtlpExportProtocol.HttpProtobuf;
+                // Not the one from the logging provider's service container: it is disposed before the final log flush on shutdown.
+                o.HttpClientFactory = () => SharedHttpClient;
+                o.Endpoint = new Uri(endpoint.AbsoluteUri.TrimEnd('/') + "/v1/" + signal);
+            }
+            else
+            {
+                o.Protocol = OtlpExportProtocol.Grpc;
+                o.Endpoint = endpoint;
+            }
+        };
 
         _tracerProvider = Sdk.CreateTracerProviderBuilder()
             .SetResourceBuilder(resource)
             .AddSource(scopeName)
-            .AddOtlpExporter(Configure)
+            .AddOtlpExporter(For("traces"))
             .Build();
 
         var meterBuilder = Sdk.CreateMeterProviderBuilder()
@@ -68,7 +79,7 @@ internal sealed class PodTelemetry : IDisposable
         _meterProvider = meterBuilder
             .AddOtlpExporter((exporter, reader) =>
             {
-                Configure(exporter);
+                For("metrics")(exporter);
                 reader.PeriodicExportingMetricReaderOptions.ExportIntervalMilliseconds = metricIntervalMs;
             })
             .Build();
@@ -82,12 +93,14 @@ internal sealed class PodTelemetry : IDisposable
                 o.IncludeFormattedMessage = true;
                 // Must come before the exporter: it rewrites the record's timestamp to the simulated time.
                 o.AddProcessor(new SimulatedTimeProcessor());
-                o.AddOtlpExporter(Configure);
+                o.AddOtlpExporter(For("logs"));
             });
         });
 
         CreateInstruments();
     }
+
+    private static readonly HttpClient SharedHttpClient = new();
 
     public ActivitySource Source { get; }
 

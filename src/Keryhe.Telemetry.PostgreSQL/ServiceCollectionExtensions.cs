@@ -18,6 +18,8 @@ public static class PostgreSqlServiceCollectionExtensions
     /// <summary>Write-side services for the gRPC ingestion server (uses <c>ConnectionStrings:Collector</c>).</summary>
     public static IServiceCollection AddPostgreSqlCollectorServices(this IServiceCollection services, IConfiguration configuration)
     {
+        // Lets the ingestion worker split a batch around records this database refuses instead of retrying and dropping it.
+        services.AddSingleton<Keryhe.Telemetry.Core.Data.IFlushErrorClassifier, Keryhe.Telemetry.PostgreSQL.Services.PostgreSqlFlushErrorClassifier>();
         services.AddSingleton(_ => NpgsqlDataSource.Create(configuration.GetConnectionString("Collector")!));
         services.AddSingleton<ITelemetryBulkWriter, PostgreSqlBulkWriter>();
         // metric_last_seen maintenance (list-pages-server-side plan, Phase 5). MetricTouchWorker

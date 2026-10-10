@@ -44,13 +44,14 @@ public class TraceWriteRepository : ITraceWriteRepository
 
     public async Task<IEnumerable<string>> StoreTracesBatchAsync(
         IEnumerable<TraceModel> traces,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        long requestBytes = 0)
     {
         var list = (traces ?? throw new ArgumentNullException(nameof(traces)))
             .Where(t => t.Spans.Count > 0)
             .ToList();
         if (list.Count == 0) return [];
-        await WriteTracesAsync(list, list.Sum(t => t.Spans.Count), cancellationToken);
+        await WriteTracesAsync(list, list.Sum(t => t.Spans.Count), cancellationToken, requestBytes);
         _logger.LogDebug("Enqueued {Count} traces for async write", list.Count);
         return list.Select(t => t.Spans.First().TraceIdHex);
     }
@@ -85,7 +86,7 @@ public class TraceWriteRepository : ITraceWriteRepository
     /// <c>SpanModel.Resource</c>/<c>InstrumentationScope</c> directly with no fallback logic of its
     /// own to duplicate.
     /// </summary>
-    private async Task WriteTracesAsync(List<TraceModel> traces, int spanCount, CancellationToken cancellationToken)
+    private async Task WriteTracesAsync(List<TraceModel> traces, int spanCount, CancellationToken cancellationToken, long requestBytes = 0)
     {
         var spans = new List<SpanModel>(spanCount);
         foreach (var trace in traces)
@@ -98,15 +99,16 @@ public class TraceWriteRepository : ITraceWriteRepository
             }
         }
 
-        await _channel.TraceGate.AcquireAsync(spanCount, cancellationToken);
+        var tenantId = TenantOf.Of(spans[0]);
+        await _channel.AcquireOrRejectAsync("traces", _channel.TraceGate, spanCount, cancellationToken, requestBytes, tenantId);
         try
         {
-            _channel.MarkEnqueued(spans);
+            _channel.MarkEnqueued(spans, requestBytes);
             await _channel.Traces.Writer.WriteAsync(spans, cancellationToken);
         }
         catch
         {
-            _channel.TraceGate.Release(spanCount);
+            _channel.Release(_channel.TraceGate, spanCount, requestBytes, tenantId);
             throw;
         }
     }

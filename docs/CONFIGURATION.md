@@ -56,6 +56,14 @@ Host: `Keryhe.Telemetry.Collector.Server` (gRPC OTLP ingestion, the write path).
 | Key | Default | Description |
 |---|---|---|
 | `AllowInsecureTransport` | `false` | Outside Development the collector fails startup on a plaintext (`http://`) TCP address, because API keys would cross the network in cleartext. Set `true` only when TLS is terminated by a proxy in front of the collector. Unix-socket addresses are exempt. |
+| `MaxConnectionAgeSeconds` | 0 | A connection older than this many seconds (plus up to 10% jitter) is sent an HTTP/2 `GOAWAY` after its current request, so clients reconnect and a layer-4 load balancer spreads them over every collector instance (an OTLP exporter otherwise keeps one connection open for as long as it runs). 0 never closes a healthy connection. Not needed behind a gRPC-aware balancer or with client-side round-robin. |
+| `HttpBasePath` | empty | A prefix for the OTLP/HTTP routes (`{HttpBasePath}/v1/traces`, `/v1/logs`, `/v1/metrics`), for a host that mounts them elsewhere. Must start with `/`. |
+| `MaxReceiveMessageSizeBytes` | 4194304 | The largest OTLP export accepted, in bytes **after decompression** (gRPC's default, now explicit). A larger one is refused with `RESOURCE_EXHAUSTED` before it is read into memory; a gzip message is bounded while it is decompressed, not only by its size on the wire. A client's exporter should batch below it. |
+| `AuthFailureLimit:PerSecond` | 5 | Failed authentication attempts a client **address** earns back per second (a token bucket). Only failures (missing, malformed, invalid or expired key) take a token; a client with none left is refused with gRPC `RESOURCE_EXHAUSTED` (no `RetryInfo`, so exporters do not retry) before any control-plane lookup, unless its key is already cached as valid. 0 turns the limit off. |
+| `AuthFailureLimit:Burst` | 20 | Failed attempts in a burst before an address is refused. |
+| `AuthFailureLimit:MaxTrackedClients` | 100000 | Addresses tracked at once; past it, new ones share one overflow bucket. IPv6 addresses are grouped by /64. |
+| `ManagementPort` | 0 | Port of the plaintext HTTP/1.1 management endpoint that serves `/healthz/live` and `/healthz/ready`. 0 takes the port of the Kestrel endpoint named `Management` (the shipped `appsettings.json` defines one on `http://127.0.0.1:5119`); with neither, the HTTP health endpoints are not mapped. The gRPC `grpc.health.v1.Health` service is always available on the OTLP endpoints. |
+| `ManagementEndpoints` | `[]` | Plaintext management addresses allowed outside Development besides loopback and private-network ones, as the exact `Url` of the Kestrel endpoint (for example `http://0.0.0.0:8081` in a container whose port is not published). A plaintext `Management` endpoint on any other address still fails startup. |
 
 ### Listening endpoint and certificate (`Kestrel:Endpoints`)
 
@@ -64,13 +72,14 @@ the keys it changes.
 
 | Key | Default | Description |
 |---|---|---|
-| `Kestrel:Endpoints:Https:Url` | `https://0.0.0.0:7057` | The TLS gRPC endpoint (`appsettings.json`). |
-| `Kestrel:Endpoints:Https:Protocols` | `Http2` | gRPC requires HTTP/2. |
+| `Kestrel:Endpoints:Https:Url` | `https://0.0.0.0:7057` | The TLS endpoint (`appsettings.json`): OTLP/gRPC and OTLP/HTTP on one port. |
+| `Kestrel:Endpoints:Https:Protocols` | `Http1AndHttp2` | TLS ALPN gives a gRPC client HTTP/2 and an OTLP/HTTP client HTTP/1.1 on the same port. gRPC requires HTTP/2, so a plaintext endpoint that must serve gRPC has to be `Http2`-only (see below). |
 | `Kestrel:Endpoints:Https:Certificate:Path` | none | A `.pfx` (or a `.pem`/`.crt` with `KeyPath`). With no certificate configured Kestrel uses the ASP.NET Core development certificate, which is normally absent (startup fails) or untrusted outside a development machine. |
 | `Kestrel:Endpoints:Https:Certificate:Password` | none | The `.pfx` (or encrypted key) password. Set it as an environment variable or secret, never in a committed file. |
 | `Kestrel:Endpoints:Https:Certificate:KeyPath` | none | The private key file, when `Path` is a PEM certificate. |
 | `Kestrel:Endpoints:Https:Certificate:Store` / `Location` / `Subject` | none | Load from a certificate store instead of a file (e.g. `My` / `LocalMachine` / `collector.example.com`). `AllowInvalid` (default `false`) permits a self-signed or otherwise invalid certificate. |
 | `Kestrel:Endpoints:Http:Url` | `http://localhost:5117` (Development only) | The plaintext h2c endpoint, `Protocols: Http2`, from `appsettings.Development.json`; used by the TestDataGenerator and the stress harness. |
+| `Kestrel:Endpoints:OtlpHttp:Url` | `http://localhost:5118` (Development only) | The plaintext HTTP/1.1 endpoint for OTLP/HTTP (`Protocols: Http1`): h2c and HTTP/1.1 cannot share a plaintext port, so the Development OTLP/HTTP clients (`Generator:Protocol` `http/protobuf`, `curl`) get their own. |
 
 Give the certificate in an override (`appsettings.Production.json` next to the executable, or environment variables)
 rather than editing the shipped `appsettings.json`, which every publish replaces. A certificate file:
@@ -105,11 +114,15 @@ The Windows certificate store (the service account needs read access to the priv
 "Certificate": { "Store": "My", "Location": "LocalMachine", "Subject": "collector.example.com" }
 ```
 
-**TLS terminated by a proxy.** Repoint the same endpoint at plaintext and tell the transport guard it is intended;
-the proxy must forward HTTP/2 (h2c) to the collector:
+**TLS terminated by a proxy.** Repoint the endpoint at plaintext and tell the transport guard it is intended; the proxy must forward
+HTTP/2 (h2c) to the collector. Plaintext cannot negotiate a protocol, so the endpoint becomes `Http2`-only (gRPC), and OTLP/HTTP needs an
+HTTP/1.1 endpoint of its own for the proxy to forward to:
 
 ```
 Kestrel__Endpoints__Https__Url=http://0.0.0.0:7057
+Kestrel__Endpoints__Https__Protocols=Http2
+Kestrel__Endpoints__OtlpHttp__Url=http://0.0.0.0:7058
+Kestrel__Endpoints__OtlpHttp__Protocols=Http1
 Telemetry__Collector__AllowInsecureTransport=true
 ```
 
@@ -125,6 +138,7 @@ Don't use `ASPNETCORE_URLS` or `ASPNETCORE_HTTP_PORTS`/`HTTPS_PORTS` for the col
 | `MaxQueuedLogRecords` | 200000 | Log records resident in the ingestion queue before a further export waits (backpressure). |
 | `MaxQueuedMetrics` | 200000 | The same, for metrics. |
 | `MaxQueuedSpans` | 200000 | The same, for spans (counted in spans, not traces). |
+| `MaxQueuedBytesPerSignal` | 268435456 | Bytes each signal's queue may hold, measured as the protobuf size of the exports that produced the queued records (the in-memory models are larger than their wire form, so this is a proxy). An export is admitted when both its records and its bytes fit, or the queue is empty. 0 turns the byte budget off. Exposed as the `resident_bytes` gauge. |
 | `MaxLogFlushBatchSize` | 2000 | Log records merged into one flush. |
 | `MaxMetricFlushBatchSize` | 2000 | Metrics merged into one flush. |
 | `MaxTraceFlushSpanBatchSize` | 2000 | Spans merged into one trace flush. |
@@ -132,9 +146,53 @@ Don't use `ASPNETCORE_URLS` or `ASPNETCORE_HTTP_PORTS`/`HTTPS_PORTS` for the col
 | `MaxFlushRetries` | 5 | Retries after a failed flush before the batch is dropped (counted on `records_dropped`). |
 | `RetryBaseDelayMilliseconds` | 200 | First retry delay; doubles each attempt, with jitter. |
 | `RetryMaxDelayMilliseconds` | 5000 | Cap on the retry delay. |
+| `MaxGateWaitMilliseconds` | unset | How long an export waits for room in a full queue before it is refused with gRPC `UNAVAILABLE` + `RetryInfo`. Unset = 2000, and on ClickHouse the day-buffer `LingerMilliseconds` + 2000 (its queue frees room a whole buffer at a time). 0 refuses at once; negative waits without limit (the export is held open until the client's deadline). Setting it below ClickHouse's linger logs a warning at startup. While a queue has been refusing callers for the whole wait, further exports are refused before they are converted. |
+| `RejectRetryDelayMilliseconds` | 1000 | The delay a refused client is told to wait (`RetryInfo`), plus up to 50% random jitter. |
+| `MaxSplitFlushes` | 64 | Extra flushes spent isolating records the database permanently refuses (a value too long, a bad type) after a flush fails with such an error. The batch is cut in half repeatedly so only the bad records are dropped; what is left at the cap is dropped. Transient errors (locks, connections, timeouts) are retried, never split. |
+| `ReadinessControlPlaneSeconds` | 60 | `/healthz/ready` fails when API-key lookups have been failing for longer than this. |
+| `ReadinessSaturatedSeconds` | 10 | `/healthz/ready` fails when a signal's queue has been refusing exports continuously for longer than this. |
 
 On ClickHouse the `MaxQueued*` gates and the retry keys apply, but `MaxLogFlushBatchSize`, `MaxMetricFlushBatchSize`,
 `MaxTraceFlushSpanBatchSize`, `FlushConcurrency` and `FlushLingerMilliseconds` do not: see the next section.
+
+### Fair use between tenants (`Telemetry:Ingestion:TenantQuota`)
+
+`TenantQuotaOptions`, reloadable without a restart. Every tenant shares each signal's queue, so without a quota one tenant that sends more
+than the database can absorb fills it and every other tenant's exports are refused too.
+
+| Key | Default | Description |
+|---|---|---|
+| `MaxShare` | 0.5 | The most of a signal's queue (records, and bytes where the byte budget is on) one tenant may hold. An export that would take its tenant over the share is refused like a full queue (`UNAVAILABLE` + `RetryInfo`, reason `tenant_quota`); a tenant holding nothing is always admitted, so a single large export is never refused for size alone. `1` turns the quota off. |
+| `RecordsPerSecond` | 0 | The most records per second a tenant may send per signal (a token bucket with a one-second burst). Over it, an export is refused with `UNAVAILABLE` and the time until enough tokens return (reason `tenant_rate`). `0` turns the rate limit off. |
+| `Overrides:<tenantId>:MaxShare`, `Overrides:<tenantId>:RecordsPerSecond` | none | Per-tenant exceptions. |
+
+A **single-tenant installation** gets half the queue at the default share; set `MaxShare` to `1` there. On ClickHouse a tenant's share also
+counts the records waiting out the day-buffer linger, so a tenant at 40,000 records/s with the 2.5 s linger already holds about 100,000 (half
+the default 200,000 queue): raise the queue or the share for very high rates from few tenants. Who is holding the queue is visible on the
+`tenant_resident_records` gauge (tags `signal`, `tenant`).
+
+### Input limits (`Telemetry:Ingestion:Limits`)
+
+`IngestionLimitsOptions`. Applied while an export is converted, on every provider. Nothing is rejected for exceeding one: the value is
+cut, the record's own dropped-attributes/events/links count is raised by what was cut (as an SDK would), and each cut is counted on
+`records_truncated` (tags `signal`, `limit`). 0 means unlimited. A resource is truncated before it is hashed, so the same oversized
+resource always maps to the same row.
+
+| Key | Default | Description |
+|---|---|---|
+| `MaxAttributes` | 128 | Attributes kept per span, log record, event, link, data point, resource or scope. |
+| `MaxAttributeKeyLength` | 256 | Characters of an attribute key. |
+| `MaxAttributeValueLength` | 16384 | Characters of a string attribute value (bytes of a bytes value). |
+| `MaxEventsPerSpan` | 128 | Events kept per span. |
+| `MaxLinksPerSpan` | 128 | Links kept per span. |
+| `MaxLogBodyLength` | 65536 | Characters of a log body. A bytes, array or map body that is still longer once rendered is cut and stored as a string body. |
+| `MaxNestingDepth` | 32 | Levels of nested array/map values; deeper values are dropped. |
+| `MaxElementsPerLevel` | 1024 | Elements kept at each level of an array or map value. |
+
+Separately from these, every value stored in a sized text column is clipped to the column's size on every provider (`ColumnLimits`: span,
+service, scope and metric names 255, event name 256, metric unit 63, schema URL 2048, severity text 255), whatever the limits above are set to; a
+value over its column is a permanent flush error on PostgreSQL, SQL Server and MySQL. Clipping is by characters and never splits a surrogate
+pair. The `limit` tag then names the column (`span_name`, `service_name`, `schema_url`, ...).
 
 ### ClickHouse ingestion (`Telemetry:ClickHouse:Ingestion`)
 
@@ -169,6 +227,8 @@ All values must be greater than 0. Extra instrument: `late_buffer_records` (reco
 | `PositiveCacheTtlSeconds` | 30 | How long a valid API key's tenant is cached. |
 | `NegativeCacheTtlSeconds` | 5 | How long an invalid or inactive key is cached. |
 | `LastUsedFlushIntervalSeconds` | 60 | Interval of the `api_keys.last_used_at` flush. |
+| `MaxConcurrentLookups` | 16 | Control-plane key lookups in flight at once on one collector, for keys that are not cached. Lookups of the *same* key hash are coalesced into one query regardless. |
+| `LookupQueueTimeoutMilliseconds` | 1000 | How long a lookup waits for one of those slots before the request is answered as "lookup unavailable" (gRPC `UNAVAILABLE`, retryable, never cached). |
 
 ### Metric touch (`Telemetry:MetricTouch`)
 
@@ -321,7 +381,8 @@ sets every value and is the working example. API keys go in User Secrets, never 
 
 | Key | Default | Description |
 |---|---|---|
-| `OtlpEndpoint` | `http://localhost:5117` | Collector to send to. |
+| `OtlpEndpoint` | `http://localhost:5117` | Collector to send to: its gRPC address, or with `Protocol` `http/protobuf` its base address (`http://localhost:5118` in Development; the SDK is given `/v1/traces`, `/v1/logs` and `/v1/metrics` under it). |
+| `Protocol` | `grpc` | The transport live data uses: `grpc` or `http/protobuf`. Backfill is always gRPC and shares `OtlpEndpoint`, so the two cannot be combined in one run (backfill first, then run live over HTTP). |
 | `Seed` | 42 | Seed for every random decision; the same seed and time range give the same telemetry. |
 | `PeakRequestsPerSecond` | 2 | Traffic at the daily peak, before each tenant's `Scale`. |
 | `Environment` | `production` | `deployment.environment` resource attribute. |

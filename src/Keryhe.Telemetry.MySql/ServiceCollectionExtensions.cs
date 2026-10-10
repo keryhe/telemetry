@@ -17,6 +17,8 @@ public static class MySqlServiceCollectionExtensions
     /// <summary>Write-side services for the gRPC ingestion server.</summary>
     public static IServiceCollection AddMySqlCollectorServices(this IServiceCollection services, IConfiguration configuration)
     {
+        // Lets the ingestion worker split a batch around records this database refuses instead of retrying and dropping it.
+        services.AddSingleton<Keryhe.Telemetry.Core.Data.IFlushErrorClassifier, Keryhe.Telemetry.MySql.Services.MySqlFlushErrorClassifier>();
         services.AddSingleton<ITelemetryBulkWriter, MySqlBulkWriter>();
         // metric_last_seen maintenance (list-pages-server-side plan, Phase 5). MetricTouchWorker
         // is provider-agnostic and registered once, in AddKeryheTelemetryCollector.

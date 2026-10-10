@@ -125,6 +125,32 @@ public class ScenarioTests
     }
 
     [Fact]
+    public void Throttled_rate_trips_past_its_limit_and_is_off_at_zero()
+    {
+        static WindowSummary Throttle(long attempts, long ok = 100) =>
+            new("traces", 60, 6000, 6000, 0, 0, 0, ok, 0, 0, new LatencySummary(ok, 5, 5, 8, 10, 10), ThrottledAttempts: attempts);
+
+        Assert.Equal([RampEvaluator.Throttled], RampEvaluator.Tripped(Step(Throttle(attempts: 10)), Criteria));   // 10 of 110 attempts: 9%
+        Assert.Empty(RampEvaluator.Tripped(Step(Throttle(attempts: 4)), Criteria));                               // 4 of 104: under the 5% default
+        Assert.Empty(RampEvaluator.Tripped(Step(Throttle(attempts: 50)), new RampCriteria { MaxThrottledRatePercent = 0 }));
+        // A throttled attempt that was retried and accepted is not a server error.
+        Assert.DoesNotContain(RampEvaluator.ErrorRate, RampEvaluator.Tripped(Step(Throttle(attempts: 50)), Criteria));
+    }
+
+    [Fact]
+    public void The_exporter_reads_the_retry_delay_from_the_status_details_trailer()
+    {
+        var status = new Google.Rpc.Status { Code = (int)Grpc.Core.StatusCode.Unavailable, Message = "full" };
+        status.Details.Add(Google.Protobuf.WellKnownTypes.Any.Pack(new Google.Rpc.RetryInfo { RetryDelay = Google.Protobuf.WellKnownTypes.Duration.FromTimeSpan(TimeSpan.FromMilliseconds(1500)) }));
+        var withInfo = new Grpc.Core.RpcException(new Grpc.Core.Status(Grpc.Core.StatusCode.Unavailable, "full"),
+            new Grpc.Core.Metadata { { "grpc-status-details-bin", Google.Protobuf.MessageExtensions.ToByteArray(status) } });
+        var without = new Grpc.Core.RpcException(new Grpc.Core.Status(Grpc.Core.StatusCode.Unavailable, "shutting down"));
+
+        Assert.Equal(TimeSpan.FromMilliseconds(1500), Keryhe.Telemetry.StressTests.Load.OtlpExporter.ThrottleDelay(withInfo));
+        Assert.Null(Keryhe.Telemetry.StressTests.Load.OtlpExporter.ThrottleDelay(without));   // a plain UNAVAILABLE is a failure, not throttling
+    }
+
+    [Fact]
     public void Lag_growth_needs_a_climb_not_a_high_plateau_and_a_missing_probe_counts_as_growth()
     {
         var steady = new double?[] { 8000, 8100, 7900, 8000, 8050, 7950 };

@@ -1,0 +1,16 @@
+// The subset of google/rpc/error_details.proto the collector needs: RetryInfo, which tells a client how long to wait before
+// retrying a refused export. Wire-compatible with the upstream definition (https://github.com/googleapis/googleapis), Apache-2.0.
+syntax = "proto3";
+
+package google.rpc;
+
+import "google/protobuf/duration.proto";
+
+option csharp_namespace = "Google.Rpc";
+option java_multiple_files = true;
+option java_outer_classname = "ErrorDetailsProto";
+option java_package = "com.google.rpc";
+
+message RetryInfo {
+  google.protobuf.Duration retry_delay = 1;
+}

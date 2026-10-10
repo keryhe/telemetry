@@ -18,6 +18,9 @@ namespace Keryhe.Telemetry.Core.Data;
 public sealed class IngestionMetrics : IDisposable
 {
     private readonly Meter _meter = new("Keryhe.Telemetry.Ingestion", "1.0.0");
+
+    /// <summary>This instance's meter, so a listener can tell it from another instance's in the same process (tests run several hosts at once).</summary>
+    public Meter Meter => _meter;
     private readonly Counter<long> _recordsDropped;
     private readonly Histogram<double> _gateWait;
     private readonly Histogram<double> _flushDuration;
@@ -26,12 +29,17 @@ public sealed class IngestionMetrics : IDisposable
     private readonly Histogram<long> _flushBatchSize;
     private readonly Histogram<double> _commitLag;
     private readonly Counter<long> _authFailures;
+    private readonly Counter<long> _recordsAccepted;
+    private readonly Counter<long> _recordsRefused;
     private readonly Counter<long> _rollupRowsWritten;
     private readonly Counter<long> _rollupRowsDropped;
     private readonly Histogram<double> _rollupFlushDuration;
 
     // signal -> reader of that signal's gate's resident count; see RegisterResidentRecords.
     private readonly ConcurrentDictionary<string, Func<int>> _residentRecords = new();
+    private readonly ConcurrentDictionary<string, Func<long>> _residentBytes = new();
+    private readonly Counter<long> _recordsTruncated;
+    private readonly ConcurrentDictionary<string, Func<IReadOnlyDictionary<long, int>>> _tenantResident = new();
 
     public IngestionMetrics()
     {
@@ -68,6 +76,15 @@ public sealed class IngestionMetrics : IDisposable
             unit: "{request}",
             description: "Collector requests rejected by API key authentication, tagged by signal and " +
                           "reason (missing, malformed, invalid, expired, unavailable).");
+        _recordsAccepted = _meter.CreateCounter<long>(
+            "keryhe.telemetry.ingestion.records_accepted",
+            unit: "{record}",
+            description: "Records enqueued for storage, tagged by signal and tenant.");
+        _recordsRefused = _meter.CreateCounter<long>(
+            "keryhe.telemetry.ingestion.records_refused",
+            unit: "{record}",
+            description: "Records in exports that were refused before being enqueued, tagged by signal, tenant and " +
+                          "reason (throttled, shutting_down, invalid). Authentication failures are auth_failures.");
         _rollupRowsWritten = _meter.CreateCounter<long>(
             "keryhe.telemetry.ingestion.rollup_rows_written",
             unit: "{row}",
@@ -86,11 +103,27 @@ public sealed class IngestionMetrics : IDisposable
             unit: "{record}",
             description: "Records currently held by each signal's ingestion gate (enqueued or in flight), tagged by signal.");
 
+        _meter.CreateObservableGauge(
+            "keryhe.telemetry.ingestion.resident_bytes",
+            ObserveResidentBytes,
+            unit: "By",
+            description: "Protobuf bytes of the exports currently held by each signal's ingestion gate, tagged by signal (0 when the byte budget is off).");
+        _meter.CreateObservableGauge(
+            "keryhe.telemetry.ingestion.tenant_resident_records",
+            ObserveTenantResident,
+            unit: "{record}",
+            description: "Records each tenant currently holds in each signal's ingestion queue, tagged by signal and tenant: who is holding the queue.");
+        _recordsTruncated = _meter.CreateCounter<long>(
+            "keryhe.telemetry.ingestion.records_truncated",
+            unit: "{value}",
+            description: "Values cut to fit a configured limit or a database column while converting an export, tagged by signal and " +
+                          "limit (attributes, attribute_key, attribute_value, events, links, body, depth, elements, or a column such as span_name).");
+
         _recordsDropped = _meter.CreateCounter<long>(
             "keryhe.telemetry.ingestion.records_dropped",
             unit: "{record}",
             description: "Records (log records, spans, or metrics) dropped from an ingestion " +
-                          "flush after MaxFlushRetries was exhausted, tagged by signal.");
+                          "flush after MaxFlushRetries was exhausted, tagged by signal and reason.");
     }
 
     /// <param name="signal">"logs", "traces", or "metrics".</param>
@@ -100,16 +133,30 @@ public sealed class IngestionMetrics : IDisposable
     /// for "traces".
     /// </param>
     /// <param name="reason">
-    /// Optional <c>reason</c> tag (the ClickHouse worker sets <c>retries_exhausted</c>, <c>out_of_retention</c> or
-    /// <c>shutdown</c>); untagged when null, as the shared worker records it.
+    /// Why: <c>retries_exhausted</c> (transient failures outlasted the retries), <c>permanent</c> (a record the
+    /// database refuses, isolated by splitting the batch), <c>split_cap</c> (the split budget ran out),
+    /// <c>out_of_retention</c> (ClickHouse, older than the retention window at ingest) or <c>shutdown</c>.
     /// </param>
-    public void RecordDropped(string signal, int count, string? reason = null)
+    public void RecordDropped(string signal, int count, string reason)
     {
         if (count <= 0) return;
-        if (reason is null)
-            _recordsDropped.Add(count, new KeyValuePair<string, object?>("signal", signal));
-        else
-            _recordsDropped.Add(count, new KeyValuePair<string, object?>("signal", signal), new KeyValuePair<string, object?>("reason", reason));
+        _recordsDropped.Add(count, new KeyValuePair<string, object?>("signal", signal), new KeyValuePair<string, object?>("reason", reason));
+    }
+
+    /// <summary>Records of one export enqueued for <paramref name="tenantId"/>.</summary>
+    public void RecordAccepted(string signal, long tenantId, int count, string protocol = "grpc")
+    {
+        if (count <= 0) return;
+        _recordsAccepted.Add(count, new KeyValuePair<string, object?>("signal", signal), new KeyValuePair<string, object?>("tenant", tenantId),
+            new KeyValuePair<string, object?>("protocol", protocol));
+    }
+
+    /// <summary>Records of one export refused for <paramref name="tenantId"/> for <paramref name="reason"/> (see <see cref="RefusalReasons"/>).</summary>
+    public void RecordRefused(string signal, long tenantId, string reason, int count, string protocol = "grpc")
+    {
+        if (count <= 0) return;
+        _recordsRefused.Add(count, new KeyValuePair<string, object?>("signal", signal), new KeyValuePair<string, object?>("tenant", tenantId),
+            new KeyValuePair<string, object?>("reason", reason), new KeyValuePair<string, object?>("protocol", protocol));
     }
 
     public void RecordGateWait(string signal, double milliseconds) =>
@@ -168,6 +215,30 @@ public sealed class IngestionMetrics : IDisposable
     /// the gates, so this class needs no reference to them and its lifetime stays independent.
     /// </summary>
     public void RegisterResidentRecords(string signal, Func<int> read) => _residentRecords[signal] = read;
+
+    public void RegisterResidentBytes(string signal, Func<long> read) => _residentBytes[signal] = read;
+
+    public void RegisterTenantResident(string signal, Func<IReadOnlyDictionary<long, int>> read) => _tenantResident[signal] = read;
+
+    private IEnumerable<Measurement<long>> ObserveTenantResident()
+    {
+        foreach (var (signal, read) in _tenantResident)
+            foreach (var (tenant, records) in read())
+                yield return new Measurement<long>(records, new KeyValuePair<string, object?>("signal", signal), new KeyValuePair<string, object?>("tenant", tenant));
+    }
+
+    /// <summary>A value (or list) of <paramref name="signal"/> was cut by <paramref name="limit"/>; <paramref name="count"/> says how many.</summary>
+    public void RecordTruncated(string signal, string limit, int count = 1)
+    {
+        if (count <= 0) return;
+        _recordsTruncated.Add(count, new KeyValuePair<string, object?>("signal", signal), new KeyValuePair<string, object?>("limit", limit));
+    }
+
+    private IEnumerable<Measurement<long>> ObserveResidentBytes()
+    {
+        foreach (var (signal, read) in _residentBytes)
+            yield return new Measurement<long>(read(), new KeyValuePair<string, object?>("signal", signal));
+    }
 
     private IEnumerable<Measurement<long>> ObserveResidentRecords()
     {

@@ -20,8 +20,11 @@ public sealed class SdkSink : ISink
     /// <summary>Producer span contexts, so a consumer trace in a later chunk can still link to its producer.</summary>
     private readonly ConditionalWeakTable<SimSpan, StrongBox<ActivityContext>> _contexts = new();
 
-    public SdkSink(Uri endpoint, string apiKey, int metricIntervalSeconds)
+    private readonly bool _http;
+
+    public SdkSink(Uri endpoint, string apiKey, int metricIntervalSeconds, bool httpProtobuf = false)
     {
+        _http = httpProtobuf;
         _endpoint = endpoint;
         _apiKey = apiKey;
         _metricIntervalMs = metricIntervalSeconds * 1000;
@@ -32,7 +35,7 @@ public sealed class SdkSink : ISink
     private PodTelemetry Pod(ServiceInstance instance)
     {
         if (!_pods.TryGetValue(instance.PodName, out var pod))
-            _pods[instance.PodName] = pod = new PodTelemetry(instance, _endpoint, _apiKey, _metricIntervalMs);
+            _pods[instance.PodName] = pod = new PodTelemetry(instance, _endpoint, _apiKey, _metricIntervalMs, _http);
         return pod;
     }
 

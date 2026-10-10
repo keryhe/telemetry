@@ -147,6 +147,9 @@ public class TransportAndValidatorTests
                 // The handler's own dependencies, so DI validation reaches the validator.
                 s.AddSingleton<Keryhe.Telemetry.Core.Data.IngestionMetrics>();
                 s.AddScoped<ITenantResolver>(_ => null!);
+                s.AddSingleton<AuthFailureLimiter>();
+                s.AddSingleton(TimeProvider.System);
+                s.Configure<TelemetryCollectorOptions>(_ => { });
                 s.AddAuthentication()
                     .AddScheme<ApiKeyAuthenticationOptions, ApiKeyAuthenticationHandler>(TelemetryAuthenticationSchemes.ApiKey, null);
             },

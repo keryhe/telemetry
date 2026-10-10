@@ -36,7 +36,8 @@ public sealed class ApiKeyAuthenticationHandler(
     ILoggerFactory loggerFactory,
     UrlEncoder encoder,
     ITenantResolver tenantResolver,
-    IngestionMetrics metrics)
+    IngestionMetrics metrics,
+    AuthFailureLimiter failureLimiter)
     : AuthenticationHandler<ApiKeyAuthenticationOptions>(options, loggerFactory, encoder)
 {
     private const string BearerPrefix = "Bearer ";
@@ -53,18 +54,25 @@ public sealed class ApiKeyAuthenticationHandler(
         if (Context.GetEndpoint()?.Metadata.GetMetadata<CollectorEndpointMetadata>() is null)
             return AuthenticateResult.NoResult();
 
+        var address = Context.Connection.RemoteIpAddress;
+
         var header = Request.Headers.Authorization.ToString();
         if (string.IsNullOrWhiteSpace(header))
-            return Reject("missing", null, null, "Missing Authorization header.");
+            return RejectUnauthenticated(address, "missing", "Missing Authorization header.");
         if (!header.StartsWith(BearerPrefix, StringComparison.OrdinalIgnoreCase))
-            return Reject("malformed", null, null, "Authorization header must be 'Bearer <key>'.");
+            return RejectUnauthenticated(address, "malformed", "Authorization header must be 'Bearer <key>'.");
 
         var apiKey = header[BearerPrefix.Length..].Trim();
         if (apiKey.Length == 0)
-            return Reject("malformed", null, null, "API key is empty.");
+            return RejectUnauthenticated(address, "malformed", "API key is empty.");
 
         var keyHash = ComputeKeyHash(apiKey);
         var prefix = keyHash[..8];
+
+        // A valid, cached key is never throttled: a good client behind the same address as a misconfigured one keeps working. Anything else
+        // from an address that has used up its failed attempts is refused before it can cost a control-plane lookup.
+        if (!tenantResolver.IsCached(keyHash) && failureLimiter.IsExhausted(address))
+            return Reject("throttled", prefix, null, "Too many failed authentication attempts from this address.");
 
         var resolution = await tenantResolver.ResolveAsync(keyHash, Context.RequestAborted);
         switch (resolution.Failure)
@@ -77,12 +85,23 @@ public sealed class ApiKeyAuthenticationHandler(
                 ], Scheme.Name);
                 return AuthenticateResult.Success(new AuthenticationTicket(new ClaimsPrincipal(identity), Scheme.Name));
             case ApiKeyFailure.Expired:
+                failureLimiter.RecordFailure(address);
                 return Reject("expired", prefix, null, "API key has expired.");
             case ApiKeyFailure.Unavailable:
                 return Reject("unavailable", prefix, resolution.Error, "API key lookup is temporarily unavailable.");
             default:
+                failureLimiter.RecordFailure(address);
                 return Reject("invalid", prefix, null, "Invalid API key.");
         }
+    }
+
+    // No usable credential at all: it takes a failed-attempt token, and from an address that has none left it is "throttled", not "missing".
+    private AuthenticateResult RejectUnauthenticated(System.Net.IPAddress? address, string reason, string message)
+    {
+        if (failureLimiter.IsExhausted(address))
+            return Reject("throttled", null, null, "Too many failed authentication attempts from this address.");
+        failureLimiter.RecordFailure(address);
+        return Reject(reason, null, null, message);
     }
 
     private AuthenticateResult Reject(string reason, string? keyPrefix, Exception? error, string message)
@@ -103,20 +122,49 @@ public sealed class ApiKeyAuthenticationHandler(
         metrics.RecordAuthFailure(signal, failure.Reason);
         LogFailure(signal, failure);
 
-        var unavailable = failure.Reason == "unavailable";
         var message = failure.Reason switch
         {
             "missing" => "Unauthenticated: missing Authorization header.",
             "malformed" => "Unauthenticated: malformed Authorization header (expected 'Bearer <key>').",
             "expired" => "Unauthenticated: API key has expired.",
             "unavailable" => "API key lookup is temporarily unavailable; retry.",
+            "throttled" => "Too many failed authentication attempts from this address.",
             _ => "Unauthenticated: invalid API key.",
         };
-        await WriteGrpcStatusAsync(unavailable ? 14 : 16, message);
+        if (ProtocolOfEndpoint() == CollectorProtocol.Http)
+        {
+            // 401 for a key that is not usable, 429 (no Retry-After: exporters do not retry it) for an address out of attempts, and 503 with
+            // Retry-After when the lookup failed. The body is a google.rpc.Status in the request's content type.
+            var contentType = Http.OtlpHttpBodyReader.ContentTypeOf(Request) ?? Http.OtlpContentType.Json;
+            switch (failure.Reason)
+            {
+                case "unavailable":
+                    await Http.OtlpHttpEndpoints.WriteStatusAsync(Context, StatusCodes.Status503ServiceUnavailable, Grpc.Core.StatusCode.Unavailable, message, contentType, TimeSpan.FromSeconds(1));
+                    break;
+                case "throttled":
+                    await Http.OtlpHttpEndpoints.WriteStatusAsync(Context, StatusCodes.Status429TooManyRequests, Grpc.Core.StatusCode.ResourceExhausted, message, contentType);
+                    break;
+                default:
+                    Response.Headers.WWWAuthenticate = "Bearer";
+                    await Http.OtlpHttpEndpoints.WriteStatusAsync(Context, StatusCodes.Status401Unauthorized, Grpc.Core.StatusCode.Unauthenticated, message, contentType);
+                    break;
+            }
+            return;
+        }
+
+        // THROTTLED is RESOURCE_EXHAUSTED with no RetryInfo: OTLP exporters treat that as not retryable, so a misconfigured client stops
+        // instead of hammering. A failed lookup is UNAVAILABLE (retryable); everything else is UNAUTHENTICATED.
+        await WriteGrpcStatusAsync(failure.Reason switch { "unavailable" => 14, "throttled" => 8, _ => 16 }, message);
     }
 
     protected override Task HandleForbiddenAsync(AuthenticationProperties properties) =>
-        WriteGrpcStatusAsync(7, "Permission denied.");
+        ProtocolOfEndpoint() == CollectorProtocol.Http
+            ? Http.OtlpHttpEndpoints.WriteStatusAsync(Context, StatusCodes.Status403Forbidden, Grpc.Core.StatusCode.PermissionDenied, "Permission denied.",
+                Http.OtlpHttpBodyReader.ContentTypeOf(Request) ?? Http.OtlpContentType.Json)
+            : WriteGrpcStatusAsync(7, "Permission denied.");
+
+    private CollectorProtocol ProtocolOfEndpoint() =>
+        Context.GetEndpoint()?.Metadata.GetMetadata<CollectorEndpointMetadata>()?.Protocol ?? CollectorProtocol.Grpc;
 
     // Trailers-only: HTTP 200, no body, grpc-status in the response headers.
     private Task WriteGrpcStatusAsync(int grpcStatus, string message)
@@ -130,7 +178,9 @@ public sealed class ApiKeyAuthenticationHandler(
 
     private void LogFailure(string signal, Failure f)
     {
-        if (f.Error is not null)
+        if (f.Error is LookupQueueTimeoutException)
+            Logger.LogWarning("API key lookup queue is full for {Signal} export (key {KeyPrefix}); responding UNAVAILABLE", signal, f.KeyPrefix);
+        else if (f.Error is not null)
             Logger.LogError(f.Error, "API key lookup failed for {Signal} export (key {KeyPrefix}); responding UNAVAILABLE", signal, f.KeyPrefix);
 
         var warn = false;

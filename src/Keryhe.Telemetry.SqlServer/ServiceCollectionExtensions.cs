@@ -16,6 +16,8 @@ public static class SqlServerServiceCollectionExtensions
     /// <summary>Write-side services for the gRPC ingestion server.</summary>
     public static IServiceCollection AddSqlServerCollectorServices(this IServiceCollection services, IConfiguration configuration)
     {
+        // Lets the ingestion worker split a batch around records this database refuses instead of retrying and dropping it.
+        services.AddSingleton<Keryhe.Telemetry.Core.Data.IFlushErrorClassifier, Keryhe.Telemetry.SqlServer.Services.SqlServerFlushErrorClassifier>();
         services.AddSingleton<ITelemetryBulkWriter, SqlServerBulkWriter>();
         // metric_last_seen maintenance (list-pages-server-side plan, Phase 5). MetricTouchWorker
         // is provider-agnostic and registered once, in AddKeryheTelemetryCollector.

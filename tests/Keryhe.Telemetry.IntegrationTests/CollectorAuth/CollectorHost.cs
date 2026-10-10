@@ -48,9 +48,11 @@ public sealed class CollectorHost : IAsyncDisposable
         Http = server.CreateClient();
         Channel = GrpcChannel.ForAddress("http://localhost", new GrpcChannelOptions { HttpHandler = server.CreateHandler() });
 
+        // Only this host's own meter: other hosts running in parallel in the same process publish an instrument of the same name.
+        var ownMeter = app.Services.GetRequiredService<IngestionMetrics>().Meter;
         _listener.InstrumentPublished = (instrument, listener) =>
         {
-            if (instrument.Meter.Name == "Keryhe.Telemetry.Ingestion" && instrument.Name.EndsWith("auth_failures"))
+            if (ReferenceEquals(instrument.Meter, ownMeter) && instrument.Name.EndsWith("auth_failures"))
                 listener.EnableMeasurementEvents(instrument);
         };
         _listener.SetMeasurementEventCallback<long>((_, value, tags, _) =>
@@ -66,7 +68,7 @@ public sealed class CollectorHost : IAsyncDisposable
         _listener.Start();
     }
 
-    public static async Task<CollectorHost> StartAsync(Dictionary<string, string?>? config = null, Action<WebApplication>? map = null)
+    public static async Task<CollectorHost> StartAsync(Dictionary<string, string?>? config = null, Action<WebApplication>? map = null, bool fakeClientAddresses = false)
     {
         var builder = WebApplication.CreateBuilder(new WebApplicationOptions { EnvironmentName = "Development" });
         builder.WebHost.UseTestServer();
@@ -90,6 +92,15 @@ public sealed class CollectorHost : IAsyncDisposable
         builder.Services.AddSingleton<TimeProvider>(clock);
 
         var app = builder.Build();
+        // TestServer has no client address. With this on, a request's X-Test-IP header becomes its remote address, so the per-address
+        // failure limit can be exercised for several clients.
+        if (fakeClientAddresses)
+            app.Use((ctx, next) =>
+            {
+                if (ctx.Request.Headers.TryGetValue("X-Test-IP", out var ip) && System.Net.IPAddress.TryParse(ip.ToString(), out var address))
+                    ctx.Connection.RemoteIpAddress = address;
+                return next();
+            });
         app.UseRouting();
         app.UseAuthentication();
         app.UseAuthorization();
@@ -113,18 +124,29 @@ public sealed class CollectorHost : IAsyncDisposable
     {
         private readonly ConcurrentDictionary<string, ApiKeyLookupResult> _rows = new();
         public bool Throw { get; set; }
+        public TimeSpan Delay { get; set; }
         public int Calls;
+        public int MaxConcurrent;
+        private int _running;
 
         public void Add(string plainKey, long tenantId, long apiKeyId = 1, DateTimeOffset? expiresAt = null) =>
             _rows[ApiKeyAuthenticationHandler.ComputeKeyHash(plainKey)] = new ApiKeyLookupResult(tenantId, apiKeyId, expiresAt);
 
         public void Remove(string plainKey) => _rows.TryRemove(ApiKeyAuthenticationHandler.ComputeKeyHash(plainKey), out _);
 
-        public Task<ApiKeyLookupResult?> LookupAsync(string keyHash, CancellationToken cancellationToken)
+        public async Task<ApiKeyLookupResult?> LookupAsync(string keyHash, CancellationToken cancellationToken)
         {
             Interlocked.Increment(ref Calls);
-            if (Throw) throw new InvalidOperationException("database unreachable");
-            return Task.FromResult(_rows.TryGetValue(keyHash, out var r) ? r : null);
+            var running = Interlocked.Increment(ref _running);
+            try
+            {
+                int seen;
+                while (running > (seen = Volatile.Read(ref MaxConcurrent))) if (Interlocked.CompareExchange(ref MaxConcurrent, running, seen) == seen) break;
+                if (Delay > TimeSpan.Zero) await Task.Delay(Delay, CancellationToken.None);
+                if (Throw) throw new InvalidOperationException("database unreachable");
+                return _rows.TryGetValue(keyHash, out var r) ? r : null;
+            }
+            finally { Interlocked.Decrement(ref _running); }
         }
     }
 
@@ -132,6 +154,9 @@ public sealed class CollectorHost : IAsyncDisposable
     {
         private DateTimeOffset _now = now;
         public override DateTimeOffset GetUtcNow() => _now;
+        // The monotonic timestamp follows the same controllable time, so token buckets (the failed-attempt limiter) do not refill on real time.
+        public override long GetTimestamp() => _now.UtcTicks;
+        public override long TimestampFrequency => TimeSpan.TicksPerSecond;
         public void Advance(TimeSpan by) => _now += by;
     }
 

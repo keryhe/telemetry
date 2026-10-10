@@ -20,16 +20,20 @@ namespace Keryhe.Telemetry.Core.Data;
 /// <see cref="ApiKeyFailure.Unavailable"/> and the next call tries again.
 /// </summary>
 public sealed class CachingTenantResolver(
-    IApiKeyLookup lookup,
+    ApiKeyLookupCoordinator lookup,
     IMemoryCache cache,
     ApiKeyTouchTracker touchTracker,
     IOptions<TenantResolutionOptions> options,
-    TimeProvider timeProvider) : ITenantResolver
+    TimeProvider timeProvider,
+    ControlPlaneHealth? health = null) : ITenantResolver
 {
     private readonly TenantResolutionOptions _options = options.Value;
 
     // A cached "no active row" is a null result; wrapped so TryGetValue can tell it from a miss.
     private sealed record Entry(ApiKeyLookupResult? Result);
+
+    public bool IsCached(string keyHash) =>
+        cache.TryGetValue<Entry>(CacheKey(keyHash), out var entry) && entry?.Result is { } r && !IsExpired(r);
 
     public async Task<TenantResolution> ResolveAsync(string keyHash, CancellationToken cancellationToken)
     {
@@ -41,14 +45,21 @@ public sealed class CachingTenantResolver(
             try
             {
                 result = await lookup.LookupAsync(keyHash, cancellationToken);
+                health?.RecordSuccess();
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
             {
                 throw;
             }
+            catch (LookupQueueTimeoutException ex)
+            {
+                // Too many lookups already running: the collector is shedding load, the control plane is not known to be down.
+                return TenantResolution.Fail(ApiKeyFailure.Unavailable) with { Error = ex };
+            }
             catch (Exception ex)
             {
                 // Never cached: the next call tries the database again.
+                health?.RecordFailure();
                 return TenantResolution.Fail(ApiKeyFailure.Unavailable) with { Error = ex };
             }
 

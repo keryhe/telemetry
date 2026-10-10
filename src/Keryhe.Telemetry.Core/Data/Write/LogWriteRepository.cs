@@ -28,11 +28,12 @@ public class LogWriteRepository : ILogWriteRepository
 
     public async Task<IEnumerable<long>> StoreLogRecordsBatchAsync(
         IEnumerable<LogRecordModel> logRecords,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        long requestBytes = 0)
     {
         var list = (logRecords ?? throw new ArgumentNullException(nameof(logRecords))).ToList();
         if (list.Count == 0) return [];
-        await WriteLogRecordsAsync(list, cancellationToken);
+        await WriteLogRecordsAsync(list, cancellationToken, requestBytes);
         _logger.LogDebug("Enqueued {Count} log records for async write", list.Count);
         return Enumerable.Empty<long>();
     }
@@ -42,17 +43,18 @@ public class LogWriteRepository : ILogWriteRepository
     /// writing, releasing on a failed write so a cancelled or otherwise-failed enqueue cannot leak
     /// the reservation forever.
     /// </summary>
-    private async Task WriteLogRecordsAsync(List<LogRecordModel> records, CancellationToken cancellationToken)
+    private async Task WriteLogRecordsAsync(List<LogRecordModel> records, CancellationToken cancellationToken, long requestBytes = 0)
     {
-        await _channel.LogGate.AcquireAsync(records.Count, cancellationToken);
+        var tenantId = TenantOf.Of(records[0]);
+        await _channel.AcquireOrRejectAsync("logs", _channel.LogGate, records.Count, cancellationToken, requestBytes, tenantId);
         try
         {
-            _channel.MarkEnqueued(records);
+            _channel.MarkEnqueued(records, requestBytes);
             await _channel.Logs.Writer.WriteAsync(records, cancellationToken);
         }
         catch
         {
-            _channel.LogGate.Release(records.Count);
+            _channel.Release(_channel.LogGate, records.Count, requestBytes, tenantId);
             throw;
         }
     }

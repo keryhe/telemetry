@@ -37,6 +37,13 @@ public sealed class TelemetryIngestionOptions
     /// </summary>
     public int MaxQueuedSpans { get; set; } = 200_000;
 
+    /// <summary>
+    /// Bytes each signal's queue may hold, measured as the protobuf size of the requests that produced the queued records
+    /// (the in-memory models are larger than their wire form, so this is a proxy; the default leaves room for that). A
+    /// request is admitted when both its records and its bytes fit, or the queue is empty. 0 turns the byte budget off.
+    /// </summary>
+    public long MaxQueuedBytesPerSignal { get; set; } = 256L * 1024 * 1024;
+
     /// <summary>Maximum log records merged into one flush batch handed to the bulk writer.</summary>
     public int MaxLogFlushBatchSize { get; set; } = 2_000;
 
@@ -93,4 +100,58 @@ public sealed class TelemetryIngestionOptions
     /// failover without losing the batch.
     /// </summary>
     public int RetryMaxDelayMilliseconds { get; set; } = 5_000;
+
+    /// <summary>The wait applied when <see cref="MaxGateWaitMilliseconds"/> is not set, in milliseconds.</summary>
+    public const int DefaultMaxGateWaitMilliseconds = 2_000;
+
+    /// <summary>
+    /// How long an export waits for room in a full ingestion queue before it is refused with a retryable status
+    /// (gRPC <c>UNAVAILABLE</c> + <c>RetryInfo</c>), in milliseconds. 0 refuses at once when the queue is full; a
+    /// negative value waits without limit (the pre-bounded behaviour: the export is held open until the client's own
+    /// deadline). Unset means the provider's default: <see cref="DefaultMaxGateWaitMilliseconds"/>, or on ClickHouse the
+    /// day-buffer linger plus that, because its worker frees room a whole buffer at a time.
+    /// </summary>
+    public int? MaxGateWaitMilliseconds { get; set; }
+
+    /// <summary>
+    /// The delay a refused client is told to wait (<c>RetryInfo</c> / <c>Retry-After</c>), in milliseconds, before
+    /// jitter of up to 50% is added so a fleet of refused clients does not return at the same instant.
+    /// </summary>
+    public int RejectRetryDelayMilliseconds { get; set; } = 1_000;
+
+    /// <summary>
+    /// The most extra flush attempts spent isolating permanently bad records in one batch (see
+    /// <see cref="BatchBisector"/>). What is left when the cap is reached is dropped.
+    /// </summary>
+    public int MaxSplitFlushes { get; set; } = 64;
+
+    /// <summary>Readiness fails when the control-plane key lookup has been failing for longer than this, in seconds.</summary>
+    public int ReadinessControlPlaneSeconds { get; set; } = 60;
+
+    /// <summary>Readiness fails when a signal's queue has been continuously full for longer than this, in seconds.</summary>
+    public int ReadinessSaturatedSeconds { get; set; } = 10;
+
+    /// <summary>The wait to apply, or null for unbounded.</summary>
+    public TimeSpan? EffectiveMaxGateWait => (MaxGateWaitMilliseconds ?? DefaultMaxGateWaitMilliseconds) switch
+    {
+        < 0 => null,
+        var ms => TimeSpan.FromMilliseconds(ms)
+    };
+
+    public void Validate()
+    {
+        static void NonNegative(int value, string name)
+        {
+            if (value < 0) throw new InvalidOperationException($"{SectionName}:{name} must not be negative (was {value}).");
+        }
+        static void Positive(int value, string name)
+        {
+            if (value <= 0) throw new InvalidOperationException($"{SectionName}:{name} must be greater than 0 (was {value}).");
+        }
+        if (MaxQueuedBytesPerSignal < 0) throw new InvalidOperationException($"{SectionName}:{nameof(MaxQueuedBytesPerSignal)} must not be negative (was {MaxQueuedBytesPerSignal}).");
+        NonNegative(RejectRetryDelayMilliseconds, nameof(RejectRetryDelayMilliseconds));
+        NonNegative(MaxSplitFlushes, nameof(MaxSplitFlushes));
+        Positive(ReadinessControlPlaneSeconds, nameof(ReadinessControlPlaneSeconds));
+        Positive(ReadinessSaturatedSeconds, nameof(ReadinessSaturatedSeconds));
+    }
 }

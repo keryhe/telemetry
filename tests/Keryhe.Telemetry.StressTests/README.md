@@ -84,7 +84,15 @@ with optional browsers), and `playwright-install`.
 | `ramp` | 1 min | steps of 60s | x1 = 1,000/s, +1,000/s per step, up to 30 steps | 3 | 3 |
 | `ramp-write-only` | 1 min | steps of 60s | same rates as `ramp` | none (no marker probes either) | 3 |
 
-All five send 2% backdated records, 2% re-deliveries, 5% late arrivals and 2% orphan traces (traces whose root is never sent: schema 3.0.0 anchors them on their earliest span like any other).
+| `noisy-tenant` | 20 s | 2 min | 6,000/s, ten times as much from tenant 0 as from each of the other two | none | 3 |
+
+`noisy-tenant` is a fixed-rate, write-only profile for the per-tenant quota (collector improvements phase 3). The summary prints each
+tenant's acked rate, throttled attempts, exports still refused at their deadline and p50/p95 latency; the profile's header shows the
+`--host-env` settings that make the queue small enough for the noisy tenant to fill it, and how to compare `TenantQuota__MaxShare` 0.5
+with 1. Its `maxInFlightExports` is raised because the client's cap on exports in flight is shared by all tenants and would otherwise starve
+the quiet ones on the client side.
+
+The first five send 2% backdated records, 2% re-deliveries, 5% late arrivals and 2% orphan traces (traces whose root is never sent: schema 3.0.0 anchors them on their earliest span like any other).
 
 ## Writing a profile
 
@@ -119,6 +127,7 @@ Ramp criteria (each applies to a whole step; the rate scale multiplies the profi
 |---|---|---|
 | `maxDroppedRecords` | 0 | More records were dropped in the step |
 | `maxGateWaitP95Ms` | 250 | The worst signal's gate-wait p95 is higher (the gate is saturated and clients are being held) |
+| `maxThrottledRatePercent` | 5 | `throttled_rate`: more than this percentage of a signal's export attempts were refused by a full collector queue (`UNAVAILABLE` + `RetryInfo`; 0 disables). The load generator waits the advertised delay and resends, so a throttled attempt usually ends as an OK export; the count is the saturation signal. `maxGateWaitP95Ms` stays as the earlier warning, but the gate wait is now capped by `MaxGateWaitMilliseconds` |
 | `maxExportP99Seconds` | 5 | Any signal's client-side Export p99 is higher |
 | `maxErrorRatePercent` | 1 | More than this percentage of a signal's exports failed with a gRPC error |
 | `lagGrowthFactor` / `lagGrowthMinMs` | 2 / 3000 | `lag_growth`: lag in the last third of the step's probes is that many times the first third's and at least that much higher, or a probe never appeared |

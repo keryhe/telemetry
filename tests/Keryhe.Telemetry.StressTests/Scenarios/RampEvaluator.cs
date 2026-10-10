@@ -13,7 +13,7 @@ public sealed record StepMeasurements(
 public static class RampEvaluator
 {
     public const string Dropped = "records_dropped", GateWait = "gate_wait_p95", ExportP99 = "export_p99", ErrorRate = "grpc_error_rate",
-        LagGrowth = "lag_growth", LagAbsolute = "lag_absolute", CommitLag = "commit_lag_p95";
+        LagGrowth = "lag_growth", LagAbsolute = "lag_absolute", CommitLag = "commit_lag_p95", Throttled = "throttled_rate";
 
     /// <summary>The criteria that hold for the step, empty when it sustained.</summary>
     public static IReadOnlyList<string> Tripped(StepMeasurements m, RampCriteria c)
@@ -23,6 +23,7 @@ public static class RampEvaluator
         if (m.GateWaitP95Ms > c.MaxGateWaitP95Ms) tripped.Add(GateWait);
         if (m.Windows.Any(w => w.Latency.P99Ms > c.MaxExportP99Seconds * 1000)) tripped.Add(ExportP99);
         if (m.Windows.Any(w => w.ErrorRatePercent > c.MaxErrorRatePercent)) tripped.Add(ErrorRate);
+        if (c.MaxThrottledRatePercent > 0 && m.Windows.Any(w => w.ThrottledRatePercent > c.MaxThrottledRatePercent)) tripped.Add(Throttled);
         if (c.MaxCommitLagP95Ms > 0 && m.CommitLagP95Ms > c.MaxCommitLagP95Ms) tripped.Add(CommitLag);
         if (LagGrows(m.TraceLagsMs, c) || LagGrows(m.LogLagsMs, c)) tripped.Add(LagGrowth);
         if (LagTooHigh(m.TraceLagsMs, c) || LagTooHigh(m.LogLagsMs, c)) tripped.Add(LagAbsolute);

@@ -1,0 +1,86 @@
+# A client-side OpenTelemetry Collector (agent or gateway) that forwards to a Keryhe collector.
+#
+# Your applications send OTLP to this Collector on 4317 (gRPC) or 4318 (HTTP) with no key; this Collector adds your tenant's Keryhe API key
+# and ships to Keryhe, absorbing outages on the Keryhe side in a file-backed queue. How your applications authenticate to this
+# Collector is your own concern.
+#
+# Needs the contrib distribution (otel/opentelemetry-collector-contrib): file_storage is a contrib extension.
+#
+# Environment:
+#   KERYHE_ENDPOINT       host:port of the Keryhe collector's gRPC endpoint            (default: localhost:7057)
+#   KERYHE_API_KEY        the tenant's key, ktel_...                                  (required)
+#   KERYHE_TLS_INSECURE   "true" only for a plaintext development collector           (default: false)
+#   KERYHE_CA_FILE        a CA certificate file, when Keryhe's certificate is private  (default: none)
+#
+# Tested with otelcol 0.157.0. The exporter is `otlp_grpc` there; older releases call it `otlp` (rename it, and its id below, if yours does).
+# The settings below are the ones that matter against Keryhe's limits; see src/Keryhe.Telemetry.Collector/README.md.
+
+extensions:
+  file_storage:
+    directory: /var/lib/otelcol/file_storage    # mount a volume here: the sending queue survives restarts only if this does
+    timeout: 10s
+
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+
+processors:
+  # Sheds load before the Collector runs out of memory. Always first.
+  memory_limiter:
+    check_interval: 1s
+    limit_mib: 512
+    spike_limit_mib: 128
+
+  # Batches stay below Keryhe's MaxReceiveMessageSizeBytes (4 MiB after decompression) with a wide margin: 2,000 spans or log records are
+  # roughly 1 MB at typical sizes. Lower send_batch_max_size if your records carry large attributes or bodies. Keryhe merges small
+  # exports into its own flush batches, so larger batches here buy little.
+  batch:
+    send_batch_size: 1000
+    send_batch_max_size: 2000
+    timeout: 5s
+
+exporters:
+  otlp_grpc/keryhe:
+    endpoint: ${env:KERYHE_ENDPOINT:-localhost:7057}
+    headers:
+      authorization: "Bearer ${env:KERYHE_API_KEY}"
+    compression: gzip
+    tls:
+      insecure: ${env:KERYHE_TLS_INSECURE:-false}
+      ca_file: ${env:KERYHE_CA_FILE:-}
+    # A refused export (Keryhe is full, or this tenant is over its share or rate) is UNAVAILABLE with a RetryInfo delay, which this exporter
+    # honours. An invalid or expired key is UNAUTHENTICATED: permanent, so the data is dropped and an error is logged. That log line is
+    # the signal to fix the key.
+    retry_on_failure:
+      enabled: true
+      initial_interval: 5s
+      max_interval: 30s
+      max_elapsed_time: 0s        # keep retrying; the queue below is the bound (set e.g. 1h to prefer dropping to holding)
+    sending_queue:
+      enabled: true
+      num_consumers: 4
+      queue_size: 10000           # batches, held in memory and in the file store
+      storage: file_storage
+
+service:
+  extensions: [file_storage]
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [memory_limiter, batch]
+      exporters: [otlp_grpc/keryhe]
+    metrics:
+      receivers: [otlp]
+      processors: [memory_limiter, batch]
+      exporters: [otlp_grpc/keryhe]
+    logs:
+      receivers: [otlp]
+      processors: [memory_limiter, batch]
+      exporters: [otlp_grpc/keryhe]
+  telemetry:
+    metrics:
+      level: basic

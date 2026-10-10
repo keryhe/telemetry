@@ -31,7 +31,7 @@ public sealed class PlaintextTransportGuard(
 
     public Task StartingAsync(CancellationToken cancellationToken)
     {
-        var plaintext = ConfiguredAddresses().Where(IsPlaintextTcp).ToList();
+        var plaintext = ConfiguredAddresses().Where(IsPlaintextTcp).Where(a => !IsAllowedManagement(a)).ToList();
         if (plaintext.Count == 0) return Task.CompletedTask;
 
         if (!Enforced)
@@ -55,7 +55,10 @@ public sealed class PlaintextTransportGuard(
     private void CheckBoundAddresses()
     {
         var addresses = (services.GetService(typeof(IServer)) as IServer)?.Features.Get<IServerAddressesFeature>()?.Addresses;
-        var plaintext = addresses?.Where(IsPlaintextTcp).ToList();
+        var managementPorts = ManagementEndpointUrls().Where(IsAllowedManagement).Select(PortOf).ToHashSet();
+        var plaintext = addresses?.Where(IsPlaintextTcp)
+            .Where(a => !(managementPorts.Contains(PortOf(a)) && HostOf(a) is { } h && (IsInternalHost(h) || options.Value.ManagementEndpoints.Length > 0)))
+            .ToList();
         if (plaintext is not { Count: > 0 }) return;
 
         if (!Enforced)
@@ -68,6 +71,36 @@ public sealed class PlaintextTransportGuard(
         logger.LogCritical("The collector is listening on plaintext address(es) {Addresses} and AllowInsecureTransport is not set; stopping", string.Join(", ", plaintext));
         Environment.ExitCode = 1;
         lifetime.StopApplication();
+    }
+
+    // The Management endpoint (plain HTTP/1.1 health probes) carries no API key and no telemetry, so a plaintext address is
+    // allowed for it when it is only reachable from the host or its private network, or is listed explicitly.
+    private IEnumerable<string> ManagementEndpointUrls() =>
+        configuration.GetSection("Kestrel:Endpoints").GetChildren()
+            .Where(e => string.Equals(e.Key, "Management", StringComparison.OrdinalIgnoreCase) && e["Url"] is { Length: > 0 })
+            .SelectMany(e => Split(e["Url"]!));
+
+    private bool IsAllowedManagement(string address)
+    {
+        if (options.Value.ManagementEndpoints.Contains(address, StringComparer.OrdinalIgnoreCase)) return true;
+        return ManagementEndpointUrls().Contains(address, StringComparer.OrdinalIgnoreCase)
+            && HostOf(address) is { } host && IsInternalHost(host);
+    }
+
+    private static string? HostOf(string address) =>
+        Uri.TryCreate(address.Replace("*", "wildcard").Replace("+", "wildcard"), UriKind.Absolute, out var uri) ? uri.Host : null;
+
+    private static int PortOf(string address) =>
+        Uri.TryCreate(address.Replace("*", "wildcard").Replace("+", "wildcard"), UriKind.Absolute, out var uri) ? uri.Port : -1;
+
+    private static bool IsInternalHost(string host)
+    {
+        if (host.Equals("localhost", StringComparison.OrdinalIgnoreCase)) return true;
+        if (!System.Net.IPAddress.TryParse(host.Trim('[', ']'), out var ip)) return false;
+        if (System.Net.IPAddress.IsLoopback(ip)) return true;
+        if (ip.IsIPv6UniqueLocal || ip.IsIPv6LinkLocal) return true;
+        var b = ip.GetAddressBytes();
+        return b.Length == 4 && (b[0] == 10 || (b[0] == 172 && b[1] is >= 16 and <= 31) || (b[0] == 192 && b[1] == 168) || (b[0] == 169 && b[1] == 254));
     }
 
     private IEnumerable<string> ConfiguredAddresses()

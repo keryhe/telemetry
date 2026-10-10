@@ -96,7 +96,7 @@ public sealed class GeneratorWorker : BackgroundService
 
     private async Task LiveAsync(TenantSimulator sim, TenantOptions tenant, Uri endpoint, DateTimeOffset start, CancellationToken ct)
     {
-        await using var sink = new SdkSink(endpoint, tenant.ApiKey, _options.LiveMetricIntervalSeconds);
+        await using var sink = new SdkSink(endpoint, tenant.ApiKey, _options.LiveMetricIntervalSeconds, _options.Protocol.Equals("http/protobuf", StringComparison.OrdinalIgnoreCase));
         var cursor = start;
         var lastSample = start;
         var sampleEvery = TimeSpan.FromSeconds(_options.LiveMetricIntervalSeconds);

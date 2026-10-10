@@ -5,8 +5,14 @@ public sealed class GeneratorOptions
 {
     public const string SectionName = "Generator";
 
-    /// <summary>gRPC OTLP endpoint of the collector (h2c on 5117 by default).</summary>
+    /// <summary>
+    /// The collector's OTLP endpoint: for <c>grpc</c> its gRPC address (h2c on 5117 in Development), for <c>http/protobuf</c> its base address
+    /// (<c>http://localhost:5118</c> in Development; the SDK is given <c>/v1/traces</c>, <c>/v1/logs</c> and <c>/v1/metrics</c> under it).
+    /// </summary>
     public string OtlpEndpoint { get; set; } = "http://localhost:5117";
+
+    /// <summary>The transport live data uses: <c>grpc</c> (default) or <c>http/protobuf</c>. Backfill always uses gRPC.</summary>
+    public string Protocol { get; set; } = "grpc";
 
     /// <summary>Seeds every random decision, so the same seed yields the same telemetry.</summary>
     public int Seed { get; set; } = 42;
@@ -52,6 +58,10 @@ public sealed class GeneratorOptions
             if (t.Scale <= 0)
                 throw new InvalidOperationException($"{SectionName}:Tenants:{i}:Scale must be positive.");
         }
+        if (!Protocol.Equals("grpc", StringComparison.OrdinalIgnoreCase) && !Protocol.Equals("http/protobuf", StringComparison.OrdinalIgnoreCase))
+            throw new InvalidOperationException($"{SectionName}:Protocol must be 'grpc' or 'http/protobuf' (was '{Protocol}').");
+        if (Backfill.Enabled && Protocol.Equals("http/protobuf", StringComparison.OrdinalIgnoreCase))
+            throw new InvalidOperationException($"{SectionName}:Backfill sends hand-built OTLP over gRPC and shares {SectionName}:OtlpEndpoint with live data, so it cannot be combined with Protocol 'http/protobuf'. Backfill first over gRPC, then run live over HTTP.");
         if (PodsPerService < 1) throw new InvalidOperationException($"{SectionName}:PodsPerService must be at least 1.");
         if (PeakRequestsPerSecond <= 0) throw new InvalidOperationException($"{SectionName}:PeakRequestsPerSecond must be positive.");
     }

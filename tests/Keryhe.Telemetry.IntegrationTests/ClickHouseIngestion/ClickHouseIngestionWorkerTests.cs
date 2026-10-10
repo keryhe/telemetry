@@ -15,12 +15,21 @@ namespace Keryhe.Telemetry.IntegrationTests.ClickHouseIngestion;
 /// short.
 /// </summary>
 [Trait("Suite", "ClickHouseIngestion")]
+[Collection(IngestionMeterCollection.Name)]
 public sealed class ClickHouseIngestionWorkerTests
 {
     private sealed record Call(string Signal, string Token, int Count, HashSet<DateOnly> Days);
 
+    private sealed class PoisonException : Exception;
+
+    private sealed class PoisonClassifier : IFlushErrorClassifier
+    {
+        public FlushErrorKind Classify(Exception exception) => exception is PoisonException ? FlushErrorKind.Permanent : FlushErrorKind.Transient;
+    }
+
     private sealed class FakeWriter : IClickHouseTokenWriter
     {
+        public ConcurrentBag<string> Stored { get; } = new();
         public ConcurrentQueue<Call> Calls { get; } = new();
         public int FailAttempts;      // the next N attempts (across calls) throw
 
@@ -33,8 +42,13 @@ public sealed class ClickHouseIngestionWorkerTests
 
         public Task FlushLogsAsync(List<LogRecordModel> records, string token, CancellationToken ct = default) =>
             Record("logs", token, records.Select(r => r.TimeUnixNano!.Value), records.Count);
-        public Task FlushTracesAsync(List<SpanModel> spans, string token, CancellationToken ct = default) =>
-            Record("traces", token, spans.Select(s => s.StartTimeUnixNano), spans.Count);
+        public Task FlushTracesAsync(List<SpanModel> spans, string token, CancellationToken ct = default)
+        {
+            var recorded = Record("traces", token, spans.Select(s => s.StartTimeUnixNano), spans.Count);
+            if (spans.Any(s => s.Name == "poison")) throw new PoisonException();
+            foreach (var s in spans) Stored.Add(s.SpanIdHex);
+            return recorded;
+        }
         public Task FlushMetricsAsync(List<MetricModel> metrics, string token, CancellationToken ct = default) =>
             Record("metrics", token, metrics.Select(m => m.GaugeDataPoints![0].TimeUnixNano), metrics.Count);
     }
@@ -57,13 +71,13 @@ public sealed class ClickHouseIngestionWorkerTests
         private readonly MeterListener _listener = new();
         public ConcurrentBag<(string Name, double Value, string? Reason)> Measurements { get; } = new();
 
-        public Harness(ClickHouseIngestionOptions? options = null, int? traceRetentionDays = null, int maxRetries = 5, int? metricRetentionDays = null)
+        public Harness(ClickHouseIngestionOptions? options = null, int? traceRetentionDays = null, int maxRetries = 5, int? metricRetentionDays = null, IFlushErrorClassifier? classifier = null)
         {
             options ??= new ClickHouseIngestionOptions { LingerMilliseconds = 100, LateLingerMilliseconds = 60_000 };
             var shared = Options.Create(new TelemetryIngestionOptions { MaxFlushRetries = maxRetries, RetryBaseDelayMilliseconds = 5, RetryMaxDelayMilliseconds = 10 });
             Channel = new TelemetryIngestionChannel(shared, Metrics);
             Worker = new ClickHouseIngestionWorker(Writer, Channel, Options.Create(options), shared, Metrics,
-                new FakeRetention(traceRetentionDays, metricRetentionDays), TimeProvider.System, NullLogger<ClickHouseIngestionWorker>.Instance);
+                new FakeRetention(traceRetentionDays, metricRetentionDays), TimeProvider.System, NullLogger<ClickHouseIngestionWorker>.Instance, classifier);
 
             _listener.InstrumentPublished = (instrument, l) =>
             {
@@ -87,6 +101,15 @@ public sealed class ClickHouseIngestionWorkerTests
 
         public Task StartAsync() => Worker.StartAsync(CancellationToken.None);
         public Task StopAsync() => Worker.StopAsync(CancellationToken.None);
+
+        /// <summary>Enqueues one export that reserved <paramref name="bytes"/> on the gate, as a service does.</summary>
+        public async Task EnqueueSpansWithBytesAsync(long bytes, params SpanModel[] spans)
+        {
+            var list = spans.ToList();
+            await Channel.TraceGate.AcquireAsync(list.Count, bytes, CancellationToken.None);
+            Channel.MarkEnqueued(list, bytes);
+            await Channel.Traces.Writer.WriteAsync(list);
+        }
 
         public async Task EnqueueSpansAsync(params SpanModel[] spans)
         {
@@ -280,5 +303,98 @@ public sealed class ClickHouseIngestionWorkerTests
 
         Assert.Equal([3, 3, 1], h.Writer.Calls.Select(c => c.Count).Order().Reverse());
         Assert.Equal(3, h.Writer.Calls.Select(c => c.Token).Distinct().Count());
+    }
+
+    [Fact]
+    public async Task APoisonRecord_IsIsolatedBySplitting_EveryOtherRecordIsStored_AndEachAttemptGetsItsOwnToken()
+    {
+        await using var h = new Harness(new ClickHouseIngestionOptions { LingerMilliseconds = 100, LateLingerMilliseconds = 60_000 }, classifier: new PoisonClassifier());
+        await h.StartAsync();
+        var spans = Enumerable.Range(0, 20).Select(i =>
+        {
+            var span = Span(DaysAgo(0));
+            span.SpanIdHex = i.ToString("x16");
+            if (i == 13) span.Name = "poison";
+            return span;
+        }).ToArray();
+        await h.EnqueueSpansAsync(spans);
+
+        Assert.True(await h.WaitAsync(() => h.Sum("records_dropped", "permanent") == 1 && h.Sum("records_flushed") == 19));
+        await h.StopAsync();
+
+        Assert.Equal(19, h.Writer.Stored.Distinct().Count());
+        Assert.DoesNotContain((13).ToString("x16"), h.Writer.Stored);
+        Assert.Equal(0, h.Sum("flush_retries"));                                         // a permanent error is not retried
+        Assert.Equal(h.Writer.Calls.Count, h.Writer.Calls.Select(c => c.Token).Distinct().Count()); // ClickHouse would discard a different block under a seen token
+        Assert.Equal(0, h.Channel.TraceGate.Resident);
+        Assert.Equal(0, h.Sum("records_dropped", "retries_exhausted"));
+    }
+
+    [Fact]
+    public async Task ATransientError_IsStillRetriedUnderTheSameToken_NotSplit()
+    {
+        await using var h = new Harness(new ClickHouseIngestionOptions { LingerMilliseconds = 100, LateLingerMilliseconds = 60_000 }, classifier: new PoisonClassifier());
+        h.Writer.FailAttempts = 2;
+        await h.StartAsync();
+        await h.EnqueueSpansAsync(Enumerable.Range(0, 5).Select(_ => Span(DaysAgo(0))).ToArray());
+
+        Assert.True(await h.WaitAsync(() => h.Sum("records_flushed") == 5));
+        await h.StopAsync();
+
+        Assert.Equal(3, h.Writer.Calls.Count);
+        Assert.Single(h.Writer.Calls.Select(c => c.Token).Distinct());
+        Assert.All(h.Writer.Calls, c => Assert.Equal(5, c.Count));
+        Assert.Equal(0, h.Sum("records_dropped"));
+    }
+
+    [Fact]
+    public async Task AnExportsBytes_AreSharedAcrossItsDayBuffers_AndAllReleased()
+    {
+        await using var h = new Harness(new ClickHouseIngestionOptions { LingerMilliseconds = 100, LateLingerMilliseconds = 150 });
+        await h.StartAsync();
+        await h.EnqueueSpansWithBytesAsync(1001, Span(DaysAgo(0)), Span(DaysAgo(0)), Span(DaysAgo(2)));   // 3 records over two days
+        Assert.Equal(1001, h.Channel.TraceGate.ResidentBytes);
+
+        Assert.True(await h.WaitAsync(() => h.Writer.Calls.Count == 2 && h.Channel.TraceGate.Resident == 0));
+        await h.StopAsync();
+        Assert.Equal(0, h.Channel.TraceGate.ResidentBytes);   // 334 + 334 + 333, no remainder lost
+    }
+
+    [Fact]
+    public async Task ARecordDroppedForRetention_ReleasesItsShareOfTheBytes()
+    {
+        await using var h = new Harness(new ClickHouseIngestionOptions { LingerMilliseconds = 100, LateLingerMilliseconds = 60_000 }, traceRetentionDays: 7);
+        await h.StartAsync();
+        await h.EnqueueSpansWithBytesAsync(900, Span(DaysAgo(0)), Span(DaysAgo(30)), Span(DaysAgo(30)));   // two of three are out of retention
+
+        Assert.True(await h.WaitAsync(() => h.Sum("records_dropped", "out_of_retention") == 2));
+        Assert.Equal(300, h.Channel.TraceGate.ResidentBytes);   // only the kept record's third is still held
+        await h.StopAsync();
+        Assert.Equal(0, h.Channel.TraceGate.ResidentBytes);
+        Assert.Equal(0, h.Channel.TraceGate.Resident);
+    }
+
+    [Fact]
+    public async Task EachTenantsShare_IsReleasedWithTheDayBufferHoldingItsRecords()
+    {
+        await using var h = new Harness(new ClickHouseIngestionOptions { LingerMilliseconds = 100, LateLingerMilliseconds = 60_000 }, traceRetentionDays: 7);
+        await h.StartAsync();
+        SpanModel Of(long tenant, long start) { var s = Span(start); s.Resource = new ResourceModel { TenantId = tenant }; return s; }
+
+        // Tenant 1 sends today's and an out-of-retention span, tenant 2 sends today's: the gate learns the tenants from the records.
+        await h.Channel.AcquireOrRejectAsync("traces", h.Channel.TraceGate, 2, CancellationToken.None, bytes: 200, tenantId: 1);
+        var first = new List<SpanModel> { Of(1, DaysAgo(0)), Of(1, DaysAgo(30)) };
+        h.Channel.MarkEnqueued(first, 200);
+        await h.Channel.Traces.Writer.WriteAsync(first);
+        await h.Channel.AcquireOrRejectAsync("traces", h.Channel.TraceGate, 1, CancellationToken.None, bytes: 100, tenantId: 2);
+        var second = new List<SpanModel> { Of(2, DaysAgo(0)) };
+        h.Channel.MarkEnqueued(second, 100);
+        await h.Channel.Traces.Writer.WriteAsync(second);
+
+        Assert.True(await h.WaitAsync(() => h.Sum("records_dropped", "out_of_retention") == 1));   // tenant 1's old span is gone at drain
+        Assert.True(await h.WaitAsync(() => h.Channel.TraceGate.Resident == 0));
+        await h.StopAsync();
+        Assert.Empty(h.Channel.TraceGate.TenantResident());
+        Assert.Equal(0, h.Channel.TraceGate.ResidentBytes);
     }
 }

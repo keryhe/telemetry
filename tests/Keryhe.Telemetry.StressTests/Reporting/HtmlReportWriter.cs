@@ -100,7 +100,9 @@ public static class HtmlReportWriter
             ("write.batch_size", "Flush batch size p95", false),
             ("write.resident", "Records resident in the ingestion queue", true),
             ("write.late_buffer", "Late buffer (ClickHouse: records held for a closed day)", true),
-            ("write.retries", "Flush retries and dropped records", true)]);
+            ("write.retries", "Flush retries and dropped records", true),
+            ("write.dropped_by_reason", "Records dropped, by reason", true),
+            ("write.refused", "Records accepted and refused by the collector (refused = the queue was full)", true)]);
         Charts(sb, s, "Database timelines", [
             ("db.lock_waits", "Lock waits sampled", true),
             ("db.parts", "ClickHouse active parts", true),

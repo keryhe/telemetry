@@ -13,6 +13,7 @@ namespace Keryhe.Telemetry.IntegrationTests.Tests;
 /// <see cref="MeterListener"/> the way <c>dotnet-counters</c> would. Runs the real
 /// <see cref="TelemetryIngestionWorker"/> against a fake bulk writer; needs no database.
 /// </summary>
+[Collection(IngestionMeterCollection.Name)]
 public class IngestionMetricsTests
 {
     private sealed record Sample(string Instrument, double Value, Dictionary<string, object?> Tags);

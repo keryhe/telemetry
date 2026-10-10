@@ -41,7 +41,7 @@ host at startup.
 |---------|------|
 | `Keryhe.Telemetry.Core` | Domain interfaces and models, plus the provider-agnostic write repositories, ingestion channel + background worker and Dapper read-repository bases |
 | `Keryhe.Telemetry.PostgreSQL` / `.SqlServer` / `.MySql` / `.ClickHouse` | Per-provider implementations: telemetry reads and writes, and (all but ClickHouse) the control plane |
-| `Keryhe.Telemetry.Collector` / `.Collector.Server` | gRPC OTLP ingestion with per-tenant API key authentication (class library + thin host) |
+| `Keryhe.Telemetry.Collector` / `.Collector.Server` | OTLP ingestion over gRPC and HTTP with per-tenant API key authentication (class library + thin host); a sample client-side OpenTelemetry Collector configuration is in [`deploy/otel-collector`](deploy/otel-collector/README.md) |
 | `Keryhe.Telemetry.Api` / `.Api.Server` | REST API controllers, base-path routing and authorization, alert evaluation (rules, webhooks, periodic worker) and retention sweeps (class library + thin host) |
 | `Keryhe.Telemetry.Ui` | Prebuilt Angular UI, packaged as static web assets — see [Build your own host](#build-your-own-host) below |
 | `Keryhe.Telemetry.Admin` | Console tool for tenants and API keys (PostgreSQL, SQL Server, MySQL: the control-plane providers) |

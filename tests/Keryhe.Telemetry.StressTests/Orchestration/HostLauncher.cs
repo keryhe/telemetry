@@ -261,8 +261,12 @@ public static class HostLauncher
         {
             case HostRole.Collector:
             {
-                var port = PortFinder.GetFreePorts(1)[0];
+                var ports = PortFinder.GetFreePorts(2);
+                var port = ports[0];
                 Endpoint("Https", port, "Http2");
+                // The shipped appsettings add a loopback management endpoint (health probes) on a fixed port; a free one avoids
+                // a clash with a collector the developer already has running.
+                Endpoint("Management", ports[1], "Http1");
                 env["Telemetry__Collector__AllowInsecureTransport"] = "true";
                 grpc = new Uri($"http://127.0.0.1:{port}");
                 env["ConnectionStrings__Collector"] = options.CollectorConnectionString;

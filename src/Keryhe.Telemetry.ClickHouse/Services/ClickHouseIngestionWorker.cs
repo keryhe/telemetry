@@ -46,8 +46,11 @@ internal sealed class ClickHouseIngestionWorker(
     IngestionMetrics metrics,
     IRetentionWindows retention,
     TimeProvider time,
-    ILogger<ClickHouseIngestionWorker> logger) : BackgroundService
+    ILogger<ClickHouseIngestionWorker> logger,
+    IFlushErrorClassifier? classifier = null) : BackgroundService
 {
+    private readonly IFlushErrorClassifier _classifier = classifier ?? DefaultFlushErrorClassifier.Instance;
+
     private static readonly TimeSpan AbortGracePeriod = TimeSpan.FromSeconds(2);
 
     // Fields (not just primary-constructor parameters) so the nested pumps can reach them.
@@ -83,6 +86,14 @@ internal sealed class ClickHouseIngestionWorker(
 
     protected override Task ExecuteAsync(CancellationToken stoppingToken)
     {
+        // Room in the gate appears a whole day buffer at a time, about every linger plus flush time, so a bounded wait
+        // shorter than the linger refuses exports the next flush would have admitted.
+        if (_shared.MaxGateWaitMilliseconds is { } wait && wait >= 0 && wait < _options.LingerMilliseconds)
+            logger.LogWarning(
+                "Telemetry:Ingestion:MaxGateWaitMilliseconds ({Wait} ms) is below Telemetry:ClickHouse:Ingestion:LingerMilliseconds ({Linger} ms): " +
+                "a full queue frees room only when a buffer flushes, so exports will be refused that a short wait would have admitted",
+                wait, _options.LingerMilliseconds);
+
         var abort = _abort.Token;
         _pumps.Add(new Pump<LogRecordModel>(this, "logs", channel.Logs.Reader, channel.LogGate, _options.MaxLogBatchRecords,
             LogTime, writer.FlushLogsAsync));
@@ -147,6 +158,7 @@ internal sealed class ClickHouseIngestionWorker(
         public readonly List<T> Items = [];
         public readonly List<long> Stamps = [];
         public long FirstAt = Stopwatch.GetTimestamp();
+        public readonly RecordCountGate.TenantTally Tally = new();   // this buffer's records and share of the exports' gate bytes, by tenant, released with it
     }
 
     private sealed class Pump<T>(
@@ -222,21 +234,30 @@ internal sealed class ClickHouseIngestionWorker(
         {
             var oldest = owner.retention.OldestAllowedUtc(signal);
             var oldestNano = oldest is null ? 0L : (oldest.Value - DateTime.UnixEpoch).Ticks * 100;
+            var droppedTally = new RecordCountGate.TenantTally();
             var dropped = 0;
 
             while (reader.TryRead(out var items))
             {
-                var stampPending = owner.channel.TryTakeEnqueued(items, out var stamp);
+                var stampPending = owner.channel.TryTakeEnqueued(items, out var stamp, out var exportBytes);
+                // One export's bytes were reserved as a unit but its records may land in several day buffers (or be dropped),
+                // so each record carries an equal share (the remainder on the first) and a buffer releases its records' shares.
+                var share = items.Count == 0 ? 0 : exportBytes / items.Count;
+                var remainder = exportBytes - share * items.Count;
+                var first = true;
                 foreach (var item in items)
                 {
+                    var itemBytes = share + (first ? remainder : 0);
+                    first = false;
                     var nano = timeOf(item);
-                    if (oldest is not null && nano < oldestNano) { dropped++; continue; }
+                    if (oldest is not null && nano < oldestNano) { dropped++; droppedTally.Add(TenantOf.Of(item!), 1, itemBytes); continue; }
 
                     var day = DayOf(nano);
                     if (day > Today) day = Today; // clock skew counts as current
                     if (!_buffers.TryGetValue(day, out var buffer))
                         _buffers[day] = buffer = new DayBuffer<T>();
                     buffer.Items.Add(item);
+                    buffer.Tally.Add(TenantOf.Of(item!), 1, itemBytes);
                     Interlocked.Increment(ref _held);
                     if (stampPending) { buffer.Stamps.Add(stamp); stampPending = false; }
                 }
@@ -245,7 +266,7 @@ internal sealed class ClickHouseIngestionWorker(
             if (dropped > 0)
             {
                 owner.metrics.RecordDropped(signal, dropped, "out_of_retention");
-                gate.Release(dropped);
+                gate.Release(droppedTally);
             }
         }
 
@@ -303,14 +324,33 @@ internal sealed class ClickHouseIngestionWorker(
                 for (var offset = 0; offset < total; offset += maxBatch)
                 {
                     var piece = offset == 0 && total <= maxBatch ? buffer.Items : buffer.Items.GetRange(offset, Math.Min(maxBatch, total - offset));
-                    var token = Guid.NewGuid().ToString("N"); // minted once per sealed piece, reused on every retry
                     owner.metrics.RecordFlushBatchSize(signal, piece.Count);
-                    if (await owner.FlushWithRetryAsync(flush, piece, token, signal, abort))
+                    var outcome = await owner.FlushWithRetryAsync(flush, piece, signal, abort);
+                    if (outcome == FlushOutcome.Ok)
                         owner.metrics.RecordFlushed(signal, piece.Count);
-                    else
+                    else if (outcome == FlushOutcome.Exhausted)
                     {
                         allOk = false;
                         owner.metrics.RecordDropped(signal, piece.Count, "retries_exhausted");
+                    }
+                    else
+                    {
+                        // The database refuses something in this piece: bisect to the offending records. Every half is a different
+                        // row set, so each attempt mints its own token (ClickHouse would silently discard a different block sent
+                        // under a token it has already seen). Pieces of the failed flush that had already landed are stored again.
+                        var split = await BatchBisector.RunAsync(piece,
+                            (half, token) => owner.FlushWithRetryAsync(flush, half, signal, token), owner._shared.MaxSplitFlushes, abort);
+                        foreach (var stored in split.Flushed) owner.metrics.RecordFlushed(signal, stored.Count);
+                        foreach (var bad in split.Permanent.Take(10))
+                            owner.logger.LogWarning("Dropped a {Signal} record ClickHouse refuses: {Record}", signal, DroppedRecordDescription.Of(bad!));
+                        owner.logger.LogWarning(
+                            "Split a {Signal} piece of {Count} after a permanent flush error with {Flushes} extra flushes: {Stored} stored, " +
+                            "{Permanent} refused, {Exhausted} lost to exhausted retries, {Cap} dropped at the split cap",
+                            signal, piece.Count, split.Flushes, split.Flushed.Sum(p => p.Count), split.Permanent.Count, split.Exhausted, split.CapDropped);
+                        owner.metrics.RecordDropped(signal, split.Permanent.Count, "permanent");
+                        owner.metrics.RecordDropped(signal, split.Exhausted, "retries_exhausted");
+                        owner.metrics.RecordDropped(signal, split.CapDropped, "split_cap");
+                        if (split.Permanent.Count + split.Exhausted + split.CapDropped > 0) allOk = false;
                     }
                 }
 
@@ -323,7 +363,7 @@ internal sealed class ClickHouseIngestionWorker(
             }
             // Released regardless of outcome: a dropped batch still leaves the queue. A flush cut off by the shutdown
             // deadline throws before this line, so its records stay held for StopAsync to report.
-            gate.Release(total);
+            gate.Release(buffer.Tally);
             Interlocked.Add(ref _held, -total);
         }
 
@@ -342,9 +382,15 @@ internal sealed class ClickHouseIngestionWorker(
     // Retry, reusing the shared options (MaxFlushRetries, backoff)
     // =========================================================================
 
-    private async Task<bool> FlushWithRetryAsync<T>(
-        Func<List<T>, string, CancellationToken, Task> flush, List<T> batch, string token, string signal, CancellationToken ct)
+    /// <summary>
+    /// Flushes <paramref name="batch"/> under one deduplication token, minted here and reused on every retry (a retried
+    /// insert is stored once), retrying transient errors with the shared backoff. A permanent error (per the provider's
+    /// classifier) is not retried: the caller splits the batch, and each piece comes back through here with a new token.
+    /// </summary>
+    private async Task<FlushOutcome> FlushWithRetryAsync<T>(
+        Func<List<T>, string, CancellationToken, Task> flush, List<T> batch, string signal, CancellationToken ct)
     {
+        var token = Guid.NewGuid().ToString("N");
         var attempt = 0;
         while (true)
         {
@@ -353,7 +399,7 @@ internal sealed class ClickHouseIngestionWorker(
             {
                 await flush(batch, token, ct);
                 metrics.RecordFlushDuration(signal, Stopwatch.GetElapsedTime(started).TotalMilliseconds, "ok");
-                return true;
+                return FlushOutcome.Ok;
             }
             catch (OperationCanceledException) when (ct.IsCancellationRequested)
             {
@@ -362,11 +408,16 @@ internal sealed class ClickHouseIngestionWorker(
             catch (Exception ex)
             {
                 metrics.RecordFlushDuration(signal, Stopwatch.GetElapsedTime(started).TotalMilliseconds, "failed");
+                if (_classifier.Classify(ex) == FlushErrorKind.Permanent)
+                {
+                    logger.LogWarning(ex, "Permanent error flushing {Signal} batch of {Count} -- not retrying", signal, batch.Count);
+                    return FlushOutcome.Permanent;
+                }
                 attempt++;
                 if (attempt > _shared.MaxFlushRetries)
                 {
                     logger.LogError(ex, "Error flushing {Signal} batch of {Count} after {Attempts} attempts -- batch dropped", signal, batch.Count, attempt);
-                    return false;
+                    return FlushOutcome.Exhausted;
                 }
 
                 metrics.RecordFlushRetry(signal);

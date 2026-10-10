@@ -109,10 +109,10 @@ public sealed class OtlpLoadGenerator : IAsyncDisposable
                 try
                 {
                     var first = await send(payload, false);
-                    Record(stats, payload.Records, first);
+                    Record(stats, payload.Records, first, payload.TenantIndex);
                     // A redelivery is only meaningful once the original was accepted.
                     if (payload.Redeliver && first.Outcome == ExportOutcome.Ok)
-                        Record(stats, 0, await send(payload, true));
+                        Record(stats, 0, await send(payload, true), payload.TenantIndex);
                 }
                 finally { slots.Release(); }
             });
@@ -124,10 +124,10 @@ public sealed class OtlpLoadGenerator : IAsyncDisposable
     }
 
     // Redeliveries add rows but were not scheduled: pass 0 records so offered/acked stay per-original.
-    private static void Record(SignalStats stats, int records, ExportResult r)
+    private static void Record(SignalStats stats, int records, ExportResult r, int tenantIndex)
     {
         if (r.Status == "CLIENT_CANCELLED") return;
-        stats.Completed(records, r.LatencyMs, r.Outcome, r.Status);
+        stats.Completed(records, r.LatencyMs, r.Outcome, r.Status, r.ThrottledAttempts, tenantIndex);
     }
 
     /// <summary>Starts a fresh measuring window on every signal (the measured window, or one ramp step).</summary>

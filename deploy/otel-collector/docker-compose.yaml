@@ -1,0 +1,49 @@
+# Runs client-gateway.yaml in a container for a local end-to-end check against a Keryhe collector on this machine, and generates test data
+# with telemetrygen. See README.md in this folder for the checks.
+#
+#   export KERYHE_API_KEY=ktel_...            # a key for a tenant in the database the collector uses
+#   docker compose up -d otelcol
+#   docker compose run --rm telemetrygen-traces
+#   docker compose run --rm telemetrygen-logs
+#   docker compose run --rm telemetrygen-metrics
+#
+# KERYHE_ENDPOINT defaults to the development collector's plaintext h2c gRPC endpoint on the host (5117) with TLS off. For the TLS endpoint use
+# KERYHE_ENDPOINT=host.docker.internal:7057 KERYHE_TLS_INSECURE=false and give the container the CA that signed its certificate.
+services:
+  otelcol:
+    image: otel/opentelemetry-collector-contrib:latest
+    command: ["--config=/etc/otelcol/client-gateway.yaml"]
+    environment:
+      KERYHE_ENDPOINT: ${KERYHE_ENDPOINT:-host.docker.internal:5117}
+      KERYHE_API_KEY: ${KERYHE_API_KEY:?set KERYHE_API_KEY to a tenant's Keryhe API key}
+      KERYHE_TLS_INSECURE: ${KERYHE_TLS_INSECURE:-true}
+    volumes:
+      - ./client-gateway.yaml:/etc/otelcol/client-gateway.yaml:ro
+      - queue:/var/lib/otelcol/file_storage
+    ports:
+      - "4317:4317"
+      - "4318:4318"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+  # Test data, sent to the Collector above exactly as an application would send it (no key).
+  telemetrygen-traces:
+    image: ghcr.io/open-telemetry/opentelemetry-collector-contrib/telemetrygen:latest
+    profiles: ["tools"]
+    depends_on: [otelcol]
+    command: ["traces", "--otlp-endpoint=otelcol:4317", "--otlp-insecure", "--traces=${TELEMETRYGEN_COUNT:-200}", "--rate=${TELEMETRYGEN_RATE:-100}", "--service=e2e-traces"]
+
+  telemetrygen-logs:
+    image: ghcr.io/open-telemetry/opentelemetry-collector-contrib/telemetrygen:latest
+    profiles: ["tools"]
+    depends_on: [otelcol]
+    command: ["logs", "--otlp-endpoint=otelcol:4317", "--otlp-insecure", "--logs=${TELEMETRYGEN_COUNT:-200}", "--rate=${TELEMETRYGEN_RATE:-100}", "--service=e2e-logs"]
+
+  telemetrygen-metrics:
+    image: ghcr.io/open-telemetry/opentelemetry-collector-contrib/telemetrygen:latest
+    profiles: ["tools"]
+    depends_on: [otelcol]
+    command: ["metrics", "--otlp-endpoint=otelcol:4317", "--otlp-insecure", "--metrics=${TELEMETRYGEN_COUNT:-200}", "--rate=${TELEMETRYGEN_RATE:-100}", "--service=e2e-metrics"]
+
+volumes:
+  queue:

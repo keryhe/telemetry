@@ -13,6 +13,13 @@ public sealed class RampCriteria
     /// <summary>Stop when the step's gate-wait p95 (the worst signal) exceeds this: the gate is saturated and clients are being held.</summary>
     public double MaxGateWaitP95Ms { get; set; } = 250;
 
+    /// <summary>
+    /// Stop when more than this percentage of a signal's export attempts were refused by a full collector queue (<c>UNAVAILABLE</c> with
+    /// <c>RetryInfo</c>; 0 disables). Once the bounded gate wait is in place the wait itself is capped, so this is the saturation signal clients
+    /// actually see.
+    /// </summary>
+    public double MaxThrottledRatePercent { get; set; } = 5;
+
     /// <summary>Stop when any signal's client-side Export p99 for the step exceeds this.</summary>
     public double MaxExportP99Seconds { get; set; } = 5;
 

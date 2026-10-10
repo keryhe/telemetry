@@ -74,7 +74,7 @@ public sealed class ClickHouseIngestionWorkerDbTests(ClickHouseFixture fixture) 
         await channel.Traces.Writer.WriteAsync(spans);
         await worker.StopAsync(CancellationToken.None);
 
-        Assert.True(writer.Attempts >= 3, "one failed first attempt, its retry, and the other day");
+        Assert.True(writer.Attempts >= 3, $"one failed first attempt, its retry, and the other day (attempts {writer.Attempts}, resident {channel.TraceGate.Resident}, drops {metrics.GetHashCode()})");
         var stored = await QueryAsync("SELECT toString(toDate(start_time)) AS day, count() AS n FROM spans GROUP BY day ORDER BY day");
         Assert.Equal(2, stored.Count);
         // today's first attempt landed and then failed; its retry reused the token, so nothing is doubled
