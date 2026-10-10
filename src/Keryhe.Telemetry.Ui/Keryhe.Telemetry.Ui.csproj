@@ -5,14 +5,14 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <GeneratePackageOnBuild>true</GeneratePackageOnBuild>
-    <Version>1.3.0</Version>
+    <Version>2.0.0</Version>
     <Authors>Keith Heard</Authors>
     <Product>Telemetry</Product>
     <PackageLicenseExpression>MIT</PackageLicenseExpression>
     <PackageProjectUrl>https://github.com/keryhe/telemetry</PackageProjectUrl>
     <PackageTags>Keryhe Telemetry Ui Angular</PackageTags>
-    <AssemblyVersion>1.3.0.0</AssemblyVersion>
-    <FileVersion>1.3.0.0</FileVersion>
+    <AssemblyVersion>2.0.0.0</AssemblyVersion>
+    <FileVersion>2.0.0.0</FileVersion>
     <Description>Prebuilt Angular UI for Keryhe Telemetry, packaged as static web assets</Description>
     <Copyright>Copyright 2026</Copyright>
     <PackageReadmeFile>README.md</PackageReadmeFile>
