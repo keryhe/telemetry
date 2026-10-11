@@ -20,6 +20,9 @@ public abstract partial class DatabaseObserverBase : ILockObserver, IStatementSt
 
     public abstract string Provider { get; }
 
+    /// <summary>Gives a provider without a server to sample the API host's console log path, once the hosts are up (Parquet reads its statement timings from it).</summary>
+    public virtual void AttachHostLog(string apiHostLogPath) { }
+
     /// <summary>When <see cref="BeginAsync"/> ran, in the local clock the container log timestamps are compared against.</summary>
     protected DateTime BeganUtc { get; private set; }
 

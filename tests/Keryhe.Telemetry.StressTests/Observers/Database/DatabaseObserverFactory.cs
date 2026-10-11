@@ -14,6 +14,7 @@ public static class DatabaseObserverFactory
         "SqlServer" => new SqlServerObserver(connectionString, readLogs),
         "MySql" => new MySqlObserver(connectionString, readLogs),
         "ClickHouse" => new ClickHouseObserver(connectionString, readLogs),
+        "Parquet" => new ParquetObserver(connectionString, readLogs), // the "connection string" of a Parquet container is its root directory
         _ => throw new ArgumentOutOfRangeException(nameof(provider), provider, "Unknown provider.")
     };
 }

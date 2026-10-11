@@ -114,6 +114,7 @@ public abstract class RetentionTestsBase : IAsyncLifetime
     [Fact]
     public async Task LogRetention_RemovesExpiredRecords_AndKeepsInWindowRecords()
     {
+        if (!_fixture.SupportsLogsAndMetrics) return; // Parquet writes logs and metrics from phase 5 (plans/parquet-duckdb)
         var now = DateTime.UtcNow;
         var logs = new List<LogRecordModel>();
         foreach (var (_, at) in Moments(now))
@@ -133,6 +134,7 @@ public abstract class RetentionTestsBase : IAsyncLifetime
     [Fact]
     public async Task MetricRetention_RemovesExpiredDataPoints_AndKeepsInWindowOnes_AndTheCatalogRow()
     {
+        if (!_fixture.SupportsLogsAndMetrics) return; // Parquet writes logs and metrics from phase 5 (plans/parquet-duckdb)
         var now = DateTime.UtcNow;
         var metrics = new List<MetricModel>();
         foreach (var (_, at) in Moments(now))

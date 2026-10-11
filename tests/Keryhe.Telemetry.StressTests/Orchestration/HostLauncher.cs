@@ -269,7 +269,10 @@ public static class HostLauncher
                 Endpoint("Management", ports[1], "Http1");
                 env["Telemetry__Collector__AllowInsecureTransport"] = "true";
                 grpc = new Uri($"http://127.0.0.1:{port}");
-                env["ConnectionStrings__Collector"] = options.CollectorConnectionString;
+                if (options.Provider == "Parquet")
+                    env["Telemetry__Parquet__RootPath"] = options.CollectorConnectionString; // a Parquet "connection string" is the root directory
+                else
+                    env["ConnectionStrings__Collector"] = options.CollectorConnectionString;
                 break;
             }
             default:
@@ -279,9 +282,16 @@ public static class HostLauncher
                 api = new Uri($"http://127.0.0.1:{port}");
                 // ClickHouse 25.x caches a predicate's matching granules, so a repeated read looks free in a measurement (Phase 0, spike 4):
                 // the harness's API host reads with the cache off. Production queries do not.
-                env["ConnectionStrings__Api"] = options.Provider == "ClickHouse"
-                    ? options.ApiConnectionString + ";set_use_query_condition_cache=0"
-                    : options.ApiConnectionString;
+                if (options.Provider == "Parquet")
+                {
+                    env["Telemetry__Parquet__RootPath"] = options.ApiConnectionString;
+                    // The read engine's per-statement timing line (elapsed ms, files read) is the slowest-SQL source for this provider.
+                    env["Logging__LogLevel__Keryhe.Telemetry.Parquet.ParquetQueryEngine"] = "Debug";
+                }
+                else
+                    env["ConnectionStrings__Api"] = options.Provider == "ClickHouse"
+                        ? options.ApiConnectionString + ";set_use_query_condition_cache=0"
+                        : options.ApiConnectionString;
                 // The harness calls the API at the option default /api (the readiness probe, ScenarioRunner, TourDiscovery,
                 // MarkerProbe, DetailProbe; ApiRequestNormalizer assumes it), but the shipped Api.Server appsettings mount it
                 // at /telemetry/api. Without this every readiness probe is a 404. The UI follows (TelemetryUi:ApiBasePath unset).

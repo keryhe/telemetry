@@ -34,6 +34,7 @@ public abstract class SummaryTimeoutDegradationTestsBase : IAsyncLifetime
     [Fact]
     public async Task ZeroBudget_EverySummaryClassRead_DegradesInsteadOfThrowing()
     {
+        if (!_fixture.SupportsLogsAndMetrics) return; // Parquet writes logs and metrics from phase 5 (plans/parquet-duckdb)
         using (var write = _fixture.Services.CreateScope())
         {
             var writer = write.ServiceProvider.GetRequiredService<ITelemetryBulkWriter>();

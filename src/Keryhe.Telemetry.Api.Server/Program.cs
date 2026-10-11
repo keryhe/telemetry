@@ -47,8 +47,9 @@ switch (builder.Configuration["Database:Provider"])
     case "PostgreSQL": builder.Services.AddPostgreSqlApiServices(builder.Configuration); break;
     case "ClickHouse": builder.Services.AddClickHouseApiServices(builder.Configuration); break;
     case "MySql":      builder.Services.AddMySqlApiServices(builder.Configuration);      break;
+    case "Parquet":    builder.Services.AddParquetApiServices(builder.Configuration);    break;
     default: throw new InvalidOperationException(
-        "Unknown or missing Database:Provider (expected SqlServer, PostgreSQL, ClickHouse, or MySql).");
+        "Unknown or missing Database:Provider (expected SqlServer, PostgreSQL, ClickHouse, MySql, or Parquet).");
 }
 
 // The control plane (tenants, alert rules, retention settings): ControlPlane:Provider +

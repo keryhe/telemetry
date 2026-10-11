@@ -36,6 +36,7 @@ public abstract class ExportTestsBase : IAsyncLifetime
     [Fact]
     public async Task LogsExport_RowCount_IsEveryLogInTheWindow()
     {
+        if (!_fixture.SupportsLogsAndMetrics) return; // Parquet writes logs and metrics from phase 5 (plans/parquet-duckdb)
         var logs = SeededDataBuilder.BasicLogWindow(_fixture.TenantId, WindowStart, count: 300);
         using (var writeScope = Scope())
             await writeScope.ServiceProvider.GetRequiredService<ITelemetryBulkWriter>().FlushLogsAsync(logs);
@@ -55,6 +56,7 @@ public abstract class ExportTestsBase : IAsyncLifetime
     [Fact]
     public async Task LogsExport_HonorsServiceFilter()
     {
+        if (!_fixture.SupportsLogsAndMetrics) return; // Parquet writes logs and metrics from phase 5 (plans/parquet-duckdb)
         var logs = SeededDataBuilder.BasicLogWindow(_fixture.TenantId, WindowStart, count: 300);
         using (var writeScope = Scope())
             await writeScope.ServiceProvider.GetRequiredService<ITelemetryBulkWriter>().FlushLogsAsync(logs);
@@ -124,6 +126,7 @@ public abstract class ExportTestsBase : IAsyncLifetime
     [Fact]
     public async Task MetricsExport_IncludesEverySeries_NoTopNTruncation()
     {
+        if (!_fixture.SupportsLogsAndMetrics) return; // Parquet writes logs and metrics from phase 5 (plans/parquet-duckdb)
         const int streamCount = 10;
         const string metricName = "phase8.export.topn.gauge";
         // Distinct metric name/service prefix from MetricPhase4TestsBase's own top-N test: both
@@ -179,6 +182,7 @@ public abstract class ExportTestsBase : IAsyncLifetime
     [Fact]
     public async Task MetricsExport_IncludesRate()
     {
+        if (!_fixture.SupportsLogsAndMetrics) return; // Parquet writes logs and metrics from phase 5 (plans/parquet-duckdb)
         // Distinct service name from MetricPhase4TestsBase's own rate test (same metric name is
         // hardcoded in the shared builder): both classes share this provider's fixture collection,
         // and the process-lifetime ResourceScopeCache isn't cleared between test classes even
@@ -210,6 +214,7 @@ public abstract class ExportTestsBase : IAsyncLifetime
     [Fact]
     public async Task MetricsExport_UnknownMetricName_ReturnsEmpty()
     {
+        if (!_fixture.SupportsLogsAndMetrics) return; // Parquet writes logs and metrics from phase 5 (plans/parquet-duckdb)
         using var readScope = Scope();
         var repo = readScope.ServiceProvider.GetRequiredService<IMetricReadRepository>();
 

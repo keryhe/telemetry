@@ -30,7 +30,13 @@ public abstract class RollupWriteTestsBase : IAsyncLifetime
 
     protected abstract Task<DbConnection> OpenAsync();
 
+    /// <summary>False while the provider does not write logs yet (Parquet before phase 5): the log halves are skipped.</summary>
+    protected virtual bool SupportsLogs => true;
+
     private IServiceScope Scope() => _fixture.Services.CreateScope();
+
+    // DuckDB sums BIGINT to HUGEINT, which its driver returns as a BigInteger.
+    private static long ToLong(object? value) => value is System.Numerics.BigInteger big ? (long)big : Convert.ToInt64(value);
 
     private static long MinuteOf(long nanos) => nanos - nanos % Minute;
 
@@ -88,7 +94,7 @@ public abstract class RollupWriteTestsBase : IAsyncLifetime
         using var scope = Scope();
         var writer = scope.ServiceProvider.GetRequiredService<ITelemetryBulkWriter>();
         await writer.FlushTracesAsync(spans);
-        await writer.FlushLogsAsync(logs);
+        if (SupportsLogs) await writer.FlushLogsAsync(logs);
 
         var store = scope.ServiceProvider.GetRequiredService<IRollupStore>();
         if (store.FedByViews) return;
@@ -130,8 +136,8 @@ public abstract class RollupWriteTestsBase : IAsyncLifetime
             $"SELECT service_name, bucket_start_unix_nano, SUM(request_count), SUM(error_count), SUM(sum_duration_nanos), MAX(max_duration_nanos), {BandSums()} " +
             $"FROM request_rollup_minute WHERE tenant_id = {_fixture.TenantId} GROUP BY service_name, bucket_start_unix_nano");
         return rows.ToDictionary(
-            r => (Convert.ToString(r[0])!, Convert.ToInt64(r[1])),
-            r => r.Skip(2).Select(Convert.ToInt64).ToArray());
+            r => (Convert.ToString(r[0])!, ToLong(r[1])),
+            r => r.Skip(2).Select(ToLong).ToArray());
     }
 
     private async Task<Dictionary<(string Service, int Severity, long Minute), long>> ReadLogsAsync()
@@ -139,13 +145,13 @@ public abstract class RollupWriteTestsBase : IAsyncLifetime
         var rows = await QueryAsync(
             "SELECT service_name, severity_number, bucket_start_unix_nano, SUM(record_count) " +
             $"FROM log_rollup_minute WHERE tenant_id = {_fixture.TenantId} GROUP BY service_name, severity_number, bucket_start_unix_nano");
-        return rows.ToDictionary(r => (Convert.ToString(r[0])!, Convert.ToInt32(r[1]), Convert.ToInt64(r[2])), r => Convert.ToInt64(r[3]));
+        return rows.ToDictionary(r => (Convert.ToString(r[0])!, Convert.ToInt32(r[1]), ToLong(r[2])), r => ToLong(r[3]));
     }
 
     private async Task<long> CountAsync(string table)
     {
         var rows = await QueryAsync($"SELECT COUNT(*) FROM {table} WHERE tenant_id = {_fixture.TenantId}");
-        return Convert.ToInt64(rows[0][0]);
+        return ToLong(rows[0][0]);
     }
 
     [Fact]
@@ -232,6 +238,7 @@ public abstract class RollupWriteTestsBase : IAsyncLifetime
     [InlineData(9, "payments-worker")]
     public async Task LogRollupRead_EqualsALinqRestatement_AndTheSeverityFilterLeavesNullOut(int? minSeverity, string? service)
     {
+        if (!SupportsLogs) return;
         var at = DateTime.UtcNow.AddHours(-1);
         var logs = SeedLogs(at);
         await WriteAsync(SeedSpans(at), logs);
@@ -317,6 +324,7 @@ public abstract class RollupWriteTestsBase : IAsyncLifetime
     [Fact]
     public async Task LogRollup_EqualsALinqRestatementOverTheSeededLogs_WithNullSeverityAsMinusOne()
     {
+        if (!SupportsLogs) return;
         var logs = SeedLogs(DateTime.UtcNow.AddHours(-1));
         await WriteAsync(SeedSpans(DateTime.UtcNow.AddHours(-1)), logs);
 
@@ -336,25 +344,26 @@ public abstract class RollupWriteTestsBase : IAsyncLifetime
         var now = DateTime.UtcNow;
         await WriteAsync(SeedSpans(old).Concat(SeedSpans(now).Select(Renumber)).ToList(), SeedLogs(old).Concat(SeedLogs(now)).ToList());
         var requestsBefore = await CountAsync("request_rollup_minute");
-        var logsBefore = await CountAsync("log_rollup_minute");
-        Assert.True(requestsBefore > 0 && logsBefore > 0);
+        var logsBefore = SupportsLogs ? await CountAsync("log_rollup_minute") : 0;
+        Assert.True(requestsBefore > 0 && (logsBefore > 0 || !SupportsLogs));
 
         using (var scope = Scope())
         {
             var retention = scope.ServiceProvider.GetRequiredService<IRetentionSweeper>();
             await retention.DeleteOldTracesAsync(TimeSpan.FromDays(90));
-            await retention.DeleteOldLogRecordsAsync(TimeSpan.FromDays(90));
+            if (SupportsLogs) await retention.DeleteOldLogRecordsAsync(TimeSpan.FromDays(90));
         }
 
         var requestsAfter = await QueryAsync(
             $"SELECT MIN(bucket_start_unix_nano), COUNT(*) FROM request_rollup_minute WHERE tenant_id = {_fixture.TenantId}");
-        var logsAfter = await QueryAsync(
-            $"SELECT MIN(bucket_start_unix_nano), COUNT(*) FROM log_rollup_minute WHERE tenant_id = {_fixture.TenantId}");
+        var logsAfter = SupportsLogs ? await QueryAsync(
+            $"SELECT MIN(bucket_start_unix_nano), COUNT(*) FROM log_rollup_minute WHERE tenant_id = {_fixture.TenantId}") : null;
         var cutoff = SeededDataBuilder.ToUnixNano(DateTime.UtcNow.AddDays(-90));
-        Assert.InRange(Convert.ToInt64(requestsAfter[0][1]), 1, requestsBefore - 1);
-        Assert.InRange(Convert.ToInt64(logsAfter[0][1]), 1, logsBefore - 1);
-        Assert.True(Convert.ToInt64(requestsAfter[0][0]) > cutoff);
-        Assert.True(Convert.ToInt64(logsAfter[0][0]) > cutoff);
+        Assert.InRange(ToLong(requestsAfter[0][1]), 1, requestsBefore - 1);
+        Assert.True(ToLong(requestsAfter[0][0]) > cutoff);
+        if (logsAfter is null) return;
+        Assert.InRange(ToLong(logsAfter[0][1]), 1, logsBefore - 1);
+        Assert.True(ToLong(logsAfter[0][0]) > cutoff);
     }
 
     private static int _renumber = 100_000;

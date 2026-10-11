@@ -2,9 +2,8 @@ using System.Data.Common;
 using Dapper;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging;
-using Microsoft.Extensions.Options;
 
-namespace Keryhe.Telemetry.ClickHouse.Services;
+namespace Keryhe.Telemetry.Core.Data;
 
 /// <summary>The retention windows the collector uses to drop records that retention would delete at once.</summary>
 internal interface IRetentionWindows
@@ -20,14 +19,14 @@ internal interface IRetentionWindows
 
 /// <summary>
 /// Reads the retention windows from the control plane's <c>retention_settings</c> row and caches them
-/// (<see cref="ClickHouseIngestionOptions.RetentionRefreshSeconds"/>). The collector registers no
+/// (re-read every <c>refreshSeconds</c>, a provider option). The collector registers no
 /// <c>IRetentionSettingsRepository</c> (it is API-side) and this project references no relational driver, so the
 /// connection is created by type name from <c>ControlPlane:Provider</c>: the host has loaded that provider's driver
 /// for its API-key lookup. Fails open: when the windows cannot be read, nothing is dropped as out-of-retention.
 /// </summary>
 internal sealed class RetentionWindowCache(
     IConfiguration configuration,
-    IOptions<ClickHouseIngestionOptions> options,
+    int refreshSeconds,
     TimeProvider time,
     ILogger<RetentionWindowCache> logger) : IRetentionWindows
 {
@@ -74,5 +73,5 @@ internal sealed class RetentionWindowCache(
         }
     }
 
-    public int RefreshSeconds => options.Value.RetentionRefreshSeconds;
+    public int RefreshSeconds => refreshSeconds;
 }

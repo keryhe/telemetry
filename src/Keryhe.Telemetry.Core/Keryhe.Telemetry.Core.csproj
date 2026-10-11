@@ -33,6 +33,8 @@
 
   <ItemGroup>
     <InternalsVisibleTo Include="Keryhe.Telemetry.ClickHouse" />
+    <InternalsVisibleTo Include="Keryhe.Telemetry.Parquet" />
+    <InternalsVisibleTo Include="Keryhe.Telemetry.Parquet.Tests" />
     <InternalsVisibleTo Include="Keryhe.Telemetry.IntegrationTests" />
   </ItemGroup>
 

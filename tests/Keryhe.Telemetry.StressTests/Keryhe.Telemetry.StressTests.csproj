@@ -18,6 +18,7 @@
   <ItemGroup>
     <!-- The OTLP client stubs (Grpc.Net.Client arrives transitively via Grpc.AspNetCore) -->
     <ProjectReference Include="../../src/Keryhe.Telemetry.Collector/Keryhe.Telemetry.Collector.csproj" />
+    <ProjectReference Include="../../src/Keryhe.Telemetry.Parquet/Keryhe.Telemetry.Parquet.csproj" />
     <ProjectReference Include="../Keryhe.Telemetry.TestInfrastructure/Keryhe.Telemetry.TestInfrastructure.csproj" />
   </ItemGroup>
 

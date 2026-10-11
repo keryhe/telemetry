@@ -28,6 +28,9 @@ public abstract class ProviderFixture : IAsyncLifetime
 {
     public abstract string ProviderName { get; }
 
+    /// <summary>False while a provider cannot yet write or read logs and metrics (Parquet before phase 5 of plans/parquet-duckdb): the shared tests of those signals return early.</summary>
+    public virtual bool SupportsLogsAndMetrics => true;
+
     public const string ApiKeyPlainText = "phase0-integration-test-key";
 
     public ServiceProvider Services { get; private set; } = null!;

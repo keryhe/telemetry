@@ -74,6 +74,7 @@ public abstract class SearchParityTestsBase : IAsyncLifetime
     [Fact]
     public async Task NumericAttribute_MatchesExactSet()
     {
+        if (!_fixture.SupportsLogsAndMetrics) return; // Parquet writes logs and metrics from phase 5 (plans/parquet-duckdb)
         var actual = await SearchAsync("http.status_code:500");
         var expected = Expected(300, i => i % 4 == 3);
         Assert.Equal(expected, actual);
@@ -82,6 +83,7 @@ public abstract class SearchParityTestsBase : IAsyncLifetime
     [Fact]
     public async Task BooleanAttribute_MatchesExactSet()
     {
+        if (!_fixture.SupportsLogsAndMetrics) return; // Parquet writes logs and metrics from phase 5 (plans/parquet-duckdb)
         var actual = await SearchAsync("retry:true");
         var expected = Expected(300, i => i % 4 == 3);
         Assert.Equal(expected, actual);
@@ -97,6 +99,7 @@ public abstract class SearchParityTestsBase : IAsyncLifetime
     [Fact]
     public async Task NegatedAttribute_ReturnsRowsWithDifferentValue()
     {
+        if (!_fixture.SupportsLogsAndMetrics) return; // Parquet writes logs and metrics from phase 5 (plans/parquet-duckdb)
         var actual = await SearchAsync("-retry:true");
         var expected = Expected(300, i => i % 4 != 3);
         Assert.Equal(expected, actual);
@@ -105,6 +108,7 @@ public abstract class SearchParityTestsBase : IAsyncLifetime
     [Fact]
     public async Task DottedKey_MatchesExactSet()
     {
+        if (!_fixture.SupportsLogsAndMetrics) return; // Parquet writes logs and metrics from phase 5 (plans/parquet-duckdb)
         // k8s.pod.name is "{service}-pod-{i % 5}" -- pick pod index 2 on checkout-api (index 0 mod 3).
         var actual = await SearchAsync("k8s.pod.name:checkout-api-pod-2");
         var expected = Expected(300, i => i % 3 == 0 && i % 5 == 2);
@@ -114,6 +118,7 @@ public abstract class SearchParityTestsBase : IAsyncLifetime
     [Fact]
     public async Task FreeText_SubstringMatchesExactSet()
     {
+        if (!_fixture.SupportsLogsAndMetrics) return; // Parquet writes logs and metrics from phase 5 (plans/parquet-duckdb)
         var actual = await SearchAsync("payments-worker");
         var expected = Expected(300, i => i % 3 == 1);
         Assert.Equal(expected, actual);

@@ -18,6 +18,7 @@
       <ProjectReference Include="../Keryhe.Telemetry.PostgreSQL/Keryhe.Telemetry.PostgreSQL.csproj" />
       <ProjectReference Include="../Keryhe.Telemetry.ClickHouse/Keryhe.Telemetry.ClickHouse.csproj" />
       <ProjectReference Include="../Keryhe.Telemetry.MySql/Keryhe.Telemetry.MySql.csproj" />
+      <ProjectReference Include="../Keryhe.Telemetry.Parquet/Keryhe.Telemetry.Parquet.csproj" />
     </ItemGroup>
 
     <ItemGroup>

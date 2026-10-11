@@ -106,10 +106,10 @@ id-parameter plan (no `CONVERT_IMPLICIT`), and PostgreSQL's index-not-seq-scan p
 negative-controlled.
 
 ```bash
-# All four providers (one xUnit collection fixture per provider, containers started once per run)
+# All five providers (one xUnit collection fixture per provider, containers started once per run)
 dotnet test tests/Keryhe.Telemetry.IntegrationTests
 
-# One provider only (Provider trait: PostgreSQL | SqlServer | MySql | ClickHouse)
+# One provider only (Provider trait: PostgreSQL | SqlServer | MySql | ClickHouse | Parquet)
 dotnet test tests/Keryhe.Telemetry.IntegrationTests --filter Provider=SqlServer
 ```
 
@@ -374,6 +374,7 @@ REST API consumed by an Angular single-page application.
 | `Keryhe.Telemetry.SqlServer` | SQL Server provider implementation (Microsoft.Data.SqlClient + Dapper): telemetry data and control plane |
 | `Keryhe.Telemetry.ClickHouse` | ClickHouse provider implementation (ClickHouse.Client bulk-copy writes + Dapper reads): telemetry data only, no control plane |
 | `Keryhe.Telemetry.MySql` | MySQL provider implementation (MySqlConnector + Dapper): telemetry data and control plane |
+| `Keryhe.Telemetry.Parquet` | Parquet + DuckDB provider (telemetry data only; `plans/parquet-duckdb/`, phases 0-6 done, measurement phase 7 pending): all three signals work: spans, logs and metric points with their derived tables (`trace_index`, both rollups, `metric_catalog`, `metric_series`) written as per-tenant-hour Parquet files with per-writer manifests, read by an in-process DuckDB; a compactor on the API host (lease, minor/major/day compaction, grace deletes), retention by day folder; selectable as `Database:Provider=Parquet` on both hosts |
 | `Keryhe.Telemetry.Collector` | gRPC services + OpenTelemetry proto files → generated stubs (class library) |
 | `Keryhe.Telemetry.Collector.Server` | Thin ASP.NET Core host that maps the gRPC services and runs the ingestion worker |
 | `Keryhe.Telemetry.Api` | REST API controllers, base-path routing, authorization, read-service wiring, alerting (`Api/Alerting`: evaluators, webhooks, `AlertEvaluationWorker`) and retention (`Api/Retention`) (class library) |
@@ -434,11 +435,11 @@ per side that two registrations in one container would silently overwrite.
 
 Two providers are selected at runtime, both required, on both hosts:
 
-- **`Database:Provider`** (`"PostgreSQL"`, `"SqlServer"`, `"ClickHouse"`, or `"MySql"`) for the telemetry data. Each
+- **`Database:Provider`** (`"PostgreSQL"`, `"SqlServer"`, `"ClickHouse"`, `"MySql"` or `"Parquet"`) for the telemetry data. Each
   provider project exposes `ServiceCollectionExtensions` with `Add<Provider>CollectorServices` /
   `Add<Provider>ApiServices` (the bulk writer, the read repositories, the rollup and touch stores, and on the API side
   `IRetentionSweeper`), and the hosts `switch` on the config key to call the right one.
-- **`ControlPlane:Provider`** (`"PostgreSQL"`, `"SqlServer"`, or `"MySql"`; never ClickHouse) for the control plane:
+- **`ControlPlane:Provider`** (`"PostgreSQL"`, `"SqlServer"`, or `"MySql"`; never ClickHouse or Parquet) for the control plane:
   `tenants`, `api_keys`, `alert_rules`, `alert_events`, `retention_settings`. The same three provider projects expose
   `Add<Provider>ControlPlaneCollectorServices` (`IApiKeyLookup`, `IApiKeyTouchStore`) and
   `Add<Provider>ControlPlaneApiServices` (`IAlertRuleRepository`, `ITenantCatalogRepository`,
@@ -503,6 +504,33 @@ relational four in deliberate ways (all confined to the provider; Core interface
 - **No control plane.** ClickHouse holds telemetry only; tenants, API keys, alert rules and retention settings run on
   PostgreSQL, SQL Server or MySQL (`ControlPlane:Provider`), so alert CRUD and `TryClaimFireAsync` are as atomic as
   they are there.
+
+**Parquet provider notes** (plan and decisions: `plans/parquet-duckdb/`; operator guide: `src/Keryhe.Telemetry.Parquet/README.md`; no database
+server for telemetry, fresh install only). Modelled on ClickHouse (one row carries everything, the collector writes the derived data, own
+ingestion worker and read repositories behind unchanged Core interfaces), with file management in place of a server:
+- **Config.** `Database:Provider=Parquet` and `Telemetry:Parquet:RootPath` on both hosts (no `ConnectionStrings:Collector`/`:Api`); the control plane
+  runs on PostgreSQL, SQL Server or MySQL as for ClickHouse. **The root must be on one machine's file system** (a local disk or a volume shared by
+  containers on one Linux host; a network share, and Docker Desktop's host bind mounts, gave stale manifests). `schema/apply-schema.sh telemetry parquet <root>` only creates the directory.
+- **Layout.** `<table>/tenant_id=<t>/date=<day>/hour=<HH>/` holds a collector's `part-<writer>-<seq>-<token>.parquet` files, its `_manifest.<writer>.json`
+  and the compactor's `_compacted.<gen>.json`; a merged day lives in `_day/`. A file is visible only once a manifest lists it, manifests are swapped by atomic
+  rename, and a reader's file set is the newest compacted generation plus each writer's files above its `through` (writers' manifests read first, then the
+  generation: the opposite order loses files). A batch's file name carries its deduplication token, so a retried flush is stored once.
+- **Types.** Timestamps are `BIGINT` `*_unix_nano`; a trace id is two `UBIGINT` columns `trace_hi`/`trace_lo` (DuckDB does not prune `UUID` statistics);
+  attributes are `MAP(VARCHAR, VARCHAR)` (values are text, as ClickHouse); the appender cannot write `MAP`/`STRUCT`, so they are staged as JSON and converted
+  with `json_transform` in the `COPY`.
+- **Reads** go through `ParquetQueryEngine`: a connection per statement group with `TEMP VIEW`s over the file lists the manifests resolve for the request's
+  tenant and time range (never a glob), so shared SQL (the rollup base) runs unchanged; `NamedParameterConnection` rewrites `@name` to DuckDB's `$name`.
+  At `Debug` the category `Keryhe.Telemetry.Parquet.ParquetQueryEngine` logs `parquet-sql ms= files= sql=` per statement, the stress harness's slowest-SQL source.
+- **Ingestion** is `PartitionedIngestionWorker` (Core, extracted from ClickHouse's worker) per tenant-hour buffers with a 30 s linger; a crash loses the
+  buffer (no write-ahead log), shutdown drains. The ingestion gates must each hold at least `MaxBufferRecords` (startup warning).
+- **Compaction** runs on the API host under a lease (`ParquetCompactor`, `ParquetCompactionWorker`): minor (fold uncompacted writer files), hour and day
+  merges, superseded files deleted after `GraceSeconds`; a query or export running longer than the grace may fail on a deleted file.
+- **Retention** deletes day folders at once (see "Retention"); a read reaching back past the window can fail on a deleted file, anything inside it cannot.
+- **Tests.** `--filter Provider=Parquet` runs the shared bases against a temp root (and `ParquetCompacted*` with a forced compaction after every flush);
+  `tests/Keryhe.Telemetry.Parquet.Tests` is the no-Docker unit suite. `PoisonRecordTestsBase` is not run on Parquet (no column length limit).
+- **Stress harness.** `--provider Parquet` has no database container: `ParquetObserver` counts rows with DuckDB over the manifests, samples file counts instead
+  of locks, reads statement timings from the API host log, and reports no container stats (the hosts' process metrics carry resource use); the control plane
+  is a PostgreSQL container as for ClickHouse.
 
 **Search and capabilities (schema 3.0.0, decisions 3 and 19).** Free-text and `key:value` search is
 unindexed and time-window bounded on **every** provider: one predicate form per dialect (the
@@ -875,6 +903,7 @@ includes the rows removed and the sweep's elapsed milliseconds. The mechanism is
 | Provider | Retention |
 |---|---|
 | PostgreSQL, SQL Server, MySQL | Spans and logs: bounded-batch deletes **per tenant** (`tenant_id = @t AND time < @cutoff`) through the `(tenant_id, time)` access path; data points: bounded batches through their time index (PostgreSQL's BRIN, SQL Server/MySQL's `(time_unix_nano)`). The shared loop is `RetentionSweeperBase`; a provider supplies only `BatchedDeleteSql` (PostgreSQL has no primary key on these tables, so a batch is `DELETE ... WHERE ctid = ANY (ARRAY(SELECT ctid ... LIMIT n))`; SQL Server `DELETE TOP (n)` at `DEADLOCK_PRIORITY LOW`, batch kept under the lock-escalation threshold; MySQL `DELETE ... LIMIT n`). The tenants swept are `SELECT DISTINCT tenant_id FROM resources`, **not** the control plane's `tenants` (the two may be different databases; data whose tenant was removed from the control plane still expires). |
+| Parquet | `ParquetRetentionSweeper`: deletes each tenant's `date=` folder for every table of the signal's window (derived tables with it) once the whole day is before the cutoff's day; tenants are the folders present, so a tenant gone from the control plane still expires; the count is the raw tables' rows summed from the manifests before the delete. Granularity is the day. |
 | ClickHouse | `ALTER TABLE ... DROP PARTITION ID` for each fully expired day (spans, `trace_index`, `request_rollup_minute`, logs, `log_rollup_minute`, the five points tables); rows of the raw tables counted from `system.parts` (`partition_id`) first. Metric sweeps also run a lightweight `DELETE` of `metric_series`/`metric_catalog` rows with `last_seen` before the cutoff. Granularity is the day. |
 
 `AddRetention()` registers the worker; called from `Api.Server`'s `Program.cs` only, never
@@ -1051,7 +1080,7 @@ beyond the margin is missing from a hinted read, which is the limit of a hint; a
 
 ### Database
 
-Telemetry providers: PostgreSQL, SQL Server 2022, ClickHouse, or MySQL 8.0.19+. Control-plane providers: PostgreSQL,
+Telemetry providers: PostgreSQL, SQL Server 2022, ClickHouse, MySQL 8.0.19+, or Parquet files (no server). Control-plane providers: PostgreSQL,
 SQL Server 2022, or MySQL 8.0.19+. Schema 4.0.0 (fresh install only; the split is `plans/control-plane-split.md`). The schema is two components, each with
 its own scripts and version table (see "Commands"):
 

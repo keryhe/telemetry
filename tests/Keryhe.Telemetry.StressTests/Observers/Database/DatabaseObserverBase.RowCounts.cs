@@ -38,7 +38,7 @@ public abstract partial class DatabaseObserverBase
     /// is before <paramref name="cutoffNanos"/>). Cheap enough to poll, which the correctness check does while the rollup catches up with the
     /// last closed minutes. The same SQL runs on every provider (ClickHouse's rollup tables are summed, never read with <c>FINAL</c>).
     /// </summary>
-    public async Task<RowCounts> CountRollupRowsAsync(long cutoffNanos, CancellationToken cancellationToken)
+    public virtual async Task<RowCounts> CountRollupRowsAsync(long cutoffNanos, CancellationToken cancellationToken)
     {
         var cells = new List<RowCountCell>();
         foreach (var (table, column) in new[] { (Load.RollupTables.Request, "request_count"), (Load.RollupTables.Log, "record_count") })

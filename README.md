@@ -7,7 +7,7 @@ A self-hosted OpenTelemetry (OTLP) ingestion and visualization platform for trac
 - **Complete OTLP Support**: Handles traces, metrics, and logs as defined in opentelemetry-proto
 - **Angular UI**: Web interface (Angular 20) for exploring traces, metrics, logs, dashboards, and alerts
 - **REST API**: ASP.NET Core Web API (`Keryhe.Telemetry.Api`) with Swagger support
-- **Multiple Database Providers**: Choose between PostgreSQL, SQL Server, MySQL, or ClickHouse (columnar/OLAP) for telemetry data; tenants, API keys, alert rules and retention settings (the control plane) live in PostgreSQL, SQL Server or MySQL
+- **Multiple Database Providers**: Choose between PostgreSQL, SQL Server, MySQL, ClickHouse (columnar/OLAP) or Parquet files read by an in-process DuckDB (no database server, one machine) for telemetry data; tenants, API keys, alert rules and retention settings (the control plane) live in PostgreSQL, SQL Server or MySQL
 - **Trace Correlation**: Links logs and metrics to traces via trace and span IDs
 - **Built-in Analytics**: Service maps, trace summaries and latency heatmaps, and log severity analysis, computed on demand from the raw data
 - **Multi-tenant**: Every OTLP export carries a per-tenant API key (hashed in the database, optional expiry); the REST API is scoped by tenant and supports pluggable authorization
@@ -21,7 +21,7 @@ A self-hosted OpenTelemetry (OTLP) ingestion and visualization platform for trac
 OpenTelemetry SDKs (any language)
   → OTLP gRPC (port 5117) → Keryhe.Telemetry.Collector.Server
   → bounded ingestion channel → background worker → provider bulk writer
-  → PostgreSQL / SQL Server / MySQL / ClickHouse   (telemetry data)
+  → PostgreSQL / SQL Server / MySQL / ClickHouse / Parquet files   (telemetry data)
   → Keryhe.Telemetry.Api.Server (REST API, port 5188 / 7105)
   → Angular SPA (src/telemetry-client, port 4201)
 ```
@@ -29,10 +29,10 @@ OpenTelemetry SDKs (any language)
 Tenants, API keys, alert rules and retention settings are the **control plane**: a small relational
 database the collector reads for API keys and the API reads and writes for everything else. On
 PostgreSQL, SQL Server and MySQL it is simply the same database as the telemetry data; a ClickHouse
-deployment runs its control plane on one of those three.
+or Parquet deployment runs its control plane on one of those three.
 
 Two providers are chosen at runtime, and both are required: `Database:Provider` for telemetry data
-(`PostgreSQL`, `SqlServer`, `MySql`, or `ClickHouse`, with `ConnectionStrings:Collector` / `:Api`) and
+(`PostgreSQL`, `SqlServer`, `MySql`, `ClickHouse`, or `Parquet`, with `ConnectionStrings:Collector` / `:Api`, or `Telemetry:Parquet:RootPath` for Parquet) and
 `ControlPlane:Provider` for the control plane (`PostgreSQL`, `SqlServer`, or `MySql`, with
 `ConnectionStrings:ControlPlane`). Each provider ships its own implementation and is selected by the
 host at startup.
@@ -40,7 +40,7 @@ host at startup.
 | Project | Role |
 |---------|------|
 | `Keryhe.Telemetry.Core` | Domain interfaces and models, plus the provider-agnostic write repositories, ingestion channel + background worker and Dapper read-repository bases |
-| `Keryhe.Telemetry.PostgreSQL` / `.SqlServer` / `.MySql` / `.ClickHouse` | Per-provider implementations: telemetry reads and writes, and (all but ClickHouse) the control plane |
+| `Keryhe.Telemetry.PostgreSQL` / `.SqlServer` / `.MySql` / `.ClickHouse` / `.Parquet` | Per-provider implementations: telemetry reads and writes, and (PostgreSQL, SQL Server, MySQL) the control plane |
 | `Keryhe.Telemetry.Collector` / `.Collector.Server` | OTLP ingestion over gRPC and HTTP with per-tenant API key authentication (class library + thin host); a sample client-side OpenTelemetry Collector configuration is in [`deploy/otel-collector`](deploy/otel-collector/README.md) |
 | `Keryhe.Telemetry.Api` / `.Api.Server` | REST API controllers, base-path routing and authorization, alert evaluation (rules, webhooks, periodic worker) and retention sweeps (class library + thin host) |
 | `Keryhe.Telemetry.Ui` | Prebuilt Angular UI, packaged as static web assets — see [Build your own host](#build-your-own-host) below |
@@ -90,7 +90,7 @@ every OTLP request — see [Configure an API key](docs/SETUP.md#3-create-a-tenan
 in the full setup guide. In Development the collector also listens on plaintext `http://localhost:5117`;
 outside Development it requires TLS (`https://…:7057`), because keys travel in every export.
 
-For other database providers (SQL Server, MySQL, ClickHouse), Docker recipes,
+For other database providers (SQL Server, MySQL, ClickHouse, Parquet), Docker recipes,
 running the two hosts, deploying to production, the full schema reference, and alerting
 configuration, see **[docs/SETUP.md](docs/SETUP.md)**. Every configuration key and its default is
 listed in **[docs/CONFIGURATION.md](docs/CONFIGURATION.md)**.
@@ -108,7 +108,7 @@ combine it with an existing application, or change what gets exposed.
   <PackageReference Include="Keryhe.Telemetry.Ui" Version="1.3.0" />
   <!-- Plus the provider package for your telemetry data (Database:Provider) and the one for your
        control plane (ControlPlane:Provider). On PostgreSQL, SQL Server or MySQL these are the same
-       package; a ClickHouse consumer references Keryhe.Telemetry.ClickHouse and one of the others. -->
+       package; a ClickHouse or Parquet consumer references Keryhe.Telemetry.ClickHouse or .Parquet and one of the others. -->
   <PackageReference Include="Keryhe.Telemetry.PostgreSQL" Version="1.3.0" />
 </ItemGroup>
 ```

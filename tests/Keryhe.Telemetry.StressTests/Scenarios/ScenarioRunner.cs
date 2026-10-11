@@ -73,6 +73,9 @@ public static class ScenarioRunner
                 new HostLaunchOptions(spec.Provider, db.ConnectionString, db.ConnectionString, db.ControlPlaneProviderName, db.ControlPlaneConnectionString, spec.Topology, directory, profile.RetentionIntervalSeconds,
                     ExtraEnvironment: profile.HostEnvironment), ct);
 
+            if (hosts.Hosts.FirstOrDefault(h => h.Role == HostRole.Api) is { } apiHost)
+                observers.AttachHostLog(apiHost.LogPath);
+
             await using var generator = new OtlpLoadGenerator(profile.Load,
                 tenants.Select(t => new LoadTenant(t.Id, t.Name, t.ApiKey)).ToList(), hosts.GrpcUri);
             generator.SetRateScale(profile.Ramp?.StartScale ?? 1);

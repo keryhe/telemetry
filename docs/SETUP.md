@@ -13,6 +13,7 @@ alerting and retention subsystems. See the [README](../README.md) for a quick st
   - SQL Server 2022
   - MySQL 8.0.19+ (MariaDB is not supported)
   - ClickHouse 25.8 (fresh install; no migration from an earlier layout)
+  - Parquet files read by an in-process DuckDB (telemetry data only, no database server; one machine; the control plane runs on one of the relational backends)
 - Docker, only to run the integration and stress tests or the Docker recipes below
 
 ## 1. Create the database(s) and apply the schemas
@@ -22,7 +23,7 @@ The schema has two components, each with its own script per provider and its own
 - **Control plane** (`tenants`, `api_keys`, `alert_rules`, `alert_events`, `retention_settings`): PostgreSQL, SQL Server or
   MySQL only. Apply `schema/<Provider>-ControlPlane.sql`.
 - **Telemetry data** (resources, spans, logs, metrics, rollups): PostgreSQL, SQL Server, MySQL or ClickHouse. Apply
-  `schema/<Provider>-Telemetry.sql`.
+  `schema/<Provider>-Telemetry.sql`. (Parquet has no script: see below.)
 
 No foreign key crosses the two, so either may be applied first; apply the control plane first, since a running
 collector needs keys before it accepts data.
@@ -54,12 +55,20 @@ createdb keryhe_control
 psql -d keryhe_control -f schema/PostgreSQL-ControlPlane.sql
 ```
 
+**Parquet** holds telemetry as files under one directory and needs no server or script: create the root (the collector
+writes `_schema.json` into it on first start) and run the control plane on PostgreSQL, SQL Server or MySQL as for ClickHouse.
+The collector and the API host must see the same directory on one machine's file system.
+
+```bash
+schema/apply-schema.sh telemetry parquet /var/lib/keryhe-telemetry   # just creates the directory
+```
+
 Or use the runner script, which skips a component whose target version (`control_plane_schema_version` /
 `telemetry_schema_version`, both currently 4.0.0) is already recorded:
 
 ```bash
 schema/apply-schema.sh <controlplane|telemetry> <postgresql|sqlserver|mysql|clickhouse> [database]
-# controlplane: postgresql | sqlserver | mysql        telemetry: postgresql | sqlserver | mysql | clickhouse
+# controlplane: postgresql | sqlserver | mysql        telemetry: postgresql | sqlserver | mysql | clickhouse | parquet
 ```
 
 > **Schema 4.x is a fresh-install schema.** There is no migration from 2.x or 3.x: an existing database must be
@@ -100,12 +109,12 @@ Update `src/Keryhe.Telemetry.Api.Server/appsettings.json` (REST API / read path)
 }
 ```
 
-Set `Database:Provider` to `PostgreSQL`, `SqlServer`, `MySql`, or `ClickHouse` to match your telemetry backend, and
+Set `Database:Provider` to `PostgreSQL`, `SqlServer`, `MySql`, `ClickHouse`, or `Parquet` to match your telemetry backend, and
 `ControlPlane:Provider` to `PostgreSQL`, `SqlServer`, or `MySql` for the control plane (both hosts must agree on both). Both
 keys and `ConnectionStrings:ControlPlane` are **required**: a missing or unknown value fails startup with the key
 named, and there is no fallback from `ControlPlane` to `Collector`/`Api`. On the relational backends the control-plane
-string normally points at the same database as the data strings; with ClickHouse it points at the separate control-plane
-database. For SQL Server use a standard ADO.NET connection string. For MySQL use a MySqlConnector connection string, e.g. `Server=localhost;Port=3306;Database=telemetry;User ID=root;Password=<password>`. For ClickHouse use a ClickHouse.Client connection string over the HTTP interface (port 8123), e.g. `Host=localhost;Port=8123;Username=default;Password=<password>;Database=telemetry`.
+string normally points at the same database as the data strings; with ClickHouse or Parquet it points at the separate control-plane
+database. Parquet takes no data connection string: set `Telemetry:Parquet:RootPath` (the same directory) on both hosts instead. For SQL Server use a standard ADO.NET connection string. For MySQL use a MySqlConnector connection string, e.g. `Server=localhost;Port=3306;Database=telemetry;User ID=root;Password=<password>`. For ClickHouse use a ClickHouse.Client connection string over the HTTP interface (port 8123), e.g. `Host=localhost;Port=8123;Username=default;Password=<password>;Database=telemetry`.
 
 > **During development, connection strings should live in User Secrets, not `appsettings.json`.** Both hosts ship with an
 > empty `ConnectionStrings` value and read the real value from .NET User Secrets so credentials
@@ -336,6 +345,7 @@ when unauthenticated and 403 for a refused tenant or operation. See
 - `request_rollup_minute`, `log_rollup_minute` — Per-minute rollups of inbound spans and log records that the dashboard, trace list and logs page read for their cards and charts (rows are partial and summed on read; forward-only, so ranges before an upgrade show empty charts)
 - `telemetry_schema_version` — Applied telemetry schema versions
 - MySQL only: `request_rollup_hour`, `log_rollup_hour` and `rollup_compaction` — the hour tier of those rollups
+- Parquet has the same table set as ClickHouse, as files (see below).
 - ClickHouse has its own table set (see below): `spans`, `log_records`, one points table per metric type, `trace_index`, `metric_catalog`, `metric_series` and the two rollup tables; it has no `resources`, `instrumentation_scopes`, `metrics` or `metric_last_seen`
 
 ### Control-plane tables
@@ -360,6 +370,8 @@ charts above them come from the rollups, which count **requests** (inbound serve
 When using the MySQL provider (MySQL 8.0.19+), the schema mirrors the SQL Server relational layout with MySQL-native types (`AUTO_INCREMENT` surrogate keys, `JSON` columns for attributes, `DATETIME(6)` timestamps). Hash-based deduplication of resources/scopes uses `INSERT ... ON DUPLICATE KEY UPDATE`, and writes are batched as multi-row inserts.
 
 When using the ClickHouse provider (25.8), each row carries its own resource and scope attributes, so there are no reference tables and no surrogate ids. Tables are plain `MergeTree` (the derived `trace_index` and rollups are `AggregatingMergeTree`) partitioned by day; attributes are `Map(LowCardinality(String), String)` (values are text, the original type is not kept); trace ids are `UUID` and span ids `UInt64`. The collector writes the derived tables itself after the raw insert, so a failed derived insert under-counts the cards, charts and metric catalog (`derived_rows_dropped`). Retention drops fully expired day partitions. ClickHouse has no control plane of its own (tenants, keys, alert rules and retention settings live in the PostgreSQL, SQL Server or MySQL database named by `ControlPlane:Provider`), so alert-rule edits and the cooldown fire-claim are as atomic as on those. See the ClickHouse package README and `../CLAUDE.md` for the full list of ClickHouse-specific behaviors.
+
+When using the Parquet provider, the data is Parquet files under `Telemetry:Parquet:RootPath`, one folder per table, tenant, day and hour, listed by manifests that readers follow (a file is visible only once listed). Like ClickHouse each row carries its own resource and scope attributes (values are text), the collector writes the derived tables, and trace ids are two `UBIGINT` halves. The collector holds records for `LingerMilliseconds` (30 s) before writing, so a crash loses that window and new data is readable about that long after it arrives. The compactor on the API host folds the many small files into larger ones, and retention deletes whole expired day folders. See the Parquet package README (`src/Keryhe.Telemetry.Parquet/README.md`) for the operator guide.
 
 Free-text and `key:value` search is unindexed on every provider, so a search or "slow" request is limited to
 `Telemetry:Query:RawSearchWindowHours` (default 24); exports are limited to a provider-dependent window
@@ -401,14 +413,14 @@ automatic evaluation.
 (default 3600; `Enabled=false` stops it). How many days to keep is not configuration: it is the
 control plane's `retention_settings` row, edited on the **Settings** page in the UI. The sweep runs against the telemetry
 database, and the mechanism depends on its provider: bounded-batch deletes per tenant (PostgreSQL, SQL Server, MySQL; the
-tenants are those with rows in `resources`) or dropping whole day partitions (ClickHouse). Each sweep logs "Retention sweep complete" with the rows removed and how long it took.
+tenants are those with rows in `resources`) or dropping whole day partitions (ClickHouse) or day folders (Parquet). Each sweep logs "Retention sweep complete" with the rows removed and how long it took.
 
 ## Testing
 
 ```bash
 # Every provider against real Testcontainers databases (requires Docker)
 dotnet test tests/Keryhe.Telemetry.IntegrationTests
-# One provider: PostgreSQL | SqlServer | MySql | ClickHouse (ClickHouse also starts a PostgreSQL container for its control plane)
+# One provider: PostgreSQL | SqlServer | MySql | ClickHouse | Parquet (ClickHouse and Parquet also start a PostgreSQL container for their control plane)
 dotnet test tests/Keryhe.Telemetry.IntegrationTests --filter Provider=SqlServer
 
 # Test data generator simulation tests (no database or Docker)

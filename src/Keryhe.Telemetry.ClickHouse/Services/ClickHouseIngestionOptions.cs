@@ -1,3 +1,5 @@
+using Keryhe.Telemetry.Core.Data;
+
 namespace Keryhe.Telemetry.ClickHouse.Services;
 
 /// <summary>
@@ -5,8 +7,10 @@ namespace Keryhe.Telemetry.ClickHouse.Services;
 /// the shared <c>Telemetry:Ingestion</c> gate sizes still apply (they bound resident records, including those waiting
 /// in day buffers); its <c>FlushConcurrency</c>, flush batch sizes and linger do not. Retry settings are shared.
 /// </summary>
-public sealed class ClickHouseIngestionOptions
+public sealed class ClickHouseIngestionOptions : IPartitionedIngestionOptions
 {
+    int IPartitionedIngestionOptions.MaxLateBuffers => MaxLateDayBuffers;
+
     public const string SectionName = "Telemetry:ClickHouse:Ingestion";
 
     /// <summary>How long the current day's buffer collects records after its first record before it is flushed.</summary>

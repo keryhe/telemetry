@@ -20,6 +20,12 @@ public sealed class MySqlCollection : ICollectionFixture<MySqlFixture>;
 [CollectionDefinition(ProviderNames.ClickHouse)]
 public sealed class ClickHouseCollection : ICollectionFixture<ClickHouseFixture>;
 
+[CollectionDefinition(ProviderNames.Parquet)]
+public sealed class ParquetCollection : ICollectionFixture<ParquetFixture>;
+
+[CollectionDefinition(ProviderNames.ParquetCompacted)]
+public sealed class ParquetCompactedCollection : ICollectionFixture<ParquetCompactedFixture>;
+
 /// <summary>
 /// Test classes that count the process-wide <c>Keryhe.Telemetry.Ingestion</c> meter with a <c>MeterListener</c>. A listener sees
 /// every <c>IngestionMetrics</c> instance in the process, so these classes must not run at the same time as one another.

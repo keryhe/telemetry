@@ -1,6 +1,7 @@
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.Extensions.Hosting;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using Keryhe.Telemetry.Core;
 using Keryhe.Telemetry.Core.Data;
@@ -40,7 +41,9 @@ public static class ClickHouseServiceCollectionExtensions
             o.MaxGateWaitMilliseconds ??= ch.Value.LingerMilliseconds + TelemetryIngestionOptions.DefaultMaxGateWaitMilliseconds);
         services.AddSingleton<IFlushErrorClassifier, ClickHouseFlushErrorClassifier>();
         services.TryAddSingleton(TimeProvider.System);
-        services.AddSingleton<IRetentionWindows, RetentionWindowCache>();
+        services.AddSingleton<IRetentionWindows>(sp => new RetentionWindowCache(
+            sp.GetRequiredService<IConfiguration>(), sp.GetRequiredService<IOptions<ClickHouseIngestionOptions>>().Value.RetentionRefreshSeconds,
+            sp.GetRequiredService<TimeProvider>(), sp.GetRequiredService<ILogger<RetentionWindowCache>>()));
         var shared = services.FirstOrDefault(d => d.ServiceType == typeof(IHostedService) && d.ImplementationType == typeof(TelemetryIngestionWorker));
         if (shared is not null) services.Remove(shared);
         else if (services.Any(d => d.ServiceType == typeof(TelemetryIngestionChannel)))

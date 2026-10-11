@@ -55,6 +55,14 @@ public abstract class RollupReadRepositoryBase : DapperReadRepository, IRollupRe
     protected virtual string? HourTierSource(string kind, Func<string, string, string> branch, RollupQuery query, string filters, DynamicParameters parameters)
         => null;
 
+    /// <summary>
+    /// Opens the connection a rollup statement runs on. The default ignores the query; a provider whose connection must be
+    /// prepared for the window being read (Parquet defines its views over the files of the range) overrides it.
+    /// </summary>
+    /// <param name="kind"><c>request</c> or <c>log</c>.</param>
+    protected virtual Task<DbConnection> OpenRollupConnectionAsync(string kind, RollupQuery query, CancellationToken cancellationToken)
+        => OpenConnectionAsync(cancellationToken);
+
     private DynamicParameters Parameters(RollupQuery query)
     {
         var parameters = new DynamicParameters();
@@ -118,7 +126,7 @@ public abstract class RollupReadRepositoryBase : DapperReadRepository, IRollupRe
             GROUP BY b, svc
             """;
 
-        await using var conn = await OpenConnectionAsync(ct);
+        await using var conn = await OpenRollupConnectionAsync("request", query, ct);
         var rows = await conn.QueryAsync(new CommandDefinition(sql, parameters, commandTimeout: commandTimeout, cancellationToken: ct));
         var result = new List<RequestRollupAggregate>();
         foreach (var row in rows)
@@ -162,7 +170,7 @@ public abstract class RollupReadRepositoryBase : DapperReadRepository, IRollupRe
             GROUP BY b, sev
             """;
 
-        await using var conn = await OpenConnectionAsync(ct);
+        await using var conn = await OpenRollupConnectionAsync("log", query, ct);
         var rows = await conn.QueryAsync(new CommandDefinition(sql, parameters, commandTimeout: commandTimeout, cancellationToken: ct));
         var result = new List<LogRollupAggregate>();
         foreach (var row in rows)

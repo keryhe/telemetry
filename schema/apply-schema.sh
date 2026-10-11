@@ -13,13 +13,18 @@
 #   schema/apply-schema.sh <controlplane|telemetry> <provider> [database]
 #
 #   <provider>   controlplane: postgresql | sqlserver | mysql
-#                telemetry:    postgresql | sqlserver | clickhouse | mysql
-#   [database]   target database name (default: telemetry)
+#                telemetry:    postgresql | sqlserver | clickhouse | mysql | parquet
+#   [database]   target database name (default: telemetry); for parquet, the root directory (required)
 #
 # On a relational provider both components normally go to the same database; apply the control
 # plane first (a running collector needs keys before it accepts data), though either order works
 # (no foreign key crosses the two). A ClickHouse deployment applies the telemetry component to
 # ClickHouse and the control plane to a separate PostgreSQL, SQL Server or MySQL database.
+#
+# The parquet provider has no scripts: `telemetry parquet <root>` only creates the root directory. The collector
+# writes <root>/_schema.json (the version and a hash of its table definitions) on first start, and both hosts
+# refuse a root with another version (plans/parquet-duckdb). It has no control plane: run `controlplane` on a
+# relational provider.
 #
 # Connection settings are taken from the standard client environment variables:
 #   postgresql  -> PGHOST, PGPORT, PGUSER, PGPASSWORD (libpq)
@@ -52,11 +57,25 @@ TELEMETRY_TARGET_VERSION="4.0.0"
 usage() {
     echo "usage: $0 <controlplane|telemetry> <provider> [database]" >&2
     echo "  controlplane providers: postgresql|sqlserver|mysql" >&2
-    echo "  telemetry providers:    postgresql|sqlserver|clickhouse|mysql" >&2
+    echo "  telemetry providers:    postgresql|sqlserver|clickhouse|mysql|parquet" >&2
     exit 2
 }
 
 [[ -z "$COMPONENT" || -z "$PROVIDER" ]] && usage
+
+if [[ "$PROVIDER" == "parquet" ]]; then
+    if [[ "$COMPONENT" != "telemetry" ]]; then
+        echo "error: Parquet has no control-plane schema; use postgresql, sqlserver or mysql for the control plane" >&2
+        exit 2
+    fi
+    if [[ $# -lt 3 ]]; then
+        echo "error: telemetry parquet needs the root directory: $0 telemetry parquet <root>" >&2
+        exit 2
+    fi
+    mkdir -p "$DATABASE"
+    echo "created Parquet root '$DATABASE'; the collector writes _schema.json ($TELEMETRY_TARGET_VERSION) on first start."
+    exit 0
+fi
 
 case "$COMPONENT" in
     controlplane) FILE_SUFFIX="ControlPlane"; TARGET_VERSION="$CONTROLPLANE_TARGET_VERSION"; VERSION_TABLE="control_plane_schema_version" ;;

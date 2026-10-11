@@ -15,8 +15,8 @@ to both.
 
 | Key | Default | Host | Description |
 |---|---|---|---|
-| `Database:Provider` | none (required) | collector, API | The telemetry data provider: `PostgreSQL`, `SqlServer`, `ClickHouse` or `MySql`. Unknown or missing fails startup. |
-| `ControlPlane:Provider` | none (required) | collector, API, Admin | The control-plane provider (tenants, API keys, alert rules, retention settings): `PostgreSQL`, `SqlServer` or `MySql`. ClickHouse is not a control-plane provider. Unknown or missing fails startup naming the key. |
+| `Database:Provider` | none (required) | collector, API | The telemetry data provider: `PostgreSQL`, `SqlServer`, `ClickHouse`, `MySql` or `Parquet` (files + DuckDB; no connection string, see `Telemetry:Parquet`). Unknown or missing fails startup. |
+| `ControlPlane:Provider` | none (required) | collector, API, Admin | The control-plane provider (tenants, API keys, alert rules, retention settings): `PostgreSQL`, `SqlServer` or `MySql`. ClickHouse and Parquet are not control-plane providers. Unknown or missing fails startup naming the key. |
 | `ConnectionStrings:Collector` | none (required) | collector | Write path: the telemetry bulk writer, metric-touch and rollup stores. |
 | `ConnectionStrings:Api` | none (required) | API | Read path: every telemetry read repository and the retention sweeper. |
 | `ConnectionStrings:ControlPlane` | none (required) | collector, API | The control-plane database: the collector's API-key lookup and touch, the API's alert rules, tenant catalog and retention settings. No fallback to `Collector`/`Api`; missing fails startup naming the key. On PostgreSQL, SQL Server and MySQL it normally points at the same database as the data strings. |
@@ -218,6 +218,45 @@ All values must be greater than 0. Extra instrument: `late_buffer_records` (reco
 `derived_rows_dropped` (tag `table`) counts `trace_index`, rollup and catalog rows lost because their insert failed after the raw rows were stored.
 `records_dropped` carries a `reason` tag on ClickHouse (`retries_exhausted`, `out_of_retention`, `shutdown`).
 
+### Parquet (`Telemetry:Parquet`)
+
+`ParquetOptions`, read by both hosts when `Database:Provider` is `Parquet` (there is no `ConnectionStrings:Collector`/`:Api` for it).
+The collector writes tenant-hour Parquet files; the API host reads them with an in-process DuckDB and runs the compactor. Both
+must see the same `RootPath` **on one machine's file system** (a local disk, or a volume shared by containers on one Linux host; not a network share).
+`Compaction` is read by the API host only, `Writer` by the collector only. Ingestion buffers per hour like ClickHouse's per day, so the
+`Telemetry:Ingestion:MaxQueued*` gates must each be at least `MaxBufferRecords` (a startup warning says so) and large enough to hold the
+records of one linger. When these keys are not set, the Parquet provider defaults the three record gates to `2 x MaxBufferRecords` (1,000,000)
+and `MaxQueuedBytesPerSignal` to 2 GB, instead of the 200000 / 256 MB above; a key you set wins.
+
+| Key | Default | Description |
+|---|---|---|
+| `RootPath` | none (required) | The data directory. |
+| `WriterId` | machine name + a saved suffix | A collector's stable id (1-64 letters, digits, `_`, `-`); unique per live collector on one root. |
+| `LingerMilliseconds` | 30000 | How long the open hour's buffer collects records before it is written as a file; also the delay before new data is readable. |
+| `LateLingerMilliseconds` | 120000 | The same for a buffer of an earlier hour (late data). |
+| `MaxBufferRecords` | 500000 | A buffer is written at once when it holds this many records. |
+| `MaxBufferBytes` | 268435456 | Reserved: the gate's `MaxQueuedBytesPerSignal` already bounds resident bytes. |
+| `MaxLateBuffers` | 24 | With more earlier-hour buffers than this, the oldest is written early. |
+| `RetentionRefreshSeconds` | 300 | How often the retention windows are re-read from the control plane. Records older than their window are dropped at ingest (`records_dropped`, `reason=out_of_retention`). |
+| `CatalogRefreshSeconds` / `MaxTrackedSeries` | 300 / 1000000 | A metric or series that keeps reporting has its `metric_catalog`/`metric_series` row re-written at most this often; past the limit the writer forgets and re-writes. |
+| `RowGroupRows` | 122880 | Parquet row group size. |
+| `Compression` | `zstd` | `zstd`, `snappy`, `gzip` or `uncompressed`. |
+| `DuckDb:MemoryLimit` / `Threads` / `TempDirectory` | 2GB / processor count / `<RootPath>/_tmp/<host>` | The API host's read database. |
+| `Writer:DuckDb:MemoryLimit` / `Threads` | 1GB / 2 | The collector's file-writing database. |
+| `Compaction:Enabled` | true | Runs on the API host; one instance at a time holds the lease. |
+| `Compaction:IntervalSeconds` / `LeaseSeconds` | 60 / 300 | Worker wake-up and lease renewal; a lease not renewed for `LeaseSeconds` is taken over. |
+| `Compaction:MinorFileThreshold` / `MinorAgeSeconds` | 100 / 600 | Uncompacted files in a partition beyond this count (or older than this) are folded into one. |
+| `Compaction:CloseHourGraceMinutes` / `CloseDayGraceHours` | 15 / 6 | How long after it ends an hour is rewritten, and a day merged into one folder. |
+| `Compaction:MaxFileRows` / `MaxSortRows` | 10000000 / 20000000 | A compacted file's size cap, and the most rows one sorted write takes. |
+| `Compaction:GraceSeconds` | 600 | A superseded file is deleted this long after; must exceed your longest query or export. |
+| `Compaction:MaxConcurrentCompactions` | 2 | Tenant-days compacted at a time. |
+| `Compaction:ScanDays` / `FullScanMinutes` | 2 / 60 | A pass looks at the last `ScanDays` days; every `FullScanMinutes` at all of them. |
+| `Compaction:DuckDb:MemoryLimit` / `Threads` | 3GB / 4 | The compactor's own database. |
+
+All numeric values must be greater than 0 (`MinorAgeSeconds`, `CloseHourGraceMinutes`, `CloseDayGraceHours` and `GraceSeconds` may be 0).
+Logging `Keryhe.Telemetry.Parquet.ParquetQueryEngine` at `Debug` on the API host writes one line per read statement with its elapsed
+milliseconds and the number of files read. `records_dropped` carries the same `reason` tag as on ClickHouse. The package README is the operator guide.
+
 ### Tenant resolution (`Telemetry:TenantResolution`)
 
 `TenantResolutionOptions`.
@@ -300,7 +339,7 @@ API host. `QueryOptions`.
 | `AnchorLookbackMinutes` | 5 | How far before a trace-list window the anchor derivation looks, so a trace that began just before the window is not listed on a later span. |
 | `PageSliceSeconds` | 2 | First slice of trace start times a trace-list page scans (relational providers). |
 | `PageSliceGrowth` | 4 | Factor each further slice widens by (minimum 2). |
-| `TraceHintMarginMinutes` | 1 | Margin either side of a trace-detail `?start=&end=` hint (ClickHouse). |
+| `TraceHintMarginMinutes` | 1 | Margin either side of a trace-detail `?start=&end=` hint (ClickHouse, Parquet). |
 | `TraceHintEnabled` | true | `false` ignores every trace-detail time hint. |
 
 ### List caps (`Telemetry:Query:Limits`)
@@ -323,7 +362,7 @@ API host. `ExportOptions`.
 
 | Key | Default | Description |
 |---|---|---|
-| `MaxWindowDaysOverride` | unset (7 on PostgreSQL/ClickHouse, 1 on SQL Server/MySQL) | Widest window an export may cover; wider is a `400`. |
+| `MaxWindowDaysOverride` | unset (7 on PostgreSQL/ClickHouse/Parquet, 1 on SQL Server/MySQL) | Widest window an export may cover; wider is a `400`. |
 | `MaxConcurrent` | 2 | Exports streaming at once per API instance; beyond it a request gets `429`. |
 
 ### Alert evaluation (`Telemetry:AlertEvaluation`)

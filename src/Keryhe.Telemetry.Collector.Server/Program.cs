@@ -23,8 +23,9 @@ public class Program
             case "PostgreSQL": builder.Services.AddPostgreSqlCollectorServices(builder.Configuration); break;
             case "ClickHouse": builder.Services.AddClickHouseCollectorServices(builder.Configuration); break;
             case "MySql":      builder.Services.AddMySqlCollectorServices(builder.Configuration);      break;
+            case "Parquet":    builder.Services.AddParquetCollectorServices(builder.Configuration);    break;
             default: throw new InvalidOperationException(
-                "Unknown or missing Database:Provider (expected SqlServer, PostgreSQL, ClickHouse, or MySql).");
+                "Unknown or missing Database:Provider (expected SqlServer, PostgreSQL, ClickHouse, MySql, or Parquet).");
         }
 
         // The control plane (tenants and API keys): ControlPlane:Provider + ConnectionStrings:ControlPlane, both

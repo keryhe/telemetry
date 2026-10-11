@@ -11,4 +11,6 @@ public static class ProviderNames
     public const string SqlServer = "SqlServer";
     public const string MySql = "MySql";
     public const string ClickHouse = "ClickHouse";
+    public const string Parquet = "Parquet";
+    public const string ParquetCompacted = "ParquetCompacted";
 }

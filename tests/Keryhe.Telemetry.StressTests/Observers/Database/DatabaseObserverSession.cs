@@ -14,14 +14,15 @@ public sealed class DatabaseObserverSession : IAsyncDisposable
 {
     private readonly DatabaseObserverBase _observer;
     private readonly LockSampler _locks;
-    private readonly ContainerStatsSampler _stats;
+    private readonly ContainerStatsSampler? _stats;
     private IReadOnlyList<ServerSetting> _settings = [];
 
     private DatabaseObserverSession(DatabaseObserverBase observer, string containerId, TimeSpan interval)
     {
         _observer = observer;
         _locks = new LockSampler(observer, interval);
-        _stats = new ContainerStatsSampler(containerId);
+        // Parquet has no database container (its ContainerId is the control plane's PostgreSQL): the hosts' own process metrics carry resource use.
+        _stats = observer.Provider == "Parquet" ? null : new ContainerStatsSampler(containerId);
     }
 
     public string Provider => _observer.Provider;
@@ -33,7 +34,7 @@ public sealed class DatabaseObserverSession : IAsyncDisposable
         await session._observer.BeginAsync(cancellationToken);
         session._settings = await session._observer.ReadSettingsAsync(cancellationToken);
         await session._observer.ResetAsync(cancellationToken);
-        session._stats.Start();
+        session._stats?.Start();
         session._locks.Start();
         return session;
     }
@@ -46,6 +47,9 @@ public sealed class DatabaseObserverSession : IAsyncDisposable
     public Task<RowCounts> CountRollupRowsAsync(long backdatedCutoffNanos, CancellationToken cancellationToken = default) =>
         _observer.CountRollupRowsAsync(backdatedCutoffNanos, cancellationToken);
 
+    /// <summary>Hands the API host's console log to an observer that reads statement timings from it (Parquet).</summary>
+    public void AttachHostLog(string apiHostLogPath) => _observer.AttachHostLog(apiHostLogPath);
+
     /// <summary>The effective server settings read when the session started.</summary>
     public IReadOnlyList<ServerSetting> Settings => _settings;
 
@@ -55,7 +59,7 @@ public sealed class DatabaseObserverSession : IAsyncDisposable
     public async Task<DatabaseObservation> StopAsync(int topStatements = 20, CancellationToken cancellationToken = default)
     {
         var samples = await _locks.StopAsync();
-        var containerStats = await _stats.StopAsync();
+        IReadOnlyList<ContainerStatsSample> containerStats = _stats is null ? [] : await _stats.StopAsync();
         var summary = await _observer.EndAsync(cancellationToken);
         var statements = await _observer.SnapshotAsync(topStatements, cancellationToken);
         var tables = await _observer.ReadAsync(cancellationToken);
@@ -66,6 +70,6 @@ public sealed class DatabaseObserverSession : IAsyncDisposable
     public async ValueTask DisposeAsync()
     {
         await _locks.DisposeAsync();
-        await _stats.DisposeAsync();
+        if (_stats is not null) await _stats.DisposeAsync();
     }
 }
