@@ -1,12 +1,22 @@
 import { InjectionToken } from '@angular/core';
 import { Observable } from 'rxjs';
 
+/** The parts of the signed-in user the header shows. All optional: a provider may release only some of them. */
+export interface UserInfo {
+  name?: string;
+  givenName?: string;
+  email?: string;
+  picture?: string;
+}
+
 /**
  * The SPA's own sign-in, present only in `oidc` mode (provided by `provideOidcAuth`, which is
  * imported on demand so a cookie-mode deployment never downloads the OIDC client). Null in `cookie`
  * mode, where the host owns sign-in and the browser attaches its cookie.
  */
 export interface AuthSession {
+  /** The signed-in user's details from the session (ID token claims, plus userinfo if the host enables it); null when none. */
+  user(): Observable<UserInfo | null>;
   /** The current access token (refreshed when needed), or null when there is none. */
   accessToken(): Observable<string | null>;
   /** Starts the sign-in redirect, coming back to the app-relative `returnUrl`. */

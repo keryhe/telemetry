@@ -254,7 +254,7 @@ public class SqlServerRetentionSettingsRepository(ControlPlaneConnection control
 /// SQL Server implementation of the <see cref="IRetentionSweeper"/> sweeps: the shared
 /// batched, per-tenant shape from <see cref="RetentionSweeperBase"/>. The batch is
 /// <c>DELETE TOP (n)</c>, which seeks the clustered key (<c>(tenant_id, time, id)</c> on spans and
-/// log records) or the data-point time index, and is kept below SQL Server's lock-escalation
+/// log records) or the data-point <c>(metric_id, time, id)</c> clustered key, and is kept below SQL Server's lock-escalation
 /// threshold (~5000 locks on one table/index in a single statement) so a sweep takes row locks only,
 /// rather than escalating to an exclusive table lock that blocks -- and deadlocks with -- the
 /// ingest path still appending to the same table.

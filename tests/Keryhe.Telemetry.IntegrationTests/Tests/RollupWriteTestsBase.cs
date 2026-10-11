@@ -350,8 +350,8 @@ public abstract class RollupWriteTestsBase : IAsyncLifetime
         using (var scope = Scope())
         {
             var retention = scope.ServiceProvider.GetRequiredService<IRetentionSweeper>();
-            await retention.DeleteOldTracesAsync(TimeSpan.FromDays(90));
-            if (SupportsLogs) await retention.DeleteOldLogRecordsAsync(TimeSpan.FromDays(90));
+            await retention.DeleteOldTracesAsync(Seeding.RetentionPolicies.For((_fixture.TenantId, 90)));
+            if (SupportsLogs) await retention.DeleteOldLogRecordsAsync(Seeding.RetentionPolicies.For((_fixture.TenantId, 90)));
         }
 
         var requestsAfter = await QueryAsync(

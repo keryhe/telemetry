@@ -12,7 +12,7 @@ schema, the tests and the measurements use). Fresh install only: there is no mig
 - `AddClickHouseApiServices(configuration)` — registers the trace, log, metric, resource and rollup read
   repositories and `IRetentionSweeper`, connecting via `ConnectionStrings:Api`.
 
-**ClickHouse holds telemetry data only.** Tenants, API keys, alert rules and retention settings (the control
+**ClickHouse holds telemetry data only.** Tenants, API keys, alert rules and each tenant's retention windows (the control
 plane) live in PostgreSQL, SQL Server or MySQL: also reference that provider's package and register its
 `Add<Provider>ControlPlaneCollectorServices` / `Add<Provider>ControlPlaneApiServices`
 (`ControlPlane:Provider`, `ConnectionStrings:ControlPlane`).
@@ -63,12 +63,14 @@ control-plane script of your control-plane provider to its database, and create 
 - **Large flushes are split** into concurrent inserts (`ParallelFlushMinRows`, `InsertPieceRows`, `MaxParallelInserts`), each
   with its own dedup token; below the threshold a flush is one insert.
 - **Late data** is accepted: records are buffered per UTC day and an earlier day is flushed less often
-  (`Telemetry:ClickHouse:Ingestion`). Records older than the retention window are dropped at ingest.
+  (`Telemetry:ClickHouse:Ingestion`). Records older than their tenant's retention window (the built-in 30 days for a tenant with no control-plane row) are dropped at ingest; after a window is lengthened, records between the old and new cutoff are still dropped for up to the refresh interval.
 - **Search.** A free-text term of only letters and digits is a whole-word match through a token index
   (`pay` does not find `payments`); anything else is a substring scan. Search is limited to
   `Telemetry:Query:RawSearchWindowHours`.
-- **Retention** drops whole expired day partitions (the granularity is the day); the metric catalog and series rows
-  nothing has written to within the metrics window are deleted.
+- **Retention** is per tenant, in whole days. Whole day partitions past the longest window in effect are dropped; for each shorter
+  window one lightweight `DELETE` removes that window's tenants' rows from the days between the two cutoffs (skipped when already
+  done for those days), so queries skip masked rows on the affected parts until merges remove them. The metric catalog and series
+  rows nothing has written to within a tenant's metrics window are deleted.
 
 Because ClickHouse has no control plane here, nothing in this package needs a relational database except the
 `ControlPlane:Provider` you register beside it.

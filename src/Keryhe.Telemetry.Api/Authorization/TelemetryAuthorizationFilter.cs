@@ -42,7 +42,11 @@ public sealed class TelemetryAuthorizationFilter(
             tenantId = parsed;
         }
 
-        if (options.Value.Authorization.Enabled)
+        // [TelemetryAnonymous] actions (GET /me) skip authorization altogether; they answer for the caller's own identity only.
+        var anonymous = (context.ActionDescriptor as ControllerActionDescriptor)?.MethodInfo
+            .IsDefined(typeof(TelemetryAnonymousAttribute), false) == true;
+
+        if (options.Value.Authorization.Enabled && !anonymous)
         {
             var operation = (context.ActionDescriptor as ControllerActionDescriptor)?.MethodInfo
                 .GetCustomAttributes(typeof(TelemetryOperationAttribute), false)

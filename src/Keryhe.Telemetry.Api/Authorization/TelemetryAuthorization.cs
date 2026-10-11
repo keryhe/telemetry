@@ -18,6 +18,14 @@ public sealed class TelemetryOperationAttribute(TelemetryOperation operation) : 
     public TelemetryOperation Operation { get; } = operation;
 }
 
+/// <summary>
+/// Marks an action that is served without authorization (and so carries no <see cref="TelemetryOperationAttribute"/>):
+/// <c>TelemetryAuthorizationFilter</c> skips it. Only for an action that answers about the caller's own identity and
+/// reveals nothing else (<c>GET /me</c>). Exactly one of the two attributes belongs on every library action.
+/// </summary>
+[AttributeUsage(AttributeTargets.Method, AllowMultiple = false)]
+public sealed class TelemetryAnonymousAttribute : Attribute;
+
 /// <summary>Marks a controller whose routes live under <c>tenants/{tenantId}</c>.</summary>
 [AttributeUsage(AttributeTargets.Class, AllowMultiple = false)]
 public sealed class TenantScopedAttribute : Attribute;

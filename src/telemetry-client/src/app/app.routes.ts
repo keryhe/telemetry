@@ -6,7 +6,7 @@ import {
 
 /**
  * Tenant-scoped pages live under `t/:tenantId/`, so the URL (and a copied link) names its tenant.
- * `settings` is global. The tenant-less paths of earlier versions redirect under the last used
+ * The tenant-less paths of earlier versions redirect under the last used
  * tenant (`legacyTenantRedirect`), keeping bookmarks and their query strings working.
  */
 const legacy = (path: string) => ({ path, pathMatch: 'full' as const, canActivate: [legacyTenantRedirect], children: [] });
@@ -74,13 +74,13 @@ export const routes: Routes = [
             loadComponent: () =>
               import('./features/alerts/alerts.component').then((m) => m.AlertsComponent),
           },
+          {
+            path: 'settings',
+            title: 'Settings',
+            loadComponent: () =>
+              import('./features/settings/settings.component').then((m) => m.SettingsComponent),
+          },
         ],
-      },
-      {
-        path: 'settings',
-        title: 'Settings',
-        loadComponent: () =>
-          import('./features/settings/settings.component').then((m) => m.SettingsComponent),
       },
       {
         path: 'no-tenants',
@@ -95,6 +95,7 @@ export const routes: Routes = [
       legacy('metrics/:name'),
       legacy('logs'),
       legacy('alerts'),
+      legacy('settings'),
     ],
   },
 ];

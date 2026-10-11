@@ -1,0 +1,33 @@
+<ng-template #avatar let-large="large">
+  <span class="avatar" [class.avatar-large]="large">
+    @if (picture(); as src) {
+      <img [src]="src" alt="" referrerpolicy="no-referrer" (error)="onPictureError()" />
+    } @else if (initial(); as letter) {
+      <span class="avatar-initial" aria-hidden="true">{{ letter }}</span>
+    } @else {
+      <mat-icon>person</mat-icon>
+    }
+  </span>
+</ng-template>
+
+<button mat-icon-button type="button" class="user-button" [matMenuTriggerFor]="menu"
+        [matTooltip]="label()" [attr.aria-label]="label()">
+  <ng-container [ngTemplateOutlet]="avatar" [ngTemplateOutletContext]="{ large: false }" />
+</button>
+
+<mat-menu #menu="matMenu" xPosition="before" class="user-menu-panel">
+  <div class="user-card" (click)="$event.stopPropagation()" (keydown)="$event.stopPropagation()">
+    <ng-container [ngTemplateOutlet]="avatar" [ngTemplateOutletContext]="{ large: true }" />
+    <div class="user-lines">
+      @if (user()?.name; as name) { <span class="user-name">{{ name }}</span> }
+      @if (user()?.email; as email) { <span class="user-email">{{ email }}</span> }
+    </div>
+  </div>
+  <mat-divider />
+  @if (auth.canSignOut()) {
+    <button mat-menu-item type="button" (click)="auth.signOut()">
+      <mat-icon>logout</mat-icon>
+      <span>Sign out</span>
+    </button>
+  }
+</mat-menu>

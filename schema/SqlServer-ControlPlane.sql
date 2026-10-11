@@ -1,5 +1,5 @@
--- OpenTelemetry SQL Server control-plane schema -- control-plane schema 4.0.0
--- Tenants, API keys, alert rules and retention settings: the small, mutable, relational state that
+-- OpenTelemetry SQL Server control-plane schema -- control-plane schema 4.0.1
+-- Tenants (with their retention windows), API keys and alert rules: the small, mutable, relational state that
 -- sits beside the telemetry data (plans/control-plane-split.md). The telemetry tables are in
 -- SqlServer-Telemetry.sql. No foreign key crosses the two, so they may share a database or live in two,
 -- and either script may be applied first (control plane first is natural: a running collector needs
@@ -9,7 +9,7 @@
 -- A ClickHouse deployment has no control-plane script of its own: it runs this one on PostgreSQL,
 -- SQL Server or MySQL (ControlPlane:Provider).
 --
--- Schema 4.0.0 is a fresh-install schema: there is no upgrade path from 2.x or 3.x.
+-- Schema 4.0.x is a fresh-install schema: there is no upgrade path from 2.x or 3.x.
 --
 -- Usage:
 --   sqlcmd -S <server> -d telemetry -i schema/SqlServer-ControlPlane.sql
@@ -32,6 +32,10 @@ CREATE TABLE tenants (
     id         BIGINT IDENTITY(1,1) PRIMARY KEY,
     name       NVARCHAR(255) NOT NULL,
     created_at DATETIME2     NOT NULL DEFAULT SYSDATETIME(),
+    trace_retention_days  INT       NOT NULL DEFAULT 30,
+    log_retention_days    INT       NOT NULL DEFAULT 30,
+    metric_retention_days INT       NOT NULL DEFAULT 30,
+    retention_updated_at  DATETIME2 NOT NULL DEFAULT SYSUTCDATETIME(),
     CONSTRAINT uk_tenant_name UNIQUE (name)
 );
 
@@ -97,32 +101,12 @@ CREATE INDEX idx_alert_events_fired_at ON alert_events (fired_at DESC);
 GO
 
 -- =============================================================================
--- RETENTION TABLES
--- =============================================================================
-
--- Single global row (id = 1, enforced by the CHECK below) -- see IRetentionSettingsRepository for
--- why this is untenanted and why UPDATE, never INSERT, is the only mutation the app issues
--- against it after the seed row below.
-CREATE TABLE retention_settings (
-    id                    SMALLINT  NOT NULL PRIMARY KEY DEFAULT 1,
-    trace_retention_days  INT       NOT NULL,
-    log_retention_days    INT       NOT NULL,
-    metric_retention_days INT       NOT NULL,
-    updated_at            DATETIME2 NOT NULL DEFAULT SYSUTCDATETIME(),
-    CONSTRAINT chk_retention_settings_singleton CHECK (id = 1)
-);
-GO
-INSERT INTO retention_settings (id, trace_retention_days, log_retention_days, metric_retention_days)
-VALUES (1, 90, 90, 180);
-GO
-
--- =============================================================================
 -- SCHEMA VERSION (recorded LAST)
 -- =============================================================================
 -- Only reached when every statement above succeeded, so a partial apply cannot
 -- leave a false version marker for the apply-schema.sh gate.
 MERGE control_plane_schema_version AS target
-USING (VALUES (N'4.0.0')) AS src (version)
+USING (VALUES (N'4.0.1')) AS src (version)
 ON target.version = src.version
 WHEN MATCHED     THEN UPDATE SET applied_at = SYSDATETIME()
 WHEN NOT MATCHED THEN INSERT (version, applied_at) VALUES (src.version, SYSDATETIME());

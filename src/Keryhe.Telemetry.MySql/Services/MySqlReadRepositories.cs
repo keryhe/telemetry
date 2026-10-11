@@ -201,7 +201,7 @@ public class MySqlRetentionSettingsRepository(ControlPlaneConnection controlPlan
 /// MySQL implementation of the <see cref="IRetentionSweeper"/> sweeps: the shared
 /// batched, per-tenant shape from <see cref="RetentionSweeperBase"/>. The batch is
 /// <c>DELETE ... LIMIT n</c>, which InnoDB serves from the clustered primary key
-/// (<c>(tenant_id, time, id)</c> on spans and log records) or the data-point time index, bounded so
+/// (<c>(tenant_id, time, id)</c> on spans and log records) or the data-point <c>(metric_id, time)</c> index, bounded so
 /// a sweep cannot escalate to a table lock or build an enormous undo log while ingestion appends.
 /// </summary>
 public class MySqlRetentionSweeper(IConfiguration configuration)
@@ -219,18 +219,22 @@ public class MySqlRetentionSweeper(IConfiguration configuration)
     protected override string BatchedDeleteSql(string table, string predicate)
         => $"DELETE FROM {table} WHERE {predicate} LIMIT {DeleteBatchSize}";
 
+    // `DELETE ... WHERE metric_id IN (SELECT id FROM metrics ...) LIMIT n` is planned as a scan of the data-point table with a
+    // per-row subquery probe (EXPLAIN: type ALL + unique_subquery), so a tenant's points are deleted by metric id list.
+    protected override bool MetricIdsFirst => true;
+
     // The hour tier follows its signal's window like the minute rollup does (summary-rollups plan, decision 8); not counted.
-    public override async Task<int> DeleteOldTracesAsync(TimeSpan retentionPeriod, CancellationToken cancellationToken = default)
+    public override async Task<int> DeleteOldTracesAsync(RetentionPolicy policy, CancellationToken cancellationToken = default)
     {
-        var removed = await base.DeleteOldTracesAsync(retentionPeriod, cancellationToken);
-        await SweepPerTenantAsync("request_rollup_hour", "bucket_start_unix_nano", retentionPeriod, cancellationToken);
+        var removed = await base.DeleteOldTracesAsync(policy, cancellationToken);
+        await SweepPerTenantAsync("request_rollup_hour", "bucket_start_unix_nano", RetentionSignal.Traces, policy, cancellationToken);
         return removed;
     }
 
-    public override async Task<int> DeleteOldLogRecordsAsync(TimeSpan retentionPeriod, CancellationToken cancellationToken = default)
+    public override async Task<int> DeleteOldLogRecordsAsync(RetentionPolicy policy, CancellationToken cancellationToken = default)
     {
-        var removed = await base.DeleteOldLogRecordsAsync(retentionPeriod, cancellationToken);
-        await SweepPerTenantAsync("log_rollup_hour", "bucket_start_unix_nano", retentionPeriod, cancellationToken);
+        var removed = await base.DeleteOldLogRecordsAsync(policy, cancellationToken);
+        await SweepPerTenantAsync("log_rollup_hour", "bucket_start_unix_nano", RetentionSignal.Logs, policy, cancellationToken);
         return removed;
     }
 }

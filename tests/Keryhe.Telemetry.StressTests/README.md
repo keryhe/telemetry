@@ -4,7 +4,7 @@ A provider stress harness. For each database provider (PostgreSQL, SqlServer, My
 topology, it ingests a large volume of logs, traces and metrics over OTLP/gRPC while headless Chromium walks every
 UI page, then reports what was slow, what locked, what it cost, and whether the rows in the database match what was sent.
 
-Each scenario also runs the control plane (tenants, API keys, alert rules, retention settings): on the relational
+Each scenario also runs the control plane (tenants with their retention windows, API keys, alert rules): on the relational
 providers it is the same database as the telemetry data; for ClickHouse and Parquet the harness starts a PostgreSQL container for it
 (not observed, and not covered by `--db-cpuset`, so it shares the Docker VM's CPUs; the report lists its image).
 **Parquet has no database container**: its "database" is a temp directory. The report's database section lists files per table instead of locks, the slowest SQL is

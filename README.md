@@ -7,7 +7,7 @@ A self-hosted OpenTelemetry (OTLP) ingestion and visualization platform for trac
 - **Complete OTLP Support**: Handles traces, metrics, and logs as defined in opentelemetry-proto
 - **Angular UI**: Web interface (Angular 20) for exploring traces, metrics, logs, dashboards, and alerts
 - **REST API**: ASP.NET Core Web API (`Keryhe.Telemetry.Api`) with Swagger support
-- **Multiple Database Providers**: Choose between PostgreSQL, SQL Server, MySQL, ClickHouse (columnar/OLAP) or Parquet files read by an in-process DuckDB (no database server, one machine) for telemetry data; tenants, API keys, alert rules and retention settings (the control plane) live in PostgreSQL, SQL Server or MySQL
+- **Multiple Database Providers**: Choose between PostgreSQL, SQL Server, MySQL, ClickHouse (columnar/OLAP) or Parquet files read by an in-process DuckDB (no database server, one machine) for telemetry data; tenants (with their retention windows), API keys and alert rules (the control plane) live in PostgreSQL, SQL Server or MySQL
 - **Trace Correlation**: Links logs and metrics to traces via trace and span IDs
 - **Built-in Analytics**: Service maps, trace summaries and latency heatmaps, and log severity analysis, computed on demand from the raw data
 - **Multi-tenant**: Every OTLP export carries a per-tenant API key (hashed in the database, optional expiry); the REST API is scoped by tenant and supports pluggable authorization
@@ -26,7 +26,7 @@ OpenTelemetry SDKs (any language)
   → Angular SPA (src/telemetry-client, port 4201)
 ```
 
-Tenants, API keys, alert rules and retention settings are the **control plane**: a small relational
+Tenants (with their retention windows), API keys and alert rules are the **control plane**: a small relational
 database the collector reads for API keys and the API reads and writes for everything else. On
 PostgreSQL, SQL Server and MySQL it is simply the same database as the telemetry data; a ClickHouse
 or Parquet deployment runs its control plane on one of those three.
@@ -119,7 +119,7 @@ var builder = WebApplication.CreateBuilder(args);
 builder.Services.AddKeryheTelemetryApi(builder.Configuration); // controllers, tenant context, authorization
 builder.Services.AddKeryheTelemetryUi(builder.Configuration);  // binds the TelemetryUi section
 builder.Services.AddPostgreSqlApiServices(builder.Configuration);              // telemetry reads: ConnectionStrings:Api
-builder.Services.AddPostgreSqlControlPlaneApiServices(builder.Configuration);  // alerts, tenants, retention settings: ConnectionStrings:ControlPlane
+builder.Services.AddPostgreSqlControlPlaneApiServices(builder.Configuration);  // alerts, tenants and their retention windows: ConnectionStrings:ControlPlane
 
 var app = builder.Build();
 

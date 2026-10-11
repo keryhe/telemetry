@@ -10,9 +10,9 @@ namespace Keryhe.Telemetry.Api.Retention;
 /// <summary>
 /// Periodic background worker that drives the retention sweeps. On each cycle it creates a
 /// fresh DI scope, resolves the scoped <see cref="IRetentionSettingsRepository"/> (control plane) and
-/// <see cref="IRetentionSweeper"/> (telemetry database), reads the current windows via
-/// <see cref="IRetentionSettingsRepository.GetSettingsAsync"/>, then runs the three <c>Delete*</c>
-/// sweeps against them. A scope is required because the repositories (and the provider
+/// <see cref="IRetentionSweeper"/> (telemetry database), reads every tenant's windows via
+/// <see cref="IRetentionSettingsRepository.GetAllAsync"/> into one <see cref="RetentionPolicy"/>, then runs the
+/// three <c>Delete*</c> sweeps against it. A scope is required because the repositories (and the provider
 /// connections they hold) are registered scoped, whereas a <see cref="BackgroundService"/>
 /// is a singleton — structurally a copy of <c>AlertEvaluationWorker</c>.
 /// </summary>
@@ -42,14 +42,11 @@ public sealed class RetentionWorker(
                 await using var scope = scopeFactory.CreateAsyncScope();
                 var settingsRepository = scope.ServiceProvider.GetRequiredService<IRetentionSettingsRepository>();
                 var sweeper = scope.ServiceProvider.GetRequiredService<IRetentionSweeper>();
-                var settings = await settingsRepository.GetSettingsAsync(stoppingToken);
+                var policy = new RetentionPolicy(await settingsRepository.GetAllAsync(stoppingToken));
 
-                var tracesRemoved = await sweeper.DeleteOldTracesAsync(
-                    TimeSpan.FromDays(settings.TraceRetentionDays), stoppingToken);
-                var metricsRemoved = await sweeper.DeleteOldMetricDataPointsAsync(
-                    TimeSpan.FromDays(settings.MetricRetentionDays), stoppingToken);
-                var logsRemoved = await sweeper.DeleteOldLogRecordsAsync(
-                    TimeSpan.FromDays(settings.LogRetentionDays), stoppingToken);
+                var tracesRemoved = await sweeper.DeleteOldTracesAsync(policy, stoppingToken);
+                var metricsRemoved = await sweeper.DeleteOldMetricDataPointsAsync(policy, stoppingToken);
+                var logsRemoved = await sweeper.DeleteOldLogRecordsAsync(policy, stoppingToken);
 
                 logger.LogInformation(
                     "Retention sweep complete: {Traces} span rows, {Metrics} data-point rows, {Logs} log rows removed in {ElapsedMs} ms.",

@@ -45,7 +45,7 @@ Configuration:
 - `ConnectionStrings:Api` — connection string for the telemetry data (read by the provider's own
   `Add<Provider>ApiServices` call, not by `AddKeryheTelemetryApi`).
 - `ControlPlane:Provider` and `ConnectionStrings:ControlPlane` — the control-plane database for alert rules, the tenant
-  catalog and retention settings (read by `Add<Provider>ControlPlaneApiServices`, which throws naming the key when the
+  catalog and each tenant's retention windows (read by `Add<Provider>ControlPlaneApiServices`, which throws naming the key when the
   connection string is missing).
 - `Telemetry:Api` — the section below.
 
@@ -60,11 +60,20 @@ only, never to the host's own. The bundled UI follows it unless `TelemetryUi:Api
 |---|---|
 | `GET {base}/capabilities` | global |
 | `GET {base}/tenants` | the tenants the caller may access |
-| `GET`/`PUT {base}/settings/retention` | global |
+| `GET {base}/me` | global; anonymous-allowed (see below) |
+| `GET`/`PUT {base}/tenants/{tenantId}/settings/retention` | the tenant's retention windows; Read / ManageSettings; 404 for a tenant with no row |
 | `GET {base}/tenants/{tenantId}/traces/summary` | also `logs`, `metrics`, `resources`, `alerts` |
 | `POST {base}/tenants/{tenantId}/alerts/rules` | |
 
 A tenant id that is not a positive number, and any other unknown path under the base, is a JSON `404`.
+
+**`GET {base}/me`** answers who the caller is, for the UI's user menu in cookie mode. It carries `[TelemetryAnonymous]` (instead of
+`[TelemetryOperation]`; every action has exactly one of the two): `TelemetryAuthorizationFilter` skips it, so it never challenges. It
+is always `200`, `Cache-Control: no-store`, with `{ signedIn, name?, givenName?, email?, picture? }` and `signedIn: false` when nobody
+is signed in. When the Read operation's policy names `AuthenticationSchemes` the caller is authenticated through them, otherwise by
+the host's default scheme. Claims are read with a fixed fallback list (no configuration): `name`, `ClaimTypes.Name`,
+`Identity.Name`; `given_name`, `ClaimTypes.GivenName`; `email`, `ClaimTypes.Email`, `preferred_username` (only if it contains `@`);
+`picture` (only an absolute `http`/`https` URL).
 
 ## Summary endpoints (breaking change in schema 3.2.0)
 

@@ -3,6 +3,7 @@ using DuckDB.NET.Data;
 using Dapper;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
+using Keryhe.Telemetry.Core;
 using Keryhe.Telemetry.Core.Models;
 using static Keryhe.Telemetry.Parquet.Tests.Spans;
 
@@ -419,7 +420,7 @@ public class CompactionTests
         await compactor.RunPassAsync(true, default);                              // day-merged
         await WriteFlushesAsync(fx, Resource(1, "svc"), BaseNano, 1, 5);          // plus a late file
 
-        var removed = await new ParquetRetentionSweeper(fx.Store).DeleteOldTracesAsync(TimeSpan.FromDays(30));
+        var removed = await new ParquetRetentionSweeper(fx.Store).DeleteOldTracesAsync(RetentionPolicy.BuiltIn());
 
         Assert.Equal(17, removed);
         Assert.Empty(fx.Store.EnumeratePartitions("spans", null, DateOnly.MinValue, DateOnly.MaxValue));

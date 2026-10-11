@@ -284,5 +284,5 @@ public sealed class OidcOptions
 {
     public string? Authority { get; set; }
     public string? ClientId { get; set; }
-    public string Scope { get; set; } = "openid profile";
+    public string Scope { get; set; } = "openid profile email";
 }

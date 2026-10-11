@@ -45,7 +45,7 @@ internal interface IPartitionedIngestionOptions
 /// never re-batched after sealing; an oversize one is cut into pieces that each get a new token.
 ///
 /// The gate is released for a record when its flush finishes (success or drop), so backpressure covers records
-/// waiting in a buffer. A record older than the retention window is dropped before buffering. Shutdown drains like the
+/// waiting in a buffer. A record older than its tenant's retention window is dropped before buffering. Shutdown drains like the
 /// shared worker: writers complete, every buffer flushes regardless of linger, and what is left at the host's
 /// deadline is counted as dropped.
 /// </summary>
@@ -247,8 +247,8 @@ internal class PartitionedIngestionWorker(
         /// <summary>Sorts everything currently queued into day buffers, dropping what is older than retention.</summary>
         private void Drain()
         {
-            var oldest = owner.retention.OldestAllowedUtc(signal);
-            var oldestNano = oldest is null ? 0L : (oldest.Value - DateTime.UnixEpoch).Ticks * 100;
+            // One dictionary lookup per record: each tenant's cutoff is resolved once per drain (null = nothing is dropped).
+            var cutoffs = new Dictionary<long, long?>();
             var droppedTally = new RecordCountGate.TenantTally();
             var dropped = 0;
 
@@ -265,14 +265,20 @@ internal class PartitionedIngestionWorker(
                     var itemBytes = share + (first ? remainder : 0);
                     first = false;
                     var nano = timeOf(item);
-                    if (oldest is not null && nano < oldestNano) { dropped++; droppedTally.Add(TenantOf.Of(item!), 1, itemBytes); continue; }
+                    var tenantId = TenantOf.Of(item!);
+                    if (!cutoffs.TryGetValue(tenantId, out var oldestNano))
+                    {
+                        var oldest = owner.retention.OldestAllowedUtc(signal, tenantId);
+                        cutoffs[tenantId] = oldestNano = oldest is null ? null : (oldest.Value - DateTime.UnixEpoch).Ticks * 100;
+                    }
+                    if (oldestNano is { } limit && nano < limit) { dropped++; droppedTally.Add(tenantId, 1, itemBytes); continue; }
 
                     var day = owner.BucketOf(nano);
                     if (day > Today) day = Today; // clock skew counts as current
                     if (!_buffers.TryGetValue(day, out var buffer))
                         _buffers[day] = buffer = new PartitionBuffer<T>();
                     buffer.Items.Add(item);
-                    buffer.Tally.Add(TenantOf.Of(item!), 1, itemBytes);
+                    buffer.Tally.Add(tenantId, 1, itemBytes);
                     Interlocked.Increment(ref _held);
                     if (stampPending) { buffer.Stamps.Add(stamp); stampPending = false; }
                 }

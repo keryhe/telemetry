@@ -11,6 +11,9 @@ import { MatToolbarModule } from '@angular/material/toolbar';
 import { MatTooltipModule } from '@angular/material/tooltip';
 import { Router, RouterLink, RouterLinkActive, RouterOutlet } from '@angular/router';
 import { AuthService } from '../../core/auth/auth.service';
+import { UserService } from '../../core/auth/user.service';
+import { GlobalSettingsMenuComponent } from '../global-settings-menu/global-settings-menu.component';
+import { UserMenuComponent } from '../user-menu/user-menu.component';
 import { EmptyStateComponent } from '../../shared/components/empty-state/empty-state.component';
 import { map } from 'rxjs/operators';
 import { APP_CONFIG } from '../../core/config/app-config';
@@ -72,19 +75,25 @@ const COMPACT_QUERY = '(max-width: 599.98px)';
     MatSidenavModule, MatToolbarModule, MatRippleModule,
     MatIconModule, MatButtonModule, MatTooltipModule,
     MatSelectModule, MatFormFieldModule, EmptyStateComponent,
-    TimeRangePickerComponent,
+    TimeRangePickerComponent, GlobalSettingsMenuComponent, UserMenuComponent,
   ],
   templateUrl: './shell.component.html',
   styleUrl: './shell.component.scss',
 })
 export class ShellComponent {
-  // Not otherwise referenced here now that the theme controls live on the settings page — kept
+  // Not otherwise referenced here now that the theme control lives in the global settings menu — kept
   // so the shell (always instantiated, unlike a lazy-loaded route) forces this singleton's
   // constructor to run at startup and apply the persisted theme class to <body> immediately.
   private readonly themeService = inject(ThemeService);
   protected readonly tenantService = inject(TenantService);
   protected readonly authService = inject(AuthService);
+  protected readonly userService = inject(UserService);
   private readonly router = inject(Router);
+
+  constructor() {
+    // Who is signed in, for the user menu (cookie mode asks the API's /me once).
+    this.userService.load();
+  }
 
   /**
    * Keys the `<router-outlet>`: bumping it destroys and recreates the outlet, which re-activates the
@@ -120,7 +129,7 @@ export class ShellComponent {
     { label: 'Traces', icon: 'account_tree', path: 'traces' },
     { label: 'Metrics', icon: 'bar_chart', path: 'metrics' },
     { label: 'Alerts', icon: 'notifications', path: 'alerts' },
-    { label: 'Settings', icon: 'settings', path: '/settings', global: true },
+    { label: 'Settings', icon: 'settings', path: 'settings' },
   ];
 
   /** Router commands for a nav item: under the current tenant, or the global path. */
@@ -136,7 +145,7 @@ export class ShellComponent {
 
     // On a tenant page: the same section under the new tenant, dropping the old tenant's filters and
     // paging state, and leaving a detail page (its trace/metric belongs to the old tenant) for its
-    // list. Time range is kept. Elsewhere (settings) there is nothing to navigate.
+    // list. Time range is kept. Settings is a tenant section too: it opens the new tenant's settings.
     const tree = this.router.parseUrl(this.router.url);
     const segments = tree.root.children['primary']?.segments.map((s) => s.path) ?? [];
     if (segments[0] !== 't' || segments.length < 3) return;

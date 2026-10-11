@@ -6,7 +6,7 @@
 # component's target version is already recorded in its version table. There are two components,
 # each versioned on its own (plans/control-plane-split.md):
 #
-#   controlplane  tenants, API keys, alert rules, retention settings   -> control_plane_schema_version
+#   controlplane  tenants (+ retention windows), API keys, alert rules  -> control_plane_schema_version
 #   telemetry     spans, logs, metrics, rollups                        -> telemetry_schema_version
 #
 # Usage:
@@ -51,8 +51,8 @@ DATABASE="${3:-telemetry}"
 
 # Target versions must match the values written by the schema scripts. A schema change edits the
 # affected component's scripts and that component's version, in one commit.
-CONTROLPLANE_TARGET_VERSION="4.0.0"
-TELEMETRY_TARGET_VERSION="4.0.0"
+CONTROLPLANE_TARGET_VERSION="4.0.1"
+TELEMETRY_TARGET_VERSION="4.0.1"
 
 usage() {
     echo "usage: $0 <controlplane|telemetry> <provider> [database]" >&2

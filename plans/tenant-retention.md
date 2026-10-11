@@ -239,3 +239,23 @@ Phases 1–2 together (the interface change breaks every sweeper), then 3, 4, 5,
 `dotnet build Telemetry.sln`; `dotnet test tests/Keryhe.Telemetry.IntegrationTests` per provider
 (`--filter Provider=...`) plus `Suite=ApiHttp`; `tests/Keryhe.Telemetry.Parquet.Tests`; the UI built and the settings
 page checked live against the API host for two tenants. The dev database must be recreated at 4.0.1 (control plane and telemetry).
+
+## Implementation notes (2026-10-11)
+
+All phases implemented, uncommitted. What differed from the plan, and what was measured:
+
+- **Data-point index audit (phase 2).** Every data-point query in `MetricReadRepositoryBase` (series, distribution, exemplars, labels,
+  the "seen in range" `EXISTS`, the latest-value join) is led by `metric_id`; none relies on the time-only index, so it was dropped from the
+  PostgreSQL, SQL Server and MySQL telemetry scripts (4.0.1).
+- **MySQL** plans `DELETE ... WHERE metric_id IN (SELECT id FROM metrics WHERE tenant_id = @t) AND time < @c LIMIT n` as a scan of the
+  data-point table (`type ALL` + `unique_subquery`), so `MySqlRetentionSweeper` sets `MetricIdsFirst`: it reads the tenant's metric ids and
+  deletes by id list (200 per statement), a range on the primary key. PostgreSQL (nested loop, `metric_id = metrics.id` index condition) and
+  SQL Server (clustered index seek) keep the subquery form; both have plan tests with a negative control.
+- **Parquet** (phase 4) enumerates folders up to the cutoff day of the **shortest** window (the latest cutoff), not the longest as written
+  above: the longest window's cutoff is the earliest, so it would never reach a short-window tenant's expired days. Each `(tenant, day)` is then
+  checked against its own tenant's cutoff.
+- **ClickHouse** `ClickHouseRetentionMemory` (singleton) is keyed by table, window and tenant set, so a tenant moved to another window is not
+  skipped. The fixtures clear it on reset (a test truncates the tables under it).
+- **User button** is shown for state `in`, or `unknown` when a sign-out mechanism exists (an `unknown` button with nothing in its menu is noise).
+- Not run: stress smoke, `TraceQueryBench` on ClickHouse with a lightweight delete applied, OIDC against a local IdP, cookie mode against a real
+  host (the UI was checked against a stub API for cookie mode: signed in, signed out, `/me` failing; light/dark; 375 px).

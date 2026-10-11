@@ -8,7 +8,7 @@ using Xunit;
 namespace Keryhe.Telemetry.IntegrationTests.Tests;
 
 /// <summary>
-/// Retention sweeps under schema 3.0.0, each provider's own mechanism: batched per-tenant deletes
+/// Retention sweeps (per-tenant windows, <c>plans/tenant-retention.md</c>), each provider's own mechanism: batched per-tenant deletes
 /// (PostgreSQL, SQL Server, MySQL) and <c>DROP PARTITION</c> (ClickHouse). Data is seeded 200 and 100 days old, an hour either side of a 90-day cutoff, and
 /// current; a sweep must remove what is older than the window and keep what is inside it.
 ///
@@ -19,6 +19,9 @@ namespace Keryhe.Telemetry.IntegrationTests.Tests;
 public abstract class RetentionTestsBase : IAsyncLifetime
 {
     private static readonly TimeSpan Window = TimeSpan.FromDays(90);
+
+    /// <summary>The fixture tenant on a 90-day window; any other tenant (no control-plane row) on the built-in 30.</summary>
+    private RetentionPolicy Policy() => RetentionPolicies.For((_fixture.TenantId, 90));
 
     private readonly ProviderFixture _fixture;
     protected RetentionTestsBase(ProviderFixture fixture) => _fixture = fixture;
@@ -77,7 +80,7 @@ public abstract class RetentionTestsBase : IAsyncLifetime
         var before = await CountsAsync("spans", "start_time_unix_nano", now);
 
         using var scope = Scope();
-        var removed = await scope.ServiceProvider.GetRequiredService<IRetentionSweeper>().DeleteOldTracesAsync(Window);
+        var removed = await scope.ServiceProvider.GetRequiredService<IRetentionSweeper>().DeleteOldTracesAsync(Policy());
 
         Assert.True(removed > 0);
         AssertSwept(before, await CountsAsync("spans", "start_time_unix_nano", now));
@@ -103,7 +106,7 @@ public abstract class RetentionTestsBase : IAsyncLifetime
         Assert.True(before["200d"] > 0 && before["now"] > 0);
 
         using var scope = Scope();
-        var removed = await scope.ServiceProvider.GetRequiredService<IRetentionSweeper>().DeleteOldTracesAsync(Window);
+        var removed = await scope.ServiceProvider.GetRequiredService<IRetentionSweeper>().DeleteOldTracesAsync(Policy());
 
         var after = await CountsAsync("spans", "start_time_unix_nano", now);
         Assert.True(removed > 0);
@@ -125,7 +128,7 @@ public abstract class RetentionTestsBase : IAsyncLifetime
         var before = await CountsAsync("log_records", "time_unix_nano", now);
 
         using var scope = Scope();
-        var removed = await scope.ServiceProvider.GetRequiredService<IRetentionSweeper>().DeleteOldLogRecordsAsync(Window);
+        var removed = await scope.ServiceProvider.GetRequiredService<IRetentionSweeper>().DeleteOldLogRecordsAsync(Policy());
 
         Assert.True(removed > 0);
         AssertSwept(before, await CountsAsync("log_records", "time_unix_nano", now));
@@ -146,7 +149,7 @@ public abstract class RetentionTestsBase : IAsyncLifetime
         var catalogRowsBefore = await CountRowsAsync("metrics", "", 0, 0);
 
         using var scope = Scope();
-        var removed = await scope.ServiceProvider.GetRequiredService<IRetentionSweeper>().DeleteOldMetricDataPointsAsync(Window);
+        var removed = await scope.ServiceProvider.GetRequiredService<IRetentionSweeper>().DeleteOldMetricDataPointsAsync(Policy());
 
         Assert.True(removed > 0);
         AssertSwept(before, await CountsAsync("gauge_data_points", "time_unix_nano", now));
@@ -155,10 +158,126 @@ public abstract class RetentionTestsBase : IAsyncLifetime
     }
 
     [Fact]
-    public async Task NegativeRetentionPeriod_IsRejected_RatherThanErasingEverything()
+    public void NegativeRetentionWindow_IsRejected_RatherThanErasingEverything()
+        => Assert.Throws<ArgumentOutOfRangeException>(() => RetentionPolicies.For((_fixture.TenantId, -1)));
+
+    // ── per-tenant windows ────────────────────────────────────────────────────
+
+    private const long TenantB = 777_001;       // 60 days
+    private const long Orphan = 987_654_321;    // no control-plane row: the built-in 30 days
+
+    /// <summary>
+    /// Each tenant is seeded at ages (days) only it uses, so a time-range count identifies the tenant. Every age is at least
+    /// five days from every cutoff it could meet, so day-granular providers (ClickHouse, Parquet) agree with row-granular ones.
+    /// A is on 10 days, B on 60, the orphan on the built-in 30: an age kept by one window is expired by another.
+    /// </summary>
+    private (long Tenant, int AgeDays, bool Survives)[] Ages() =>
+    [
+        (_fixture.TenantId, 20, false),   // A: past 10 (the orphan's 30 and B's 60 would keep it)
+        (_fixture.TenantId, 5, true),
+        (TenantB, 45, true),              // B: inside 60 (A's 10 and the orphan's 30 would drop it)
+        (TenantB, 65, false),
+        (Orphan, 35, false),              // orphan: past 30 (B's 60 would keep it)
+        (Orphan, 25, true),               // inside 30 (A's 10 would drop it)
+    ];
+
+    private RetentionPolicy PerTenantPolicy(int tenantADays = 10) => RetentionPolicies.For((_fixture.TenantId, tenantADays), (TenantB, 60));
+
+    private async Task AssertSurvivorsAsync(string table, string timeColumn, DateTime now, Dictionary<(long, int), long> before)
     {
+        foreach (var (tenant, age, survives) in Ages())
+        {
+            var at = now.AddDays(-age);
+            var after = await CountRowsAsync(table, timeColumn, Nano(at.AddMinutes(-10)), Nano(at.AddMinutes(10)));
+            Assert.True(before[(tenant, age)] > 0, $"tenant {tenant} age {age} was seeded");
+            var expected = survives ? before[(tenant, age)] : 0;
+            Assert.True(expected == after, $"{table}: tenant {tenant} at {age} days old: expected {expected} rows, found {after}");
+        }
+    }
+
+    private async Task<Dictionary<(long, int), long>> CountAgesAsync(string table, string timeColumn, DateTime now)
+    {
+        var counts = new Dictionary<(long, int), long>();
+        foreach (var (tenant, age, _) in Ages())
+        {
+            var at = now.AddDays(-age);
+            counts[(tenant, age)] = await CountRowsAsync(table, timeColumn, Nano(at.AddMinutes(-10)), Nano(at.AddMinutes(10)));
+        }
+        return counts;
+    }
+
+    private async Task SeedTracesAsync(DateTime now)
+    {
+        var spans = new List<SpanModel>();
+        foreach (var (tenant, age, _) in Ages())
+            spans.AddRange(SeededDataBuilder.BasicTraceWindow(tenant, now.AddDays(-age), traceCount: 4, seedOffset: (int)(tenant % 1000) * 1000 + age));
+        using var write = Scope();
+        await write.ServiceProvider.GetRequiredService<ITelemetryBulkWriter>().FlushTracesAsync(spans);
+    }
+
+    [Fact]
+    public async Task TraceRetention_AppliesEachTenantsOwnWindow()
+    {
+        var now = DateTime.UtcNow;
+        await SeedTracesAsync(now);
+        var before = await CountAgesAsync("spans", "start_time_unix_nano", now);
+
         using var scope = Scope();
-        var repo = scope.ServiceProvider.GetRequiredService<IRetentionSweeper>();
-        await Assert.ThrowsAsync<ArgumentOutOfRangeException>(() => repo.DeleteOldTracesAsync(TimeSpan.FromDays(-1)));
+        await scope.ServiceProvider.GetRequiredService<IRetentionSweeper>().DeleteOldTracesAsync(PerTenantPolicy());
+
+        await AssertSurvivorsAsync("spans", "start_time_unix_nano", now, before);
+    }
+
+    /// <summary>Negative control: with tenant A given B's window the same assertions must fail (A's 20-day-old rows survive).</summary>
+    [Fact]
+    public async Task TraceRetention_WithTheWrongWindow_TheSurvivorAssertionFails()
+    {
+        var now = DateTime.UtcNow;
+        await SeedTracesAsync(now);
+        var before = await CountAgesAsync("spans", "start_time_unix_nano", now);
+
+        using var scope = Scope();
+        await scope.ServiceProvider.GetRequiredService<IRetentionSweeper>().DeleteOldTracesAsync(PerTenantPolicy(tenantADays: 60));
+
+        await Assert.ThrowsAnyAsync<Xunit.Sdk.XunitException>(() => AssertSurvivorsAsync("spans", "start_time_unix_nano", now, before));
+    }
+
+    [Fact]
+    public async Task LogRetention_AppliesEachTenantsOwnWindow()
+    {
+        if (!_fixture.SupportsLogsAndMetrics) return;
+        var now = DateTime.UtcNow;
+        var logs = new List<LogRecordModel>();
+        foreach (var (tenant, age, _) in Ages())
+            logs.AddRange(SeededDataBuilder.BasicLogWindow(tenant, now.AddDays(-age), count: 20));
+        using (var write = Scope())
+            await write.ServiceProvider.GetRequiredService<ITelemetryBulkWriter>().FlushLogsAsync(logs);
+        var before = await CountAgesAsync("log_records", "time_unix_nano", now);
+
+        using var scope = Scope();
+        await scope.ServiceProvider.GetRequiredService<IRetentionSweeper>().DeleteOldLogRecordsAsync(PerTenantPolicy());
+
+        await AssertSurvivorsAsync("log_records", "time_unix_nano", now, before);
+    }
+
+    [Fact]
+    public async Task MetricRetention_AppliesEachTenantsOwnWindow()
+    {
+        if (!_fixture.SupportsLogsAndMetrics) return;
+        var now = DateTime.UtcNow;
+        // A service name no earlier test used: the fixtures truncate `metrics` between tests but the process-wide ResourceScopeCache
+        // keeps the old ids, so a reused identity would point its data at a catalog row that is gone (a test artifact; production never deletes them).
+        var service = $"retention-{Guid.NewGuid():N}";
+        var metrics = new List<MetricModel>();
+        foreach (var (tenant, age, _) in Ages())
+            metrics.AddRange(SeededDataBuilder.MultiInstanceGauge(tenant, now.AddDays(-age), serviceName: service, instanceCount: 1, pointsPerInstance: 6));
+        using (var write = Scope())
+            await write.ServiceProvider.GetRequiredService<ITelemetryBulkWriter>().FlushMetricsAsync(metrics);
+        var before = await CountAgesAsync("gauge_data_points", "time_unix_nano", now);
+
+        using var scope = Scope();
+        await scope.ServiceProvider.GetRequiredService<IRetentionSweeper>().DeleteOldMetricDataPointsAsync(PerTenantPolicy());
+
+        await AssertSurvivorsAsync("gauge_data_points", "time_unix_nano", now, before);
     }
 }

@@ -97,8 +97,8 @@ public class PostgreSqlRetentionSettingsRepository([FromKeyedServices(PostgreSql
 /// Postgres has neither <c>DELETE TOP (n)</c> nor <c>DELETE ... LIMIT n</c>, and the hot tables have
 /// no primary key (schema 3.0.0), so a batch is bounded by selecting a capped set of <c>ctid</c>s
 /// first and deleting those through a TID scan. The inner SELECT is the indexed access path --
-/// <c>idx_spans_tenant_time</c>/<c>idx_log_tenant_time_id</c> for spans and logs, the BRIN index for
-/// the data-point tables -- and each statement commits on its own, so a large first sweep never
+/// <c>idx_spans_tenant_time</c>/<c>idx_log_tenant_time_id</c> for spans and logs, the <c>(metric_id, time_unix_nano, id)</c> index for
+/// the data-point tables (per tenant, through its <c>metrics</c> rows) -- and each statement commits on its own, so a large first sweep never
 /// holds one transaction open long enough to block autovacuum database-wide.
 ///
 /// <c>ctid</c> is only unique within a single table, which is why the batch is a TID scan of one table.

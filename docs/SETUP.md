@@ -8,7 +8,7 @@ alerting and retention subsystems. See the [README](../README.md) for a quick st
 
 - [.NET 10 SDK](https://dotnet.microsoft.com/download)
 - [Node.js](https://nodejs.org/) (for the Angular client dev server; a publish of the API host also builds the UI with it)
-- A database for the telemetry data, and one for the control plane (tenants, API keys, alert rules, retention settings). Supported backends:
+- A database for the telemetry data, and one for the control plane (tenants and their retention windows, API keys, alert rules). Supported backends:
   - PostgreSQL 14+
   - SQL Server 2022
   - MySQL 8.0.19+ (MariaDB is not supported)
@@ -20,7 +20,7 @@ alerting and retention subsystems. See the [README](../README.md) for a quick st
 
 The schema has two components, each with its own script per provider and its own version table:
 
-- **Control plane** (`tenants`, `api_keys`, `alert_rules`, `alert_events`, `retention_settings`): PostgreSQL, SQL Server or
+- **Control plane** (`tenants`, `api_keys`, `alert_rules`, `alert_events`): PostgreSQL, SQL Server or
   MySQL only. Apply `schema/<Provider>-ControlPlane.sql`.
 - **Telemetry data** (resources, spans, logs, metrics, rollups): PostgreSQL, SQL Server, MySQL or ClickHouse. Apply
   `schema/<Provider>-Telemetry.sql`. (Parquet has no script: see below.)
@@ -352,16 +352,15 @@ when unauthenticated and 403 for a refused tenant or operation. See
 
 Relational only (PostgreSQL, SQL Server, MySQL), in their own script and version table:
 
-- `tenants` — Tenant registry (none is seeded; see step 3)
+- `tenants` — Tenant registry (none is seeded; see step 3), with each tenant's retention windows (`trace_retention_days`, `log_retention_days`, `metric_retention_days`, 30 each for a new tenant)
 - `api_keys` — Hashed API keys scoped to a tenant, with an optional `expires_at`, used for ingestion auth
 - `alert_rules` — Alert rule definitions (type, condition JSON, webhook URL, cooldown)
 - `alert_events` — Audit log of all fired alert events
-- `retention_settings` — The single row holding the retention windows (traces 90 days, logs 90, metrics 180 by default)
 - `control_plane_schema_version` — Applied control-plane schema versions
 
 No foreign key crosses the boundary (`resources.tenant_id` is a plain column), so the two may share a database or live in
 two. The retention sweep takes its tenants from `resources`, so data whose tenant has been removed from the control plane
-still expires.
+still expires (on the built-in 30/30/30).
 
 Spans, log records and data points are plain appends with no unique key and no foreign keys, so a re-delivered
 batch is stored again and reads tolerate it. The trace and log lists are computed from the raw rows; the cards and
@@ -410,10 +409,16 @@ automatic evaluation.
 ## Retention
 
 `RetentionWorker` in `Keryhe.Telemetry.Api.Server` sweeps old telemetry every `Telemetry:Retention:IntervalSeconds`
-(default 3600; `Enabled=false` stops it). How many days to keep is not configuration: it is the
-control plane's `retention_settings` row, edited on the **Settings** page in the UI. The sweep runs against the telemetry
-database, and the mechanism depends on its provider: bounded-batch deletes per tenant (PostgreSQL, SQL Server, MySQL; the
-tenants are those with rows in `resources`) or dropping whole day partitions (ClickHouse) or day folders (Parquet). Each sweep logs "Retention sweep complete" with the rows removed and how long it took.
+(default 3600; `Enabled=false` stops it). How many days to keep is not configuration, and there is no global default:
+every tenant has its own three windows (traces, logs, metrics; a new tenant starts at 30/30/30), stored on its row in the
+control plane and edited on that tenant's **Settings** page in the UI (`/t/{tenantId}/settings`, or
+`GET`/`PUT {base}/tenants/{tenantId}/settings/retention`). Telemetry whose tenant has no control-plane row (a deleted
+tenant, say) expires on the built-in 30/30/30. A shortened window deletes on the next sweep, within the interval, with no
+confirmation. The sweep runs against the telemetry database, and the mechanism depends on its provider: bounded-batch
+deletes per tenant (PostgreSQL, SQL Server, MySQL; the tenants are those with rows in `resources`), or dropping whole day
+partitions past the longest window and lightweight-deleting the days a shorter window has already expired (ClickHouse), or
+deleting each tenant's expired day folders (Parquet). Each sweep logs "Retention sweep complete" with the rows removed and
+how long it took.
 
 ## Testing
 

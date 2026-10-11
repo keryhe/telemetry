@@ -3,26 +3,9 @@
 }
 
 <div class="page-container">
-  <!-- Theme -->
-  <mat-card>
-    <mat-card-header>
-      <mat-card-title>Theme</mat-card-title>
-    </mat-card-header>
-    <mat-card-content>
-      <div class="settings-grid">
-        @for (tm of themeModes; track tm.value) {
-          <button
-            type="button"
-            class="theme-tile"
-            [class.selected]="themeService.mode() === tm.value"
-            (click)="setTheme(tm.value)">
-            <mat-icon>{{ tm.icon }}</mat-icon>
-            <span>{{ tm.label }}</span>
-          </button>
-        }
-      </div>
-    </mat-card-content>
-  </mat-card>
+  <h1 class="page-title">
+    Settings<span class="tenant-name"> · {{ tenantService.selectedTenant()?.name }}</span>
+  </h1>
 
   <!-- Retention -->
   <mat-card>
@@ -55,6 +38,9 @@
           }
         </mat-form-field>
       </form>
+      @if (updatedAt()) {
+        <p class="last-changed">Last changed {{ updatedAt() | date: 'medium' }}</p>
+      }
     </mat-card-content>
     <mat-card-actions align="end">
       @if (retentionDirty()) {
@@ -66,13 +52,15 @@
           Cancel
         </button>
       }
-      <button
-        mat-flat-button
-        color="primary"
-        [disabled]="saving() || retentionForm.invalid"
-        (click)="saveRetention()">
-        Save
-      </button>
+      @if (retentionDirty()) {
+        <button
+          mat-flat-button
+          color="primary"
+          [disabled]="saving() || retentionForm.invalid"
+          (click)="saveRetention()">
+          Save
+        </button>
+      }
     </mat-card-actions>
   </mat-card>
 </div>

@@ -56,6 +56,51 @@ public sealed class PostgreSqlPlanTests : IAsyncLifetime
         Assert.Contains("Seq Scan", control);
     }
 
+    /// <summary>
+    /// Per-tenant metric retention (plans/tenant-retention.md, decision 9): the inner SELECT of the batched delete finds a tenant's
+    /// points through <c>metric_id</c> and the <c>(metric_id, time_unix_nano, id)</c> index. With the time-only BRIN index gone, the
+    /// same predicate without the tenant's metric ids has no leading column to seek on: the negative control shows no <c>metric_id</c> condition.
+    /// </summary>
+    [Fact]
+    public async Task PerTenantMetricRetention_UsesTheMetricIdIndex_NotASequentialScan()
+    {
+        var metrics = new List<Keryhe.Telemetry.Core.Models.MetricModel>();
+        for (var tenant = 1; tenant <= 3; tenant++)
+            metrics.AddRange(SeededDataBuilder.MultiInstanceGauge(_fixture.TenantId + tenant, WindowStart, serviceName: $"plan-{Guid.NewGuid():N}", instanceCount: 4, pointsPerInstance: 300));
+        using (var write = _fixture.Services.CreateScope())
+            await write.ServiceProvider.GetRequiredService<ITelemetryBulkWriter>().FlushMetricsAsync(metrics);
+
+        await using var conn = new NpgsqlConnection(_fixture.DatabaseConnectionString);
+        await conn.OpenAsync();
+        await ExecuteAsync(conn, "ANALYZE metrics");
+        await ExecuteAsync(conn, "ANALYZE gauge_data_points");
+        await ExecuteAsync(conn, "SET enable_seqscan = off");
+
+        // The statement PostgreSqlRetentionSweeper issues is DELETE ... WHERE ctid = ANY (ARRAY(<this select>)).
+        async Task<string> Plan(string predicate)
+        {
+            await using var cmd = new NpgsqlCommand(
+                $"EXPLAIN SELECT ctid FROM gauge_data_points WHERE {predicate} LIMIT 5000", conn);
+            cmd.Parameters.AddWithValue("tenantId", _fixture.TenantId + 1);
+            cmd.Parameters.AddWithValue("cutoff", SeededDataBuilder.ToUnixNano(WindowStart));
+            var lines = new List<string>();
+            await using var reader = await cmd.ExecuteReaderAsync();
+            while (await reader.ReadAsync()) lines.Add(reader.GetString(0));
+            return string.Join('\n', lines);
+        }
+
+        var perTenant = await Plan("metric_id IN (SELECT id FROM metrics WHERE tenant_id = @tenantId) AND time_unix_nano < @cutoff");
+        Assert.DoesNotContain("Seq Scan on gauge_data_points", perTenant);
+        Assert.Contains("idx_gauge_metric_time", perTenant);
+
+        // Seeks (metric_id = metrics.id) per tenant metric ...
+        Assert.Contains("metric_id = metrics.id", perTenant);
+
+        // ... where the time-only predicate has no leading column to seek on (the BRIN index it used is gone): it walks the whole index.
+        var control = await Plan("time_unix_nano < @cutoff");
+        Assert.DoesNotContain("metric_id =", control);
+    }
+
     private async Task<string> PlanAsync(NpgsqlConnection conn, string sql, string traceId)
     {
         await using var cmd = new NpgsqlCommand("EXPLAIN " + sql, conn);

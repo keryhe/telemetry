@@ -1,4 +1,5 @@
 using System.Net;
+using System.Net.Http.Json;
 using System.Text.Json;
 using Keryhe.Telemetry.Api;
 using Keryhe.Telemetry.Api.Alerting.Evaluators;
@@ -56,7 +57,7 @@ public class ApiHttpTests
         Assert.Equal(HttpStatusCode.OK, (await host.GetAsync("/api/capabilities")).StatusCode);
         Assert.Equal(HttpStatusCode.OK, (await host.GetAsync("/api/tenants/1/resources/services")).StatusCode);
 
-        var tenantScoped = new[] { "Traces", "Logs", "Metrics", "Resources", "Alerts" };
+        var tenantScoped = new[] { "Traces", "Logs", "Metrics", "Resources", "Alerts", "TenantSettings" };
         foreach (var d in LibraryActions(host))
         {
             var template = d.AttributeRouteInfo!.Template!;
@@ -192,7 +193,7 @@ public class ApiHttpTests
         await using var host = await Start(Opts([], auth: false));
         foreach (var id in new[] { 1, 2, 3 })
             Assert.Equal(HttpStatusCode.OK, (await host.GetAsync($"/api/tenants/{id}/resources/services")).StatusCode);
-        Assert.Equal(HttpStatusCode.OK, (await host.SendAsync(HttpMethod.Put, "/api/settings/retention", json: true)).StatusCode);
+        Assert.Equal(HttpStatusCode.OK, (await host.SendAsync(HttpMethod.Put, "/api/tenants/1/settings/retention", json: true)).StatusCode);
     }
 
     [Fact]
@@ -201,12 +202,16 @@ public class ApiHttpTests
         await using var host = await Start();
         var actions = LibraryActions(host).ToList();
         Assert.NotEmpty(actions);
+        // Exactly one of [TelemetryOperation] and [TelemetryAnonymous] on every action; only GET /me is anonymous.
         foreach (var a in actions)
-            Assert.Single(a.MethodInfo.GetCustomAttributes(typeof(TelemetryOperationAttribute), false));
+            Assert.Equal(1, a.MethodInfo.GetCustomAttributes(typeof(TelemetryOperationAttribute), false).Length
+                          + a.MethodInfo.GetCustomAttributes(typeof(TelemetryAnonymousAttribute), false).Length);
+        Assert.Equal(["Me"], actions.Where(a => a.MethodInfo.IsDefined(typeof(TelemetryAnonymousAttribute), false)).Select(a => a.ControllerName).ToArray());
+        actions = actions.Where(a => !a.MethodInfo.IsDefined(typeof(TelemetryAnonymousAttribute), false)).ToList();
 
         var scoped = actions.Where(a => a.ControllerTypeInfo.IsDefined(typeof(TenantScopedAttribute), false))
             .Select(a => a.ControllerName).Distinct().Order().ToArray();
-        Assert.Equal(new[] { "Alerts", "Logs", "Metrics", "Resources", "Traces" }, scoped);
+        Assert.Equal(new[] { "Alerts", "Logs", "Metrics", "Resources", "TenantSettings", "Traces" }, scoped);
 
         // The documented classification: three exports, alert changes, the retention change.
         Assert.Equal(3, actions.Count(a => Op(a) == TelemetryOperation.Export));
@@ -230,7 +235,7 @@ public class ApiHttpTests
     public async Task Enabled_Anonymous_Is401OnEveryLibraryAction()
     {
         await using var host = await Start(Opts(Enabled()));
-        foreach (var a in LibraryActions(host))
+        foreach (var a in LibraryActions(host).Where(a => !a.MethodInfo.IsDefined(typeof(TelemetryAnonymousAttribute), false)))
         {
             var method = a.ActionConstraints!.OfType<Microsoft.AspNetCore.Mvc.ActionConstraints.HttpMethodActionConstraint>().Single().HttpMethods.Single();
             var url = "/" + System.Text.RegularExpressions.Regex.Replace(a.AttributeRouteInfo!.Template!, @"\{(tenantId)[^}]*\}", "1");
@@ -248,12 +253,12 @@ public class ApiHttpTests
         var admin = new[] { "role=operator", "role=admin" };
 
         Assert.Equal(HttpStatusCode.OK, (await host.GetAsync("/api/tenants/1/resources/services", reader)).StatusCode);
-        Assert.Equal(HttpStatusCode.OK, (await host.GetAsync("/api/settings/retention", reader)).StatusCode);
+        Assert.Equal(HttpStatusCode.OK, (await host.GetAsync("/api/tenants/1/settings/retention", reader)).StatusCode);
         Assert.True(ApiHost.Authorized(await host.GetAsync("/api/tenants/1/logs/export", reader)));
 
-        Assert.Equal(HttpStatusCode.Forbidden, (await host.SendAsync(HttpMethod.Put, "/api/settings/retention", reader, json: true, configure: Csrf)).StatusCode);
+        Assert.Equal(HttpStatusCode.Forbidden, (await host.SendAsync(HttpMethod.Put, "/api/tenants/1/settings/retention", reader, json: true, configure: Csrf)).StatusCode);
         Assert.Equal(HttpStatusCode.Forbidden, (await host.SendAsync(HttpMethod.Post, "/api/tenants/1/alerts/rules", reader, configure: Csrf)).StatusCode);
-        Assert.Equal(HttpStatusCode.OK, (await host.SendAsync(HttpMethod.Put, "/api/settings/retention", admin, json: true, configure: Csrf)).StatusCode);
+        Assert.Equal(HttpStatusCode.OK, (await host.SendAsync(HttpMethod.Put, "/api/tenants/1/settings/retention", admin, json: true, configure: Csrf)).StatusCode);
         Assert.True(ApiHost.Authorized(await host.SendAsync(HttpMethod.Post, "/api/tenants/1/alerts/rules", admin, configure: Csrf)));
     }
 
@@ -271,9 +276,116 @@ public class ApiHttpTests
     {
         await using var host = await Start(Opts(Enabled(Policy("ManageSettings", "SettingsPolicy"))));
         var admin = new[] { "role=operator", "role=admin" };
-        Assert.Equal(HttpStatusCode.Forbidden, (await host.SendAsync(HttpMethod.Put, "/api/settings/retention", admin, json: true, configure: Csrf)).StatusCode);
+        Assert.Equal(HttpStatusCode.Forbidden, (await host.SendAsync(HttpMethod.Put, "/api/tenants/1/settings/retention", admin, json: true, configure: Csrf)).StatusCode);
         Assert.True(ApiHost.Authorized(await host.SendAsync(HttpMethod.Post, "/api/tenants/1/alerts/rules", admin, configure: Csrf)));
-        Assert.Equal(HttpStatusCode.OK, (await host.SendAsync(HttpMethod.Put, "/api/settings/retention", ["role=settings"], json: true, configure: Csrf)).StatusCode);
+        Assert.Equal(HttpStatusCode.OK, (await host.SendAsync(HttpMethod.Put, "/api/tenants/1/settings/retention", ["role=operator", "role=settings"], json: true, configure: Csrf)).StatusCode);
+    }
+
+    // ── per-tenant retention settings ────────────────────────────────────────
+
+    [Fact]
+    public async Task TenantRetention_RouteIsPerTenant_UnknownTenantIs404_ValidationIs400_AndTheGlobalRouteIsGone()
+    {
+        await using var host = await Start(Opts([], auth: false));
+        Assert.Equal(HttpStatusCode.OK, (await host.GetAsync("/api/tenants/2/settings/retention")).StatusCode);
+        Assert.Equal(HttpStatusCode.NotFound, (await host.GetAsync("/api/tenants/3/settings/retention")).StatusCode);
+        Assert.Equal(HttpStatusCode.NotFound, (await host.SendAsync(HttpMethod.Put, "/api/tenants/3/settings/retention", json: true)).StatusCode);
+        Assert.Equal(HttpStatusCode.OK, (await host.SendAsync(HttpMethod.Put, "/api/tenants/2/settings/retention", json: true)).StatusCode);
+
+        var invalid = await host.SendAsync(HttpMethod.Put, "/api/tenants/2/settings/retention", configure: r =>
+            r.Content = JsonContent.Create(new { traceRetentionDays = 0, logRetentionDays = 30, metricRetentionDays = 30 }));
+        Assert.Equal(HttpStatusCode.BadRequest, invalid.StatusCode);
+
+        // The old global route is a JSON 404 now, not the SPA shell.
+        var old = await host.GetAsync("/api/settings/retention");
+        Assert.Equal(HttpStatusCode.NotFound, old.StatusCode);
+        Assert.Contains("json", old.Content.Headers.ContentType!.MediaType);
+    }
+
+    [Fact]
+    public async Task TenantRetention_ReadIsReadAndChangeIsManageSettings_AndATenantRefusalIsMarked()
+    {
+        await using var host = await Start(Opts([AuthOn, Policy("Admin", "Admin"), .. Mapping(0, "groups", "payments-team", "payments")]));
+        var team = new[] { "groups=payments-team" };
+        var admin = new[] { "groups=payments-team", "role=admin" };
+
+        Assert.Equal(HttpStatusCode.OK, (await host.GetAsync("/api/tenants/1/settings/retention", team)).StatusCode);
+        Assert.Equal(HttpStatusCode.Forbidden, (await host.SendAsync(HttpMethod.Put, "/api/tenants/1/settings/retention", team, json: true, configure: Csrf)).StatusCode);
+        Assert.Equal(HttpStatusCode.OK, (await host.SendAsync(HttpMethod.Put, "/api/tenants/1/settings/retention", admin, json: true, configure: Csrf)).StatusCode);
+
+        var other = await host.GetAsync("/api/tenants/2/settings/retention", team);
+        Assert.Equal(HttpStatusCode.Forbidden, other.StatusCode);
+        Assert.Equal("tenant", other.Headers.GetValues(TelemetryAuthorizationFilter.DeniedHeader).Single());
+    }
+
+    // ── GET /me ──────────────────────────────────────────────────────────────
+
+    /// <summary>A string property, or null when it is absent (the API omits nulls).</summary>
+    private static string? Str(JsonElement e, string name) => e.TryGetProperty(name, out var v) ? v.GetString() : null;
+
+    private static async Task<JsonElement> Me(ApiHost host, params string[]? claims)
+    {
+        var response = await host.GetAsync("/api/me", claims);
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Contains("no-store", response.Headers.CacheControl!.ToString());
+        return JsonDocument.Parse(await response.Content.ReadAsStringAsync()).RootElement.Clone();
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Me_AnonymousIs200SignedInFalse_WithAuthorizationOnOrOff(bool authorizationOn)
+    {
+        await using var host = await Start(Opts(authorizationOn ? Enabled() : []));
+        var me = await Me(host, null);
+        Assert.False(me.GetProperty("signedIn").GetBoolean());
+        Assert.Null(Str(me, "name")); // omitted, not null
+    }
+
+    [Fact]
+    public async Task Me_ReadsTheShortClaimNames_TheClaimTypeUris_AndFallsBackToIdentityName()
+    {
+        await using var host = await Start(Opts(Enabled()));
+        var short1 = await Me(host, "name=Ada Lovelace", "given_name=Ada", "email=ada@example.com", "picture=https://img.example/a.png");
+        Assert.True(short1.GetProperty("signedIn").GetBoolean());
+        Assert.Equal("Ada Lovelace", Str(short1, "name"));
+        Assert.Equal("Ada", Str(short1, "givenName"));
+        Assert.Equal("ada@example.com", Str(short1, "email"));
+        Assert.Equal("https://img.example/a.png", Str(short1, "picture"));
+
+        var uris = await Me(host, "http://schemas.xmlsoap.org/ws/2005/05/identity/claims/givenname=Grace",
+            "http://schemas.xmlsoap.org/ws/2005/05/identity/claims/emailaddress=grace@example.com");
+        Assert.Equal("Grace", Str(uris, "givenName"));
+        Assert.Equal("grace@example.com", Str(uris, "email"));
+        Assert.Equal("u", Str(uris, "name")); // Identity.Name: the only name claim present
+
+        // preferred_username counts as an email only when it looks like one.
+        Assert.Equal("a@b.example", Str(await Me(host, "preferred_username=a@b.example"), "email"));
+        Assert.Null(Str(await Me(host, "preferred_username=ada"), "email"));
+    }
+
+    [Theory]
+    [InlineData("javascript:alert(1)")]
+    [InlineData("data:text/html,x")]
+    [InlineData("/relative.png")]
+    public async Task Me_DropsAPictureThatIsNotAnAbsoluteHttpUrl(string picture)
+    {
+        await using var host = await Start(Opts([]));
+        Assert.Null(Str(await Me(host, $"picture={picture}"), "picture"));
+    }
+
+    [Fact]
+    public async Task Me_AuthenticatesThroughTheReadPolicysSchemes()
+    {
+        await using var host = await Start(Opts(Enabled(Policy("Read", "AltRead"))));
+        var response = await host.SendAsync(HttpMethod.Get, "/api/me", configure: r => r.Headers.Add("X-Alt-User", "a"));
+        var me = JsonDocument.Parse(await response.Content.ReadAsStringAsync()).RootElement;
+        Assert.True(me.GetProperty("signedIn").GetBoolean());
+        Assert.Equal("alt", Str(me, "name"));
+
+        // Signed in only through the default scheme, which this policy does not use: not signed in, and still a 200.
+        var other = await Me(host, "role=operator");
+        Assert.False(other.GetProperty("signedIn").GetBoolean());
     }
 
     // ── 13: startup validation ───────────────────────────────────────────────
@@ -434,15 +546,15 @@ public class ApiHttpTests
         await using var host = await Start(Opts(Enabled()));
         var admin = new[] { "role=operator", "role=admin" };
 
-        Assert.Equal(HttpStatusCode.BadRequest, (await host.SendAsync(HttpMethod.Put, "/api/settings/retention", admin, json: true)).StatusCode);
-        Assert.Equal(HttpStatusCode.OK, (await host.SendAsync(HttpMethod.Put, "/api/settings/retention", admin, json: true, configure: Csrf)).StatusCode);
-        Assert.Equal(HttpStatusCode.OK, (await host.SendAsync(HttpMethod.Put, "/api/settings/retention", admin, json: true,
+        Assert.Equal(HttpStatusCode.BadRequest, (await host.SendAsync(HttpMethod.Put, "/api/tenants/1/settings/retention", admin, json: true)).StatusCode);
+        Assert.Equal(HttpStatusCode.OK, (await host.SendAsync(HttpMethod.Put, "/api/tenants/1/settings/retention", admin, json: true, configure: Csrf)).StatusCode);
+        Assert.Equal(HttpStatusCode.OK, (await host.SendAsync(HttpMethod.Put, "/api/tenants/1/settings/retention", admin, json: true,
             configure: r => r.Headers.Add("Authorization", "Bearer abc"))).StatusCode);
         // Basic (and Negotiate) credentials are attached by the browser itself, so they do not exempt a change.
-        Assert.Equal(HttpStatusCode.BadRequest, (await host.SendAsync(HttpMethod.Put, "/api/settings/retention", admin, json: true,
+        Assert.Equal(HttpStatusCode.BadRequest, (await host.SendAsync(HttpMethod.Put, "/api/tenants/1/settings/retention", admin, json: true,
             configure: r => r.Headers.Add("Authorization", "Basic dTpw"))).StatusCode);
         // Reads never need it.
-        Assert.Equal(HttpStatusCode.OK, (await host.GetAsync("/api/settings/retention", admin)).StatusCode);
+        Assert.Equal(HttpStatusCode.OK, (await host.GetAsync("/api/tenants/1/settings/retention", admin)).StatusCode);
     }
 
     // ── 17: background alert evaluation ──────────────────────────────────────

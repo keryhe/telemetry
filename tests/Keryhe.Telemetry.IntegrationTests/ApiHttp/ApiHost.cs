@@ -148,10 +148,14 @@ public sealed class ApiHost : IAsyncDisposable
         }
     }
 
+    /// <summary>Tenants 1 and 2 (the fake catalog's) have a row; any other tenant id is unknown (null / false).</summary>
     private sealed class FakeRetention : IRetentionSettingsRepository
     {
-        public Task<RetentionSettings> GetSettingsAsync(CancellationToken ct = default) => Task.FromResult(new RetentionSettings());
-        public Task UpdateSettingsAsync(RetentionSettings settings, CancellationToken ct = default) => Task.CompletedTask;
+        public Task<RetentionSettings?> GetSettingsAsync(long tenantId, CancellationToken ct = default)
+            => Task.FromResult<RetentionSettings?>(tenantId is 1 or 2 ? new RetentionSettings { TraceRetentionDays = 30, LogRetentionDays = 30, MetricRetentionDays = 30 } : null);
+        public Task<bool> UpdateSettingsAsync(long tenantId, RetentionSettings settings, CancellationToken ct = default) => Task.FromResult(tenantId is 1 or 2);
+        public Task<IReadOnlyDictionary<long, RetentionSettings>> GetAllAsync(CancellationToken ct = default)
+            => Task.FromResult<IReadOnlyDictionary<long, RetentionSettings>>(new Dictionary<long, RetentionSettings>());
     }
 
     public sealed class FakeAlerts : IAlertRuleRepository

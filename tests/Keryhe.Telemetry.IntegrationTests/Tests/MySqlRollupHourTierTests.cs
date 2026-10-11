@@ -263,8 +263,8 @@ public sealed class MySqlRollupHourTierTests(MySqlFixture fixture) : IAsyncLifet
         using (var scope = fixture.Services.CreateScope())
         {
             var retention = scope.ServiceProvider.GetRequiredService<IRetentionSweeper>();
-            await retention.DeleteOldTracesAsync(TimeSpan.FromDays(90));
-            await retention.DeleteOldLogRecordsAsync(TimeSpan.FromDays(90));
+            await retention.DeleteOldTracesAsync(Seeding.RetentionPolicies.For((fixture.TenantId, 90)));
+            await retention.DeleteOldLogRecordsAsync(Seeding.RetentionPolicies.For((fixture.TenantId, 90)));
         }
 
         Assert.Equal([FloorHour(current)], (await HourRequestsAsync()).Keys.Select(k => k.Hour).ToList());

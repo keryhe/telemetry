@@ -1,4 +1,5 @@
-import { Component, DestroyRef, OnInit, inject, signal } from '@angular/core';
+import { Component, DestroyRef, OnInit, effect, inject, signal, untracked } from '@angular/core';
+import { DatePipe } from '@angular/common';
 import { takeUntilDestroyed } from '@angular/core/rxjs-interop';
 import { FormBuilder, ReactiveFormsModule, Validators } from '@angular/forms';
 import { MatButtonModule } from '@angular/material/button';
@@ -12,7 +13,7 @@ import { MatTooltipModule } from '@angular/material/tooltip';
 
 import { SettingsApiService } from '../../core/services/api/settings-api.service';
 import { RetentionSettings } from '../../core/models/settings.models';
-import { ThemeMode, ThemeService } from '../../core/services/theme.service';
+import { TenantService } from '../../core/services/tenant.service';
 
 type RetentionFormValue = Pick<RetentionSettings, 'traceRetentionDays' | 'logRetentionDays' | 'metricRetentionDays'>;
 
@@ -20,7 +21,7 @@ type RetentionFormValue = Pick<RetentionSettings, 'traceRetentionDays' | 'logRet
   selector: 'app-settings',
   standalone: true,
   imports: [
-    ReactiveFormsModule,
+    ReactiveFormsModule, DatePipe,
     MatCardModule, MatButtonModule, MatIconModule, MatFormFieldModule,
     MatInputModule, MatProgressBarModule, MatTooltipModule,
   ],
@@ -28,7 +29,7 @@ type RetentionFormValue = Pick<RetentionSettings, 'traceRetentionDays' | 'logRet
   styleUrl: './settings.component.scss',
 })
 export class SettingsComponent implements OnInit {
-  protected readonly themeService = inject(ThemeService);
+  protected readonly tenantService = inject(TenantService);
   private readonly api = inject(SettingsApiService);
   private readonly fb = inject(FormBuilder);
   private readonly snack = inject(MatSnackBar);
@@ -37,14 +38,14 @@ export class SettingsComponent implements OnInit {
   protected loading = signal(true);
   protected saving = signal(false);
 
-  // Upper bound mirrors SettingsController.MaxRetentionDays — a client-side check that fails
+  // Upper bound mirrors TenantSettingsController.MaxRetentionDays — a client-side check that fails
   // fast on an obvious typo, not the source of truth for what the server accepts.
   private readonly maxRetentionDays = 3650;
 
   protected readonly retentionForm = this.fb.nonNullable.group({
-    traceRetentionDays: [90, [Validators.required, Validators.min(1), Validators.max(this.maxRetentionDays)]],
-    logRetentionDays: [90, [Validators.required, Validators.min(1), Validators.max(this.maxRetentionDays)]],
-    metricRetentionDays: [180, [Validators.required, Validators.min(1), Validators.max(this.maxRetentionDays)]],
+    traceRetentionDays: [30, [Validators.required, Validators.min(1), Validators.max(this.maxRetentionDays)]],
+    logRetentionDays: [30, [Validators.required, Validators.min(1), Validators.max(this.maxRetentionDays)]],
+    metricRetentionDays: [30, [Validators.required, Validators.min(1), Validators.max(this.maxRetentionDays)]],
   });
 
   private lastSaved: RetentionFormValue = this.retentionForm.getRawValue();
@@ -52,24 +53,20 @@ export class SettingsComponent implements OnInit {
   protected readonly dirtyFields = signal<Set<keyof RetentionFormValue>>(new Set());
   protected readonly retentionDirty = signal(false);
 
-  protected readonly themeModes: { value: ThemeMode; icon: string; label: string }[] = [
-    { value: 'light', icon: 'light_mode', label: 'Light' },
-    { value: 'dark', icon: 'dark_mode', label: 'Dark' },
-    { value: 'system', icon: 'contrast', label: 'System' },
-  ];
+  protected readonly updatedAt = signal<string | null>(null);
+
+  constructor() {
+    // The page follows the route's tenant: a tenant switch loads that tenant's windows.
+    let first = true;
+    effect(() => {
+      this.tenantService.routeTenantId();
+      if (first) { first = false; return; }
+      untracked(() => this.load());
+    });
+  }
 
   ngOnInit(): void {
-    this.loading.set(true);
-    this.api.getRetentionSettings().subscribe({
-      next: (settings) => {
-        this.retentionForm.patchValue(settings, { emitEvent: false });
-        this.lastSaved = this.retentionForm.getRawValue();
-        this.dirtyFields.set(new Set());
-        this.retentionDirty.set(false);
-        this.loading.set(false);
-      },
-      error: () => this.loading.set(false),
-    });
+    this.load();
 
     this.retentionForm.valueChanges.pipe(takeUntilDestroyed(this.destroyRef)).subscribe((value) => {
       const dirty = new Set<keyof RetentionFormValue>();
@@ -83,8 +80,19 @@ export class SettingsComponent implements OnInit {
     });
   }
 
-  protected setTheme(mode: ThemeMode): void {
-    this.themeService.setMode(mode);
+  private load(): void {
+    this.loading.set(true);
+    this.api.getRetentionSettings().subscribe({
+      next: (settings) => {
+        this.retentionForm.patchValue(settings, { emitEvent: false });
+        this.lastSaved = this.retentionForm.getRawValue();
+        this.updatedAt.set(settings.updatedAt ?? null);
+        this.dirtyFields.set(new Set());
+        this.retentionDirty.set(false);
+        this.loading.set(false);
+      },
+      error: () => this.loading.set(false),
+    });
   }
 
   protected isFieldDirty(field: keyof RetentionFormValue): boolean {
@@ -107,6 +115,7 @@ export class SettingsComponent implements OnInit {
       next: (settings) => {
         this.retentionForm.patchValue(settings);
         this.lastSaved = this.retentionForm.getRawValue();
+        this.updatedAt.set(settings.updatedAt ?? null);
         this.dirtyFields.set(new Set());
         this.retentionDirty.set(false);
         this.saving.set(false);

@@ -1,19 +1,19 @@
--- OpenTelemetry PostgreSQL telemetry schema -- telemetry schema 4.0.0
+-- OpenTelemetry PostgreSQL telemetry schema -- telemetry schema 4.0.1
 -- Supports OTLP logs, metrics, and traces as defined in opentelemetry-proto
 --
--- This script is the TELEMETRY half of the schema. Tenants, API keys, alert rules and retention
--- settings are the control plane, in PostgreSQL-ControlPlane.sql (plans/control-plane-split.md). No
+-- This script is the TELEMETRY half of the schema. Tenants (with their retention windows), API keys and
+-- alert rules are the control plane, in PostgreSQL-ControlPlane.sql (plans/control-plane-split.md). No
 -- foreign key crosses the two, so they may share a database or live in two, and either script may
 -- be applied first (control plane first is natural: a running collector needs keys before it
 -- accepts data). Telemetry schema versions are recorded in telemetry_schema_version.
 --
 -- Column names use snake_case (double-quoted) while C# models remain PascalCase.
 --
--- Spans, log_records and the metric data-point tables are plain heap tables, and data-point time
--- access for retention is served by BRIN indexes on "time_unix_nano". Because the hot tables carry
+-- Spans, log_records and the metric data-point tables are plain heap tables, and per-tenant
+-- data-point retention goes through the (metric_id, time_unix_nano, id) index. Because the hot tables carry
 -- no unique keys, day partitioning can be added later without re-keying.
 --
--- Schema 4.0.0 is a fresh-install schema: there is no upgrade path from 2.x or 3.x.
+-- Schema 4.0.x is a fresh-install schema: there is no upgrade path from 2.x or 3.x.
 --
 -- Usage:
 --   psql -U postgres -c "CREATE DATABASE telemetry;"
@@ -149,8 +149,6 @@ CREATE TABLE gauge_data_points (
 
 -- Series reads and raw-point reads.
 CREATE INDEX idx_gauge_metric_time ON gauge_data_points ("metric_id", "time_unix_nano", "id");
--- Time access for retention (a batched delete by time).
-CREATE INDEX idx_gauge_time_brin ON gauge_data_points USING BRIN ("time_unix_nano");
 
 CREATE TABLE sum_data_points (
     "id"                     BIGINT GENERATED ALWAYS AS IDENTITY,
@@ -169,8 +167,6 @@ CREATE TABLE sum_data_points (
 
 -- Series reads and raw-point reads.
 CREATE INDEX idx_sum_metric_time ON sum_data_points ("metric_id", "time_unix_nano", "id");
--- Time access for retention (a batched delete by time).
-CREATE INDEX idx_sum_time_brin ON sum_data_points USING BRIN ("time_unix_nano");
 
 CREATE TABLE histogram_data_points (
     "id"                     BIGINT GENERATED ALWAYS AS IDENTITY,
@@ -192,8 +188,6 @@ CREATE TABLE histogram_data_points (
 
 -- Series reads and raw-point reads.
 CREATE INDEX idx_histogram_metric_time ON histogram_data_points ("metric_id", "time_unix_nano", "id");
--- Time access for retention (a batched delete by time).
-CREATE INDEX idx_histogram_time_brin ON histogram_data_points USING BRIN ("time_unix_nano");
 
 CREATE TABLE exponential_histogram_data_points (
     "id"                     BIGINT GENERATED ALWAYS AS IDENTITY,
@@ -219,8 +213,6 @@ CREATE TABLE exponential_histogram_data_points (
 
 -- Series reads and raw-point reads.
 CREATE INDEX idx_exp_histogram_metric_time ON exponential_histogram_data_points ("metric_id", "time_unix_nano", "id");
--- Time access for retention (a batched delete by time).
-CREATE INDEX idx_exp_histogram_time_brin ON exponential_histogram_data_points USING BRIN ("time_unix_nano");
 
 CREATE TABLE summary_data_points (
     "id"                BIGINT GENERATED ALWAYS AS IDENTITY,
@@ -236,8 +228,6 @@ CREATE TABLE summary_data_points (
 
 -- Series reads and raw-point reads.
 CREATE INDEX idx_summary_metric_time ON summary_data_points ("metric_id", "time_unix_nano", "id");
--- Time access for retention (a batched delete by time).
-CREATE INDEX idx_summary_time_brin ON summary_data_points USING BRIN ("time_unix_nano");
 
 -- metric_last_seen: the metrics catalog's "has data in range" check reads this instead of scanning
 -- the five data-point tables. No FK to "metrics" (a FK would make every touch lock-check the
@@ -351,6 +341,6 @@ CREATE TABLE telemetry_schema_version (
 -- =============================================================================
 -- Only reached when every statement above succeeded, so a partial apply cannot
 -- leave a false version marker for the apply-schema.sh gate.
-INSERT INTO telemetry_schema_version ("version") VALUES ('4.0.0')
+INSERT INTO telemetry_schema_version ("version") VALUES ('4.0.1')
 ON CONFLICT ("version") DO UPDATE
 SET "applied_at" = NOW();

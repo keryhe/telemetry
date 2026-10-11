@@ -103,7 +103,7 @@ function normalizeAuth(raw: unknown): AuthConfig {
     const clientId = text(a.oidc?.clientId);
     if (authority && clientId) {
       auth.mode = 'oidc';
-      auth.oidc = { authority, clientId, scope: text(a.oidc?.scope) ?? 'openid profile' };
+      auth.oidc = { authority, clientId, scope: text(a.oidc?.scope) ?? 'openid profile email' };
     } else {
       console.warn('[config] auth.mode is oidc but authority/clientId are missing; using cookie mode.');
     }

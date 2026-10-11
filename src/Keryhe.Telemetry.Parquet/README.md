@@ -6,8 +6,8 @@ as Parquet files and the API reads them with an in-process DuckDB. No database s
 (design and decisions: `plans/parquet-duckdb/`; the ramp measurements of phase 7 are not recorded yet, so this README
 states no throughput figures).
 
-**Telemetry data only.** Like ClickHouse, a Parquet deployment runs the control plane (tenants, API keys, alert rules,
-retention settings) on PostgreSQL, SQL Server or MySQL (`ControlPlane:Provider`).
+**Telemetry data only.** Like ClickHouse, a Parquet deployment runs the control plane (tenants with their retention windows, API keys, alert rules,
+retention windows) on PostgreSQL, SQL Server or MySQL (`ControlPlane:Provider`).
 
 ## When to choose it
 
@@ -120,10 +120,10 @@ Schema 4.0.0 is a fresh-install schema: a root written under other table definit
   the Parquet registration defaults each record gate to twice `MaxBufferRecords` (1,000,000) and `MaxQueuedBytesPerSignal` to 2 GB
   (the shared defaults, 200,000 and 256 MB, capped ingest near 18,000 records/s; with these about 64,000 write-only on the reference machine).
 - **Retention** is by day: a tenant's `date=` folder is deleted (for each table the signal's window covers, derived tables
-  with it) once the whole day is before the cutoff, so the cutoff's own day survives until it ends. The sweep takes its tenants
+  with it) once the whole day is before the cutoff of that tenant's own window (the built-in 30 days for a tenant with no control-plane row), so the cutoff's own day survives until it ends. The sweep takes its tenants
   from the folders, so data of a tenant removed from the control plane still expires. A day is deleted at once (not after the
   compaction grace), so a query or export that reaches back past the retention window can fail on a file that disappears;
-  anything inside the window is unaffected. The collector drops records already past their window at ingest.
+  anything inside the window is unaffected. The collector drops records already past their tenant's window at ingest (after a window is lengthened, records between the old and new cutoff are still dropped for up to the refresh interval).
 - **Backup.** Copy the data files first and the manifests (`_manifest.*.json`, `_compacted.*.json`) last, so no manifest names
   a file the copy lacks; or stop the collector and compactor and copy the root. A file no manifest names is ignored by readers.
 - **Search and attributes behave as on ClickHouse**: attribute values are text (`"500"`, not `500`), a metric "instance" is

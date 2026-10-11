@@ -32,10 +32,9 @@
 
       <div class="toolbar-controls-secondary">
         <app-time-range-picker />
-        @if (authService.canSignOut) {
-          <button mat-icon-button matTooltip="Sign out" aria-label="Sign out" (click)="authService.signOut()">
-            <mat-icon>logout</mat-icon>
-          </button>
+        <app-global-settings-menu />
+        @if (userService.signedInOrUnknown() && (authService.canSignOut() || userService.state() === 'in')) {
+          <app-user-menu />
         }
       </div>
     </div>

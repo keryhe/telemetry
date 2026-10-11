@@ -66,6 +66,7 @@ public static class ClickHouseServiceCollectionExtensions
         services.AddScoped<ILogReadRepository, ClickHouseLogReadRepository>();
         services.AddScoped<IRollupReadRepository, ClickHouseRollupReadRepository>();
         services.AddScoped<IResourceReadRepository, ClickHouseResourceReadRepository>();
+        services.AddSingleton<ClickHouseRetentionMemory>();
         services.AddScoped<IRetentionSweeper, ClickHouseRetentionSweeper>();
         services.AddSingleton(ProviderCapabilities.FromConfiguration(ProviderCapabilities.Default(), configuration));
         return services;

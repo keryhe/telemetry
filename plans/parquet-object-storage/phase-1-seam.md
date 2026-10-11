@@ -22,23 +22,34 @@ Found by reading the provider (2026-10-10):
 
 ## Steps
 
-1. `IObjectStore` and `LocalObjectStore` (README "The primitive layer"), with a unit suite every backend will run
+1. `IObjectStore` (README "The primitive layer") in `Keryhe.Telemetry.Parquet`, public, with a unit suite every backend will run
    (`ObjectStoreContractTests`, abstract, one subclass per backend: put/get/ETag, `PutIfAbsent` race, `PutIfMatch` stale,
    paged list with delimiter, prefix delete, missing keys).
-2. `ObjectParquetFileStore : IParquetFileStore` over it, moving the layout and manifest JSON out of `LocalParquetFileStore`, which is
+2. **The `Keryhe.Telemetry.Parquet.Local` project** (README "Packages and registration", O22): packable like the other providers
+   (version 2.0.0), referencing only `Keryhe.Telemetry.Parquet`. It takes `LocalObjectStore`, the lock-file identity (from
+   `ParquetWriterIdentity`), the no-op DuckDB setup and the per-partition `.tmp` work area, and exposes
+   `AddParquetLocalStorage(configuration)`. After this step `Keryhe.Telemetry.Parquet` contains no file-system storage code
+   (the work area for DuckDB spill aside).
+3. **Backend registration in the core**: `IParquetStorageBackend { Kind }`, `IStorageErrorClassifier` (consulted by
+   `ParquetFlushErrorClassifier`; Local's maps nothing new) and the startup validator (none, several, or a `Kind` mismatch fails,
+   naming the `AddParquet...Storage` call). Both hosts get the `Kind` switch with `Local` only, and reference the Local project;
+   `TestInfrastructure`, `Keryhe.Telemetry.Parquet.Tests` and `StressTests` reference it too. `Telemetry.sln` gains the project.
+4. `ObjectParquetFileStore : IParquetFileStore` over it (in the core), moving the layout and manifest JSON out of `LocalParquetFileStore`, which is
    deleted. `CommitFileAsync(partition, localTempPath, finalName)` calls `PutFileAsync` and deletes the local file (for `Local`, a
    rename, as today).
-3. The interface changes above: `ReadUriOf`, `EnumeratePartitionsAsync`, `VerifyRootAsync`, `ReadTextAsync`/`WriteTextAsync` gain
+5. The interface changes above: `ReadUriOf`, `EnumeratePartitionsAsync`, `VerifyRootAsync`, `ReadTextAsync`/`WriteTextAsync` gain
    ETag variants for phase 4. Callers updated: `ParquetFileResolver`, `ParquetCompactor`, `ParquetRetentionSweeper`,
    `ManifestWriter`, `ParquetManifests`, the tests' `FailingStore`.
-4. `StorageOptions` (`Telemetry:Parquet:Storage`) with `Kind=Local` only accepted in this phase; `RootPath` is still the local root.
-5. `IDuckDbStorageSetup` with a no-op local implementation, called wherever a DuckDB database is created (read engine, compactor,
+6. `StorageOptions` (`Telemetry:Parquet:Storage`, the shared keys) with `Kind=Local` only accepted in this phase; `RootPath` is
+   still the local root, read by the Local package.
+7. `IDuckDbStorageSetup` in the core, with the Local package's no-op implementation, called wherever a DuckDB database is created (read engine, compactor,
    file writer, stress observer).
 
 ## Tests
 
 All of `tests/Keryhe.Telemetry.Parquet.Tests` and `--filter "Provider=Parquet"` pass unchanged in what they assert (only
-construction changes). `ObjectStoreContractTests` runs against `LocalObjectStore`.
+construction changes). `ObjectStoreContractTests` runs against `LocalObjectStore`. A unit test per validator case: no backend
+registered, two registered, `Kind` mismatch.
 
 ## Done when
 

@@ -123,9 +123,9 @@ How the UI authenticates to the API is chosen by `TelemetryUi:Auth:Mode`:
     "Auth": {
       "Mode": "cookie",            // "cookie" (default) or "oidc"
       "LoginUrl": "/account/login", // cookie: where a 401 sends the user (?returnUrl=...)
-      "LogoutUrl": "/account/logout", // cookie: the header's "Sign out" target
+      "LogoutUrl": "/account/logout", // cookie: the "Sign out" target of the header's user menu
       "IncludeCredentials": false,  // send cookies on cross-origin API calls
-      "Oidc": { "Authority": "", "ClientId": "", "Scope": "openid profile api://telemetry/read" }
+      "Oidc": { "Authority": "", "ClientId": "", "Scope": "openid profile email api://telemetry/read" }
     }
   }
 }
@@ -140,6 +140,13 @@ How the UI authenticates to the API is chosen by `TelemetryUi:Auth:Mode`:
   provider as a **single-page application** (public client, PKCE) with the redirect URI
   `{origin}{BasePath}/callback` (for `BasePath` `/` that is `https://host/callback`), and the post-logout
   redirect `{origin}{BasePath}/`. The sign-in library is loaded only in this mode.
+
+**Header menus.** A gear holds the global settings (today the theme: Light / Dark / System; kept per browser, not on any server).
+Whenever someone is signed in a user button sits right of it: their picture, else the initial of their first name, else a generic
+icon; its menu shows their name and email and **Sign out**, the only Sign out in the header (no one signed in, no button, even
+with a `LogoutUrl`). In `oidc` mode the details are the session's claims (request `profile` and `email`, the default scope is
+`openid profile email`); in `cookie` mode the UI calls the API's `GET {base}/me` once. The Microsoft Entra photo (Graph) is not
+read: Entra users get their initial. Retention is edited per tenant on the **Settings** page (`/t/{tenantId}/settings`).
 
 In both modes the API's authorization settings are described in the `Keryhe.Telemetry.Api` README, and
 the UI sends `X-Telemetry-Client: 1` on every API call.

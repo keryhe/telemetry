@@ -33,9 +33,12 @@ public class IngestionWorkerTests
         public Task FlushMetricsAsync(List<MetricModel> metrics, string token, CancellationToken ct = default) => inner.FlushMetricsAsync(metrics, token, ct);
     }
 
-    private sealed class FakeRetention(int? traceDays = null) : IRetentionWindows
+    /// <param name="tenantTraceDays">A tenant's own trace window; any other tenant takes <paramref name="traceDays"/>.</param>
+    private sealed class FakeRetention(int? traceDays = null, IReadOnlyDictionary<long, int>? tenantTraceDays = null) : IRetentionWindows
     {
-        public DateTime? OldestAllowedUtc(string signal) => signal == "traces" && traceDays is { } d ? DateTime.UtcNow.AddDays(-d) : null;
+        public DateTime? OldestAllowedUtc(string signal, long tenantId)
+            => signal == "traces" && (tenantTraceDays is not null && tenantTraceDays.TryGetValue(tenantId, out var own) ? own : traceDays) is { } d
+                ? DateTime.UtcNow.AddDays(-d) : null;
         public Task RefreshAsync(CancellationToken ct) => Task.CompletedTask;
         public int RefreshSeconds => 3600;
     }
@@ -50,14 +53,14 @@ public class IngestionWorkerTests
         private readonly MeterListener _listener = new();
         public ConcurrentBag<(string Name, double Value, string? Reason)> Measurements { get; } = new();
 
-        public Harness(ParquetOptions? options = null, int? retentionDays = null, int maxRetries = 5)
+        public Harness(ParquetOptions? options = null, int? retentionDays = null, int maxRetries = 5, IReadOnlyDictionary<long, int>? tenantTraceDays = null)
         {
             options ??= new ParquetOptions { LingerMilliseconds = 100, LateLingerMilliseconds = 60_000 };
             options.RootPath = Fx.Root;
             Writer = new FaultyWriter(Fx.Writer);
             var shared = Options.Create(new TelemetryIngestionOptions { MaxFlushRetries = maxRetries, RetryBaseDelayMilliseconds = 5, RetryMaxDelayMilliseconds = 10 });
             Channel = new TelemetryIngestionChannel(shared, Metrics);
-            Worker = new ParquetIngestionWorker(Writer, Channel, Options.Create(options), shared, Metrics, new FakeRetention(retentionDays),
+            Worker = new ParquetIngestionWorker(Writer, Channel, Options.Create(options), shared, Metrics, new FakeRetention(retentionDays, tenantTraceDays),
                 TimeProvider.System, NullLogger<ParquetIngestionWorker>.Instance, new ParquetFlushErrorClassifier());
 
             _listener.InstrumentPublished = (instrument, l) =>
@@ -203,6 +206,25 @@ public class IngestionWorkerTests
         Assert.True(await Harness.WaitAsync(() => h.StoredRows() == 1 && h.Channel.TraceGate.Resident == 0));
         await h.StopAsync();
         Assert.Equal(2, h.Sum("records_dropped", "out_of_retention"));
+    }
+
+    [Fact]
+    public async Task EachTenantIsDroppedOnItsOwnWindow_AndAnUnknownTenantOnTheBuiltInOne()
+    {
+        // Tenant 1 keeps 7 days, tenant 2 keeps 60; tenant 3 has no entry and takes the built-in window (30 days here).
+        await using var h = new Harness(new ParquetOptions { LingerMilliseconds = 100, LateLingerMilliseconds = 150 }, retentionDays: 30, tenantTraceDays: new Dictionary<long, int> { [1] = 7, [2] = 60 });
+        await h.StartAsync();
+        await h.EnqueueAsync(
+            S(Now(TimeSpan.FromDays(20)), 1), S(Now(TimeSpan.FromDays(20)), 2), S(Now(TimeSpan.FromDays(20)), 3),   // only tenant 1 drops
+            S(Now(TimeSpan.FromDays(45)), 1), S(Now(TimeSpan.FromDays(45)), 2), S(Now(TimeSpan.FromDays(45)), 3),   // tenants 1 and 3 drop
+            S(Now(TimeSpan.FromDays(70)), 2),                                                                         // tenant 2 drops
+            S(Now(), 1), S(Now(), 3));                                                                                 // everyone keeps
+        Assert.True(await Harness.WaitAsync(() => h.StoredRows() == 5 && h.Channel.TraceGate.Resident == 0));
+        await h.StopAsync();
+
+        Assert.Equal(4, h.Sum("records_dropped", "out_of_retention"));
+        var partitions = h.Fx.Store.EnumeratePartitions("spans", null, DateOnly.MinValue, DateOnly.MaxValue).Select(p => p.TenantId).ToList();
+        Assert.Equal(3, partitions.Distinct().Count());
     }
 
     [Fact]

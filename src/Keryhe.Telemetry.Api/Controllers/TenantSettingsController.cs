@@ -5,32 +5,27 @@ using Microsoft.AspNetCore.Mvc;
 
 namespace Keryhe.Telemetry.Api.Controllers;
 
+/// <summary>A tenant's settings: today its retention windows (there is no global retention default).</summary>
 [ApiController]
+[TenantScoped]
 [Route("settings")]
-public class SettingsController : ControllerBase
+public class TenantSettingsController(IRetentionSettingsRepository retention, ITenantContext tenantContext) : ControllerBase
 {
     // Upper bound on any *RetentionDays field. Not a technical limit — it exists so a typo
     // (entering years instead of days) fails loudly with a 400 instead of quietly configuring
     // a multi-decade retention window.
     private const int MaxRetentionDays = 3650;
 
-    private readonly IRetentionSettingsRepository _retention;
-
-    public SettingsController(IRetentionSettingsRepository retention)
-    {
-        _retention = retention;
-    }
-
-    // GET /api/settings/retention
+    // GET /api/tenants/{tenantId}/settings/retention
     [TelemetryOperation(TelemetryOperation.Read)]
     [HttpGet("retention")]
     public async Task<ActionResult<RetentionSettings>> GetRetentionSettings(CancellationToken ct = default)
     {
-        var settings = await _retention.GetSettingsAsync(ct);
-        return Ok(settings);
+        var settings = await retention.GetSettingsAsync(tenantContext.GetRequiredTenantId(), ct);
+        return settings is null ? NotFound() : Ok(settings);
     }
 
-    // PUT /api/settings/retention
+    // PUT /api/tenants/{tenantId}/settings/retention
     [TelemetryOperation(TelemetryOperation.ManageSettings)]
     [HttpPut("retention")]
     public async Task<ActionResult<RetentionSettings>> UpdateRetentionSettings(
@@ -44,8 +39,9 @@ public class SettingsController : ControllerBase
             return BadRequest($"Retention days must be a positive integer no greater than {MaxRetentionDays}.");
         }
 
-        await _retention.UpdateSettingsAsync(settings, ct);
-        return Ok(settings);
+        return await retention.UpdateSettingsAsync(tenantContext.GetRequiredTenantId(), settings, ct)
+            ? Ok(settings)
+            : NotFound();
     }
 
     private static bool IsValidRetentionDays(int days) => days is > 0 and <= MaxRetentionDays;

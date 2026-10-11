@@ -11,6 +11,9 @@ type handling and the generic `Microsoft.Extensions.*` abstractions.
   `ITraceReadRepository`, `IMetricReadRepository`, `ILogReadRepository`,
   `IAlertRuleRepository`, `ITenantCatalogRepository`, `IRetentionSettingsRepository`, and
   `ITenantResolver`.
+- Retention: each tenant's windows (`RetentionSettings`, columns on its `tenants` row; no global default) come from
+  `IRetentionSettingsRepository`; the sweep takes them as a `RetentionPolicy` (a tenant with no row expires on
+  `RetentionDefaults`, 30/30/30) and `IRetentionSweeper` deletes tenant by tenant.
 - The domain models passed across those interfaces (traces, metrics, logs, resources,
   instrumentation scopes, alert rules, tenants).
 - Provider-agnostic write-path machinery: the bounded `TelemetryIngestionChannel`, the

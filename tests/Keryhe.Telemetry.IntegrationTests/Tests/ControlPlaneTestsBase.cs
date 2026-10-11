@@ -91,22 +91,72 @@ public abstract class ControlPlaneTestsBase(ProviderFixture fixture)
         Assert.Contains(tenants, t => t.Id == Fixture.TenantId && t.Name == "phase0-tenant");
     }
 
+    private async Task<long> NewTenantAsync(string prefix)
+    {
+        var name = $"{prefix}-{Guid.NewGuid():N}";
+        return (await Fixture.SeedTenantAsync(name, name + "-key", name + "-secret")).Id;
+    }
+
+    /// <summary>Each tenant's windows are columns on its row; a new tenant takes the schema defaults, 30/30/30.</summary>
     [Fact]
-    public async Task Retention_settings_are_seeded_and_update_in_place()
+    public async Task A_new_tenant_has_the_default_retention_windows()
+    {
+        var tenantId = await NewTenantAsync("retention-defaults");
+        using var scope = Scope();
+        var settings = await scope.ServiceProvider.GetRequiredService<IRetentionSettingsRepository>().GetSettingsAsync(tenantId);
+
+        Assert.NotNull(settings);
+        Assert.Equal((RetentionDefaults.TraceDays, RetentionDefaults.LogDays, RetentionDefaults.MetricDays),
+            (settings.TraceRetentionDays, settings.LogRetentionDays, settings.MetricRetentionDays));
+        Assert.Equal((30, 30, 30), (settings.TraceRetentionDays, settings.LogRetentionDays, settings.MetricRetentionDays));
+    }
+
+    [Fact]
+    public async Task Updating_one_tenants_retention_leaves_the_others_unchanged_and_stamps_the_update()
+    {
+        var first = await NewTenantAsync("retention-a");
+        var second = await NewTenantAsync("retention-b");
+        using var scope = Scope();
+        var settings = scope.ServiceProvider.GetRequiredService<IRetentionSettingsRepository>();
+        var secondBefore = await settings.GetSettingsAsync(second);
+
+        var change = new RetentionSettings { TraceRetentionDays = 31, LogRetentionDays = 32, MetricRetentionDays = 33 };
+        var before = DateTime.UtcNow.AddSeconds(-5);
+        Assert.True(await settings.UpdateSettingsAsync(first, change));
+
+        var updated = await settings.GetSettingsAsync(first);
+        Assert.Equal((31, 32, 33), (updated!.TraceRetentionDays, updated.LogRetentionDays, updated.MetricRetentionDays));
+        Assert.True(change.UpdatedAt > before, "the update stamps retention_updated_at on the passed settings");
+        Assert.True(updated.UpdatedAt > before);
+
+        var secondAfter = await settings.GetSettingsAsync(second);
+        Assert.Equal((secondBefore!.TraceRetentionDays, secondBefore.LogRetentionDays, secondBefore.MetricRetentionDays, secondBefore.UpdatedAt),
+            (secondAfter!.TraceRetentionDays, secondAfter.LogRetentionDays, secondAfter.MetricRetentionDays, secondAfter.UpdatedAt));
+    }
+
+    [Fact]
+    public async Task Retention_of_an_unknown_tenant_is_null_and_false()
     {
         using var scope = Scope();
         var settings = scope.ServiceProvider.GetRequiredService<IRetentionSettingsRepository>();
-        var original = await settings.GetSettingsAsync();
-        try
-        {
-            await settings.UpdateSettingsAsync(new RetentionSettings { TraceRetentionDays = 31, LogRetentionDays = 32, MetricRetentionDays = 33 });
-            var updated = await settings.GetSettingsAsync();
-            Assert.Equal((31, 32, 33), (updated.TraceRetentionDays, updated.LogRetentionDays, updated.MetricRetentionDays));
-        }
-        finally
-        {
-            await settings.UpdateSettingsAsync(original);
-        }
+        Assert.Null(await settings.GetSettingsAsync(987_654_321));
+        Assert.False(await settings.UpdateSettingsAsync(987_654_321, new RetentionSettings { TraceRetentionDays = 1, LogRetentionDays = 1, MetricRetentionDays = 1 }));
+    }
+
+    [Fact]
+    public async Task GetAll_lists_every_tenants_windows()
+    {
+        var first = await NewTenantAsync("retention-all-a");
+        var second = await NewTenantAsync("retention-all-b");
+        using var scope = Scope();
+        var settings = scope.ServiceProvider.GetRequiredService<IRetentionSettingsRepository>();
+        await settings.UpdateSettingsAsync(second, new RetentionSettings { TraceRetentionDays = 7, LogRetentionDays = 8, MetricRetentionDays = 9 });
+
+        var all = await settings.GetAllAsync();
+
+        Assert.True(all.ContainsKey(Fixture.TenantId) && all.ContainsKey(first) && all.ContainsKey(second));
+        Assert.Equal((30, 30, 30), (all[first].TraceRetentionDays, all[first].LogRetentionDays, all[first].MetricRetentionDays));
+        Assert.Equal((7, 8, 9), (all[second].TraceRetentionDays, all[second].LogRetentionDays, all[second].MetricRetentionDays));
     }
 
     [Fact]

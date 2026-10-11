@@ -53,10 +53,11 @@ public sealed class ClickHouseIngestionWorkerTests
             Record("metrics", token, metrics.Select(m => m.GaugeDataPoints![0].TimeUnixNano), metrics.Count);
     }
 
-    private sealed class FakeRetention(int? traceDays = null, int? metricDays = null) : IRetentionWindows
+    /// <param name="tenantTraceDays">A tenant's own trace window; any other tenant takes <paramref name="traceDays"/>.</param>
+    private sealed class FakeRetention(int? traceDays = null, int? metricDays = null, IReadOnlyDictionary<long, int>? tenantTraceDays = null) : IRetentionWindows
     {
-        public DateTime? OldestAllowedUtc(string signal) =>
-            signal == "traces" && traceDays is { } d ? DateTime.UtcNow.AddDays(-d)
+        public DateTime? OldestAllowedUtc(string signal, long tenantId) =>
+            signal == "traces" && (tenantTraceDays is not null && tenantTraceDays.TryGetValue(tenantId, out var own) ? own : traceDays) is { } d ? DateTime.UtcNow.AddDays(-d)
             : signal == "metrics" && metricDays is { } m ? DateTime.UtcNow.AddDays(-m) : null;
         public Task RefreshAsync(CancellationToken ct) => Task.CompletedTask;
         public int RefreshSeconds => 3600;
@@ -71,13 +72,13 @@ public sealed class ClickHouseIngestionWorkerTests
         private readonly MeterListener _listener = new();
         public ConcurrentBag<(string Name, double Value, string? Reason)> Measurements { get; } = new();
 
-        public Harness(ClickHouseIngestionOptions? options = null, int? traceRetentionDays = null, int maxRetries = 5, int? metricRetentionDays = null, IFlushErrorClassifier? classifier = null)
+        public Harness(ClickHouseIngestionOptions? options = null, int? traceRetentionDays = null, int maxRetries = 5, int? metricRetentionDays = null, IFlushErrorClassifier? classifier = null, IReadOnlyDictionary<long, int>? tenantTraceDays = null)
         {
             options ??= new ClickHouseIngestionOptions { LingerMilliseconds = 100, LateLingerMilliseconds = 60_000 };
             var shared = Options.Create(new TelemetryIngestionOptions { MaxFlushRetries = maxRetries, RetryBaseDelayMilliseconds = 5, RetryMaxDelayMilliseconds = 10 });
             Channel = new TelemetryIngestionChannel(shared, Metrics);
             Worker = new ClickHouseIngestionWorker(Writer, Channel, Options.Create(options), shared, Metrics,
-                new FakeRetention(traceRetentionDays, metricRetentionDays), TimeProvider.System, NullLogger<ClickHouseIngestionWorker>.Instance, classifier);
+                new FakeRetention(traceRetentionDays, metricRetentionDays, tenantTraceDays), TimeProvider.System, NullLogger<ClickHouseIngestionWorker>.Instance, classifier);
 
             _listener.InstrumentPublished = (instrument, l) =>
             {
@@ -241,6 +242,38 @@ public sealed class ClickHouseIngestionWorkerTests
 
         Assert.Equal(1, h.Writer.Calls.Single().Count);
         Assert.Equal(2, h.Sum("records_dropped", "out_of_retention"));
+    }
+
+    /// <summary>A span of <paramref name="tenantId"/>, <paramref name="daysAgo"/> old, whose span id spells both (so a test can read who was kept).</summary>
+    private static SpanModel TenantSpan(int daysAgo, long tenantId)
+    {
+        var span = Span(DaysAgo(daysAgo));
+        span.SpanIdHex = $"{tenantId:x4}{daysAgo:x4}".PadLeft(16, '0');
+        span.Resource = new ResourceModel { TenantId = tenantId };
+        return span;
+    }
+
+    [Fact]
+    public async Task EachTenantIsDroppedOnItsOwnWindow_AndAnUnknownTenantOnTheBuiltInOne()
+    {
+        // Tenant 1 keeps 7 days, tenant 2 keeps 60; tenant 3 has no entry and takes the built-in window (30 days here).
+        await using var h = new Harness(new ClickHouseIngestionOptions { LingerMilliseconds = 100, LateLingerMilliseconds = 150 }, traceRetentionDays: 30, tenantTraceDays: new Dictionary<long, int> { [1] = 7, [2] = 60 });
+        await h.StartAsync();
+        var all = new[]
+        {
+            TenantSpan(20, 1), TenantSpan(20, 2), TenantSpan(20, 3),   // only tenant 1 drops
+            TenantSpan(45, 1), TenantSpan(45, 2), TenantSpan(45, 3),   // tenants 1 and 3 drop
+            TenantSpan(70, 2),                                         // tenant 2 drops
+            TenantSpan(1, 1), TenantSpan(1, 3),                        // everyone keeps
+        };
+        await h.EnqueueSpansAsync(all);
+        Assert.True(await h.WaitAsync(() => h.Channel.TraceGate.Resident == 0 && h.Sum("records_dropped", "out_of_retention") == 4));
+        await h.StopAsync();
+
+        var kept = h.Writer.Stored.OrderBy(x => x).ToList();
+        var expected = new[] { TenantSpan(20, 2), TenantSpan(20, 3), TenantSpan(45, 2), TenantSpan(1, 1), TenantSpan(1, 3) }
+            .Select(x => x.SpanIdHex).OrderBy(x => x).ToList();
+        Assert.Equal(expected, kept);
     }
 
     [Fact]

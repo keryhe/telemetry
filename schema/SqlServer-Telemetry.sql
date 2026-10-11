@@ -1,13 +1,13 @@
--- OpenTelemetry SQL Server Schema (SQL Server 2022), telemetry data -- telemetry schema 4.0.0
+-- OpenTelemetry SQL Server Schema (SQL Server 2022), telemetry data -- telemetry schema 4.0.1
 -- Supports OTLP logs, metrics, and traces as defined in opentelemetry-proto.
 --
--- This script is the TELEMETRY half of the schema. Tenants, API keys, alert rules and retention
--- settings are the control plane, in SqlServer-ControlPlane.sql (plans/control-plane-split.md). No
+-- This script is the TELEMETRY half of the schema. Tenants (with their retention windows), API keys and
+-- alert rules are the control plane, in SqlServer-ControlPlane.sql (plans/control-plane-split.md). No
 -- foreign key crosses the two, so they may share a database or live in two, and either script may
 -- be applied first (control plane first is natural: a running collector needs keys before it
 -- accepts data). Telemetry schema versions are recorded in telemetry_schema_version.
 --
--- Schema 4.0.0 is a fresh-install schema: there is no upgrade path from 2.x or 3.x. See
+-- Schema 4.0.x is a fresh-install schema: there is no upgrade path from 2.x or 3.x. See
 -- plans/schema-simplification.md for what changed and why. In short: the hot tables (spans,
 -- log_records, the five data-point tables) are append targets with no unique key and no foreign
 -- keys, clustered on their access path instead of an IDENTITY, with only the indexes a named
@@ -177,8 +177,6 @@ CREATE TABLE gauge_data_points (
     exemplars_json       NVARCHAR(MAX)
 );
 CREATE UNIQUE CLUSTERED INDEX cx_gauge_data_points ON gauge_data_points (metric_id, time_unix_nano, id);
--- Time access for retention (a batched delete by time).
-CREATE INDEX idx_gauge_time ON gauge_data_points (time_unix_nano);
 GO
 
 CREATE TABLE sum_data_points (
@@ -196,8 +194,6 @@ CREATE TABLE sum_data_points (
     exemplars_json          NVARCHAR(MAX)
 );
 CREATE UNIQUE CLUSTERED INDEX cx_sum_data_points ON sum_data_points (metric_id, time_unix_nano, id);
--- Time access for retention (a batched delete by time).
-CREATE INDEX idx_sum_time ON sum_data_points (time_unix_nano);
 GO
 
 CREATE TABLE histogram_data_points (
@@ -218,8 +214,6 @@ CREATE TABLE histogram_data_points (
     exemplars_json          NVARCHAR(MAX)
 );
 CREATE UNIQUE CLUSTERED INDEX cx_histogram_data_points ON histogram_data_points (metric_id, time_unix_nano, id);
--- Time access for retention (a batched delete by time).
-CREATE INDEX idx_histogram_time ON histogram_data_points (time_unix_nano);
 GO
 
 CREATE TABLE exponential_histogram_data_points (
@@ -244,8 +238,6 @@ CREATE TABLE exponential_histogram_data_points (
     exemplars_json          NVARCHAR(MAX)
 );
 CREATE UNIQUE CLUSTERED INDEX cx_exp_histogram_data_points ON exponential_histogram_data_points (metric_id, time_unix_nano, id);
--- Time access for retention (a batched delete by time).
-CREATE INDEX idx_exp_histogram_time ON exponential_histogram_data_points (time_unix_nano);
 GO
 
 CREATE TABLE summary_data_points (
@@ -260,8 +252,6 @@ CREATE TABLE summary_data_points (
     attributes_json      NVARCHAR(MAX)
 );
 CREATE UNIQUE CLUSTERED INDEX cx_summary_data_points ON summary_data_points (metric_id, time_unix_nano, id);
--- Time access for retention (a batched delete by time).
-CREATE INDEX idx_summary_time ON summary_data_points (time_unix_nano);
 GO
 
 -- metric_last_seen: the metrics catalog's "has data in range" check reads this instead of scanning
@@ -382,7 +372,7 @@ GO
 -- Only reached when every statement above succeeded, so a partial apply cannot
 -- leave a false version marker for the apply-schema.sh gate.
 MERGE telemetry_schema_version AS target
-USING (VALUES (N'4.0.0')) AS src (version)
+USING (VALUES (N'4.0.1')) AS src (version)
 ON target.version = src.version
 WHEN MATCHED     THEN UPDATE SET applied_at = SYSDATETIME()
 WHEN NOT MATCHED THEN INSERT (version, applied_at) VALUES (src.version, SYSDATETIME());

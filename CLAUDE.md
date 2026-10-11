@@ -48,7 +48,7 @@ dotnet run --project src/Keryhe.Telemetry.TestDataGenerator -- --Generator:Backf
 dotnet test tests/Keryhe.Telemetry.TestDataGenerator.Tests
 
 # Apply database schema: two components, each with its own script per provider and version table.
-# Control plane (tenants, api_keys, alert_rules, alert_events, retention_settings; PostgreSQL/SqlServer/MySQL only):
+# Control plane (tenants with their retention windows, api_keys, alert_rules, alert_events; PostgreSQL/SqlServer/MySQL only):
 psql -d telemetry -f schema/PostgreSQL-ControlPlane.sql   # or SqlServer-ControlPlane.sql / MySQL-ControlPlane.sql
 # Telemetry data (everything else):
 psql -d telemetry -f schema/PostgreSQL-Telemetry.sql      # PostgreSQL
@@ -62,9 +62,9 @@ schema/apply-schema.sh <controlplane|telemetry> <postgresql|sqlserver|mysql|clic
 
 **Schema 4.x is a fresh-install schema.** There is no migration from 2.x or 3.x: an existing database must be
 recreated and its tenants and keys re-created with the Admin tool; `schema/migrations/` does not exist.
-The schema has two components versioned independently, `control-plane` and `telemetry`, both 4.0.0, with the
+The schema has two components versioned independently, `control-plane` and `telemetry`, both 4.0.1, with the
 version rows in `control_plane_schema_version` and `telemetry_schema_version` (no shared `schema_version`
-table). After 4.0.0 each bumps only its own third digit, so a control-plane change edits the three
+table). After 4.0.0 each bumps only its own third digit (4.0.1 is `plans/tenant-retention.md`: per-tenant retention columns on `tenants` and `retention_settings` dropped on the control plane; the time-only data-point retention indexes dropped on the telemetry side, the ClickHouse script otherwise unchanged), so a control-plane change edits the three
 `*-ControlPlane.sql` scripts plus `CONTROLPLANE_TARGET_VERSION` in `apply-schema.sh`, and a telemetry change
 edits the four `*-Telemetry.sql` scripts plus `TELEMETRY_TARGET_VERSION`, in one commit. (4.0.0 ships together
 with `plans/list-caps.md`'s schema change to the telemetry scripts.) `apply-schema.sh` only skips a component
@@ -402,7 +402,7 @@ OpenTelemetry SDKs (any language)
 
 Angular UI (localhost:4201)
   → REST (Keryhe.Telemetry.Api.Server, /api) → controllers → I*ReadRepository (active provider, Dapper) → DB
-  (alert rules, tenants, retention settings: control-plane DB; the retention sweep: IRetentionSweeper → telemetry DB)
+  (alert rules, tenants and their retention windows: control-plane DB; the retention sweep: IRetentionSweeper → telemetry DB)
 ```
 
 ### The two composition roots
@@ -440,7 +440,7 @@ Two providers are selected at runtime, both required, on both hosts:
   `Add<Provider>ApiServices` (the bulk writer, the read repositories, the rollup and touch stores, and on the API side
   `IRetentionSweeper`), and the hosts `switch` on the config key to call the right one.
 - **`ControlPlane:Provider`** (`"PostgreSQL"`, `"SqlServer"`, or `"MySql"`; never ClickHouse or Parquet) for the control plane:
-  `tenants`, `api_keys`, `alert_rules`, `alert_events`, `retention_settings`. The same three provider projects expose
+  `tenants` (which carries each tenant's retention windows), `api_keys`, `alert_rules`, `alert_events`. The same three provider projects expose
   `Add<Provider>ControlPlaneCollectorServices` (`IApiKeyLookup`, `IApiKeyTouchStore`) and
   `Add<Provider>ControlPlaneApiServices` (`IAlertRuleRepository`, `ITenantCatalogRepository`,
   `IRetentionSettingsRepository`), both against **`ConnectionStrings:ControlPlane`**. They are a pair because the
@@ -735,7 +735,7 @@ count is `COUNT(DISTINCT span_id)` and trace detail drops a duplicate span id). 
 the resource hash includes `service.name`, so a rename produces a new resource and new `metrics` rows. A singleton
 `ResourceScopeCache` (`ConcurrentDictionary`) short-circuits DB lookups for all three, so a warm
 process resolves them with no round trip. The cache needs no invalidation because nothing deletes a
-resource, scope or metrics catalog row — `IRetentionSettingsRepository` offers retention only. If a delete
+resource, scope or metrics catalog row — retention only ever deletes telemetry rows. If a delete
 that removes catalog rows is ever added, it must clear the cache, or every flush keeps writing rows that
 point at a catalog row that no longer exists until the process restarts (the hot tables have no foreign
 keys to catch it any more, so it would be silent).
@@ -892,28 +892,48 @@ provider; its `AdminProvider` values are the `ControlPlane:Provider` values). `C
 `ConnectionStrings__Admin` environment variable (none ships in appsettings). A revoke reaches a running collector within
 `PositiveCacheTtlSeconds` (30 s).
 
-**Retention** (`Keryhe.Telemetry.Api/Retention/`): the single application-level mechanism for
-telemetry retention, on every provider. `RetentionWorker`, a `BackgroundService` structurally
-mirroring `AlertEvaluationWorker`, wakes on `Telemetry:Retention:IntervalSeconds` (default 3600s, config only —
-not part of the DB row), resolves the scoped `IRetentionSettingsRepository` (control plane) and
-`IRetentionSweeper` (telemetry database), reads the current windows via `GetSettingsAsync`, then runs the
-sweeper's `DeleteOldTracesAsync`/`DeleteOldMetricDataPointsAsync`/`DeleteOldLogRecordsAsync` against them. Each sweep ends with a "Retention sweep complete" log line that
-includes the rows removed and the sweep's elapsed milliseconds. The mechanism is per telemetry provider:
+**Retention** (`Keryhe.Telemetry.Api/Retention/`; plan `plans/tenant-retention.md`): the single application-level mechanism for
+telemetry retention, on every provider, with **per-tenant windows and no global default**. Each tenant's `trace_retention_days`,
+`log_retention_days` and `metric_retention_days` (default 30/30/30) and `retention_updated_at` are columns on its control-plane
+`tenants` row (`RetentionSettings`); telemetry whose `tenant_id` has no `tenants` row (a deleted tenant, a different
+control-plane database) expires on `RetentionDefaults` (Core, 30/30/30; a test keeps it equal to the schema defaults).
+`RetentionWorker`, a `BackgroundService` structurally mirroring `AlertEvaluationWorker`, wakes on
+`Telemetry:Retention:IntervalSeconds` (default 3600s, config only), resolves the scoped `IRetentionSettingsRepository`
+(control plane) and `IRetentionSweeper` (telemetry database), reads every tenant's windows with `GetAllAsync` into one
+`RetentionPolicy` (a fixed "now"; `CutoffFor(signal, tenant)`, `DistinctWindows`, `LongestWindow`, `TenantsWithWindow`; it refuses a
+negative window), then runs the sweeper's `DeleteOldTracesAsync`/`DeleteOldMetricDataPointsAsync`/`DeleteOldLogRecordsAsync` with it.
+Each sweep ends with a "Retention sweep complete" log line that includes the rows removed and the sweep's elapsed milliseconds.
+The tenants a sweep visits come from the **telemetry** side (`resources`, the Parquet folders, ClickHouse's own rows), never from
+`tenants`, so orphan data still expires. The mechanism is per telemetry provider:
 
 | Provider | Retention |
 |---|---|
-| PostgreSQL, SQL Server, MySQL | Spans and logs: bounded-batch deletes **per tenant** (`tenant_id = @t AND time < @cutoff`) through the `(tenant_id, time)` access path; data points: bounded batches through their time index (PostgreSQL's BRIN, SQL Server/MySQL's `(time_unix_nano)`). The shared loop is `RetentionSweeperBase`; a provider supplies only `BatchedDeleteSql` (PostgreSQL has no primary key on these tables, so a batch is `DELETE ... WHERE ctid = ANY (ARRAY(SELECT ctid ... LIMIT n))`; SQL Server `DELETE TOP (n)` at `DEADLOCK_PRIORITY LOW`, batch kept under the lock-escalation threshold; MySQL `DELETE ... LIMIT n`). The tenants swept are `SELECT DISTINCT tenant_id FROM resources`, **not** the control plane's `tenants` (the two may be different databases; data whose tenant was removed from the control plane still expires). |
-| Parquet | `ParquetRetentionSweeper`: deletes each tenant's `date=` folder for every table of the signal's window (derived tables with it) once the whole day is before the cutoff's day; tenants are the folders present, so a tenant gone from the control plane still expires; the count is the raw tables' rows summed from the manifests before the delete. Granularity is the day. |
-| ClickHouse | `ALTER TABLE ... DROP PARTITION ID` for each fully expired day (spans, `trace_index`, `request_rollup_minute`, logs, `log_rollup_minute`, the five points tables); rows of the raw tables counted from `system.parts` (`partition_id`) first. Metric sweeps also run a lightweight `DELETE` of `metric_series`/`metric_catalog` rows with `last_seen` before the cutoff. Granularity is the day. |
+| PostgreSQL, SQL Server, MySQL | Spans and logs: bounded-batch deletes **per tenant** (`tenant_id = @t AND time < @thatTenantsCutoff`) through the `(tenant_id, time)` access path; data points (no `tenant_id` column): bounded batches per tenant through `metric_id IN (SELECT id FROM metrics WHERE tenant_id = @t)`, served by the `(metric_id, time_unix_nano, id)` index (plan tests on PostgreSQL and SQL Server; MySQL plans that form as a scan, so `MySqlRetentionSweeper` sets `MetricIdsFirst`: it reads the tenant's metric ids and deletes by id list in chunks). The shared loop is `RetentionSweeperBase`; a provider supplies only `BatchedDeleteSql` (PostgreSQL has no primary key on these tables, so a batch is `DELETE ... WHERE ctid = ANY (ARRAY(SELECT ctid ... LIMIT n))`; SQL Server `DELETE TOP (n)` at `DEADLOCK_PRIORITY LOW`, batch kept under the lock-escalation threshold; MySQL `DELETE ... LIMIT n`). |
+| Parquet | `ParquetRetentionSweeper`: enumerates `date=` folders up to the cutoff day of the **shortest** window (the latest cutoff) and deletes each `(tenant, day)` for every table of the signal's window (derived tables with it) once the day is before **that tenant's** cutoff day; tenants are the folders present, so a tenant gone from the control plane still expires (on the built-in window); the count is the raw tables' rows summed from the manifests before the delete. Granularity is the day. |
+| ClickHouse | Per signal: `ALTER TABLE ... DROP PARTITION ID` for each day wholly before the cutoff of the **longest** window in effect (the built-in one always included; rows of the raw tables counted from `system.parts` first); then for every shorter window one lightweight `DELETE` (`SETTINGS lightweight_deletes_sync = 1`) of that window's tenants over the days between the longest cutoff and their own (a second statement, `tenant_id NOT IN (known)`, for tenants with no control-plane row when the window is the built-in one), with the `toStartOfFiveMinutes(timestamp)` / `toStartOfHour(time)` bounds the sort key needs to prune. A delete already done for the same days is skipped (`ClickHouseRetentionMemory`, a singleton keyed by table, window and tenant set; a restart repeats each once). `metric_series`/`metric_catalog` (unpartitioned) get a lightweight `DELETE ... WHERE tenant_id IN (...) AND last_seen < @cutoff` per distinct window. Granularity is the day; queries skip masked rows on the affected parts until merges remove them. |
 
-`AddRetention()` registers the worker; called from `Api.Server`'s `Program.cs` only, never
-`Collector.Server` — retention is entirely an API-host concern. The retention WINDOWS are global
-(one settings row, control plane), only the relational sweeps iterate tenants. `SettingsController`
-(`GET`/`PUT /api/settings/retention`) exposes `IRetentionSettingsRepository` for the Angular settings page to edit — no
-caching layer, since the worker only reads the row once per sweep interval. The row itself
-(`retention_settings`) is a single global singleton (`id = 1`, `CHECK` on relational providers), seeded on
-install with today's implicit defaults (traces 90d, logs 90d, metrics 180d); `UpdateSettingsAsync` is always
-an `UPDATE`, never an `INSERT`.
+`RetentionWindowCache` (collector side, ClickHouse and Parquet) reads `SELECT id, *_retention_days FROM tenants` into a tenant → windows
+map every refresh interval and `IRetentionWindows.OldestAllowedUtc(signal, tenantId)` gives the ingest-time cutoff
+(`PartitionedIngestionWorker.Drain` memoizes it per tenant per drain; an unknown tenant takes the built-in window; never loaded = drop
+nothing). After a window is lengthened, records between the old and new cutoff are still dropped at ingest for up to the refresh interval.
+
+`AddRetention()` registers the worker; called from `Api.Server`'s `Program.cs` only, never `Collector.Server` — retention is entirely an
+API-host concern. `TenantSettingsController` (`[TenantScoped]`, `GET`/`PUT {base}/tenants/{tenantId}/settings/retention`, Read /
+ManageSettings; 404 for a tenant with no row, 400 for a window outside 1..3650) exposes `IRetentionSettingsRepository` for the Angular
+settings page (`t/:tenantId/settings`, the nav item "Settings") — no caching layer, since the worker reads the windows once per sweep
+interval. `UpdateSettingsAsync(tenantId, ...)` is always an `UPDATE` of the tenant's row and returns false when there is none. The old
+global `{base}/settings/retention` is gone. The Admin tool does not touch retention (a created tenant takes the column defaults).
+
+**Header menus and `GET {base}/me`.** The header carries a gear (`GlobalSettingsMenuComponent`: global settings, per browser in
+localStorage, today the theme select; add a setting as one more row) and, when someone is signed in, a user button
+(`UserMenuComponent`: picture, else the first-name initial, else a person icon; the menu shows name and email and **Sign out**, the only
+Sign out). `UserService` (`core/auth`) reads OIDC user data client-side, or in cookie mode calls `GET {base}/me` once (`MeController`,
+`[TelemetryAnonymous]`: skipped by `TelemetryAuthorizationFilter`, always 200, `{signedIn:false}` when nobody is signed in, `Cache-Control:
+no-store`; claims by a fixed fallback list: `name`/`ClaimTypes.Name`/`Identity.Name`, `given_name`/`ClaimTypes.GivenName`,
+`email`/`ClaimTypes.Email`/`preferred_username` containing `@`, `picture` only if an absolute http(s) URL; when the Read operation's policy
+names `AuthenticationSchemes` the caller is authenticated through them). A failed lookup is the `unknown` state: the generic icon, and Sign
+out stays reachable when a sign-out mechanism exists. The default OIDC scope is `openid profile email`; the Entra photo (Graph) is out of
+scope. Every library action carries exactly one of `[TelemetryOperation]` and `[TelemetryAnonymous]`.
 
 **Export** (`Keryhe.Telemetry.Api/Controllers/*.cs`'s `GetExport` actions plus
 `Keryhe.Telemetry.Api/Export/ExportWriters.cs`, list-pages-server-side plan, Phase 8, decision 17):
@@ -1081,11 +1101,11 @@ beyond the margin is missing from a hinted read, which is the limit of a hint; a
 ### Database
 
 Telemetry providers: PostgreSQL, SQL Server 2022, ClickHouse, MySQL 8.0.19+, or Parquet files (no server). Control-plane providers: PostgreSQL,
-SQL Server 2022, or MySQL 8.0.19+. Schema 4.0.0 (fresh install only; the split is `plans/control-plane-split.md`). The schema is two components, each with
+SQL Server 2022, or MySQL 8.0.19+. Schema 4.0.1 (fresh install only; the split is `plans/control-plane-split.md`). The schema is two components, each with
 its own scripts and version table (see "Commands"):
 
 - **Control plane** (`schema/<Provider>-ControlPlane.sql`, relational only): `tenants`, `api_keys`, `alert_rules`,
-  `alert_events`, `retention_settings`, `control_plane_schema_version`. Foreign keys inside it stay (`api_keys` and
+  `alert_events`, `control_plane_schema_version`. Foreign keys inside it stay (`api_keys` and
   `alert_rules` -> `tenants`; `alert_events` -> `alert_rules`).
 - **Telemetry** (`schema/<Provider>-Telemetry.sql`): everything else (below), plus `telemetry_schema_version`.
 - **Nothing crosses the boundary**: `resources.tenant_id` is a plain `BIGINT NOT NULL` (no foreign key to `tenants`,
@@ -1110,8 +1130,8 @@ Telemetry tables:
   and SQL Server; MySQL has no filtered index, so `(tenant_id, status_code, start_time_unix_nano)`,
   which Phase 4 should measure and drop if its insert cost is material); `log_records (tenant_id,
   time_unix_nano, id)` and `(trace_id)`; `metrics` unique `(resource_id, name, type, scope_id)` and
-  `(tenant_id, service_name, name)`; data points `(metric_id, time_unix_nano, id)` plus a time index for
-  retention (PostgreSQL BRIN; SQL Server/MySQL `(time_unix_nano)`; none on ClickHouse);
+  `(tenant_id, service_name, name)`; data points `(metric_id, time_unix_nano, id)` only (the time-only retention
+  index was dropped in 4.0.1: per-tenant metric retention goes through `metric_id`);
   `resources` unique `(tenant_id, resource_hash)` and `(tenant_id, service_name)`;
   `instrumentation_scopes` unique `(scope_hash)`. No GIN/trigram/skip indexes, no `pg_trgm`.
 - **SQL Server** clusters on the access path, not an IDENTITY: `spans (tenant_id, start_time_unix_nano, id)`,
@@ -1143,7 +1163,7 @@ its `events_json`/`links_json` columns — there are no separate `span_events`/`
 
 **Alerting (2)**: `alert_rules`, `alert_events`
 
-**Retention (1)**: `retention_settings`
+**Retention**: three `*_retention_days` columns and `retention_updated_at` on `tenants` (no separate table)
 
 **Utility (1)**: `control_plane_schema_version` (in the control-plane scripts; the telemetry scripts carry
 `telemetry_schema_version`)

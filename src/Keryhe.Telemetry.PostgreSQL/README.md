@@ -2,7 +2,7 @@
 
 PostgreSQL provider for [Keryhe Telemetry](https://github.com/keryhe/telemetry) — Npgsql/Dapper
 implementations of the write and read repositories for a PostgreSQL database, and a PostgreSQL control plane
-(tenants, API keys, alert rules, retention settings).
+(tenants with their retention windows, API keys, alert rules).
 
 ## What it provides
 

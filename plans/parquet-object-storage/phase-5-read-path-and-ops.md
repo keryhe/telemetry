@@ -32,12 +32,16 @@ The `Keryhe.Telemetry.Parquet.Storage` meter (README "Reads"): `storage_requests
 
 ## Documentation
 
-- `src/Keryhe.Telemetry.Parquet/README.md`: choosing a backend; configuration; credentials (chains, secrets, never appsettings,
-  and how to check a role or managed identity, since tests do not); bucket settings (versioning off or with noncurrent expiry,
-  lifecycle rule for incomplete multipart uploads and for `_writers/` debris, encryption is the bucket's); request-cost arithmetic
-  from phase 6; offline extensions; moving a root between backends (O16); writer ids on Kubernetes; what "emulators only" did not
-  prove.
-- `docs/CONFIGURATION.md`: `Telemetry:Parquet:Storage`. `CLAUDE.md`: the Parquet notes block (storage kinds, the seam, test filters
+- `src/Keryhe.Telemetry.Parquet/README.md`: choosing a backend and which package to reference (the `Kind` switch a host writes);
+  the shared configuration; request-cost arithmetic from phase 6; offline extensions; moving a root between backends (O16); writer
+  ids on Kubernetes; what "emulators only" did not prove. Links to the three package READMEs.
+- `src/Keryhe.Telemetry.Parquet.Local/README.md`: `RootPath`, the one-machine rule.
+- `src/Keryhe.Telemetry.Parquet.AwsS3/README.md` and `src/Keryhe.Telemetry.Parquet.AzureBlob/README.md`: configuration;
+  credentials (chains, secrets, never appsettings, and how to check a role or managed identity, since tests do not); bucket or
+  container settings (versioning off or with noncurrent expiry, lifecycle rule for incomplete multipart uploads and for `_writers/`
+  debris, encryption is the bucket's). AwsS3's says the endpoint override is for MinIO in development.
+- `docs/CONFIGURATION.md`: `Telemetry:Parquet:Storage` and its `AwsS3`/`AzureBlob` sections. `CLAUDE.md`: the projects table (the
+  three packages) and the Parquet notes block (storage kinds, the seam, the packages and the `Kind` switch, test filters
   `ParquetS3`/`ParquetAzure`, harness flags). `docs/SETUP.md`: the object-storage option.
 - `plans/parquet-duckdb/README.md`: U4's "later phase" points here.
 

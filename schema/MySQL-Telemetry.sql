@@ -1,14 +1,14 @@
--- OpenTelemetry MySQL Schema (MySQL 8.0+), telemetry data -- telemetry schema 4.0.0
+-- OpenTelemetry MySQL Schema (MySQL 8.0+), telemetry data -- telemetry schema 4.0.1
 -- Supports OTLP logs, metrics, and traces as defined in opentelemetry-proto. MySQL 8 only: no
 -- MariaDB compatibility is maintained.
 --
--- This script is the TELEMETRY half of the schema. Tenants, API keys, alert rules and retention
--- settings are the control plane, in MySQL-ControlPlane.sql (plans/control-plane-split.md). No
+-- This script is the TELEMETRY half of the schema. Tenants (with their retention windows), API keys and
+-- alert rules are the control plane, in MySQL-ControlPlane.sql (plans/control-plane-split.md). No
 -- foreign key crosses the two, so they may share a database or live in two, and either script may
 -- be applied first (control plane first is natural: a running collector needs keys before it
 -- accepts data). Telemetry schema versions are recorded in telemetry_schema_version.
 --
--- Schema 4.0.0 is a fresh-install schema: there is no upgrade path from 2.x or 3.x. See
+-- Schema 4.0.x is a fresh-install schema: there is no upgrade path from 2.x or 3.x. See
 -- plans/schema-simplification.md for what changed and why. In short: the hot tables (spans,
 -- log_records, the five data-point tables) are append targets with no unique key and no foreign
 -- keys, whose InnoDB primary key follows the access path instead of an AUTO_INCREMENT id, with
@@ -167,8 +167,6 @@ CREATE TABLE gauge_data_points (
     PRIMARY KEY (metric_id, time_unix_nano, id),
     KEY idx_gauge_id (id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
--- Time access for retention (a batched delete by time).
-CREATE INDEX idx_gauge_time ON gauge_data_points (time_unix_nano);
 
 CREATE TABLE sum_data_points (
     id                      BIGINT NOT NULL AUTO_INCREMENT,
@@ -186,8 +184,6 @@ CREATE TABLE sum_data_points (
     PRIMARY KEY (metric_id, time_unix_nano, id),
     KEY idx_sum_id (id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
--- Time access for retention (a batched delete by time).
-CREATE INDEX idx_sum_time ON sum_data_points (time_unix_nano);
 
 CREATE TABLE histogram_data_points (
     id                      BIGINT NOT NULL AUTO_INCREMENT,
@@ -208,8 +204,6 @@ CREATE TABLE histogram_data_points (
     PRIMARY KEY (metric_id, time_unix_nano, id),
     KEY idx_histogram_id (id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
--- Time access for retention (a batched delete by time).
-CREATE INDEX idx_histogram_time ON histogram_data_points (time_unix_nano);
 
 CREATE TABLE exponential_histogram_data_points (
     id                      BIGINT NOT NULL AUTO_INCREMENT,
@@ -234,8 +228,6 @@ CREATE TABLE exponential_histogram_data_points (
     PRIMARY KEY (metric_id, time_unix_nano, id),
     KEY idx_exp_histogram_id (id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
--- Time access for retention (a batched delete by time).
-CREATE INDEX idx_exp_histogram_time ON exponential_histogram_data_points (time_unix_nano);
 
 CREATE TABLE summary_data_points (
     id                   BIGINT NOT NULL AUTO_INCREMENT,
@@ -250,8 +242,6 @@ CREATE TABLE summary_data_points (
     PRIMARY KEY (metric_id, time_unix_nano, id),
     KEY idx_summary_id (id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
--- Time access for retention (a batched delete by time).
-CREATE INDEX idx_summary_time ON summary_data_points (time_unix_nano);
 
 -- metric_last_seen: the metrics catalog's "has data in range" check reads this instead of scanning
 -- the five data-point tables. No FK to metrics (a FK would make every touch lock-check the
@@ -423,7 +413,7 @@ CREATE TABLE telemetry_schema_version (
 -- Only inserted when every statement above succeeded, so a partial apply cannot
 -- leave a false version marker for the apply-schema.sh gate.
 INSERT INTO telemetry_schema_version (version, applied_at)
-VALUES ('4.0.0', CURRENT_TIMESTAMP(6))
+VALUES ('4.0.1', CURRENT_TIMESTAMP(6))
 ON DUPLICATE KEY UPDATE applied_at = CURRENT_TIMESTAMP(6);
 
 -- =============================================================================

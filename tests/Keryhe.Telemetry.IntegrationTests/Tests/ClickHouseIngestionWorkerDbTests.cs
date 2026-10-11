@@ -39,7 +39,7 @@ public sealed class ClickHouseIngestionWorkerDbTests(ClickHouseFixture fixture) 
 
     private sealed class NoRetention : IRetentionWindows
     {
-        public DateTime? OldestAllowedUtc(string signal) => null;
+        public DateTime? OldestAllowedUtc(string signal, long tenantId) => null;
         public Task RefreshAsync(CancellationToken ct) => Task.CompletedTask;
         public int RefreshSeconds => 3600;
     }

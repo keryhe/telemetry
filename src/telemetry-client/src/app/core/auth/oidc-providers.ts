@@ -2,7 +2,7 @@ import { EnvironmentProviders, Provider, inject, provideAppInitializer } from '@
 import { OidcSecurityService, provideAuth } from 'angular-auth-oidc-client';
 import { firstValueFrom, map } from 'rxjs';
 import { AppConfig } from '../config/app-config';
-import { AUTH_SESSION, AuthSession, currentAppUrl, saveReturnUrl } from './auth-session';
+import { AUTH_SESSION, AuthSession, UserInfo, currentAppUrl, saveReturnUrl } from './auth-session';
 
 /**
  * `oidc` mode: sign-in by authorization code + PKCE with refresh-token renewal (no iframe), against
@@ -35,6 +35,7 @@ export function provideOidcAuth(config: AppConfig): (Provider | EnvironmentProvi
       useFactory: (): AuthSession => {
         const service = inject(OidcSecurityService);
         return {
+          user: () => service.userData$.pipe(map((r) => toUserInfo(r.userData))),
           accessToken: () => service.getAccessToken().pipe(map((t) => t || null)),
           signIn: (returnUrl) => { saveReturnUrl(returnUrl); service.authorize(); },
           signOut: () => { service.logoff().subscribe(); },
@@ -51,4 +52,19 @@ export function provideOidcAuth(config: AppConfig): (Provider | EnvironmentProvi
       }
     }),
   ];
+}
+
+/** The claims the header uses (`openid profile email`); anything else the provider sends is ignored. */
+function toUserInfo(claims: unknown): UserInfo | null {
+  if (claims === null || typeof claims !== 'object') return null;
+  const c = claims as Record<string, unknown>;
+  const text = (v: unknown) => (typeof v === 'string' && v.trim() !== '' ? v.trim() : undefined);
+  const email = text(c['email']);
+  const username = text(c['preferred_username']);
+  return {
+    name: text(c['name']),
+    givenName: text(c['given_name']),
+    email: email ?? (username?.includes('@') ? username : undefined),
+    picture: text(c['picture']),
+  };
 }

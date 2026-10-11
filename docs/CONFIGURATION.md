@@ -16,10 +16,10 @@ to both.
 | Key | Default | Host | Description |
 |---|---|---|---|
 | `Database:Provider` | none (required) | collector, API | The telemetry data provider: `PostgreSQL`, `SqlServer`, `ClickHouse`, `MySql` or `Parquet` (files + DuckDB; no connection string, see `Telemetry:Parquet`). Unknown or missing fails startup. |
-| `ControlPlane:Provider` | none (required) | collector, API, Admin | The control-plane provider (tenants, API keys, alert rules, retention settings): `PostgreSQL`, `SqlServer` or `MySql`. ClickHouse and Parquet are not control-plane providers. Unknown or missing fails startup naming the key. |
+| `ControlPlane:Provider` | none (required) | collector, API, Admin | The control-plane provider (tenants and their retention windows, API keys, alert rules): `PostgreSQL`, `SqlServer` or `MySql`. ClickHouse and Parquet are not control-plane providers. Unknown or missing fails startup naming the key. |
 | `ConnectionStrings:Collector` | none (required) | collector | Write path: the telemetry bulk writer, metric-touch and rollup stores. |
 | `ConnectionStrings:Api` | none (required) | API | Read path: every telemetry read repository and the retention sweeper. |
-| `ConnectionStrings:ControlPlane` | none (required) | collector, API | The control-plane database: the collector's API-key lookup and touch, the API's alert rules, tenant catalog and retention settings. No fallback to `Collector`/`Api`; missing fails startup naming the key. On PostgreSQL, SQL Server and MySQL it normally points at the same database as the data strings. |
+| `ConnectionStrings:ControlPlane` | none (required) | collector, API | The control-plane database: the collector's API-key lookup and touch, the API's alert rules, tenant catalog and each tenant's retention windows. No fallback to `Collector`/`Api`; missing fails startup naming the key. On PostgreSQL, SQL Server and MySQL it normally points at the same database as the data strings. |
 | `ConnectionStrings:Admin` | none (required) | Admin tool | `Keryhe.Telemetry.Admin`'s connection (the control-plane database). |
 
 The committed `appsettings.json` files leave the connection strings empty; local values live in User Secrets.
@@ -376,8 +376,9 @@ API host (`AddAlerting`). `AlertingOptions`.
 
 ### Retention (`Telemetry:Retention`)
 
-API host (`AddRetention`). `RetentionOptions`. How many days to keep is not configuration: it is the
-`retention_settings` row, edited on the Settings page.
+API host (`AddRetention`). `RetentionOptions`. How many days to keep is not configuration, and there is no global default:
+each tenant's three windows (a new tenant starts at 30/30/30) are columns on its `tenants` row, edited on that tenant's Settings
+page (`/t/{tenantId}/settings`); telemetry of a tenant with no row expires on the built-in 30/30/30.
 
 | Key | Default | Description |
 |---|---|---|
@@ -399,11 +400,11 @@ API host (`AddKeryheTelemetryUi`). `TelemetryUiOptions`; full detail in
 | `HealthThresholds:ErrorRate:Critical` | unset (0.05 in the SPA) | Error threshold; must be above `Warn`. |
 | `Auth:Mode` | `cookie` | `cookie` (the host owns sign-in) or `oidc` (the SPA signs in itself and sends a bearer token). |
 | `Auth:LoginUrl` | unset | Where the SPA sends the browser on a `401` (cookie mode). |
-| `Auth:LogoutUrl` | unset | Sign-out link (cookie mode). |
+| `Auth:LogoutUrl` | unset | Target of "Sign out" in the header's user menu (cookie mode). The user menu appears only while someone is signed in: in cookie mode the UI asks the API's `GET {base}/me` (anonymous-allowed, always 200, `signedIn:false` when nobody is) and in oidc mode it reads the session's own claims. |
 | `Auth:IncludeCredentials` | false | Send cookies on cross-origin API calls. |
 | `Auth:Oidc:Authority` | unset | OIDC issuer (oidc mode). |
 | `Auth:Oidc:ClientId` | unset | OIDC client id (oidc mode). |
-| `Auth:Oidc:Scope` | `openid profile` | Requested scopes (oidc mode). |
+| `Auth:Oidc:Scope` | `openid profile email` | Requested scopes (oidc mode); `profile` and `email` supply the name, picture and email the header's user menu shows. |
 
 ### CORS (`Cors`)
 

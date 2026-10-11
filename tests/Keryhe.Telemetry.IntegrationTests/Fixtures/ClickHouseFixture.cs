@@ -52,6 +52,8 @@ public sealed class ClickHouseFixture : ProviderFixture
         ];
         // the writer remembers which catalog/series rows it wrote; the tables just lost them
         ((Keryhe.Telemetry.ClickHouse.Services.ClickHouseBulkWriter)Services.GetRequiredService<Keryhe.Telemetry.Core.ITelemetryBulkWriter>()).ResetCatalogTrackers();
+        // ...and the retention sweeper which days it already deleted
+        Services.GetRequiredService<Keryhe.Telemetry.ClickHouse.Services.ClickHouseRetentionMemory>().Clear();
         foreach (var table in tables)
         {
             var cmd = conn.CreateCommand();

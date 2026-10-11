@@ -1,6 +1,6 @@
--- OpenTelemetry ClickHouse telemetry schema -- telemetry schema 4.0.0 (ClickHouse 25.8 LTS or later)
+-- OpenTelemetry ClickHouse telemetry schema -- telemetry schema 4.0.1 (ClickHouse 25.8 LTS or later)
 -- Fresh install only: there is no upgrade path from any earlier layout (recreate the database).
--- ClickHouse holds telemetry data only: tenants, API keys, alert rules and retention settings are the
+-- ClickHouse holds telemetry data only: tenants (with their retention windows), API keys and alert rules are the
 -- control plane, which a ClickHouse deployment runs on PostgreSQL, SQL Server or MySQL
 -- (PostgreSQL-ControlPlane.sql and its siblings, ControlPlane:Provider).
 --
@@ -438,4 +438,4 @@ ORDER BY version;
 
 -- The telemetry_schema_version row is seeded LAST, so a partial/failed apply never records a version that
 -- the apply-schema.sh version gate would wrongly treat as "already applied".
-INSERT INTO telemetry_schema_version (version) VALUES ('4.0.0');
+INSERT INTO telemetry_schema_version (version) VALUES ('4.0.1');

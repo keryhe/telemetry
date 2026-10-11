@@ -111,4 +111,44 @@ public sealed class SqlServerSchemaTests(SqlServerFixture fixture) : IAsyncLifet
         var unicode = await PlanAsync("nvarchar(4000)");
         Assert.True(ConvertsTheColumn(unicode), "the nvarchar control must show the column being converted");
     }
+
+    /// <summary>
+    /// Per-tenant metric retention (plans/tenant-retention.md, decision 9): the batched delete finds a tenant's points through
+    /// <c>metric_id</c> and the clustered key <c>(metric_id, time_unix_nano, id)</c>, a seek per metric rather than a scan of the
+    /// table. Negative control: the time-only predicate (the time index is gone) can only scan.
+    /// </summary>
+    [Fact]
+    public async Task PerTenantMetricRetentionDelete_SeeksTheClusteredKey_AndTheTimeOnlyControlScans()
+    {
+        var metrics = new List<Keryhe.Telemetry.Core.Models.MetricModel>();
+        for (var tenant = 1; tenant <= 3; tenant++)
+            metrics.AddRange(Seeding.SeededDataBuilder.MultiInstanceGauge(fixture.TenantId + tenant, new DateTime(2026, 3, 1, 0, 0, 0, DateTimeKind.Utc),
+                serviceName: $"plan-{Guid.NewGuid():N}", instanceCount: 4, pointsPerInstance: 300));
+        using (var write = fixture.Services.CreateScope())
+            await write.ServiceProvider.GetRequiredService<Keryhe.Telemetry.Core.ITelemetryBulkWriter>().FlushMetricsAsync(metrics);
+
+        async Task<string> PlanAsync(string predicate)
+        {
+            await using var conn = new SqlConnection(fixture.DatabaseConnectionString);
+            await conn.OpenAsync();
+            await using (var on = new SqlCommand("SET SHOWPLAN_XML ON", conn)) await on.ExecuteNonQueryAsync();
+            await using var cmd = new SqlCommand($"""
+                DECLARE @tenantId bigint = {fixture.TenantId + 1};
+                DECLARE @cutoff bigint = 1;
+                DELETE TOP (4000) FROM gauge_data_points WHERE {predicate}
+                """, conn);
+            var plans = new List<string>();
+            await using var reader = await cmd.ExecuteReaderAsync();
+            do { while (await reader.ReadAsync()) plans.Add(reader.GetString(0)); } while (await reader.NextResultAsync());
+            return string.Join('\n', plans);
+        }
+
+        var perTenant = await PlanAsync("metric_id IN (SELECT id FROM metrics WHERE tenant_id = @tenantId) AND time_unix_nano < @cutoff");
+        Assert.Contains("PhysicalOp", perTenant);
+        Assert.Contains("cx_gauge_data_points", perTenant);
+        Assert.Contains("Index Seek", perTenant);
+
+        var control = await PlanAsync("time_unix_nano < @cutoff");
+        Assert.Contains("Clustered Index Scan", control);
+    }
 }
