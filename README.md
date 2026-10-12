@@ -1,5 +1,11 @@
 # Keryhe Telemetry
 
+> [!WARNING]
+> **Experimental: not for production use.** This is a personal project and a proof of concept, built to explore
+> ideas around OpenTelemetry ingestion, storage and visualization. It has not been hardened, security-reviewed or
+> tested at production scale, and its schema and APIs may change without notice or a migration path. Use it to
+> learn, experiment or borrow ideas, but do not rely on it for real workloads or sensitive data.
+
 A self-hosted OpenTelemetry (OTLP) ingestion and visualization platform for traces, metrics, and logs. Provides a gRPC server for receiving telemetry from any OpenTelemetry SDK, a REST API for querying the data, and an Angular UI for visualization.
 
 ## Features
