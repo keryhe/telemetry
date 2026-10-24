@@ -17,5 +17,6 @@ public enum AdminProvider
 {
     PostgreSql,
     SqlServer,
-    MySql
+    MySql,
+    Sqlite
 }

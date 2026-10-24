@@ -13,7 +13,7 @@ schema, the tests and the measurements use).
   repositories and `IRetentionSweeper`, connecting via `ConnectionStrings:Api`.
 
 **ClickHouse holds telemetry data only.** Tenants, API keys, alert rules and each tenant's retention windows (the control
-plane) live in PostgreSQL, SQL Server or MySQL: also reference that provider's package and register its
+plane) live in PostgreSQL, SQL Server, MySQL or a SQLite file: also reference that provider's package and register its
 `Add<Provider>ControlPlaneCollectorServices` / `Add<Provider>ControlPlaneApiServices`
 (`ControlPlane:Provider`, `ConnectionStrings:ControlPlane`).
 
@@ -38,7 +38,7 @@ Configuration:
 - `ConnectionStrings:Collector` / `ConnectionStrings:Api` — HTTP-interface connection strings, e.g.
   `Host=localhost;Port=8123;Username=default;Password=<password>;Database=telemetry`.
 
-- `ControlPlane:Provider` — `PostgreSQL`, `SqlServer` or `MySql`; `ConnectionStrings:ControlPlane` — that database
+- `ControlPlane:Provider` — `PostgreSQL`, `SqlServer`, `MySql` or `Sqlite` (a file on the same machine as the hosts); `ConnectionStrings:ControlPlane` — that database
   (both required).
 
 Apply `schema/ClickHouse-Telemetry.sql` (or `schema/apply-schema.sh telemetry clickhouse`) to ClickHouse and the

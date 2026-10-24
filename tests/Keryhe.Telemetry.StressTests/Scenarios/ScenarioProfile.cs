@@ -102,6 +102,24 @@ public sealed class ScenarioProfile
     /// <summary>CPUs the database container is pinned to (Docker <c>--cpuset-cpus</c>, e.g. "0-3"), or null for the shared pool. See the report's CPU-separation note.</summary>
     public string? DatabaseCpuset { get; set; }
 
+    /// <summary>
+    /// Where the control plane runs (<c>--control-plane postgresql|sqlite</c>), or null for the provider's default: a SQLite file for Parquet, a
+    /// PostgreSQL container for ClickHouse, the provider's own database for the relational ones. Recorded in the result.
+    /// </summary>
+    public string? ControlPlane { get; set; }
+
+    /// <summary>
+    /// Applies a <c>--control-plane</c> choice for <paramref name="provider"/>. A choice that moves the provider off its default tags the profile
+    /// name (<c>-cpsqlite</c>, <c>-cppostgresql</c>), so such results land in their own folders and never read as the default scenario.
+    /// </summary>
+    public void OverrideControlPlane(string provider, string choice)
+    {
+        var normalized = TestInfrastructure.Containers.ProviderContainerFactory.ValidateControlPlane(provider, choice);
+        ControlPlane = normalized;
+        if (!TestInfrastructure.Containers.ProviderContainerFactory.IsDefaultControlPlane(provider, normalized))
+            Name = $"{Name}-cp{normalized}";
+    }
+
     /// <summary>Extra environment variables for both hosts (<c>--host-env KEY=VALUE</c>), e.g. ingestion settings under test. Recorded in the run's command line.</summary>
     public Dictionary<string, string> HostEnvironment { get; set; } = [];
 

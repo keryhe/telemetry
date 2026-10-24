@@ -17,13 +17,13 @@ public sealed class ParquetOptions : IPartitionedIngestionOptions
     public string? WriterId { get; set; }
 
     /// <summary>How long the open hour's buffer collects records before it is written (used by the ingestion worker).</summary>
-    public int LingerMilliseconds { get; set; } = 30_000;
+    public int LingerMilliseconds { get; set; } = 5_000;
 
     /// <summary>The same for a buffer of an earlier hour.</summary>
     public int LateLingerMilliseconds { get; set; } = 120_000;
 
     /// <summary>A buffer is sealed and written as soon as it holds this many records (spans, log records or metrics).</summary>
-    public int MaxBufferRecords { get; set; } = 500_000;
+    public int MaxBufferRecords { get; set; } = 50_000;
 
     /// <summary>With more earlier-hour buffers than this, the oldest is written early.</summary>
     public int MaxLateBuffers { get; set; } = 24;

@@ -16,13 +16,26 @@ to both.
 | Key | Default | Host | Description |
 |---|---|---|---|
 | `Database:Provider` | none (required) | collector, API | The telemetry data provider: `PostgreSQL`, `SqlServer`, `ClickHouse`, `MySql` or `Parquet` (files + DuckDB; no connection string, see `Telemetry:Parquet`). Unknown or missing fails startup. |
-| `ControlPlane:Provider` | none (required) | collector, API, Admin | The control-plane provider (tenants and their retention windows, API keys, alert rules): `PostgreSQL`, `SqlServer` or `MySql`. ClickHouse and Parquet are not control-plane providers. Unknown or missing fails startup naming the key. |
+| `ControlPlane:Provider` | none (required) | collector, API, Admin | The control-plane provider (tenants and their retention windows, API keys, alert rules): `PostgreSQL`, `SqlServer`, `MySql` or `Sqlite` (a file; see [`Telemetry:ControlPlane:Sqlite`](#sqlite-control-plane) below). ClickHouse and Parquet are not control-plane providers. Unknown or missing fails startup naming the key. |
 | `ConnectionStrings:Collector` | none (required) | collector | Write path: the telemetry bulk writer, metric-touch and rollup stores. |
 | `ConnectionStrings:Api` | none (required) | API | Read path: every telemetry read repository and the retention sweeper. |
-| `ConnectionStrings:ControlPlane` | none (required) | collector, API | The control-plane database: the collector's API-key lookup and touch, the API's alert rules, tenant catalog and each tenant's retention windows. No fallback to `Collector`/`Api`; missing fails startup naming the key. On PostgreSQL, SQL Server and MySQL it normally points at the same database as the data strings. |
+| `ConnectionStrings:ControlPlane` | none (required) | collector, API | The control-plane database: the collector's API-key lookup and touch, the API's alert rules, tenant catalog and each tenant's retention windows. No fallback to `Collector`/`Api`; missing fails startup naming the key. On PostgreSQL, SQL Server and MySQL it normally points at the same database as the data strings. For `Sqlite` it is `Data Source=<absolute path of the file>` (a relative path or `:memory:` fails startup); `Mode`/`Cache` are ignored (the host decides whether it may create the file), `Foreign Keys` and `Pooling` are forced on, and `Default Timeout` (the busy wait) is 30 s unless set. |
 | `ConnectionStrings:Admin` | none (required) | Admin tool | `Keryhe.Telemetry.Admin`'s connection (the control-plane database). |
 
 The committed `appsettings.json` files leave the connection strings empty; local values live in User Secrets.
+
+### SQLite control plane
+
+`ControlPlane:Provider=Sqlite` keeps the control plane in one file (`Keryhe.Telemetry.Sqlite`; operator guide in its README).
+`ConnectionStrings:ControlPlane` (and `ConnectionStrings:Admin` for the Admin tool) is `Data Source=<absolute path>`, the **same file
+on every host and tool, on one machine's local file system**. It works with any `Database:Provider`.
+
+| Key | Default | Host | Description |
+|---|---|---|---|
+| `Telemetry:ControlPlane:Sqlite:ApplySchema` | `true` | API | `true`: the API host creates the database if it has no schema and applies forward-only migrations at startup, before the alerting and retention workers start (the directory must exist; the file is created). `false`: it only checks, as the collector always does, for an operator who wants to create or migrate deliberately (`schema/apply-schema.sh controlplane sqlite <file>` creates a fresh file). A migration first copies the file to `<file>.bak-<version>-<time>-<id>`. A database at a newer version than the build, or an older one with no migration chain, fails startup naming both versions. |
+
+The collector and the Admin tool never create or migrate the file: they fail (the collector before it binds a port) when it is missing
+or not at exactly the build's schema version, so upgrade the API host first.
 
 ### Host settings
 
@@ -225,16 +238,16 @@ The collector writes tenant-hour Parquet files; the API host reads them with an 
 must see the same `RootPath` **on one machine's file system** (a local disk, or a volume shared by containers on one Linux host; not a network share).
 `Compaction` is read by the API host only, `Writer` by the collector only. Ingestion buffers per hour like ClickHouse's per day, so the
 `Telemetry:Ingestion:MaxQueued*` gates must each be at least `MaxBufferRecords` (a startup warning says so) and large enough to hold the
-records of one linger. When these keys are not set, the Parquet provider defaults the three record gates to `2 x MaxBufferRecords` (1,000,000)
+records of one linger. When these keys are not set, the Parquet provider defaults the three record gates to 1,000,000 (or `2 x MaxBufferRecords` if that is more)
 and `MaxQueuedBytesPerSignal` to 2 GB, instead of the 200000 / 256 MB above; a key you set wins.
 
 | Key | Default | Description |
 |---|---|---|
 | `RootPath` | none (required) | The data directory. |
 | `WriterId` | machine name + a saved suffix | A collector's stable id (1-64 letters, digits, `_`, `-`); unique per live collector on one root. |
-| `LingerMilliseconds` | 30000 | How long the open hour's buffer collects records before it is written as a file; also the delay before new data is readable. |
+| `LingerMilliseconds` | 5000 | How long the open hour's buffer collects records before it is written as a file; also the delay before new data is readable. |
 | `LateLingerMilliseconds` | 120000 | The same for a buffer of an earlier hour (late data). |
-| `MaxBufferRecords` | 500000 | A buffer is written at once when it holds this many records. |
+| `MaxBufferRecords` | 50000 | A buffer is written at once when it holds this many records. |
 | `MaxBufferBytes` | 268435456 | Reserved: the gate's `MaxQueuedBytesPerSignal` already bounds resident bytes. |
 | `MaxLateBuffers` | 24 | With more earlier-hour buffers than this, the oldest is written early. |
 | `RetentionRefreshSeconds` | 300 | How often the retention windows are re-read from the control plane. Records older than their window are dropped at ingest (`records_dropped`, `reason=out_of_retention`). |

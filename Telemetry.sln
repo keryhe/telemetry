@@ -40,6 +40,8 @@ Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Keryhe.Telemetry.Parquet", 
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Keryhe.Telemetry.Parquet.Tests", "tests\Keryhe.Telemetry.Parquet.Tests\Keryhe.Telemetry.Parquet.Tests.csproj", "{3C508873-B196-4D14-B5EF-BEF7AAE0F9B4}"
 EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Keryhe.Telemetry.Sqlite", "src\Keryhe.Telemetry.Sqlite\Keryhe.Telemetry.Sqlite.csproj", "{E7693472-143D-4791-9D89-B8E8E3DE9213}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -266,6 +268,18 @@ Global
 		{3C508873-B196-4D14-B5EF-BEF7AAE0F9B4}.Release|x64.Build.0 = Release|Any CPU
 		{3C508873-B196-4D14-B5EF-BEF7AAE0F9B4}.Release|x86.ActiveCfg = Release|Any CPU
 		{3C508873-B196-4D14-B5EF-BEF7AAE0F9B4}.Release|x86.Build.0 = Release|Any CPU
+		{E7693472-143D-4791-9D89-B8E8E3DE9213}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{E7693472-143D-4791-9D89-B8E8E3DE9213}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{E7693472-143D-4791-9D89-B8E8E3DE9213}.Debug|x64.ActiveCfg = Debug|Any CPU
+		{E7693472-143D-4791-9D89-B8E8E3DE9213}.Debug|x64.Build.0 = Debug|Any CPU
+		{E7693472-143D-4791-9D89-B8E8E3DE9213}.Debug|x86.ActiveCfg = Debug|Any CPU
+		{E7693472-143D-4791-9D89-B8E8E3DE9213}.Debug|x86.Build.0 = Debug|Any CPU
+		{E7693472-143D-4791-9D89-B8E8E3DE9213}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{E7693472-143D-4791-9D89-B8E8E3DE9213}.Release|Any CPU.Build.0 = Release|Any CPU
+		{E7693472-143D-4791-9D89-B8E8E3DE9213}.Release|x64.ActiveCfg = Release|Any CPU
+		{E7693472-143D-4791-9D89-B8E8E3DE9213}.Release|x64.Build.0 = Release|Any CPU
+		{E7693472-143D-4791-9D89-B8E8E3DE9213}.Release|x86.ActiveCfg = Release|Any CPU
+		{E7693472-143D-4791-9D89-B8E8E3DE9213}.Release|x86.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE
@@ -289,5 +303,6 @@ Global
 		{2E0805BE-BAEE-486E-A7F0-938AFF728D6D} = {0AB3BF05-4346-4AA6-1389-037BE0695223}
 		{23BA072E-1DC8-4502-86FD-4CBEB1C610A1} = {827E0CD3-B72D-47B6-A68D-7590B98EB39B}
 		{3C508873-B196-4D14-B5EF-BEF7AAE0F9B4} = {0AB3BF05-4346-4AA6-1389-037BE0695223}
+		{E7693472-143D-4791-9D89-B8E8E3DE9213} = {827E0CD3-B72D-47B6-A68D-7590B98EB39B}
 	EndGlobalSection
 EndGlobal

@@ -84,6 +84,9 @@ public static class HtmlReportWriter
               .Append(", exit ").Append(E(outage.ExitCode?.ToString() ?? "?")).Append(", OOM-killed ").Append(E(outage.OomKilled?.ToString() ?? "?"))
               .Append("). Everything measured before it stands; the database observation and the correctness check were skipped.</p>");
 
+        if (r.ControlPlane is not null)
+            sb.Append("<p class=\"keyline\">Control plane (tenants, API keys, alert rules, retention settings): ").Append(E(r.ControlPlane))
+              .Append(r.ControlPlane == "Sqlite" ? ", a file in the scenario folder, on the same machine as the hosts." : ".").Append("</p>");
         if (r.ProfileUsed.WriteOnly) sb.Append("<p class=\"keyline\">Write-only run: no browsers and no marker probes, so nothing read the database. The ramp judged drops, gate wait, client export latency/errors and commit lag only.</p>");
         CpuSeparation(sb, s, run);
         Summary(sb, s);

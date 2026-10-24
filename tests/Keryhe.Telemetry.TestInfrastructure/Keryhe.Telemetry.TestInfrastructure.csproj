@@ -18,6 +18,10 @@
     <PackageReference Include="ClickHouse.Client" Version="7.14.0" />
   </ItemGroup>
 
+  <ItemGroup>
+    <ProjectReference Include="../../src/Keryhe.Telemetry.Sqlite/Keryhe.Telemetry.Sqlite.csproj" />
+  </ItemGroup>
+
   <!-- The real schema/*.sql scripts, copied next to the consuming project's binaries under Schema/.
        Content items flow through a ProjectReference, so the integration tests and the stress harness
        both find them at AppContext.BaseDirectory/Schema/. -->

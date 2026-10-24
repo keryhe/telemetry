@@ -1,0 +1,49 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <GeneratePackageOnBuild>true</GeneratePackageOnBuild>
+    <Version>2.0.1</Version>
+    <Authors>Keith Heard</Authors>
+    <Product>Telemetry</Product>
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
+    <PackageProjectUrl>https://github.com/keryhe/telemetry</PackageProjectUrl>
+    <PackageTags>Keryhe Telemetry Sqlite</PackageTags>
+    <AssemblyVersion>2.0.1.0</AssemblyVersion>
+    <FileVersion>2.0.1.0</FileVersion>
+    <Description>SQLite control-plane implementation for telemetry (tenants, API keys, alert rules, retention settings)</Description>
+    <Copyright>Copyright 2026</Copyright>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <None Include="README.md" Pack="true" PackagePath="\" />
+  </ItemGroup>
+
+  <!-- The create script and the forward-only migrations are the files under /schema, embedded so they cannot drift from the
+       copies on disk. Names are the resource names SqliteControlPlaneSchema looks up. -->
+  <ItemGroup>
+    <EmbeddedResource Include="../../schema/SQLite-ControlPlane.sql" LogicalName="Keryhe.Telemetry.Sqlite.create.sql" />
+    <EmbeddedResource Include="../../schema/SQLite-ControlPlane-Migrations/*.sql" LogicalName="Keryhe.Telemetry.Sqlite.migrations.%(Filename)%(Extension)" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="Keryhe.Telemetry.IntegrationTests" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="../Keryhe.Telemetry.Core/Keryhe.Telemetry.Core.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Dapper" Version="2.1.79" />
+    <PackageReference Include="Microsoft.Data.Sqlite" Version="10.0.5" />
+    <!-- Microsoft.Data.Sqlite 10.0.5 brings the native library at 2.1.11, which NuGet flags (GHSA-2m69-gcr7-jv3q, <= 2.1.11);
+         a direct reference to a newer version wins. -->
+    <PackageReference Include="SQLitePCLRaw.lib.e_sqlite3" Version="2.1.13" />
+    <PackageReference Include="Microsoft.Extensions.Configuration.Abstractions" Version="10.0.10" />
+  </ItemGroup>
+
+</Project>

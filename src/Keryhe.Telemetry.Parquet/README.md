@@ -4,7 +4,7 @@ Parquet + DuckDB provider for [Keryhe Telemetry](https://github.com/keryhe/telem
 as Parquet files and the API reads them with an in-process DuckDB. No database server for telemetry. Set
 `Database:Provider` to `Parquet`. Spans, logs and metrics work end to end, with compaction and day-granular retention.
 
-**Telemetry data only.** Like ClickHouse, a Parquet deployment runs the control plane (tenants with their retention windows, API keys, alert rules) on PostgreSQL, SQL Server or MySQL (`ControlPlane:Provider`).
+**Telemetry data only.** Like ClickHouse, a Parquet deployment runs the control plane (tenants with their retention windows, API keys, alert rules) on PostgreSQL, SQL Server or MySQL (`ControlPlane:Provider`), **or in a SQLite file** (`ControlPlane:Provider=Sqlite`, package `Keryhe.Telemetry.Sqlite`): Parquet plus SQLite needs no database server at all, only two things on one machine's local file system, the Parquet root and the SQLite file.
 
 ## When to choose it
 
@@ -30,7 +30,7 @@ builder.Services.AddPostgreSqlControlPlaneApiServices(builder.Configuration);
 ```
 
 Set `Database:Provider` to `Parquet` and `Telemetry:Parquet:RootPath` on both hosts (there is no `ConnectionStrings:Collector`
-or `:Api` for this provider); `ControlPlane:Provider` and `ConnectionStrings:ControlPlane` as for ClickHouse. There is no
+or `:Api` for this provider); `ControlPlane:Provider` and `ConnectionStrings:ControlPlane` as for ClickHouse (for `Sqlite`: `Data Source=<absolute path>`; start the API host before the collector, since it creates the file). There is no
 schema script: `schema/apply-schema.sh telemetry parquet <root>` only creates the directory, and the collector writes
 `_schema.json` on first start. Start the collector before the API host (the API refuses a root that does not exist).
 
@@ -48,8 +48,8 @@ schema script: `schema/apply-schema.sh telemetry parquet <root>` only creates th
 |---|---|---|
 | `RootPath` | (required) | The data directory. The collector and the API must see the same files **on one machine's file system** (a local disk, or a volume shared by containers on one Linux host; not a network share) |
 | `WriterId` | machine name + saved suffix | A collector's stable id. Two live collectors must not share one: the second fails at startup |
-| `LingerMilliseconds` / `LateLingerMilliseconds` | 30,000 / 120,000 | How long the open hour's buffer collects records before it is written as a file; the same for an earlier hour's (late data) |
-| `MaxBufferRecords` / `MaxBufferBytes` | 500,000 / 256 MiB | A buffer this large is written early |
+| `LingerMilliseconds` / `LateLingerMilliseconds` | 5,000 / 120,000 | How long the open hour's buffer collects records before it is written as a file; the same for an earlier hour's (late data) |
+| `MaxBufferRecords` / `MaxBufferBytes` | 50,000 / 256 MiB | A buffer this large is written early |
 | `RowGroupRows` | 122,880 | Parquet row group size |
 | `Compression` | `zstd` | `zstd`, `snappy`, `gzip` or `uncompressed` |
 | `CatalogRefreshSeconds` / `MaxTrackedSeries` | 300 / 1,000,000 | A metric or series that keeps reporting has its `metric_catalog`/`metric_series` row re-written at most this often; the writer forgets past the limit |
@@ -108,15 +108,16 @@ The root's `_schema.json` records the table definitions it was written with; a r
 ## Operating it
 
 - **A crash loses what is buffered.** An export is acknowledged once it is queued, as on every provider, but a collector holds
-  records for `LingerMilliseconds` (30 s) before writing a file, so a crash loses up to about that much plus whatever is queued.
+  records for `LingerMilliseconds` (5 s) before writing a file, so a crash loses up to about that much plus whatever is queued.
   A graceful shutdown drains. There is no write-ahead log.
-- **Data is readable after the linger**: about 30 s (`LingerMilliseconds`) after it arrives, sooner for a buffer that reaches
+- **Data is readable after the linger**: about 5 s (`LingerMilliseconds`) after it arrives, sooner for a buffer that reaches
   `MaxBufferRecords`.
 - **Sizing the queue.** The ingestion gates (`Telemetry:Ingestion:MaxQueuedSpans`, `MaxQueuedLogRecords`, `MaxQueuedMetrics`)
   count buffered records too, so each must be at least `MaxBufferRecords`; the collector warns at startup when one is lower.
-  Records held for 30 s at your rate must fit: 10,000 spans/s needs about 300,000 resident spans, plus headroom. Unless you set them,
-  the Parquet registration defaults each record gate to twice `MaxBufferRecords` (1,000,000) and `MaxQueuedBytesPerSignal` to 2 GB
-  (the shared defaults, 200,000 and 256 MB, capped ingest near 18,000 records/s; with these about 64,000 write-only on the reference machine).
+  Records held for one linger at your rate must fit: at the 5 s default, 10,000 spans/s needs about 50,000 resident spans, plus headroom. Unless you set them,
+  the Parquet registration defaults each record gate to 1,000,000 (or twice `MaxBufferRecords` if that is more) and `MaxQueuedBytesPerSignal` to 2 GB
+  (the shared defaults, 200,000 and 256 MB, cap ingest near 200,000 / linger per signal; with these about 97,000 records/s write-only and about 64,000 with the UI reading, measured on the reference machine).
+  A shorter linger writes more, smaller files, which the compactor folds (150 files into one in the stress runs); raise `LingerMilliseconds` and `MaxBufferRecords` to write fewer files at the cost of freshness and memory.
 - **Retention** is by day: a tenant's `date=` folder is deleted (for each table the signal's window covers, derived tables
   with it) once the whole day is before the cutoff of that tenant's own window (the built-in 30 days for a tenant with no control-plane row), so the cutoff's own day survives until it ends. The sweep takes its tenants
   from the folders, so data of a tenant removed from the control plane still expires. A day is deleted at once (not after the

@@ -56,9 +56,13 @@ switch (options.Provider.Trim())
         repository = new MySqlAdminRepository(options.ConnectionString);
         providerDisplayName = "MySql";
         break;
+    case "Sqlite":
+        repository = new SqliteAdminRepository(options.ConnectionString);
+        providerDisplayName = "Sqlite";
+        break;
     default:
         AnsiConsole.MarkupLine($"[red]Unknown ControlPlane:Provider '{Markup.Escape(options.Provider)}'.[/]");
-        AnsiConsole.MarkupLine("[grey]Supported values: PostgreSQL, SqlServer, MySql.[/]");
+        AnsiConsole.MarkupLine("[grey]Supported values: PostgreSQL, SqlServer, MySql, Sqlite.[/]");
         return 1;
 }
 

@@ -12,9 +12,10 @@
 # Usage:
 #   schema/apply-schema.sh <controlplane|telemetry> <provider> [database]
 #
-#   <provider>   controlplane: postgresql | sqlserver | mysql
+#   <provider>   controlplane: postgresql | sqlserver | mysql | sqlite
 #                telemetry:    postgresql | sqlserver | clickhouse | mysql | parquet
-#   [database]   target database name (default: telemetry); for parquet, the root directory (required)
+#   [database]   target database name (default: telemetry); for parquet, the root directory (required);
+#                for sqlite, the database file (required; its directory must exist)
 #
 # On a relational provider both components normally go to the same database; apply the control
 # plane first (a running collector needs keys before it accepts data), though either order works
@@ -26,6 +27,12 @@
 # refuse a root with another version (plans/parquet-duckdb). It has no control plane: run `controlplane` on a
 # relational provider.
 #
+# The sqlite provider is for the control plane only (it lets a Parquet deployment run with no database server).
+# `controlplane sqlite <file>` needs the sqlite3 CLI and CREATES a fresh file; it never migrates. The API host does
+# that itself at startup (and creates the file too, so running this first is optional): an older file is refused here
+# with "start the API host to migrate it", a newer one is refused outright. Every host and tool must use the same
+# absolute path as `ConnectionStrings:ControlPlane` (`Data Source=<file>`) on the same machine's local file system.
+#
 # Connection settings are taken from the standard client environment variables:
 #   postgresql  -> PGHOST, PGPORT, PGUSER, PGPASSWORD (libpq)
 #   sqlserver   -> SQLCMDSERVER, SQLCMDUSER, SQLCMDPASSWORD (sqlcmd)
@@ -36,6 +43,7 @@
 #   PGUSER=postgres PGPASSWORD=secret schema/apply-schema.sh controlplane postgresql
 #   PGUSER=postgres PGPASSWORD=secret schema/apply-schema.sh telemetry postgresql
 #   CLICKHOUSE_HOST=localhost schema/apply-schema.sh telemetry clickhouse
+#   schema/apply-schema.sh controlplane sqlite /var/lib/keryhe/control-plane.db
 #
 # Schema 4.0.0 is a FRESH-INSTALL schema for both components: there is no migration from 2.x or
 # 3.x, and the scripts are not written to be re-applied on top of another version. This runner
@@ -56,16 +64,60 @@ TELEMETRY_TARGET_VERSION="4.0.1"
 
 usage() {
     echo "usage: $0 <controlplane|telemetry> <provider> [database]" >&2
-    echo "  controlplane providers: postgresql|sqlserver|mysql" >&2
+    echo "  controlplane providers: postgresql|sqlserver|mysql|sqlite" >&2
     echo "  telemetry providers:    postgresql|sqlserver|clickhouse|mysql|parquet" >&2
     exit 2
 }
 
 [[ -z "$COMPONENT" || -z "$PROVIDER" ]] && usage
 
+if [[ "$PROVIDER" == "sqlite" ]]; then
+    if [[ "$COMPONENT" != "controlplane" ]]; then
+        echo "error: SQLite is a control-plane provider only; use postgresql, sqlserver, clickhouse or parquet for the telemetry data" >&2
+        exit 2
+    fi
+    if [[ $# -lt 3 ]]; then
+        echo "error: controlplane sqlite needs the database file: $0 controlplane sqlite <file>" >&2
+        exit 2
+    fi
+    if ! command -v sqlite3 >/dev/null 2>&1; then
+        echo "error: the sqlite3 command-line tool is required (or start the API host, which creates the database itself)" >&2
+        exit 1
+    fi
+    SQLITE_DIR="$(dirname "$DATABASE")"
+    if [[ ! -d "$SQLITE_DIR" ]]; then
+        echo "error: the directory '$SQLITE_DIR' does not exist; create it first (the file is created, its directory is not)" >&2
+        exit 1
+    fi
+    SQLITE_FILE="$(cd "$SQLITE_DIR" && pwd)/$(basename "$DATABASE")"
+    SQLITE_SCRIPT="$SCRIPT_DIR/SQLite-ControlPlane.sql"
+    if [[ ! -f "$SQLITE_SCRIPT" ]]; then
+        echo "error: schema script not found: $SQLITE_SCRIPT" >&2
+        exit 1
+    fi
+    if [[ -f "$SQLITE_FILE" ]]; then
+        RECORDED="$(sqlite3 "$SQLITE_FILE" "SELECT version FROM control_plane_schema_version" 2>/dev/null | sort -V | tail -1 || true)"
+        if [[ "$RECORDED" == "$CONTROLPLANE_TARGET_VERSION" ]]; then
+            echo "controlplane schema $CONTROLPLANE_TARGET_VERSION already applied to '$SQLITE_FILE' (sqlite); nothing to do."
+            exit 0
+        elif [[ -n "$RECORDED" ]]; then
+            if [[ "$(printf '%s\n%s\n' "$RECORDED" "$CONTROLPLANE_TARGET_VERSION" | sort -V | head -1)" == "$RECORDED" ]]; then
+                echo "error: '$SQLITE_FILE' is at schema version $RECORDED, older than $CONTROLPLANE_TARGET_VERSION; this script only creates. Start the API host to migrate it." >&2
+            else
+                echo "error: '$SQLITE_FILE' is at schema version $RECORDED, newer than $CONTROLPLANE_TARGET_VERSION; downgrades are not supported." >&2
+            fi
+            exit 1
+        fi
+    fi
+    echo "applying sqlite controlplane schema ($CONTROLPLANE_TARGET_VERSION) to '$SQLITE_FILE'..."
+    sqlite3 -bail "$SQLITE_FILE" < "$SQLITE_SCRIPT" > /dev/null
+    echo "done. Use ConnectionStrings:ControlPlane = \"Data Source=$SQLITE_FILE\" on every host and tool, on this machine."
+    exit 0
+fi
+
 if [[ "$PROVIDER" == "parquet" ]]; then
     if [[ "$COMPONENT" != "telemetry" ]]; then
-        echo "error: Parquet has no control-plane schema; use postgresql, sqlserver or mysql for the control plane" >&2
+        echo "error: Parquet has no control-plane schema; use postgresql, sqlserver, mysql or sqlite for the control plane" >&2
         exit 2
     fi
     if [[ $# -lt 3 ]]; then
@@ -89,7 +141,7 @@ case "$PROVIDER" in
     mysql)      SCRIPT_FILE="$SCRIPT_DIR/MySQL-$FILE_SUFFIX.sql";      ENGINE="mysql" ;;
     clickhouse)
         if [[ "$COMPONENT" == "controlplane" ]]; then
-            echo "error: ClickHouse has no control-plane schema; use postgresql, sqlserver or mysql for the control plane" >&2
+            echo "error: ClickHouse has no control-plane schema; use postgresql, sqlserver, mysql or sqlite for the control plane" >&2
             exit 2
         fi
         SCRIPT_FILE="$SCRIPT_DIR/ClickHouse-Telemetry.sql"; ENGINE="clickhouse" ;;

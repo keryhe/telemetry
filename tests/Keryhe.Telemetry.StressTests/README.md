@@ -5,8 +5,11 @@ topology, it ingests a large volume of logs, traces and metrics over OTLP/gRPC w
 UI page, then reports what was slow, what locked, what it cost, and whether the rows in the database match what was sent.
 
 Each scenario also runs the control plane (tenants with their retention windows, API keys, alert rules): on the relational
-providers it is the same database as the telemetry data; for ClickHouse and Parquet the harness starts a PostgreSQL container for it
-(not observed, and not covered by `--db-cpuset`, so it shares the Docker VM's CPUs; the report lists its image).
+providers it is the same database as the telemetry data. For **Parquet it is a SQLite file by default**, kept in the scenario's output
+folder (`control-plane.db`): no container, no server, so a Parquet run needs no Docker at all. For ClickHouse the harness starts a PostgreSQL container
+for it (not observed, and not covered by `--db-cpuset`, so it shares the Docker VM's CPUs; the report lists its image). `--control-plane` moves it
+(below), and every result records which one ran (`controlPlane` in `scenario.json`, and a line in the report), so runs on different control planes
+are never mistaken for each other.
 **Parquet has no database container**: its "database" is a temp directory. The report's database section lists files per table instead of locks, the slowest SQL is
 parsed from the API host's `Debug` log lines (`parquet-sql ms= files= sql=`; the launcher turns that category on), there are no container CPU/memory samples (read
 the hosts' process metrics), `--db-cpuset` and `--db-sql` do not apply, and the correctness check counts rows through DuckDB over the manifests.
@@ -57,6 +60,7 @@ dotnet run --project tests/Keryhe.Telemetry.StressTests -- report --in stress-re
 | `--browsers <n>` | Override the profile's browser users (0 to 5; 0 runs none) |
 | `--out <dir>` | Results folder (default `stress-results/<timestamp>/` at the repo root, which is gitignored) |
 | `--reuse-publish <dir>` | Use hosts published by an earlier run instead of publishing again |
+| `--control-plane <v>` | Where the control plane runs: `sqlite` (a file in the scenario folder) or `postgresql` (a PostgreSQL container, for ClickHouse and Parquet, or PostgreSQL's own database). Defaults: Parquet `sqlite`, ClickHouse `postgresql`, the relational providers their own database; `sqlite` works for every provider, `postgresql` is refused for SQL Server and MySQL. One value applies to every provider of the run. A choice that moves a provider off its default tags the scenario (`-cpsqlite`, `-cppostgresql`), so it gets its own folder and never reads as the default scenario. **Parquet results recorded before this option existed ran on PostgreSQL**; they lack the `controlPlane` field, and the SQLite default is a different configuration (key touches and alert claims take a file's write lock), so do not set them beside new default runs without saying so |
 | `--db-cpuset <cpus>` | Pin the database container to these CPUs of the Docker VM (Docker `--cpuset-cpus`, e.g. `0-3`). The report states what the database shared CPUs with; under Docker Desktop the VM still shares the host's cores, so a database on another machine is the only fully separate option (not supported by the harness yet) |
 | `--retention-interval <v>` | Override the profile's retention interval: `stress` (30 s, a sweep lands in every window), `realistic` (3600 s, the API default: one sweep at host start, so retention contention does not dominate), or a number of seconds. The scenario name gets a `-ret<seconds>` suffix, so both kinds of run sit side by side in one comparison |
 

@@ -44,7 +44,8 @@ Configuration:
   own `Add<Provider>CollectorServices` call, not by `AddKeryheTelemetryCollector`).
 - `ControlPlane:Provider` and `ConnectionStrings:ControlPlane` — the control-plane database the key lookup and
   `last_used_at` update use (read by `Add<Provider>ControlPlaneCollectorServices`, which throws naming the key when
-  the connection string is missing). A control-plane outage longer than the positive cache TTL (30 s) stops
+  the connection string is missing; with `Sqlite` it also checks the file at startup and exits when it is missing or not at the build's schema
+  version, since only the API host creates and migrates it). A control-plane outage longer than the positive cache TTL (30 s) stops
   ingestion for keys that are not cached; the cache and the retryable `UNAVAILABLE` on a failed lookup cover a short one.
 - `Telemetry:Collector:AllowInsecureTransport` — see Transport below (default `false`).
 
@@ -137,7 +138,7 @@ string, so a key issued with SQL in another format works too.
 
 ### Issuing, expiring, rotating and revoking keys
 
-The Admin TUI (`Keryhe.Telemetry.Admin`; PostgreSQL, SQL Server and MySQL, the control-plane providers) creates
+The Admin TUI (`Keryhe.Telemetry.Admin`; PostgreSQL, SQL Server, MySQL and SQLite, the control-plane providers) creates
 keys, with an optional expiry (30/90/365 days or a date, stored as UTC), and revokes, reactivates and deletes them.
 Keys can also be issued with SQL against the control-plane database: generate the key, compute
 `lower(hex(sha256(key)))`, and insert it. `expires_at` is UTC; omit it (NULL) for a key that never expires.

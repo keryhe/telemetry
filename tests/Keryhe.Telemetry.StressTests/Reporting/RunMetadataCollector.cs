@@ -8,7 +8,7 @@ namespace Keryhe.Telemetry.StressTests.Reporting;
 /// <summary>Gathers what the numbers must be read against: git state, this machine, Docker's VM, and the images used.</summary>
 public static class RunMetadataCollector
 {
-    public static async Task<RunMetadata> CollectAsync(string repoRoot, IEnumerable<string> providers, string commandLine)
+    public static async Task<RunMetadata> CollectAsync(string repoRoot, IEnumerable<string> providers, string commandLine, IEnumerable<(string Provider, string? ControlPlane)>? controlPlanes = null)
     {
         var sha = await GitAsync(repoRoot, "rev-parse", "HEAD");
         var dirty = !string.IsNullOrWhiteSpace(await GitAsync(repoRoot, "status", "--porcelain", "--untracked-files=no"));
@@ -28,9 +28,16 @@ public static class RunMetadataCollector
         catch (Exception) { /* Docker unreachable: leave the fields empty rather than fail the report */ }
 
         var images = providers.Distinct().ToDictionary(p => p, p => ProviderContainerFactory.Create(p).ImageName);
-        // ClickHouse holds telemetry only; its control plane runs on a PostgreSQL container (unobserved, and sharing the Docker VM's CPUs).
-        if (images.ContainsKey("ClickHouse"))
-            images["ClickHouse control plane (PostgreSQL)"] = ProviderContainerFactory.Create("PostgreSQL").ImageName;
+        // ClickHouse and Parquet hold telemetry only: the control plane runs on a PostgreSQL container (unobserved, and sharing the Docker VM's CPUs)
+        // or in a SQLite file (no container, no server). Say which, per provider, since results are read against it.
+        foreach (var (provider, choice) in (controlPlanes ?? providers.Distinct().Select(p => (p, (string?)null))).Distinct())
+        {
+            if (provider is not ("ClickHouse" or "Parquet")) continue;
+            if (ProviderContainerFactory.EffectiveControlPlane(provider, choice) == "sqlite")
+                images[$"{provider} control plane"] = "SQLite file (Microsoft.Data.Sqlite), no container";
+            else
+                images[$"{provider} control plane (PostgreSQL)"] = ProviderContainerFactory.Create("PostgreSQL").ImageName;
+        }
         return new RunMetadata(DateTimeOffset.UtcNow, string.IsNullOrEmpty(sha) ? null : sha, dirty, RuntimeInformation.OSDescription, Environment.ProcessorCount,
             GC.GetGCMemoryInfo().TotalAvailableMemoryBytes, RuntimeInformation.FrameworkDescription, dockerCpus, dockerMem, dockerVersion, images, commandLine);
     }

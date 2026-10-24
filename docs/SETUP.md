@@ -13,15 +13,17 @@ alerting and retention subsystems. See the [README](../README.md) for a quick st
   - SQL Server 2022
   - MySQL 8.0.19+ (MariaDB is not supported)
   - ClickHouse 25.8
-  - Parquet files read by an in-process DuckDB (telemetry data only, no database server; one machine; the control plane runs on one of the relational backends)
+  - Parquet files read by an in-process DuckDB (telemetry data only, no database server; one machine; the control plane runs on one of the relational backends, or in a SQLite file)
+  - SQLite (the control plane only, never the telemetry data): one file on one machine, so Parquet plus SQLite is a deployment with **no database server at all**
 - Docker, only to run the integration and stress tests or the Docker recipes below
 
 ## 1. Create the database(s) and apply the schemas
 
 The schema has two components, each with its own script per provider and its own version table:
 
-- **Control plane** (`tenants`, `api_keys`, `alert_rules`, `alert_events`): PostgreSQL, SQL Server or
-  MySQL only. Apply `schema/<Provider>-ControlPlane.sql`.
+- **Control plane** (`tenants`, `api_keys`, `alert_rules`, `alert_events`): PostgreSQL, SQL Server, MySQL or
+  SQLite only. Apply `schema/<Provider>-ControlPlane.sql` (SQLite: the API host creates and migrates its own file at
+  startup, so this step is optional; see below).
 - **Telemetry data** (resources, spans, logs, metrics, rollups): PostgreSQL, SQL Server, MySQL or ClickHouse. Apply
   `schema/<Provider>-Telemetry.sql`. (Parquet has no script: see below.)
 
@@ -63,12 +65,29 @@ The collector and the API host must see the same directory on one machine's file
 schema/apply-schema.sh telemetry parquet /var/lib/keryhe-telemetry   # just creates the directory
 ```
 
+**SQLite** (control plane only) is one file that every host and tool opens, so they all run on one machine's local file system
+(no network share, no Docker Desktop bind mount). Create its **directory** (both service accounts need write access to it: the
+file's `-wal` and `-shm` siblings live beside it); the API host creates the file and applies any later schema migrations
+itself when it starts. The collector never creates it and exits at startup if the file is missing or not at its schema
+version, so **start the API host first** (and upgrade it first). To create the file ahead of time instead:
+
+```bash
+mkdir -p /var/lib/keryhe
+schema/apply-schema.sh controlplane sqlite /var/lib/keryhe/control-plane.db   # needs the sqlite3 CLI; creates a fresh file only
+```
+
+Then set `ControlPlane:Provider=Sqlite` and `ConnectionStrings:ControlPlane=Data Source=/var/lib/keryhe/control-plane.db`
+(an absolute path) on both hosts and the Admin tool. With **Parquet for the telemetry data this is a setup with no database
+server**: a Parquet root directory and one SQLite file. `Telemetry:ControlPlane:Sqlite:ApplySchema=false` stops the API host from
+creating or migrating (it then only checks), for a deliberate migration with a backup of your own. See
+[`Keryhe.Telemetry.Sqlite`](../src/Keryhe.Telemetry.Sqlite/README.md).
+
 Or use the runner script, which skips a component whose target version (`control_plane_schema_version` /
 `telemetry_schema_version`, both 4.0.1) is already recorded:
 
 ```bash
-schema/apply-schema.sh <controlplane|telemetry> <postgresql|sqlserver|mysql|clickhouse> [database]
-# controlplane: postgresql | sqlserver | mysql        telemetry: postgresql | sqlserver | mysql | clickhouse | parquet
+schema/apply-schema.sh <controlplane|telemetry> <postgresql|sqlserver|mysql|clickhouse|sqlite|parquet> [database]
+# controlplane: postgresql | sqlserver | mysql | sqlite (a file)   telemetry: postgresql | sqlserver | mysql | clickhouse | parquet (a directory)
 ```
 
 The two components are versioned independently: each script records its own version in its own table.
@@ -108,7 +127,7 @@ Update `src/Keryhe.Telemetry.Api.Server/appsettings.json` (REST API / read path)
 ```
 
 Set `Database:Provider` to `PostgreSQL`, `SqlServer`, `MySql`, `ClickHouse`, or `Parquet` to match your telemetry backend, and
-`ControlPlane:Provider` to `PostgreSQL`, `SqlServer`, or `MySql` for the control plane (both hosts must agree on both). Both
+`ControlPlane:Provider` to `PostgreSQL`, `SqlServer`, `MySql`, or `Sqlite` for the control plane (both hosts must agree on both). Both
 keys and `ConnectionStrings:ControlPlane` are **required**: a missing or unknown value fails startup with the key
 named, and there is no fallback from `ControlPlane` to `Collector`/`Api`. On the relational backends the control-plane
 string normally points at the same database as the data strings; with ClickHouse or Parquet it points at the separate control-plane
@@ -157,8 +176,9 @@ dotnet run --project src/Keryhe.Telemetry.Admin
 ```
 
 The tool talks to the **control plane** only, so `ConnectionStrings:Admin` is the control-plane database (also for a
-ClickHouse deployment). Its `appsettings.json` carries `ControlPlane:Provider` (set it to `PostgreSQL`, `SqlServer` or
-`MySql`). The menus create a tenant, create an API key (optionally expiring in 30, 90 or 365 days or on a date, UTC),
+ClickHouse deployment; for SQLite it is `Data Source=<the same absolute path as the hosts use>`, and the API host must have created
+or migrated the file first: the tool only checks it). Its `appsettings.json` carries `ControlPlane:Provider` (set it to `PostgreSQL`, `SqlServer`,
+`MySql` or `Sqlite`). The menus create a tenant, create an API key (optionally expiring in 30, 90 or 365 days or on a date, UTC),
 list keys, activate/deactivate and delete them. The plaintext key (`ktel_` plus 43 characters) is shown once; only its
 SHA-256 hash is stored.
 
@@ -424,7 +444,8 @@ how long it took.
 ```bash
 # Every provider against real Testcontainers databases (requires Docker)
 dotnet test tests/Keryhe.Telemetry.IntegrationTests
-# One provider: PostgreSQL | SqlServer | MySql | ClickHouse | Parquet (ClickHouse and Parquet also start a PostgreSQL container for their control plane)
+# One provider: PostgreSQL | SqlServer | MySql | ClickHouse | Parquet (ClickHouse also starts a PostgreSQL container for its control plane;
+# Parquet's control plane is a SQLite file, so Provider=Parquet and Provider=Sqlite need no Docker at all)
 dotnet test tests/Keryhe.Telemetry.IntegrationTests --filter Provider=SqlServer
 
 # Test data generator simulation tests (no database or Docker)

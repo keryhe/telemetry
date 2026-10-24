@@ -1,4 +1,5 @@
 using Keryhe.Telemetry.TestInfrastructure.Seeding;
+using Keryhe.Telemetry.TestInfrastructure.Sqlite;
 using Docker.DotNet.Models;
 
 namespace Keryhe.Telemetry.TestInfrastructure.Containers;
@@ -24,12 +25,31 @@ public abstract class ProviderContainer : IAsyncDisposable
     /// <summary>
     /// Connection string for the control plane (tenants, API keys, alert rules, retention settings). The relational providers
     /// apply both schema scripts to their one database and return <see cref="ConnectionString"/>; ClickHouse has no control
-    /// plane of its own and runs one on a PostgreSQL container.
+    /// plane of its own and runs one on a PostgreSQL container; Parquet's is a SQLite file by default. After
+    /// <see cref="UseSqliteControlPlane"/> it is that SQLite file whatever the provider.
     /// </summary>
-    public virtual string ControlPlaneConnectionString => ConnectionString;
+    public string ControlPlaneConnectionString => _sqliteControlPlane?.ConnectionString ?? DefaultControlPlaneConnectionString;
 
     /// <summary>The <c>ControlPlane:Provider</c> value the control plane runs on.</summary>
-    public virtual string ControlPlaneProviderName => ProviderName;
+    public string ControlPlaneProviderName => _sqliteControlPlane is null ? DefaultControlPlaneProviderName : SqliteControlPlane.ProviderName;
+
+    /// <summary>The control plane this provider has when nothing moved it to SQLite.</summary>
+    protected virtual string DefaultControlPlaneConnectionString => ConnectionString;
+
+    /// <summary>The <c>ControlPlane:Provider</c> value of <see cref="DefaultControlPlaneConnectionString"/>.</summary>
+    protected virtual string DefaultControlPlaneProviderName => ProviderName;
+
+    private SqliteControlPlane? _sqliteControlPlane;
+
+    /// <summary>
+    /// Moves this container's control plane to a SQLite file in <paramref name="directory"/> (kept after the run, for post-mortems):
+    /// no server, no container. Call before <see cref="StartAsync"/>. A provider that composes its own control-plane container
+    /// (ClickHouse) then does not start it.
+    /// </summary>
+    public void UseSqliteControlPlane(string directory) => _sqliteControlPlane = new SqliteControlPlane(directory);
+
+    /// <summary>True once <see cref="UseSqliteControlPlane"/> has moved the control plane to a SQLite file.</summary>
+    protected bool UsesSqliteControlPlane => _sqliteControlPlane is not null;
 
     /// <summary>Docker id of the database container. Valid once <see cref="StartAsync"/> has completed.</summary>
     public abstract string ContainerId { get; }
@@ -79,18 +99,22 @@ public abstract class ProviderContainer : IAsyncDisposable
         if (Options.Diagnostics)
             await ConfigureDiagnosticsAsync(cancellationToken);
         await ApplySchemaAsync(cancellationToken);
+        if (_sqliteControlPlane is not null)
+            await _sqliteControlPlane.StartAsync(cancellationToken);
     }
 
     /// <summary>Inserts one tenant and one API key (whose plaintext is given, optionally expiring at a UTC instant) and returns the tenant.</summary>
     public async Task<SeededTenant> SeedTenantAsync(string tenantName, string apiKeyName, string apiKeyPlainText, CancellationToken cancellationToken = default, DateTime? expiresAtUtc = null)
     {
-        var id = await InsertTenantAndApiKeyAsync(tenantName, apiKeyName, ApiKeyHasher.Hash(apiKeyPlainText), expiresAtUtc, cancellationToken);
+        var id = await InsertTenantWithHashedKeyAsync(tenantName, apiKeyName, ApiKeyHasher.Hash(apiKeyPlainText), expiresAtUtc, cancellationToken);
         return new SeededTenant(id, tenantName, apiKeyName, apiKeyPlainText);
     }
 
     /// <summary>Inserts a tenant and an API key given its hash (not plaintext) into the control plane and returns the tenant id.</summary>
     public Task<long> InsertTenantWithHashedKeyAsync(string tenantName, string apiKeyName, string keyHash, DateTime? expiresAtUtc, CancellationToken cancellationToken = default) =>
-        InsertTenantAndApiKeyAsync(tenantName, apiKeyName, keyHash, expiresAtUtc, cancellationToken);
+        _sqliteControlPlane is not null
+            ? _sqliteControlPlane.InsertTenantWithHashedKeyAsync(tenantName, apiKeyName, keyHash, expiresAtUtc, cancellationToken)
+            : InsertTenantAndApiKeyAsync(tenantName, apiKeyName, keyHash, expiresAtUtc, cancellationToken);
 
     /// <summary>
     /// Runs extra SQL against the <c>telemetry</c> database after the schema, statement by statement (split as the schema

@@ -49,7 +49,7 @@ public abstract class RetentionSettingsRepositoryBase : ControlPlaneRepositoryBa
                 traceRetentionDays = settings.TraceRetentionDays,
                 logRetentionDays = settings.LogRetentionDays,
                 metricRetentionDays = settings.MetricRetentionDays,
-                updatedAt
+                updatedAt = TimestampParam(updatedAt)
             },
             cancellationToken: ct));
 

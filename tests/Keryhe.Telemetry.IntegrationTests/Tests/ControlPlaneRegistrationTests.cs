@@ -22,7 +22,7 @@ public class ControlPlaneRegistrationTests
     public static IEnumerable<object[]> Registrations()
     {
         foreach (var side in new[] { "Collector", "Api" })
-            foreach (var provider in new[] { "PostgreSql", "SqlServer", "MySql" })
+            foreach (var provider in new[] { "PostgreSql", "SqlServer", "MySql", "Sqlite" })
                 yield return [provider, side];
     }
 
@@ -36,7 +36,9 @@ public class ControlPlaneRegistrationTests
             ("SqlServer", "Collector") => services.AddSqlServerControlPlaneCollectorServices(configuration),
             ("SqlServer", _) => services.AddSqlServerControlPlaneApiServices(configuration),
             ("MySql", "Collector") => services.AddMySqlControlPlaneCollectorServices(configuration),
-            _ => services.AddMySqlControlPlaneApiServices(configuration),
+            ("MySql", _) => services.AddMySqlControlPlaneApiServices(configuration),
+            ("Sqlite", "Collector") => services.AddSqliteApiKeyLookup(configuration),
+            _ => services.AddSqliteControlPlaneManagement(configuration),
         };
     }
 
@@ -60,7 +62,7 @@ public class ControlPlaneRegistrationTests
     [MemberData(nameof(Registrations))]
     public void A_configured_control_plane_registers_its_interfaces(string provider, string side)
     {
-        var services = Register(provider, side, Config("Host=localhost;Database=cp"));
+        var services = Register(provider, side, Config(provider == "Sqlite" ? "Data Source=/tmp/keryhe-registration-test.db" : "Host=localhost;Database=cp"));
         var registered = services.Select(d => d.ServiceType).ToHashSet();
         if (side == "Collector")
             Assert.Contains(typeof(IApiKeyLookup), registered);

@@ -60,8 +60,10 @@ switch (builder.Configuration["ControlPlane:Provider"])
     case "SqlServer":  builder.Services.AddSqlServerControlPlaneApiServices(builder.Configuration);  break;
     case "PostgreSQL": builder.Services.AddPostgreSqlControlPlaneApiServices(builder.Configuration); break;
     case "MySql":      builder.Services.AddMySqlControlPlaneApiServices(builder.Configuration);      break;
+    // Creates the file and applies forward-only migrations at startup (Telemetry:ControlPlane:Sqlite:ApplySchema).
+    case "Sqlite":     builder.Services.AddSqliteControlPlaneManagement(builder.Configuration);     break;
     default: throw new InvalidOperationException(
-        "Unknown or missing ControlPlane:Provider (expected SqlServer, PostgreSQL, or MySql).");
+        "Unknown or missing ControlPlane:Provider (expected SqlServer, PostgreSQL, MySql, or Sqlite).");
 }
 
 // ── ALERTING ──────────────────────────────────────────────────────────────────

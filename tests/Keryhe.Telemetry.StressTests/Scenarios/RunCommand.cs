@@ -17,6 +17,7 @@ public static class RunCommand
         "run [--provider <PostgreSQL|SqlServer|MySql|ClickHouse|Parquet|all>] [--topology <split|all>]\n" +
         "    [--profile <smoke|standard|soak|ramp|all|path.json>] [--scenario <fixed|ramp>] [--out <dir>] [--reuse-publish <dir>]\n" +
         "    [--browsers <n>]   override the profile's browser users (0 = none)\n" +
+        "    [--control-plane <postgresql|sqlite>]   where the control plane runs: default is a SQLite file for Parquet, a PostgreSQL container for ClickHouse, the provider's own database otherwise\n" +
         "    [--db-cpuset <cpus>]   pin the database container to these CPUs of the Docker VM (e.g. 0-3); recorded in the report\n" +
         "    [--retention-interval <stress|realistic|seconds>]   override the profile's retention interval (stress = 30 s, realistic = 3600 s)\n" +
         "    [--seed-days <n>] [--seed-spans-per-day <n>]   send n days (1-60) of backdated history, plus large traces, before the warm-up; recorded in the report\n" +
@@ -28,7 +29,7 @@ public static class RunCommand
         string provider = "PostgreSQL", topology = "split", profile = "", scenario = "fixed";
         string? outDir = null, reusePublish = null;
         int? browsers = null;
-        string? retentionInterval = null, dbCpuset = null;
+        string? retentionInterval = null, dbCpuset = null, controlPlane = null;
         int? seedDays = null, seedSpansPerDay = null;
         var hostEnvironment = new Dictionary<string, string>();
         string? databaseSqlFile = null;
@@ -47,6 +48,7 @@ public static class RunCommand
                 case "--browsers": browsers = int.Parse(Next()); break;
                 case "--retention-interval": retentionInterval = Next(); break;
                 case "--db-cpuset": dbCpuset = Next(); break;
+                case "--control-plane": controlPlane = Next(); break;
                 case "--seed-days": seedDays = int.Parse(Next()); break;
                 case "--seed-spans-per-day": seedSpansPerDay = int.Parse(Next()); break;
                 case "--host-env":
@@ -65,7 +67,7 @@ public static class RunCommand
         List<ScenarioSpec> specs;
         try
         {
-            specs = BuildMatrix(provider, topology, profile, scenario, scenarioGiven, browsers, retentionInterval, dbCpuset);
+            specs = BuildMatrix(provider, topology, profile, scenario, scenarioGiven, browsers, retentionInterval, dbCpuset, controlPlane);
             if (seedDays is { } days) foreach (var spec in specs) spec.Profile.ApplySeed(days, seedSpansPerDay);
             var databaseSql = databaseSqlFile is null ? null : File.ReadAllText(databaseSqlFile);
             foreach (var spec in specs)
@@ -93,7 +95,7 @@ public static class RunCommand
         var published = await HostPublisher.PublishAsync(repo, reusePublish ?? Path.Combine(outDir, "publish"), roles, skipIfPresent: reusePublish is not null);
 
         await File.WriteAllTextAsync(Path.Combine(outDir, ReportBuilder.RunMetadataFile), JsonSerializer.Serialize(
-            await RunMetadataCollector.CollectAsync(repo, specs.Select(s => s.Provider), "run " + string.Join(' ', args)), ResultJson.Options));
+            await RunMetadataCollector.CollectAsync(repo, specs.Select(s => s.Provider), "run " + string.Join(' ', args), specs.Select(s => (s.Provider, s.Profile.ControlPlane))), ResultJson.Options));
 
         using var cts = new CancellationTokenSource();
         Console.CancelKeyPress += (_, e) => { e.Cancel = true; cts.Cancel(); };
@@ -115,7 +117,7 @@ public static class RunCommand
     }
 
     /// <summary>Expands the CLI selections into the scenarios to run, provider-major so one container image stays warm across profiles. Pure apart from reading profile files.</summary>
-    public static List<ScenarioSpec> BuildMatrix(string provider, string topology, string profile, string scenario, bool scenarioGiven, int? browsers, string? retentionInterval = null, string? databaseCpuset = null)
+    public static List<ScenarioSpec> BuildMatrix(string provider, string topology, string profile, string scenario, bool scenarioGiven, int? browsers, string? retentionInterval = null, string? databaseCpuset = null, string? controlPlane = null)
     {
         var providers = provider.Equals("all", StringComparison.OrdinalIgnoreCase)
             ? ProviderContainerFactory.ProviderNames.ToList()
@@ -149,6 +151,7 @@ public static class RunCommand
                     if (browsers is { } b) p.Browsers.Users = b;
                     if (retentionInterval is not null) p.OverrideRetentionInterval(retentionInterval);
                     if (databaseCpuset is not null) p.DatabaseCpuset = databaseCpuset;
+                    if (controlPlane is not null) p.OverrideControlPlane(prov, controlPlane);
                     p.Validate();
                     specs.Add(new ScenarioSpec(prov, top, p));
                 }
@@ -158,6 +161,7 @@ public static class RunCommand
     public static string Summarize(ScenarioResult r)
     {
         var lines = new List<string> { $"=== {r.Provider} / {r.Topology} / {r.Profile} ({r.Kind}) — {(r.FinishedAt - r.StartedAt).TotalMinutes:F1} min ===" };
+        if (r.ControlPlane is not null) lines.Add($"  control plane: {r.ControlPlane}");
         if (r.Error is not null) lines.Add("  FAILED: " + r.Error.Split('\n')[0]);
         if (r.Outage is { } outage)
             lines.Add($"  DATABASE UNAVAILABLE after the run: {outage.Message} (container {outage.ContainerStatus}, exit {outage.ExitCode?.ToString() ?? "?"}, OOM-killed {outage.OomKilled?.ToString() ?? "?"})");

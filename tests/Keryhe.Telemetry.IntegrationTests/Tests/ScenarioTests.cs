@@ -1,6 +1,7 @@
 using Keryhe.Telemetry.StressTests.Load;
 using Keryhe.Telemetry.StressTests.Orchestration;
 using Keryhe.Telemetry.StressTests.Scenarios;
+using Keryhe.Telemetry.TestInfrastructure.Containers;
 using Xunit;
 
 namespace Keryhe.Telemetry.IntegrationTests.Tests;
@@ -84,6 +85,78 @@ public class ScenarioTests
         // profile=all with --scenario fixed leaves the ramp out; without --scenario it is included.
         Assert.DoesNotContain(RunCommand.BuildMatrix("PostgreSQL", "split", "all", "fixed", true, null), s => s.Profile.IsRamp);
         Assert.Contains(RunCommand.BuildMatrix("PostgreSQL", "split", "all", "fixed", false, null), s => s.Profile.IsRamp);
+    }
+
+    [Fact]
+    public void Control_plane_option_defaults_per_provider_and_tags_only_a_departure_from_the_default()
+    {
+        // No option: nothing recorded on the profile (the runner records what the container actually used), no tag.
+        var parquet = RunCommand.BuildMatrix("Parquet", "split", "smoke", "fixed", false, null).Single();
+        Assert.Null(parquet.Profile.ControlPlane);
+        Assert.Equal("smoke", parquet.Profile.Name);
+
+        // Parquet's default is SQLite, so asking for it is not a departure; PostgreSQL is.
+        Assert.Equal("smoke", RunCommand.BuildMatrix("Parquet", "split", "smoke", "fixed", false, null, controlPlane: "sqlite").Single().Profile.Name);
+        var parquetPostgres = RunCommand.BuildMatrix("Parquet", "split", "smoke", "fixed", false, null, controlPlane: "PostgreSQL").Single();
+        Assert.Equal(("smoke-cppostgresql", "postgresql"), (parquetPostgres.Profile.Name, parquetPostgres.Profile.ControlPlane));
+        Assert.Equal("parquet-split-smoke-cppostgresql", parquetPostgres.Id);
+
+        // ClickHouse's default is PostgreSQL; SQLite is the departure. The relational providers keep their own database.
+        Assert.Equal("smoke", RunCommand.BuildMatrix("ClickHouse", "split", "smoke", "fixed", false, null, controlPlane: "postgresql").Single().Profile.Name);
+        Assert.Equal("smoke-cpsqlite", RunCommand.BuildMatrix("ClickHouse", "split", "smoke", "fixed", false, null, controlPlane: "sqlite").Single().Profile.Name);
+        Assert.Equal("smoke-cpsqlite", RunCommand.BuildMatrix("SqlServer", "split", "smoke", "fixed", false, null, controlPlane: "sqlite").Single().Profile.Name);
+        Assert.Equal("smoke", RunCommand.BuildMatrix("PostgreSQL", "split", "smoke", "fixed", false, null, controlPlane: "postgresql").Single().Profile.Name);
+
+        // One option over a matrix applies provider by provider, and an unknown value or one that cannot apply is refused up front.
+        var all = RunCommand.BuildMatrix("all", "split", "smoke", "fixed", false, null, controlPlane: "sqlite");
+        Assert.Equal(["smoke-cpsqlite", "smoke-cpsqlite", "smoke-cpsqlite", "smoke-cpsqlite", "smoke"],
+            all.OrderBy(spec => Array.IndexOf(ProviderContainerFactory.ProviderNames.ToArray(), spec.Provider)).Select(spec => spec.Profile.Name));
+        Assert.Throws<ArgumentException>(() => RunCommand.BuildMatrix("Parquet", "split", "smoke", "fixed", false, null, controlPlane: "mongo"));
+        Assert.Throws<ArgumentException>(() => RunCommand.BuildMatrix("SqlServer", "split", "smoke", "fixed", false, null, controlPlane: "postgresql"));
+        Assert.Throws<ArgumentException>(() => RunCommand.BuildMatrix("all", "split", "smoke", "fixed", false, null, controlPlane: "postgresql"));
+    }
+
+    [Fact]
+    public void The_container_factory_puts_the_control_plane_where_it_was_asked_to()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "keryhe-factory-test");
+
+        // Parquet: a SQLite file by default, in the directory it was given.
+        var parquet = ProviderContainerFactory.Create("Parquet", null, directory);
+        Assert.Equal("Sqlite", parquet.ControlPlaneProviderName);
+        Assert.Equal($"Data Source={Path.Combine(directory, "control-plane.db")}", parquet.ControlPlaneConnectionString);
+        Assert.Equal(string.Empty, parquet.ContainerId);
+        Assert.Equal("PostgreSQL", ProviderContainerFactory.Create("Parquet", "postgresql").ControlPlaneProviderName);
+
+        // Any other provider can move its control plane to a SQLite file; without a directory to keep it in that is an error.
+        foreach (var provider in new[] { "PostgreSQL", "SqlServer", "MySql", "ClickHouse" })
+        {
+            var moved = ProviderContainerFactory.Create(provider, "sqlite", directory);
+            Assert.Equal("Sqlite", moved.ControlPlaneProviderName);
+            Assert.True(Path.IsPathRooted(moved.ControlPlaneConnectionString["Data Source=".Length..]), moved.ControlPlaneConnectionString);
+            Assert.Throws<ArgumentException>(() => ProviderContainerFactory.Create(provider, "sqlite"));
+        }
+        Assert.Equal("PostgreSQL", ProviderContainerFactory.Create("ClickHouse").ControlPlaneProviderName);
+    }
+
+    [Fact]
+    public void The_hosts_get_an_absolute_sqlite_control_plane_path_and_the_collector_only_checks_it()
+    {
+        var file = Path.Combine(Path.GetTempPath(), "keryhe-host-env", "control-plane.db");
+        var options = new HostLaunchOptions("Parquet", "/tmp/parquet-root", "/tmp/parquet-root", "Sqlite", $"Data Source={file}", HostTopology.Split, Path.GetTempPath(), RetentionIntervalSeconds: 7);
+
+        var (collector, _, _) = HostLauncher.BuildEnvironment(options, HostRole.Collector);
+        var (api, _, _) = HostLauncher.BuildEnvironment(options, HostRole.Api);
+
+        foreach (var env in new[] { collector, api })
+        {
+            Assert.Equal("Sqlite", env["ControlPlane__Provider"]);
+            var connectionString = env["ConnectionStrings__ControlPlane"];
+            Assert.StartsWith("Data Source=", connectionString);
+            Assert.True(Path.IsPathRooted(connectionString["Data Source=".Length..]), connectionString);
+            // Nothing tells the API to skip creating it (the file exists already, made by the harness through the same library call).
+            Assert.DoesNotContain("Telemetry__ControlPlane__Sqlite__ApplySchema", env.Keys);
+        }
     }
 
     [Fact]

@@ -37,8 +37,18 @@ internal sealed class RetentionWindowCache(
     {
         ["PostgreSQL"] = "Npgsql.NpgsqlConnection, Npgsql",
         ["SqlServer"] = "Microsoft.Data.SqlClient.SqlConnection, Microsoft.Data.SqlClient",
-        ["MySql"] = "MySqlConnector.MySqlConnection, MySqlConnector"
+        ["MySql"] = "MySqlConnector.MySqlConnection, MySqlConnector",
+        ["Sqlite"] = "Microsoft.Data.Sqlite.SqliteConnection, Microsoft.Data.Sqlite"
     };
+
+    /// <summary>
+    /// The connection string as this cache opens it. SQLite creates a missing file by default and this cache only reads, so it opens
+    /// read-only (the collector's startup check has already confirmed the file exists); the others are used as configured.
+    /// </summary>
+    private static string ConnectionStringFor(string provider, string connectionString) =>
+        provider.Equals("Sqlite", StringComparison.OrdinalIgnoreCase)
+            ? connectionString.TrimEnd().TrimEnd(';') + ";Mode=ReadOnly"
+            : connectionString;
 
     private volatile Dictionary<long, Windows>? _windows;
 
@@ -72,7 +82,7 @@ internal sealed class RetentionWindowCache(
             if (!ConnectionTypes.TryGetValue(provider, out var typeName) || string.IsNullOrEmpty(connectionString))
                 return;
             var type = Type.GetType(typeName) ?? throw new InvalidOperationException($"{typeName} is not loaded.");
-            await using var connection = (DbConnection)Activator.CreateInstance(type, connectionString)!;
+            await using var connection = (DbConnection)Activator.CreateInstance(type, ConnectionStringFor(provider, connectionString))!;
             await connection.OpenAsync(ct);
             var rows = await connection.QueryAsync<RetentionRow>(new CommandDefinition(
                 "SELECT id AS Id, trace_retention_days AS Trace, log_retention_days AS Log, metric_retention_days AS Metric FROM tenants",

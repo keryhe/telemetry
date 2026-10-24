@@ -35,8 +35,10 @@ public class Program
             case "SqlServer":  builder.Services.AddSqlServerControlPlaneCollectorServices(builder.Configuration);  break;
             case "PostgreSQL": builder.Services.AddPostgreSqlControlPlaneCollectorServices(builder.Configuration); break;
             case "MySql":      builder.Services.AddMySqlControlPlaneCollectorServices(builder.Configuration);      break;
+            // A file the API host creates and migrates; the collector only checks it (and exits if it is missing or not current).
+            case "Sqlite":     builder.Services.AddSqliteApiKeyLookup(builder.Configuration);     break;
             default: throw new InvalidOperationException(
-                "Unknown or missing ControlPlane:Provider (expected SqlServer, PostgreSQL, or MySql).");
+                "Unknown or missing ControlPlane:Provider (expected SqlServer, PostgreSQL, MySql, or Sqlite).");
         }
 
         // Add CORS for web clients if needed

@@ -18,8 +18,8 @@ dotnet run --project src/Keryhe.Telemetry.Collector.Server
 # REST API (read path; also serves the Angular UI)
 dotnet run --project src/Keryhe.Telemetry.Api.Server
 
-# Create tenants and API keys in the control plane (ControlPlane:Provider PostgreSQL, SqlServer or MySql).
-# Needs ConnectionStrings:Admin (the control-plane database) in its user secrets. scripts/new-api-key.sh (or New-ApiKey.ps1) only generates a
+# Create tenants and API keys in the control plane (ControlPlane:Provider PostgreSQL, SqlServer, MySql or Sqlite).
+# Needs ConnectionStrings:Admin (the control-plane database; for Sqlite `Data Source=<the hosts' absolute path>`, and the API host must have created/migrated it) in its user secrets. scripts/new-api-key.sh (or New-ApiKey.ps1) only generates a
 # key + hash for a manual INSERT.
 dotnet run --project src/Keryhe.Telemetry.Admin
 
@@ -48,8 +48,11 @@ dotnet run --project src/Keryhe.Telemetry.TestDataGenerator -- --Generator:Backf
 dotnet test tests/Keryhe.Telemetry.TestDataGenerator.Tests
 
 # Apply database schema: two components, each with its own script per provider and version table.
-# Control plane (tenants with their retention windows, api_keys, alert_rules, alert_events; PostgreSQL/SqlServer/MySQL only):
+# Control plane (tenants with their retention windows, api_keys, alert_rules, alert_events; PostgreSQL/SqlServer/MySQL/SQLite only):
 psql -d telemetry -f schema/PostgreSQL-ControlPlane.sql   # or SqlServer-ControlPlane.sql / MySQL-ControlPlane.sql
+# SQLite: a file on the machine the hosts run on (absolute path, directory must exist). The API host creates and migrates it itself at startup,
+# so this is optional; the collector and Admin tool never create it.
+schema/apply-schema.sh controlplane sqlite /var/lib/keryhe/control-plane.db
 # Telemetry data (everything else):
 psql -d telemetry -f schema/PostgreSQL-Telemetry.sql      # PostgreSQL
 sqlcmd -d telemetry -i schema/SqlServer-Telemetry.sql     # SqlServer
@@ -57,15 +60,18 @@ mysql telemetry < schema/MySQL-Telemetry.sql              # MySQL
 clickhouse-client --database telemetry --multiquery < schema/ClickHouse-Telemetry.sql  # ClickHouse (no control plane: it runs on one of the three relational providers)
 
 # Or use the runner (skips a component whose target version is already recorded):
-schema/apply-schema.sh <controlplane|telemetry> <postgresql|sqlserver|mysql|clickhouse> [database]
+schema/apply-schema.sh <controlplane|telemetry> <postgresql|sqlserver|mysql|clickhouse|sqlite> [database]
 ```
 
 The schema has two components versioned independently, `control-plane` and `telemetry`, both 4.0.1, with the
 version rows in `control_plane_schema_version` and `telemetry_schema_version`. Each bumps only its own third digit,
-so a control-plane change edits the three `*-ControlPlane.sql` scripts plus `CONTROLPLANE_TARGET_VERSION` in
-`apply-schema.sh`, and a telemetry change edits the four `*-Telemetry.sql` scripts plus `TELEMETRY_TARGET_VERSION`,
-in one commit. There are no migration scripts: the scripts create a fresh database. `apply-schema.sh` only skips a
-component when its target version row is already recorded. No foreign key crosses the two components
+so a control-plane change edits the four `*-ControlPlane.sql` scripts (PostgreSQL, SQL Server, MySQL, SQLite) plus `CONTROLPLANE_TARGET_VERSION` in
+`apply-schema.sh` (and `SqliteControlPlaneSchema.TargetVersion` and the Admin tool's `SqliteSchemaGate.TargetVersion`, which tests tie to it), and a
+telemetry change edits the four `*-Telemetry.sql` scripts plus `TELEMETRY_TARGET_VERSION`, in one commit. There are no migration scripts: the scripts
+create a fresh database, **except the SQLite control plane**, which has forward-only migrations: that same control-plane change also adds
+`schema/SQLite-ControlPlane-Migrations/<from>-to-<to>.sql` (the previous create script goes to
+`tests/Keryhe.Telemetry.IntegrationTests/SqliteSchemas/<from>.sql` so a test can compare fresh with migrated), and the API host applies it at startup
+(see "SQLite control plane notes"). `apply-schema.sh` only skips a component when its target version row is already recorded and never migrates. No foreign key crosses the two components
 (`resources.tenant_id` is a plain column), so on a shared database either script may be applied first; apply
 the control plane first, since a running collector needs keys before it accepts data.
 
@@ -89,14 +95,17 @@ it also offers opt-in per-provider diagnostics and CPU/memory
 limits (and an optional `CpusetCpus` pin) via `ContainerOptions`, which the integration fixtures leave off.
 Each container exposes `ControlPlaneConnectionString`/`ControlPlaneProviderName`: the relational ones apply both
 scripts to their one `telemetry` database, and `ClickHouseProviderContainer` composes a control-plane-only
-`PostgreSqlProviderContainer` (so a ClickHouse-only test run starts PostgreSQL too); the diagnostics and limits
-`ContainerOptions` apply to the ClickHouse container only.
+`PostgreSqlProviderContainer` (so a ClickHouse-only test run starts PostgreSQL too); `ParquetProviderContainer`'s control plane is a **SQLite file by
+default** (`SqliteControlPlane`, applied through `SqliteControlPlaneSchema`, so `--filter Provider=Parquet` and `Provider=Sqlite` need no Docker at all;
+`ParquetControlPlane.PostgreSql` keeps the PostgreSQL option), and `ProviderContainer.UseSqliteControlPlane(dir)` moves any provider's control plane
+to a SQLite file (what the stress harness's `--control-plane sqlite` does); the diagnostics and limits `ContainerOptions` apply to the ClickHouse container only.
 
 Beyond the read-path tests, the suite covers per-provider retention (`RetentionTestsBase`: 200- and
 100-day-old rows, an hour either side of the cutoff, current — ClickHouse drops whole days so its "hour
 before the cutoff" row is not asserted (its test maps the base's table and column names to the ClickHouse ones); plus a tenant with data but no `tenants` row, which must still expire),
 the control-plane repositories (`ControlPlaneTestsBase`: alert-rule CRUD, atomic `TryClaimFireAsync`, tenant catalog,
-retention settings, key touch; run per control-plane provider, and for ClickHouse on its PostgreSQL control plane),
+retention settings, key touch; run per control-plane provider, for ClickHouse on its PostgreSQL control plane, and for SQLite on the Parquet fixture's
+file as `SqliteControlPlaneTests`, beside `SqliteSchemaTests`/`SqliteMigrationTests`/`SqliteScriptTests`/`SqliteAdminTests`, all `Provider=Sqlite`),
 the trace-list anchor semantics
 (`TracePhase3TestsBase`), `GET /api/capabilities`' shape, SQL Server's `READ_COMMITTED_SNAPSHOT` and
 id-parameter plan (no `CONVERT_IMPLICIT`), and PostgreSQL's index-not-seq-scan plan, each
@@ -106,8 +115,10 @@ negative-controlled.
 # All five providers (one xUnit collection fixture per provider, containers started once per run)
 dotnet test tests/Keryhe.Telemetry.IntegrationTests
 
-# One provider only (Provider trait: PostgreSQL | SqlServer | MySql | ClickHouse | Parquet)
+# One provider only (Provider trait: PostgreSQL | SqlServer | MySql | ClickHouse | Parquet | Sqlite)
 dotnet test tests/Keryhe.Telemetry.IntegrationTests --filter Provider=SqlServer
+# Parquet (control plane in a SQLite file) and Sqlite need no Docker at all
+dotnet test tests/Keryhe.Telemetry.IntegrationTests --filter "Provider=Parquet|Provider=Sqlite"
 ```
 
 The Angular project has `npm test` (Karma/Jasmine) but no meaningful tests are set up.
@@ -149,6 +160,10 @@ signal a write-only ramp stops on because it does not depend on any read query; 
 line carries the sweep's elapsed milliseconds for the same reason. The report lists every API route's server-side latency apart from the write
 instruments, and the comparison page pairs each write-only ramp with its full ramp (the isolation number). The correctness ledger
 counts a re-delivered span twice, since spans are plain appends.
+`--control-plane <postgresql|sqlite>` picks the control plane's database: the default is a SQLite file in the scenario folder for Parquet (no container),
+a PostgreSQL container for ClickHouse and the provider's own database for the relational ones; `sqlite` works for every provider. A choice that moves a
+provider off its default tags the scenario (`-cpsqlite`, `-cppostgresql`), and every `scenario.json` records `controlPlane` (the report prints it and
+the read/write isolation pairing requires equal control planes); Parquet results recorded before this option ran on PostgreSQL and carry no such field.
 `--db-cpuset <cpus>` pins the database container to CPUs of the Docker VM and the report says what the database shared CPUs with; pointing the
 harness at a database on another machine is not supported yet.
 
@@ -367,13 +382,14 @@ REST API consumed by an Angular single-page application.
 | `Keryhe.Telemetry.SqlServer` | SQL Server provider implementation (Microsoft.Data.SqlClient + Dapper): telemetry data and control plane |
 | `Keryhe.Telemetry.ClickHouse` | ClickHouse provider implementation (ClickHouse.Client bulk-copy writes + Dapper reads): telemetry data only, no control plane |
 | `Keryhe.Telemetry.MySql` | MySQL provider implementation (MySqlConnector + Dapper): telemetry data and control plane |
+| `Keryhe.Telemetry.Sqlite` | SQLite **control plane only** (Microsoft.Data.Sqlite + Dapper): a file on one machine, created and migrated by the API host; with Parquet it makes a deployment with no database server (see "SQLite control plane notes") |
 | `Keryhe.Telemetry.Parquet` | Parquet + DuckDB provider (telemetry data only): all three signals work: spans, logs and metric points with their derived tables (`trace_index`, both rollups, `metric_catalog`, `metric_series`) written as per-tenant-hour Parquet files with per-writer manifests, read by an in-process DuckDB; a compactor on the API host (lease, minor/major/day compaction, grace deletes), retention by day folder; selectable as `Database:Provider=Parquet` on both hosts |
 | `Keryhe.Telemetry.Collector` | OTLP gRPC services and HTTP endpoints, API-key authentication, OpenTelemetry proto files → generated stubs (class library) |
 | `Keryhe.Telemetry.Collector.Server` | Thin ASP.NET Core host that maps the gRPC services and runs the ingestion worker |
 | `Keryhe.Telemetry.Api` | REST API controllers, base-path routing, authorization, read-service wiring, alerting (`Api/Alerting`: evaluators, webhooks, `AlertEvaluationWorker`) and retention (`Api/Retention`) (class library) |
 | `Keryhe.Telemetry.Api.Server` | Thin ASP.NET Core host that composes the API + OpenAPI + CORS |
 | `Keryhe.Telemetry.Ui` | Prebuilt Angular UI, packaged as static web assets (Razor class library; no .razor/.cshtml) |
-| `Keryhe.Telemetry.Admin` | Console (Spectre.Console) admin tool for tenants and API keys (create with optional expiry, list, deactivate, delete); PostgreSQL, SqlServer and MySql, the control-plane providers (see "Admin tool") |
+| `Keryhe.Telemetry.Admin` | Console (Spectre.Console) admin tool for tenants and API keys (create with optional expiry, list, deactivate, delete); PostgreSQL, SqlServer, MySql and Sqlite, the control-plane providers (see "Admin tool") |
 | `Keryhe.Telemetry.TestDataGenerator` | Worker service that simulates a multi-tenant e-commerce system and emits it as OTLP: hand-built OTLP for backfill, the OpenTelemetry SDK for live (see "Test data generator") |
 | `src/telemetry-client` | Angular 20 UI source (Angular Material, ApexCharts, ngx-graph) — not part of the .sln; built by `Keryhe.Telemetry.Ui`, not by any host directly |
 | `tests/Keryhe.Telemetry.IntegrationTests`, `.TestInfrastructure`, `.StressTests`, `.TestDataGenerator.Tests` | Docker-backed per-provider integration tests, the shared container/seeding infrastructure, the manual stress harness, and the generator's simulation tests (see "Commands") |
@@ -428,8 +444,8 @@ Two providers are selected at runtime, both required, on both hosts:
   provider project exposes `ServiceCollectionExtensions` with `Add<Provider>CollectorServices` /
   `Add<Provider>ApiServices` (the bulk writer, the read repositories, the rollup and touch stores, and on the API side
   `IRetentionSweeper`), and the hosts `switch` on the config key to call the right one.
-- **`ControlPlane:Provider`** (`"PostgreSQL"`, `"SqlServer"`, or `"MySql"`; never ClickHouse or Parquet) for the control plane:
-  `tenants` (which carries each tenant's retention windows), `api_keys`, `alert_rules`, `alert_events`. The same three provider projects expose
+- **`ControlPlane:Provider`** (`"PostgreSQL"`, `"SqlServer"`, `"MySql"`, or `"Sqlite"`; never ClickHouse or Parquet) for the control plane:
+  `tenants` (which carries each tenant's retention windows), `api_keys`, `alert_rules`, `alert_events`. The same three provider projects (and `Keryhe.Telemetry.Sqlite`, which has no telemetry side) expose
   `Add<Provider>ControlPlaneCollectorServices` (`IApiKeyLookup`, `IApiKeyTouchStore`) and
   `Add<Provider>ControlPlaneApiServices` (`IAlertRuleRepository`, `ITenantCatalogRepository`,
   `IRetentionSettingsRepository`), both against **`ConnectionStrings:ControlPlane`**. They are a pair because the
@@ -443,7 +459,7 @@ Two providers are selected at runtime, both required, on both hosts:
 An unknown or missing value for either key, or a missing `ConnectionStrings:ControlPlane`, throws at startup with the key
 named; there is no fallback from `ControlPlane` to `Collector`/`Api`. On the relational providers the control-plane string
 normally points at the same database as the data strings; ClickHouse deployments point it at a separate PostgreSQL,
-SQL Server or MySQL database. No query joins across the boundary: alert evaluation reads rules, then calls the data
+SQL Server or MySQL database, and a Parquet deployment can point it at a SQLite file. No query joins across the boundary: alert evaluation reads rules, then calls the data
 repositories separately.
 
 **PostgreSQL connection pools.** The PostgreSQL provider registers an unkeyed singleton `NpgsqlDataSource` for the
@@ -498,7 +514,7 @@ relational four in deliberate ways (all confined to the provider; Core interface
 server for telemetry). Modelled on ClickHouse (one row carries everything, the collector writes the derived data, own
 ingestion worker and read repositories behind unchanged Core interfaces), with file management in place of a server:
 - **Config.** `Database:Provider=Parquet` and `Telemetry:Parquet:RootPath` on both hosts (no `ConnectionStrings:Collector`/`:Api`); the control plane
-  runs on PostgreSQL, SQL Server or MySQL as for ClickHouse. **The root must be on one machine's file system** (a local disk or a volume shared by
+  runs on PostgreSQL, SQL Server or MySQL as for ClickHouse, or in a SQLite file (`ControlPlane:Provider=Sqlite`: Parquet plus SQLite has no database server). **The root must be on one machine's file system** (a local disk or a volume shared by
   containers on one Linux host; a network share, and Docker Desktop's host bind mounts, gave stale manifests). `schema/apply-schema.sh telemetry parquet <root>` only creates the directory.
 - **Layout.** `<table>/tenant_id=<t>/date=<day>/hour=<HH>/` holds a collector's `part-<writer>-<seq>-<token>.parquet` files, its `_manifest.<writer>.json`
   and the compactor's `_compacted.<gen>.json`; a merged day lives in `_day/`. A file is visible only once a manifest lists it, manifests are swapped by atomic
@@ -510,7 +526,7 @@ ingestion worker and read repositories behind unchanged Core interfaces), with f
 - **Reads** go through `ParquetQueryEngine`: a connection per statement group with `TEMP VIEW`s over the file lists the manifests resolve for the request's
   tenant and time range (never a glob), so shared SQL (the rollup base) runs unchanged; `NamedParameterConnection` rewrites `@name` to DuckDB's `$name`.
   At `Debug` the category `Keryhe.Telemetry.Parquet.ParquetQueryEngine` logs `parquet-sql ms= files= sql=` per statement, the stress harness's slowest-SQL source.
-- **Ingestion** is `PartitionedIngestionWorker` (Core, extracted from ClickHouse's worker) per tenant-hour buffers with a 30 s linger; a crash loses the
+- **Ingestion** is `PartitionedIngestionWorker` (Core, extracted from ClickHouse's worker) per tenant-hour buffers with a 5 s linger (50,000-record buffers); a crash loses the
   buffer (no write-ahead log), shutdown drains. The ingestion gates must each hold at least `MaxBufferRecords` (startup warning).
 - **Compaction** runs on the API host under a lease (`ParquetCompactor`, `ParquetCompactionWorker`): minor (fold uncompacted writer files), hour and day
   merges, superseded files deleted after `GraceSeconds`; a query or export running longer than the grace may fail on a deleted file.
@@ -520,6 +536,38 @@ ingestion worker and read repositories behind unchanged Core interfaces), with f
 - **Stress harness.** `--provider Parquet` has no database container: `ParquetObserver` counts rows with DuckDB over the manifests, samples file counts instead
   of locks, reads statement timings from the API host log, and reports no container stats (the hosts' process metrics carry resource use); the control plane
   is a PostgreSQL container as for ClickHouse.
+
+**SQLite control plane notes** (`Keryhe.Telemetry.Sqlite`, operator guide: its README; control plane only, never a `Database:Provider`).
+`ControlPlane:Provider=Sqlite`, `ConnectionStrings:ControlPlane=Data Source=<absolute path>`; works with any telemetry provider and exists so a
+Parquet deployment needs no database server. The shape worth knowing:
+- **One machine, a local file system, one absolute path.** `SqliteControlPlaneConnection` (built once at registration; every repository and startup
+  service opens connections through it) refuses a relative path or `:memory:`, forces `Foreign Keys=True` and `Pooling=True`, defaults the busy wait
+  (`Default Timeout`) to 30 s, and takes the open mode from the caller, never the configured string (Microsoft.Data.Sqlite creates a missing file by
+  default; only the API's schema step may). WAL mode is stored in the file by the create script.
+- **The API host creates and migrates; the collector and Admin tool only check.** `SqliteControlPlaneSchema` (public: `TargetVersion`, `EnsureCurrentAsync`,
+  `CheckAsync`; the logic is in internal `SqliteSchemaRunner`/`SqliteSchemaDefinition`) holds the embedded `schema/SQLite-ControlPlane.sql` and the
+  embedded `schema/SQLite-ControlPlane-Migrations/*.sql`. `SqliteControlPlaneInitializer` (API, `IHostedLifecycleService.StartingAsync`, so before any
+  `BackgroundService`) calls `EnsureCurrentAsync` (or only `CheckAsync` with `Telemetry:ControlPlane:Sqlite:ApplySchema=false`);
+  `SqliteControlPlaneStartupCheck` (collector, before Kestrel binds) calls `CheckAsync` and throws when the file is missing or not exactly this build's
+  version. So upgrade the API host first. The recorded version is the highest row of `control_plane_schema_version` (the table is the upgrade history).
+- **Forward only.** No version row: run the full create script. Same version: nothing. Older: run the migration chain from the recorded version
+  (`<from>-to-<to>.sql`, each `<from>` once, `<to>` greater, no gap, none past the target; checked when the definition is built and before the file is
+  touched), after a `VACUUM INTO <file>.bak-<from>-<time>-<id>` backup; foreign keys off, `BEGIN IMMEDIATE`, re-read the version inside the lock (two API
+  processes starting together serialize), run each step and insert its version row, `PRAGMA foreign_key_check`, commit, foreign keys on. Any failure rolls
+  back and keeps the backup. Newer, or older with no chain: startup fails naming the versions. A migration script holds plain DDL/DML only (a test enforces
+  no `BEGIN`/`COMMIT`, `PRAGMA foreign_keys` or version insert). `apply-schema.sh controlplane sqlite <file>` creates a fresh file with the `sqlite3` CLI
+  and never migrates. There are no migrations yet: the mechanism is tested against test-only chains (`SqliteMigrationTests`), and `Fresh_equals_migrated`
+  compares a database built from `SqliteSchemas/<version>.sql` plus the chain with a fresh one once the first real migration exists.
+- **Dialect.** `INTEGER PRIMARY KEY AUTOINCREMENT` (SQLite reuses the highest rowid without it, and a reused tenant id would hand a deleted tenant's telemetry
+  to a new tenant), `STRICT` tables, `CHECK`s for the `VARCHAR(n)` lengths and `json_valid`, a partial index for enabled rules. Every timestamp is `TEXT` in UTC
+  in one layout (`SqliteTime.Format`, `yyyy-MM-dd HH:mm:ss.fffffff`; Microsoft.Data.Sqlite's own binding trims trailing zeros, which would break text
+  comparison), so the alert cooldown claim is one `UPDATE` comparing text; repositories bind timestamps through `ControlPlaneRepositoryBase.TimestampParam`
+  (a hook that is the identity on the relational providers). `RETURNING id` returns inserted ids. `SqliteScriptTests` holds the script to the PostgreSQL one
+  (tables, columns, nullability, limits, defaults, indexes) and the embedded copies to the files on disk.
+- **Collector retention cache.** `RetentionWindowCache` (ClickHouse/Parquet collectors) reads `tenants` from the control plane by connection type name; for
+  `Sqlite` it appends `Mode=ReadOnly` so it can never create a file.
+- **Native library.** Microsoft.Data.Sqlite 10.0.5 brings `SQLitePCLRaw.lib.e_sqlite3` 2.1.11, which NuGet flags (GHSA-2m69-gcr7-jv3q); the library and the Admin
+  tool reference 2.1.13 directly. Re-check when bumping.
 
 **Search and capabilities.** Free-text and `key:value` search is
 unindexed and time-window bounded on **every** provider: one predicate form per dialect (the
@@ -865,8 +913,8 @@ while leaving rule CRUD available.
 Menus for tenants and API keys: create a tenant, create a key (shows the plaintext `ktel_...` key once, stores
 only its SHA-256 hash through `Security/ApiKeyHashing`, optional expiry of 30/90/365 days or a UTC date), list keys,
 activate/deactivate (the revoke) and delete them. It talks to the **control plane** only, directly, through
-`IAdminRepository` (`NpgsqlAdminRepository`, `SqlServerAdminRepository`, `MySqlAdminRepository`, one per control-plane
-provider; its `AdminProvider` values are the `ControlPlane:Provider` values). `ControlPlane:Provider` comes from its
+`IAdminRepository` (`NpgsqlAdminRepository`, `SqlServerAdminRepository`, `MySqlAdminRepository`, `SqliteAdminRepository`, one per control-plane
+provider (the SQLite one opens the file without permission to create it and runs its own copy of the version gate, `SqliteSchemaGate`: it never creates or migrates); its `AdminProvider` values are the `ControlPlane:Provider` values). `ControlPlane:Provider` comes from its
 `appsettings.json` and `ConnectionStrings:Admin` (the control-plane database) from its own User Secrets or the
 `ConnectionStrings__Admin` environment variable (none ships in appsettings). A revoke reaches a running collector within
 `PositiveCacheTtlSeconds` (30 s).
@@ -1076,7 +1124,7 @@ beyond the margin is missing from a hinted read, which is the limit of a hint; a
 ### Database
 
 Telemetry providers: PostgreSQL, SQL Server 2022, ClickHouse, MySQL 8.0.19+, or Parquet files (no server). Control-plane providers: PostgreSQL,
-SQL Server 2022, or MySQL 8.0.19+. Schema 4.0.1 (fresh install). The schema is two components, each with
+SQL Server 2022, MySQL 8.0.19+, or SQLite (a file). Schema 4.0.1 (fresh install). The schema is two components, each with
 its own scripts and version table (see "Commands"):
 
 - **Control plane** (`schema/<Provider>-ControlPlane.sql`, relational only): `tenants`, `api_keys`, `alert_rules`,

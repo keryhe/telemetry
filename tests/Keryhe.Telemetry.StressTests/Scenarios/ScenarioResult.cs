@@ -47,8 +47,11 @@ public sealed record ScenarioResult(
     TourResults? Tour, string? BrowserError,
     DatabaseObservation? Database, CorrectnessResult? Correctness, IReadOnlyList<HostResult> Hosts,
     HistorySeedResult? Seed = null, IReadOnlyList<DetailProbeResult>? DetailProbes = null,
-    DatabaseOutage? Outage = null)
+    DatabaseOutage? Outage = null,
+    string? ControlPlane = null)
 {
+    // ControlPlane is the ControlPlane:Provider the hosts ran on (Sqlite, PostgreSQL, SqlServer, MySql). Results from before it was recorded have
+    // none: for Parquet and ClickHouse those ran on a PostgreSQL container, for the relational providers on the telemetry database itself.
     /// <summary>
     /// 2 (database-performance plan, Phase 0): pin-adjusted lag criteria and <c>lag_absolute</c>, maybe-landed export accounting, provider
     /// diagnostics and effective server settings. Ramp results from version 1 are not comparable with version 2.

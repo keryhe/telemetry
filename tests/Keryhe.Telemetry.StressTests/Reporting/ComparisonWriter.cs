@@ -45,7 +45,7 @@ public static class ComparisonWriter
     {
         var ramps = run.Scenarios.Where(s => s.Scenario.Ramp is not null).ToList();
         var pairs = ramps.Where(s => s.Headline.WriteOnly)
-            .SelectMany(w => ramps.Where(f => !f.Headline.WriteOnly && f.Scenario.Provider == w.Scenario.Provider && f.Scenario.Topology == w.Scenario.Topology)
+            .SelectMany(w => ramps.Where(f => !f.Headline.WriteOnly && f.Scenario.Provider == w.Scenario.Provider && f.Scenario.Topology == w.Scenario.Topology && f.Scenario.ControlPlane == w.Scenario.ControlPlane)
                 .Select(f => (WriteOnly: w, Full: f)))
             .OrderBy(p => p.WriteOnly.Scenario.Provider).ThenBy(p => p.WriteOnly.Scenario.Topology).ToList();
         if (pairs.Count == 0) return;

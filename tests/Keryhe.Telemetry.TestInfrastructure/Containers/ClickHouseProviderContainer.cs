@@ -26,12 +26,14 @@ public sealed class ClickHouseProviderContainer : ProviderContainer
     public override string ProviderName => "ClickHouse";
     public override string ImageName => "clickhouse/clickhouse-server:25.8";
     public override string ConnectionString => _connectionString!;
-    public override string ControlPlaneConnectionString => _controlPlane.ConnectionString;
-    public override string ControlPlaneProviderName => _controlPlane.ProviderName;
+    protected override string DefaultControlPlaneConnectionString => _controlPlane.ConnectionString;
+    protected override string DefaultControlPlaneProviderName => _controlPlane.ProviderName;
 
     protected override async Task StartContainerAsync(CancellationToken cancellationToken)
     {
-        await _controlPlane.StartAsync(ContainerOptions.Default, cancellationToken);
+        // The control plane's PostgreSQL container, unless the run moved it to a SQLite file (UseSqliteControlPlane).
+        if (!UsesSqliteControlPlane)
+            await _controlPlane.StartAsync(ContainerOptions.Default, cancellationToken);
 
         _container = new ContainerBuilder(ImageName)
             .WithPortBinding(HttpPort, true)

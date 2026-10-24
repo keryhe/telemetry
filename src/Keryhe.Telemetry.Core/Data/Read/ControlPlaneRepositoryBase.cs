@@ -20,4 +20,11 @@ public abstract class ControlPlaneRepositoryBase
 
     /// <summary>Opens a provider-specific connection to the control-plane database.</summary>
     protected abstract Task<DbConnection> OpenConnectionAsync(CancellationToken cancellationToken);
+
+    /// <summary>
+    /// How a UTC timestamp the repository writes (<c>created_at</c>, <c>fired_at</c>, <c>retention_updated_at</c>) is bound as a
+    /// parameter. The relational providers have a native date-time type and take the value as is; SQLite stores timestamps as
+    /// text in one fixed layout (so a comparison in SQL is a text comparison) and overrides this.
+    /// </summary>
+    protected virtual object TimestampParam(DateTime utc) => utc;
 }

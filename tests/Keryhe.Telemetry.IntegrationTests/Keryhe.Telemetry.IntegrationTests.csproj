@@ -40,8 +40,14 @@
     <ProjectReference Include="../../src/Keryhe.Telemetry.PostgreSQL/Keryhe.Telemetry.PostgreSQL.csproj" />
     <ProjectReference Include="../../src/Keryhe.Telemetry.SqlServer/Keryhe.Telemetry.SqlServer.csproj" />
     <ProjectReference Include="../../src/Keryhe.Telemetry.MySql/Keryhe.Telemetry.MySql.csproj" />
+    <ProjectReference Include="../../src/Keryhe.Telemetry.Sqlite/Keryhe.Telemetry.Sqlite.csproj" />
+    <ProjectReference Include="../../src/Keryhe.Telemetry.Admin/Keryhe.Telemetry.Admin.csproj" />
     <ProjectReference Include="../../src/Keryhe.Telemetry.ClickHouse/Keryhe.Telemetry.ClickHouse.csproj" />
     <ProjectReference Include="../../src/Keryhe.Telemetry.Parquet/Keryhe.Telemetry.Parquet.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Content Include="SqliteSchemas/*.sql" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
 </Project>

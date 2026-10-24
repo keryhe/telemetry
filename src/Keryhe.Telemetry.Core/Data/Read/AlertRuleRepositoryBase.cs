@@ -86,7 +86,7 @@ public abstract class AlertRuleRepositoryBase : ControlPlaneRepositoryBase, IAle
             webhookUrl = rule.WebhookUrl,
             cooldownMinutes = rule.CooldownMinutes,
             enabled = rule.Enabled,
-            createdAt
+            createdAt = TimestampParam(createdAt)
         }, cancellationToken: ct));
 
         return new AlertRule
@@ -164,7 +164,7 @@ public abstract class AlertRuleRepositoryBase : ControlPlaneRepositoryBase, IAle
         await conn.ExecuteAsync(new CommandDefinition(sql, new
         {
             ruleId = alertEvent.RuleId,
-            firedAt = alertEvent.FiredAt,
+            firedAt = TimestampParam(alertEvent.FiredAt),
             detailsJson = alertEvent.DetailsJson
         }, cancellationToken: ct));
     }

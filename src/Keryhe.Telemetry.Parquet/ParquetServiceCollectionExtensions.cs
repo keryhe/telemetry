@@ -22,11 +22,12 @@ public static class ParquetServiceCollectionExtensions
         AddCommon(services, configuration);
 
         // Buffers are resident until the linger seals them, so the shared gate defaults (200,000 records, 256 MB) cap ingest near
-        // 200,000 / linger per signal (about 18,000 records/s in total at the 30 s default; plans/parquet-duckdb/results.md). Default
-        // each gate to two buffers and the byte budget to 2 GB; a value set in configuration still wins.
+        // 200,000 / linger per signal. Default each gate to 1,000,000 records (or two buffers if that is more) and the byte budget
+        // to 2 GB: with the 5 s linger and 50,000-record buffers that measured about 97,000 records/s write-only on the reference
+        // machine (stress-results p8-I; 30 s and 500,000 gave about 64,000). A value set in configuration still wins.
         services.AddOptions<TelemetryIngestionOptions>().PostConfigure<IOptions<ParquetOptions>>((o, pq) =>
         {
-            var records = 2 * pq.Value.MaxBufferRecords;
+            var records = Math.Max(1_000_000, 2 * pq.Value.MaxBufferRecords);
             string Key(string name) => $"{TelemetryIngestionOptions.SectionName}:{name}";
             if (configuration[Key(nameof(o.MaxQueuedSpans))] is null) o.MaxQueuedSpans = records;
             if (configuration[Key(nameof(o.MaxQueuedLogRecords))] is null) o.MaxQueuedLogRecords = records;

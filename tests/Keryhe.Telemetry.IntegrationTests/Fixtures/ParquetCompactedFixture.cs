@@ -33,8 +33,8 @@ public sealed class ParquetCompactedFixture : ProviderFixture
     {
         services.AddParquetCollectorServices(configuration);
         services.AddParquetApiServices(configuration);
-        services.AddPostgreSqlControlPlaneCollectorServices(configuration);
-        services.AddPostgreSqlControlPlaneApiServices(configuration);
+        services.AddSqliteApiKeyLookup(configuration);
+        services.AddSqliteControlPlaneManagement(configuration);
 
         // Every flush through ITelemetryBulkWriter is followed by a pass of a compactor that sees the data as two days old.
         var inner = services.Last(d => d.ServiceType == typeof(ITelemetryBulkWriter));

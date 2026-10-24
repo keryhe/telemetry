@@ -35,7 +35,7 @@ public static class ScenarioRunner
         RampResult? ramp = null;
         QuiesceResult? quiesce = null;
         TourResults? tourResults = null;
-        string? browserError = null, error = null;
+        string? browserError = null, error = null, controlPlane = null;
         DatabaseObservation? database = null;
         CorrectnessResult? correctness = null;
         HistorySeedResult? seed = null;
@@ -51,11 +51,14 @@ public static class ScenarioRunner
             log($"[{spec.Id}] schema {schemaVersion ?? "unknown"}: re-delivered spans {(profile.Load.Traces.RedeliveryCollapses ? "collapse" : "are stored again")}");
 
             log($"[{spec.Id}] starting {spec.Provider} container");
-            var db = ProviderContainerFactory.Create(spec.Provider);
+            // A SQLite control plane (Parquet's default) is a file in the scenario's output folder, kept for post-mortems.
+            var db = ProviderContainerFactory.Create(spec.Provider, profile.ControlPlane, directory);
             // Removing the database container is cleanup, not part of the measurement: a container that was OOM-killed under overload can take
             // longer to remove than Testcontainers waits, and that timeout (a TaskCanceledException) used to surface as the scenario's error
             // ("Cancelled.") with every result already in hand. It is logged instead, and Ryuk removes the leftover container.
             await using var dbDisposal = new ForgivingDisposal(db, m => log($"[{spec.Id}] {m}"));
+            controlPlane = db.ControlPlaneProviderName;
+            log($"[{spec.Id}] control plane: {controlPlane}");
             await db.StartAsync(new ContainerOptions(Diagnostics: true, CpuLimit: profile.ContainerCpus,
                 MemoryLimitBytes: (long)(profile.ContainerMemoryGb * ContainerOptions.Gigabyte), CpusetCpus: profile.DatabaseCpuset), ct);
             var tenants = await TenantSeeder.SeedAsync(db, profile.Tenants);
@@ -207,7 +210,7 @@ public static class ScenarioRunner
 
         var result = new ScenarioResult(ScenarioResult.CurrentSchemaVersion, spec.Provider, spec.Topology.ToString(), profile.Name,
             profile.IsRamp ? "ramp" : "fixed", startedAt, DateTimeOffset.UtcNow, error, profile, phases,
-            load, measured, markers, ramp, quiesce, tourResults, browserError, database, correctness, hostResults, seed, detailProbes, outage);
+            load, measured, markers, ramp, quiesce, tourResults, browserError, database, correctness, hostResults, seed, detailProbes, outage, controlPlane);
         await File.WriteAllTextAsync(Path.Combine(directory, "scenario.json"), JsonSerializer.Serialize(result, ResultJson.Options), CancellationToken.None);
         return result;
     }

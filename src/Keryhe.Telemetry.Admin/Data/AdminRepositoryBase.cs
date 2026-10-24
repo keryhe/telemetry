@@ -24,11 +24,14 @@ public abstract class AdminRepositoryBase : IAdminRepository
     /// <summary>True if <paramref name="ex"/> is this provider's unique-constraint violation.</summary>
     protected abstract bool IsUniqueViolation(DbException ex);
 
+    /// <summary>How an <c>expires_at</c> value (UTC) is bound as a parameter. SQLite stores timestamps as text in one fixed layout and overrides this.</summary>
+    protected virtual object? ExpiresAtParam(DateTime? expiresAtUtc) => expiresAtUtc;
+
     public abstract (string Server, string Database) DescribeTarget();
 
     public abstract string CreatedAtColumnHeader { get; }
 
-    public async Task CheckConnectivityAsync(CancellationToken ct)
+    public virtual async Task CheckConnectivityAsync(CancellationToken ct)
     {
         await using var conn = await OpenConnectionAsync(ct);
         await conn.ExecuteScalarAsync<int>(new CommandDefinition("SELECT 1", cancellationToken: ct));
@@ -92,7 +95,7 @@ public abstract class AdminRepositoryBase : IAdminRepository
     {
         await using var conn = await OpenConnectionAsync(ct);
         return await conn.ExecuteScalarAsync<long>(new CommandDefinition(
-            InsertApiKeySql, new { tenantId, name, keyHash, expiresAt = expiresAtUtc }, cancellationToken: ct));
+            InsertApiKeySql, new { tenantId, name, keyHash, expiresAt = ExpiresAtParam(expiresAtUtc) }, cancellationToken: ct));
     }
 
     public async Task<bool> SetApiKeyActiveAsync(long apiKeyId, bool active, CancellationToken ct)

@@ -5,8 +5,8 @@ using Microsoft.Extensions.DependencyInjection;
 namespace Keryhe.Telemetry.IntegrationTests.Fixtures;
 
 /// <summary>
-/// The Parquet provider over a temp directory, with its control plane (tenants, keys, alert rules, retention settings) on a
-/// PostgreSQL container, as ClickHouse has. The collector registration creates and verifies the root's schema file.
+/// The Parquet provider over a temp directory, with its control plane (tenants, keys, alert rules, retention settings) in a SQLite
+/// file (Parquet tests default to it, so they need no Docker). The collector registration creates and verifies the root's schema file.
 /// </summary>
 public sealed class ParquetFixture : ProviderFixture
 {
@@ -29,8 +29,8 @@ public sealed class ParquetFixture : ProviderFixture
     {
         services.AddParquetCollectorServices(configuration);
         services.AddParquetApiServices(configuration);
-        services.AddPostgreSqlControlPlaneCollectorServices(configuration);
-        services.AddPostgreSqlControlPlaneApiServices(configuration);
+        services.AddSqliteApiKeyLookup(configuration);
+        services.AddSqliteControlPlaneManagement(configuration);
     }
 
     public override Task ResetAsync()
