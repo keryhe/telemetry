@@ -12,7 +12,7 @@ alerting and retention subsystems. See the [README](../README.md) for a quick st
   - PostgreSQL 14+
   - SQL Server 2022
   - MySQL 8.0.19+ (MariaDB is not supported)
-  - ClickHouse 25.8 (fresh install; no migration from an earlier layout)
+  - ClickHouse 25.8
   - Parquet files read by an in-process DuckDB (telemetry data only, no database server; one machine; the control plane runs on one of the relational backends)
 - Docker, only to run the integration and stress tests or the Docker recipes below
 
@@ -64,16 +64,14 @@ schema/apply-schema.sh telemetry parquet /var/lib/keryhe-telemetry   # just crea
 ```
 
 Or use the runner script, which skips a component whose target version (`control_plane_schema_version` /
-`telemetry_schema_version`, both currently 4.0.0) is already recorded:
+`telemetry_schema_version`, both 4.0.1) is already recorded:
 
 ```bash
 schema/apply-schema.sh <controlplane|telemetry> <postgresql|sqlserver|mysql|clickhouse> [database]
 # controlplane: postgresql | sqlserver | mysql        telemetry: postgresql | sqlserver | mysql | clickhouse | parquet
 ```
 
-> **Schema 4.x is a fresh-install schema.** There is no migration from 2.x or 3.x: an existing database must be
-> recreated, and existing tenants and API keys re-created with the Admin tool. After 4.0.0 the two components are
-> versioned independently, and a change bumps only its own component's third digit.
+The two components are versioned independently: each script records its own version in its own table.
 
 ## 2. Configure connection strings
 
@@ -224,19 +222,20 @@ dotnet run --project src/Keryhe.Telemetry.Collector.Server
 
 # Terminal 2 - REST API + UI (http://localhost:5188, https://localhost:7105)
 dotnet run --project src/Keryhe.Telemetry.Api.Server
-
-# Terminal 3 - Angular dev server
-cd src/telemetry-client && npm install && npm run start
 ```
 
-Open `http://localhost:4201` in your browser.
+Open `http://localhost:5188/telemetry`. The API host serves the prebuilt UI itself, even under `dotnet run`; as
+shipped, its `appsettings.json` mounts the UI at `/telemetry` and the API at `/telemetry/api` (`TelemetryUi:BasePath`,
+`Telemetry:Api:BasePath`; the defaults when unset are `/` and `/api`). See [Deploying](#deploying) below.
 
-> The Angular dev server on 4201 is for **development only**: it gives you hot reload and
-> talks to the API cross-origin (hence the CORS policy in `Keryhe.Telemetry.Api.Server`).
-> The API host also serves the prebuilt UI itself, even under `dotnet run`; as shipped, its
-> `appsettings.json` mounts the UI at `/telemetry` and the API at `/telemetry/api`
-> (`TelemetryUi:BasePath`, `Telemetry:Api:BasePath`; the defaults when unset are `/` and `/api`).
-> See [Deploying](#deploying) below.
+For UI development with hot reload, run the Angular dev server as well. It serves on `http://localhost:4201` and
+proxies `/api` to `https://localhost:7105` (`src/telemetry-client/proxy.conf.json`), so start the API host with the API
+at `/api`:
+
+```bash
+dotnet run --project src/Keryhe.Telemetry.Api.Server -- --Telemetry:Api:BasePath=/api
+cd src/telemetry-client && npm install && npm start
+```
 
 ## 6. (Optional) Generate test data
 
@@ -342,7 +341,7 @@ when unauthenticated and 403 for a refused tenant or operation. See
 - `metric_last_seen` — Newest data point per metric, so the metrics catalog can tell which metrics have data in a range
 - `gauge_data_points`, `sum_data_points`, `histogram_data_points`, `exponential_histogram_data_points`, `summary_data_points` — Type-specific metric data, each carrying its own exemplars (with trace correlation) in an `exemplars_json` column
 - `log_records` — Log entries with severity and trace correlation
-- `request_rollup_minute`, `log_rollup_minute` — Per-minute rollups of inbound spans and log records that the dashboard, trace list and logs page read for their cards and charts (rows are partial and summed on read; forward-only, so ranges before an upgrade show empty charts)
+- `request_rollup_minute`, `log_rollup_minute` — Per-minute rollups of inbound spans and log records that the dashboard, trace list and logs page read for their cards and charts (rows are partial and summed on read)
 - `telemetry_schema_version` — Applied telemetry schema versions
 - MySQL only: `request_rollup_hour`, `log_rollup_hour` and `rollup_compaction` — the hour tier of those rollups
 - Parquet has the same table set as ClickHouse, as files (see below).
@@ -366,11 +365,11 @@ Spans, log records and data points are plain appends with no unique key and no f
 batch is stored again and reads tolerate it. The trace and log lists are computed from the raw rows; the cards and
 charts above them come from the rollups, which count **requests** (inbound server and consumer spans), not traces.
 
-When using the MySQL provider (MySQL 8.0.19+), the schema mirrors the SQL Server relational layout with MySQL-native types (`AUTO_INCREMENT` surrogate keys, `JSON` columns for attributes, `DATETIME(6)` timestamps). Hash-based deduplication of resources/scopes uses `INSERT ... ON DUPLICATE KEY UPDATE`, and writes are batched as multi-row inserts.
+When using the MySQL provider (MySQL 8.0.19+), the schema mirrors the SQL Server relational layout with MySQL-native types (`AUTO_INCREMENT` surrogate keys, `JSON` columns for attributes, `BIGINT` Unix-nanosecond timestamps). Hash-based deduplication of resources/scopes uses `INSERT ... ON DUPLICATE KEY UPDATE`, and writes are batched as multi-row inserts.
 
-When using the ClickHouse provider (25.8), each row carries its own resource and scope attributes, so there are no reference tables and no surrogate ids. Tables are plain `MergeTree` (the derived `trace_index` and rollups are `AggregatingMergeTree`) partitioned by day; attributes are `Map(LowCardinality(String), String)` (values are text, the original type is not kept); trace ids are `UUID` and span ids `UInt64`. The collector writes the derived tables itself after the raw insert, so a failed derived insert under-counts the cards, charts and metric catalog (`derived_rows_dropped`). Retention drops fully expired day partitions. ClickHouse has no control plane of its own (tenants, keys, alert rules and retention settings live in the PostgreSQL, SQL Server or MySQL database named by `ControlPlane:Provider`), so alert-rule edits and the cooldown fire-claim are as atomic as on those. See the ClickHouse package README and `../CLAUDE.md` for the full list of ClickHouse-specific behaviors.
+When using the ClickHouse provider (25.8), each row carries its own resource and scope attributes, so there are no reference tables and no surrogate ids. Tables are plain `MergeTree` (the derived `trace_index` and rollups are `AggregatingMergeTree`) partitioned by day; attributes are `Map(LowCardinality(String), String)` (values are text, the original type is not kept); trace ids are `UUID` and span ids `UInt64`. The collector writes the derived tables itself after the raw insert, so a failed derived insert under-counts the cards, charts and metric catalog (`derived_rows_dropped`). Retention drops fully expired day partitions. ClickHouse has no control plane of its own (tenants, keys, alert rules and retention settings live in the PostgreSQL, SQL Server or MySQL database named by `ControlPlane:Provider`), so alert-rule edits and the cooldown fire-claim are as atomic as on those. See the [ClickHouse package README](../src/Keryhe.Telemetry.ClickHouse/README.md) for the full list of ClickHouse-specific behaviors.
 
-When using the Parquet provider, the data is Parquet files under `Telemetry:Parquet:RootPath`, one folder per table, tenant, day and hour, listed by manifests that readers follow (a file is visible only once listed). Like ClickHouse each row carries its own resource and scope attributes (values are text), the collector writes the derived tables, and trace ids are two `UBIGINT` halves. The collector holds records for `LingerMilliseconds` (30 s) before writing, so a crash loses that window and new data is readable about that long after it arrives. The compactor on the API host folds the many small files into larger ones, and retention deletes whole expired day folders. See the Parquet package README (`src/Keryhe.Telemetry.Parquet/README.md`) for the operator guide.
+When using the Parquet provider, the data is Parquet files under `Telemetry:Parquet:RootPath`, one folder per table, tenant, day and hour, listed by manifests that readers follow (a file is visible only once listed). Like ClickHouse each row carries its own resource and scope attributes (values are text), the collector writes the derived tables, and trace ids are two `UBIGINT` halves. The collector holds records for `LingerMilliseconds` (30 s) before writing, so a crash loses that window and new data is readable about that long after it arrives. The compactor on the API host folds the many small files into larger ones, and retention deletes whole expired day folders. See the [Parquet package README](../src/Keryhe.Telemetry.Parquet/README.md) for the operator guide.
 
 Free-text and `key:value` search is unindexed on every provider, so a search or "slow" request is limited to
 `Telemetry:Query:RawSearchWindowHours` (default 24); exports are limited to a provider-dependent window

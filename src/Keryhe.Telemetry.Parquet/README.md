@@ -2,12 +2,9 @@
 
 Parquet + DuckDB provider for [Keryhe Telemetry](https://github.com/keryhe/telemetry): the collector writes telemetry
 as Parquet files and the API reads them with an in-process DuckDB. No database server for telemetry. Set
-`Database:Provider` to `Parquet`. Spans, logs and metrics work end to end, with compaction and day-granular retention
-(design and decisions: `plans/parquet-duckdb/`; the ramp measurements of phase 7 are not recorded yet, so this README
-states no throughput figures).
+`Database:Provider` to `Parquet`. Spans, logs and metrics work end to end, with compaction and day-granular retention.
 
-**Telemetry data only.** Like ClickHouse, a Parquet deployment runs the control plane (tenants with their retention windows, API keys, alert rules,
-retention windows) on PostgreSQL, SQL Server or MySQL (`ControlPlane:Provider`).
+**Telemetry data only.** Like ClickHouse, a Parquet deployment runs the control plane (tenants with their retention windows, API keys, alert rules) on PostgreSQL, SQL Server or MySQL (`ControlPlane:Provider`).
 
 ## When to choose it
 
@@ -51,8 +48,8 @@ schema script: `schema/apply-schema.sh telemetry parquet <root>` only creates th
 |---|---|---|
 | `RootPath` | (required) | The data directory. The collector and the API must see the same files **on one machine's file system** (a local disk, or a volume shared by containers on one Linux host; not a network share) |
 | `WriterId` | machine name + saved suffix | A collector's stable id. Two live collectors must not share one: the second fails at startup |
-| `LingerMilliseconds` / `LateLingerMilliseconds` | 30,000 / 120,000 | Buffer linger (used from phase 2) |
-| `MaxBufferRecords` / `MaxBufferBytes` | 500,000 / 256 MiB | Seal a buffer early (phase 2) |
+| `LingerMilliseconds` / `LateLingerMilliseconds` | 30,000 / 120,000 | How long the open hour's buffer collects records before it is written as a file; the same for an earlier hour's (late data) |
+| `MaxBufferRecords` / `MaxBufferBytes` | 500,000 / 256 MiB | A buffer this large is written early |
 | `RowGroupRows` | 122,880 | Parquet row group size |
 | `Compression` | `zstd` | `zstd`, `snappy`, `gzip` or `uncompressed` |
 | `CatalogRefreshSeconds` / `MaxTrackedSeries` | 300 / 1,000,000 | A metric or series that keeps reporting has its `metric_catalog`/`metric_series` row re-written at most this often; the writer forgets past the limit |
@@ -105,7 +102,8 @@ that overlap one wins and the other deletes its work.
 - Metrics on the `Keryhe.Telemetry.Parquet` meter: `compaction_duration` (by kind), `files_compacted`, `files_deleted`,
   `compaction_failures`, `uncompacted_files` (the largest count in one partition at the last pass). A partition that fails is
   retried with back-off and never blocks the others.
-Schema 4.0.0 is a fresh-install schema: a root written under other table definitions is refused.
+
+The root's `_schema.json` records the table definitions it was written with; a root written under other definitions is refused.
 
 ## Operating it
 

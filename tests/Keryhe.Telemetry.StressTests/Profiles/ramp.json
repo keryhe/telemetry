@@ -4,13 +4,14 @@
   "name": "ramp",
   "tenants": 3,
   "warmupSeconds": 60,
+  "retentionIntervalSeconds": 86400,
   "browsers": { "users": 3 },
   "load": {
     "traces": { "spansPerSecond": 1000 },
     "logs": { "recordsPerSecond": 1000 },
     "metrics": { "dataPointsPerSecond": 1000 },
     "transport": { "channels": 4 },
-    "time": { "lateArrivalFraction": 0.05, "orphanFraction": 0.02, "backdatedFraction": 0.02, "redeliveryFraction": 0.02 }
+    "time": { "lateArrivalFraction": 0.05, "orphanFraction": 0.02, "backdatedFraction": 0.0, "redeliveryFraction": 0.02 }
   },
   "ramp": {
     "startScale": 1,

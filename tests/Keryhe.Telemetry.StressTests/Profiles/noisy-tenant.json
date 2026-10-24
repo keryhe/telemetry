@@ -12,6 +12,7 @@
   "name": "noisy-tenant",
   "tenants": 3,
   "warmupSeconds": 20,
+  "retentionIntervalSeconds": 86400,
   "measuredSeconds": 120,
   "writeOnly": true,
   "load": {

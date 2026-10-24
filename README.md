@@ -15,7 +15,7 @@ A self-hosted OpenTelemetry (OTLP) ingestion and visualization platform for trac
 - **REST API**: ASP.NET Core Web API (`Keryhe.Telemetry.Api`) with Swagger support
 - **Multiple Database Providers**: Choose between PostgreSQL, SQL Server, MySQL, ClickHouse (columnar/OLAP) or Parquet files read by an in-process DuckDB (no database server, one machine) for telemetry data; tenants (with their retention windows), API keys and alert rules (the control plane) live in PostgreSQL, SQL Server or MySQL
 - **Trace Correlation**: Links logs and metrics to traces via trace and span IDs
-- **Built-in Analytics**: Service maps, trace summaries and latency heatmaps, and log severity analysis, computed on demand from the raw data
+- **Built-in Analytics**: Service maps, request and log summaries, latency heatmaps and log severity analysis; the cards and charts read per-minute rollups the collector writes as data arrives, so they stay fast over long ranges
 - **Multi-tenant**: Every OTLP export carries a per-tenant API key (hashed in the database, optional expiry); the REST API is scoped by tenant and supports pluggable authorization
 - **Export and retention**: Stream logs, traces and metrics as NDJSON or CSV; retention windows are editable in the UI and enforced by a background sweep
 - **Admin tool**: A console app (`Keryhe.Telemetry.Admin`) for creating tenants and API keys
@@ -91,7 +91,7 @@ dotnet run --project src/Keryhe.Telemetry.Admin
 cd src/telemetry-client && npm install && npm start
 ```
 
-Open `http://localhost:4201`. Ingestion requires an `Authorization: Bearer <key>` header on
+Open `http://localhost:4201` (the Angular dev server), or `http://localhost:5188/telemetry`, where the API host serves the built UI. Ingestion requires an `Authorization: Bearer <key>` header on
 every OTLP request — see [Configure an API key](docs/SETUP.md#3-create-a-tenant-and-an-api-key)
 in the full setup guide. In Development the collector also listens on plaintext `http://localhost:5117`;
 outside Development it requires TLS (`https://…:7057`), because keys travel in every export.
@@ -104,18 +104,18 @@ listed in **[docs/CONFIGURATION.md](docs/CONFIGURATION.md)**.
 ## Build your own host
 
 Every piece of this stack ships as a NuGet package — `Keryhe.Telemetry.Core`, `.Api`,
-`.Collector`, `.Ui`, and the four database providers — so you can compose your own ASP.NET Core
-host instead of running `Keryhe.Telemetry.Api.Server`/`.Server` as-is: add your own middleware,
+`.Collector`, `.Ui`, and the five telemetry providers — so you can compose your own ASP.NET Core
+hosts instead of running `Keryhe.Telemetry.Api.Server`/`.Collector.Server` as-is: add your own middleware,
 combine it with an existing application, or change what gets exposed.
 
 ```xml
 <ItemGroup>
-  <PackageReference Include="Keryhe.Telemetry.Api" Version="1.3.0" />
-  <PackageReference Include="Keryhe.Telemetry.Ui" Version="1.3.0" />
+  <PackageReference Include="Keryhe.Telemetry.Api" Version="2.0.1" />
+  <PackageReference Include="Keryhe.Telemetry.Ui" Version="2.0.1" />
   <!-- Plus the provider package for your telemetry data (Database:Provider) and the one for your
        control plane (ControlPlane:Provider). On PostgreSQL, SQL Server or MySQL these are the same
        package; a ClickHouse or Parquet consumer references Keryhe.Telemetry.ClickHouse or .Parquet and one of the others. -->
-  <PackageReference Include="Keryhe.Telemetry.PostgreSQL" Version="1.3.0" />
+  <PackageReference Include="Keryhe.Telemetry.PostgreSQL" Version="2.0.1" />
 </ItemGroup>
 ```
 
@@ -129,8 +129,8 @@ builder.Services.AddPostgreSqlControlPlaneApiServices(builder.Configuration);  /
 
 var app = builder.Build();
 
-// Paired with an explicit UseRouting() call right after it — see CLAUDE.md's "UI hosting" section
-// for why that second part matters.
+// Paired with an explicit UseRouting() call right after it, so routing does not select an
+// endpoint before the UI's static-file middleware runs.
 app.UseKeryheTelemetryUi();
 app.UseRouting();
 
@@ -139,7 +139,7 @@ app.UseRouting();
 app.UseAuthentication();
 app.UseAuthorization();
 
-app.MapKeryheTelemetryApi();   // replaces MapControllers(); also gives unknown API paths a JSON 404
+app.MapKeryheTelemetryApi();   // maps the controllers; unknown API paths get a JSON 404
 app.MapKeryheTelemetryUiFallback();
 
 app.Run();

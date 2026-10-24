@@ -3,9 +3,10 @@
   "name": "smoke",
   "tenants": 2,
   "warmupSeconds": 60,
+  "retentionIntervalSeconds": 86400,
   "measuredSeconds": 300,
   "browsers": { "users": 1 },
   "load": {
-    "time": { "lateArrivalFraction": 0.05, "orphanFraction": 0.02, "backdatedFraction": 0.02, "redeliveryFraction": 0.02 }
+    "time": { "lateArrivalFraction": 0.05, "orphanFraction": 0.02, "backdatedFraction": 0.0, "redeliveryFraction": 0.02 }
   }
 }

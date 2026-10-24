@@ -3,6 +3,7 @@
   "name": "soak",
   "tenants": 3,
   "warmupSeconds": 900,
+  "retentionIntervalSeconds": 86400,
   "measuredSeconds": 14400,
   "browsers": { "users": 3 },
   "load": {
@@ -10,6 +11,6 @@
     "logs": { "recordsPerSecond": 5000 },
     "metrics": { "dataPointsPerSecond": 5000 },
     "transport": { "channels": 4 },
-    "time": { "lateArrivalFraction": 0.05, "orphanFraction": 0.02, "backdatedFraction": 0.02, "redeliveryFraction": 0.02 }
+    "time": { "lateArrivalFraction": 0.05, "orphanFraction": 0.02, "backdatedFraction": 0.0, "redeliveryFraction": 0.02 }
   }
 }

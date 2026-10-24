@@ -2,7 +2,7 @@
 
 ClickHouse provider for [Keryhe Telemetry](https://github.com/keryhe/telemetry) — a
 ClickHouse.Client/Dapper implementation for columnar/OLAP storage. Requires **ClickHouse 25.8** (the version the
-schema, the tests and the measurements use). Fresh install only: there is no migration from an earlier layout.
+schema, the tests and the measurements use).
 
 ## What it provides
 

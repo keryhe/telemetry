@@ -11,8 +11,7 @@ providers it is the same database as the telemetry data; for ClickHouse and Parq
 parsed from the API host's `Debug` log lines (`parquet-sql ms= files= sql=`; the launcher turns that category on), there are no container CPU/memory samples (read
 the hosts' process metrics), `--db-cpuset` and `--db-sql` do not apply, and the correctness check counts rows through DuckDB over the manifests.
 
-It reports **numbers, not verdicts**: there are no pass/fail thresholds and no baseline comparison. The design and the decisions behind it are in
-[`plans/stress-tests.md`](../../plans/stress-tests.md).
+It reports **numbers, not verdicts**: there are no pass/fail thresholds and no baseline comparison.
 
 ## Prerequisites
 
@@ -52,7 +51,7 @@ dotnet run --project tests/Keryhe.Telemetry.StressTests -- report --in stress-re
 | Option | Meaning |
 |---|---|
 | `--provider` | `PostgreSQL`, `SqlServer`, `MySql`, `ClickHouse`, `Parquet`, or `all` (default `PostgreSQL`) |
-| `--topology` | `split` or `all` (default `split`; kept so existing scripts keep working) |
+| `--topology` | `split` or `all` (default `split`). The collector and API run as separate hosts; `split` is the only topology, and `all` selects it |
 | `--profile` | `smoke`, `standard`, `soak`, `ramp`, `all`, or the path of a profile JSON (default `smoke`, or `ramp` with `--scenario ramp`) |
 | `--scenario` | `fixed` or `ramp`; picks the default profile and rejects a mismatched one |
 | `--browsers <n>` | Override the profile's browser users (0 to 5; 0 runs none) |
@@ -72,7 +71,7 @@ with optional browsers), and `playwright-install`.
 1. Starts a fresh database container with diagnostics on (pg_stat_statements, Query Store, deadlock logging, ...) and the CPU/memory cap, applies `schema/*.sql`, seeds tenants and API keys.
 2. Launches the host(s) as child processes and attaches the database observers and an EventPipe metrics listener to each host.
 3. **Warm-up**: ingestion only, so data volume exists before anything reads. Recorded, but excluded from the headline numbers.
-4. **Measured window**: ingestion at the profile rate, the browser tour, and every observer together. Backdated records flow and the short retention interval makes sweeps land inside it. A **ramp** replaces this with rate steps and stops at the first step where a stop criterion holds for the whole step.
+4. **Measured window**: ingestion at the profile rate, the browser tour, and every observer together. Backdated records and retention sweeps are off by default (see the profiles); a profile that sets them makes sweeps land inside the window. A **ramp** replaces this with rate steps and stops at the first step where a stop criterion holds for the whole step.
 5. **Quiesce**: stops the load and waits until nothing is resident in the ingestion queue and nothing has been flushed for 10s (a timeout is recorded, not raised).
 6. **Correctness check**: compares the sent ledger with per-tenant row counts. If backdated records were sent, it first waits for a retention sweep that *started after* quiescence (up to `2 x RetentionIntervalSeconds + 60s`, capped at `backdatedCheckMaxWaitSeconds`), since only then do leftover backdated rows mean anything. With a realistic retention interval no such sweep comes, and the backdated outcome is `NotVerifiable`.
 7. Stops the observers, shuts the hosts down gracefully (recording whether the queue drained), saves logs, disposes the container.
@@ -89,13 +88,13 @@ with optional browsers), and `playwright-install`.
 
 | `noisy-tenant` | 20 s | 2 min | 6,000/s, ten times as much from tenant 0 as from each of the other two | none | 3 |
 
-`noisy-tenant` is a fixed-rate, write-only profile for the per-tenant quota (collector improvements phase 3). The summary prints each
+`noisy-tenant` is a fixed-rate, write-only profile for the per-tenant quota (`Telemetry:Ingestion:TenantQuota`). The summary prints each
 tenant's acked rate, throttled attempts, exports still refused at their deadline and p50/p95 latency; the profile's header shows the
 `--host-env` settings that make the queue small enough for the noisy tenant to fill it, and how to compare `TenantQuota__MaxShare` 0.5
 with 1. Its `maxInFlightExports` is raised because the client's cap on exports in flight is shared by all tenants and would otherwise starve
 the quiet ones on the client side.
 
-The first five send 2% backdated records, 2% re-deliveries, 5% late arrivals and 2% orphan traces (traces whose root is never sent: schema 3.0.0 anchors them on their earliest span like any other).
+The built-in profiles send no backdated records and sweep retention once a day (`retentionIntervalSeconds` 86400: only the sweep at host start, when there is no data), so a run measures the system without retention contention. To measure retention, use `--retention-interval stress` (30 s) with a profile that sets `backdatedFraction`. The first five send 2% re-deliveries, 5% late arrivals and 2% orphan traces (traces whose root is never sent: they are anchored on their earliest span like any other).
 
 ## Writing a profile
 
@@ -128,9 +127,9 @@ Ramp criteria (each applies to a whole step; the rate scale multiplies the profi
 
 | Criterion | Default | Trips when |
 |---|---|---|
-| `maxDroppedRecords` | 0 | More records were dropped in the step |
+| `maxDroppedRecords` | 0 | More records were dropped in the step (drops with reason `out_of_retention` are not counted: backdated records are refused at ingest on ClickHouse and Parquet) |
 | `maxGateWaitP95Ms` | 250 | The worst signal's gate-wait p95 is higher (the gate is saturated and clients are being held) |
-| `maxThrottledRatePercent` | 5 | `throttled_rate`: more than this percentage of a signal's export attempts were refused by a full collector queue (`UNAVAILABLE` + `RetryInfo`; 0 disables). The load generator waits the advertised delay and resends, so a throttled attempt usually ends as an OK export; the count is the saturation signal. `maxGateWaitP95Ms` stays as the earlier warning, but the gate wait is now capped by `MaxGateWaitMilliseconds` |
+| `maxThrottledRatePercent` | 5 | `throttled_rate`: more than this percentage of a signal's export attempts were refused by a full collector queue (`UNAVAILABLE` + `RetryInfo`; 0 disables). The load generator waits the advertised delay and resends, so a throttled attempt usually ends as an OK export; the count is the saturation signal. `maxGateWaitP95Ms` is an earlier warning, since the gate wait itself is capped by `MaxGateWaitMilliseconds` |
 | `maxExportP99Seconds` | 5 | Any signal's client-side Export p99 is higher |
 | `maxErrorRatePercent` | 1 | More than this percentage of a signal's exports failed with a gRPC error |
 | `lagGrowthFactor` / `lagGrowthMinMs` | 2 / 3000 | `lag_growth`: lag in the last third of the step's probes is that many times the first third's and at least that much higher, or a probe never appeared |
@@ -173,7 +172,7 @@ result, every time series, and the summary tables. Use it to compare runs by han
 
 - The metrics catalog only lists a metric once `MetricTouchWorker` has flushed (60s by default), so the browser tour waits up to 90s at start for it. Use a warm-up of at least 70s with browsers.
 - The tour opens metric detail by clicking through the metrics list, not by URL, because a hard load of `/metrics/<dotted.name>` is answered 404 by the UI host.
-- ClickHouse retention drops partitions (no mutations), so leftover backdated rows are reported as counted. Its API host reads with `use_query_condition_cache = 0` (the 25.x cache makes a repeated predicate look free). The report adds `late_buffer_records` and `derived_rows_dropped` beside the write instruments.
+- ClickHouse retention drops whole day partitions (with lightweight deletes only for tenants on a shorter window), so leftover backdated rows are reported as counted. Its API host reads with `use_query_condition_cache = 0` (the 25.x cache makes a repeated predicate look free). The report adds `late_buffer_records` and `derived_rows_dropped` beside the write instruments.
 - There is no product endpoint to trigger a retention sweep (by design); the harness waits for a natural one.
 - The load tool is open-loop. If it falls behind its own schedule it reports `not sent` and skipped exports, so load-tool saturation is never mistaken for server slowness; check offered versus acked.
 

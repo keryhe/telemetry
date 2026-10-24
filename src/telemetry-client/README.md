@@ -1,59 +1,37 @@
-# TelemetryClient
+# telemetry-client
 
-This project was generated using [Angular CLI](https://github.com/angular/angular-cli) version 20.1.6.
+The Angular 20 source of the Keryhe Telemetry UI (Angular Material, ApexCharts, ngx-graph). It is not part of the .NET
+solution: `Keryhe.Telemetry.Ui` builds it (`npm ci` / `npm run build`) and packages `dist/telemetry-client/browser` as
+static web assets, which the API host serves. See [the UI package README](../Keryhe.Telemetry.Ui/README.md) for hosting
+and configuration.
 
 ## Development server
 
-To start a local development server, run:
-
 ```bash
-ng serve
+npm install
+npm start
 ```
 
-Once the server is running, open your browser and navigate to `http://localhost:4200/`. The application will automatically reload whenever you modify any of the source files.
-
-## Code scaffolding
-
-Angular CLI includes powerful code scaffolding tools. To generate a new component, run:
+The dev server runs on `http://localhost:4201` and proxies `/api` to the API host at `https://localhost:7105`
+(`proxy.conf.json`), so run `Keryhe.Telemetry.Api.Server` beside it with the API at `/api` (its shipped
+`appsettings.json` mounts it at `/telemetry/api`):
 
 ```bash
-ng generate component component-name
+dotnet run --project src/Keryhe.Telemetry.Api.Server -- --Telemetry:Api:BasePath=/api
 ```
 
-For a complete list of available schematics (such as `components`, `directives`, or `pipes`), run:
-
-```bash
-ng generate --help
-```
+The client reads its API location and branding
+from `GET config.json` before it bootstraps (`src/app/core/config/load-config.ts`), so one build works wherever a host
+mounts the UI or the API.
 
 ## Building
 
-To build the project run:
-
 ```bash
-ng build
+npm run build
 ```
 
-This will compile your project and store the build artifacts in the `dist/` directory. By default, the production build optimizes your application for performance and speed.
+The output is in `dist/telemetry-client/browser`. Publishing `Keryhe.Telemetry.Api.Server` runs this build for you.
 
-## Running unit tests
+## Tests
 
-To execute unit tests with the [Karma](https://karma-runner.github.io) test runner, use the following command:
-
-```bash
-ng test
-```
-
-## Running end-to-end tests
-
-For end-to-end (e2e) testing, run:
-
-```bash
-ng e2e
-```
-
-Angular CLI does not come with an end-to-end testing framework by default. You can choose one that suits your needs.
-
-## Additional Resources
-
-For more information on using the Angular CLI, including detailed command references, visit the [Angular CLI Overview and Command Reference](https://angular.dev/tools/cli) page.
+`npm test` runs Karma/Jasmine; no meaningful tests are set up yet.

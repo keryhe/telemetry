@@ -107,11 +107,11 @@ of shipping it prebuilt. Three things to know:
 
 ### URLs
 
-Tenant pages live under `/t/{tenantId}/` (`/t/3/traces`, `/t/3/traces/{id}`, `/t/3/metrics/{name}`,
-`/t/3/logs`, `/t/3/alerts`, `/t/3/dashboard`), so a copied link carries its tenant; `/settings` is
-global. The tenant-less paths of earlier versions (`/traces?range=1h`) redirect to the same path and
-query under the last-used tenant, else the first one the caller may access. A tenant the caller
-cannot use shows "No access to this tenant".
+Every page lives under `/t/{tenantId}/` (`/t/3/dashboard`, `/t/3/traces`, `/t/3/traces/{id}`,
+`/t/3/metrics`, `/t/3/metrics/{name}`, `/t/3/logs`, `/t/3/alerts`, `/t/3/settings`), so a copied link
+carries its tenant. A path without a tenant (`/traces?range=1h`) redirects to the same path and query
+under the last-used tenant, else the first one the caller may access. A tenant the caller cannot use
+shows "No access to this tenant".
 
 ### Authentication
 

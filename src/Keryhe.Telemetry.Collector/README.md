@@ -1,6 +1,6 @@
 # Keryhe.Telemetry.Collector
 
-gRPC OTLP ingestion for [Keryhe Telemetry](https://github.com/keryhe/telemetry) — the trace,
+OTLP ingestion (gRPC and HTTP) for [Keryhe Telemetry](https://github.com/keryhe/telemetry) — the trace,
 metric, and log collector services and provider-agnostic write-path wiring.
 
 ## What it provides
@@ -130,10 +130,10 @@ or, from the Windows certificate store:
 
 ### Key format
 
-New keys are `ktel_` followed by 43 base64url characters. The prefix exists so leaked keys can be found
+Keys are `ktel_` followed by 43 base64url characters. The prefix exists so leaked keys can be found
 by a secret scanner; a custom pattern is `ktel_[A-Za-z0-9_-]{43}` (GitHub Advanced Security custom
 patterns, gitleaks, trufflehog). The collector does not require the prefix: the hash covers the whole
-string, so keys issued earlier keep working.
+string, so a key issued with SQL in another format works too.
 
 ### Issuing, expiring, rotating and revoking keys
 
@@ -287,9 +287,9 @@ what was checked and how.
 
 ## Summary rollups
 
-Besides the raw spans and logs, the collector maintains a per-minute rollup (`request_rollup_minute`, `log_rollup_minute`,
-schema 3.2.0) that the UI's cards and charts and the error-rate and log-spike alerts read. On every provider except
-ClickHouse (whose own ingestion worker writes it with each flush, no materialized views) an in-memory accumulator is fed after each successful flush and a
+Besides the raw spans and logs, the collector maintains a per-minute rollup (`request_rollup_minute`, `log_rollup_minute`)
+that the UI's cards and charts and the error-rate and log-spike alerts read. On ClickHouse and Parquet the provider's own
+ingestion worker writes it with each flush. On PostgreSQL, SQL Server and MySQL an in-memory accumulator is fed after each successful flush and a
 background worker appends the minutes that have closed, every `Telemetry:Rollup:FlushIntervalSeconds` (15) once a
 minute is `CloseGraceSeconds` (30) past its end. Three things to know when operating it:
 

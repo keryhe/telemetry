@@ -45,9 +45,13 @@ public static class HostMetricsQuery
     public static double Flushed(HostSet hosts) =>
         Stores(hosts).Sum(store => Signals.Sum(signal => store.Total(Prefix + "records_flushed", "signal", signal)));
 
+    /// <summary>
+    /// Records the collector lost in the window. Drops with reason <c>out_of_retention</c> are not counted: the harness sends backdated records
+    /// on purpose, and a provider that checks retention at ingest (ClickHouse, Parquet) refuses them there instead of leaving them for the sweep.
+    /// </summary>
     public static double Dropped(HostSet hosts, DateTimeOffset from, DateTimeOffset to) =>
         Stores(hosts).Sum(store => Signals.Sum(signal => store.Window(Prefix + "records_dropped", from, to, "signal", signal)
-            .Where(s => s.Kind == "counter" && !double.IsNaN(s.Value)).Sum(s => s.Value)));
+            .Where(s => s.Kind == "counter" && !double.IsNaN(s.Value) && s.Tags.GetValueOrDefault("reason") != "out_of_retention").Sum(s => s.Value)));
 
     /// <summary>The worst signal's gate-wait p95 over the window, averaging each signal's per-interval p95 weighted by how many waits it covered.</summary>
     public static double GateWaitP95Ms(HostSet hosts, DateTimeOffset from, DateTimeOffset to)

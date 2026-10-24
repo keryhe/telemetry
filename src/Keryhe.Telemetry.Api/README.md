@@ -1,7 +1,7 @@
 # Keryhe.Telemetry.Api
 
 REST read API for [Keryhe Telemetry](https://github.com/keryhe/telemetry) — controllers,
-multi-tenant middleware, and provider-agnostic wiring for querying ingested OpenTelemetry
+tenant-scoped routing and authorization, and provider-agnostic wiring for querying ingested OpenTelemetry
 traces, metrics, logs, and alert rules.
 
 ## What it provides
@@ -75,10 +75,10 @@ the host's default scheme. Claims are read with a fixed fallback list (no config
 `Identity.Name`; `given_name`, `ClaimTypes.GivenName`; `email`, `ClaimTypes.Email`, `preferred_username` (only if it contains `@`);
 `picture` (only an absolute `http`/`https` URL).
 
-## Summary endpoints (breaking change in schema 3.2.0)
+## Summary endpoints
 
-The cards and charts of the dashboard, trace list and logs page read **per-minute rollups** the collector writes
-(`plans/summary-rollups.md`), not the raw rows:
+The cards and charts of the dashboard, trace list and logs page read **per-minute rollups** the collector writes,
+not the raw rows:
 
 - `GET {base}/tenants/{id}/traces/summary?start&end&service&bucketCount` returns
   `{ bucketSeconds, writtenThrough, summary, buckets, services, latency, timedOut }`: **requests** (inbound spans,
@@ -89,30 +89,26 @@ The cards and charts of the dashboard, trace list and logs page read **per-minut
 
 The server picks `bucketSeconds` from a fixed ladder (1, 2, 5, 10, 15, 30 min, 1, 2, 3, 6, 12 h, 1 d), rounds the
 window to whole minutes and leaves out the minutes after `writtenThrough`, which the rollup has not been written for
-yet. `mode`, `operation`, `minDurationMs`, `maxDurationMs`, `q` and `asOf` are no longer accepted by either summary
-(they are ignored); the cards and charts describe the time range and service only (and, for logs, the minimum
-severity). The `summary` object no longer carries a trace total, `listTotal` and `latencyBuckets` are gone, and
-the lists have no exact total. Ranges before the rollup existed show empty charts over a populated list.
+yet. The cards and charts describe the time range and service only (and, for logs, the minimum severity); the lists
+below them have no exact total.
 
-## Capped lists (breaking change in schema 4.0.0)
+## Capped lists
 
-The trace list, logs list, metrics catalog and a metric's exemplars no longer page. Each returns at most `limit` rows
-(default and ceiling `Telemetry:Query:Limits`) as `{ items, truncated }`, where `truncated` is true when more rows matched.
-To see others, narrow the time range or filters, or ask for the other end of the window with `order`. Export still streams
-everything.
+The trace list, logs list, metrics catalog and a metric's exemplars are capped rather than paged. Each returns at most
+`limit` rows (default and ceiling `Telemetry:Query:Limits`) as `{ items, truncated }`, where `truncated` is true when
+more rows matched. To see others, narrow the time range or filters, or ask for the other end of the window with `order`.
+Export streams everything.
 
-| Before | After |
+| Route | Returns |
 |---|---|
-| `GET .../logs/page?start&end&asOf&service&minSeverity&q&size&cursor&nav` → `{ items, nextCursor, prevCursor, asOf }` | `GET .../logs/list?start&end&service&minSeverity&q&order=newest\|oldest&limit` → `{ items, truncated }` |
-| `GET .../traces/page?start&end&asOf&mode&service&operation&minDurationMs&maxDurationMs&q&size&cursor&nav` | `GET .../traces/list?start&end&mode&service&operation&minDurationMs&maxDurationMs&q&order=newest\|oldest&limit` → `{ items, truncated }` |
-| `GET .../metrics/catalog?...&size&cursor&nav` → page with cursors and totals | `GET .../metrics/catalog?...&limit` → `{ items, names, truncated }` |
-| `GET .../metrics/exemplars?...&size&cursor&nav` | `GET .../metrics/exemplars?...&limit` → `{ name, type, exemplars, truncated }`, newest first |
-| `GET .../logs?start&end` (every log in the window) | removed |
-| `GET {base}/capabilities`: `exemplarPaging`, `asOfBackoffSeconds` | removed; `logListLimit`, `traceListLimit`, `metricCatalogLimit`, `exemplarLimit` added |
+| `GET .../logs/list?start&end&service&minSeverity&q&order=newest\|oldest&limit` | `{ items, truncated }` |
+| `GET .../traces/list?start&end&mode&service&operation&minDurationMs&maxDurationMs&q&order=newest\|oldest&limit` | `{ items, truncated }` |
+| `GET .../metrics/catalog?...&limit` | `{ items, names, truncated }` |
+| `GET .../metrics/exemplars?...&limit` | `{ name, type, exemplars, truncated }`, newest first |
+| `GET {base}/capabilities` | the limits: `logListLimit`, `traceListLimit`, `metricCatalogLimit`, `exemplarLimit` |
 
-`limit` is clamped to 1 through the configured limit, and `order` other than `newest` or `oldest` is a `400`. The old `page`
-routes answer `404`, so a client still sending a cursor fails instead of silently receiving the first rows again.
-There is no `asOf` pin any more.
+`limit` is clamped to 1 through the configured limit, and `order` other than `newest` or `oldest` is a `400`. A list is
+one request over the data as it is at that moment; it refreshes when the time range is re-applied.
 
 ## Authorization
 

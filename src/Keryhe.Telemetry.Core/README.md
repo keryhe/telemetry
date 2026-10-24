@@ -24,7 +24,7 @@ type handling and the generic `Microsoft.Extensions.*` abstractions.
 
 This package is a dependency of the provider packages (`Keryhe.Telemetry.PostgreSQL`,
 `Keryhe.Telemetry.SqlServer`, `Keryhe.Telemetry.MySql`,
-`Keryhe.Telemetry.ClickHouse`) and of `Keryhe.Telemetry.Api`/`Keryhe.Telemetry.Collector`; it is
+`Keryhe.Telemetry.ClickHouse`, `Keryhe.Telemetry.Parquet`) and of `Keryhe.Telemetry.Api`/`Keryhe.Telemetry.Collector`; it is
 rarely installed directly — install one of those instead, and this one comes along
 transitively.
 
