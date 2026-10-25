@@ -73,6 +73,14 @@ function normalize(config: Partial<AppConfig>): Partial<AppConfig> {
     normalized.auth = normalizeAuth(config.auth);
   }
 
+  if (config.fixedTenantId !== undefined) {
+    if (Number.isInteger(config.fixedTenantId) && config.fixedTenantId > 0) {
+      normalized.fixedTenantId = config.fixedTenantId;
+    } else {
+      console.warn('[config] Ignoring invalid fixedTenantId; the Tenant selector stays.');
+    }
+  }
+
   normalizeText(config, normalized, 'brandName');
   normalizeText(config, normalized, 'brandTagline');
 

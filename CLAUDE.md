@@ -127,6 +127,11 @@ UI → API controllers → I*ReadRepository (active provider, Dapper) → teleme
   call; a throwing lookup is `Unavailable` (retryable), never cached. The `Export` methods must keep `catch (RpcException) { throw; }` ahead of
   their generic catch. `PlaintextTransportGuard` fails startup on a plaintext address outside Development. **Never set `ASPNETCORE_URLS` on the
   collector**: it replaces `Kestrel:Endpoints` and breaks h2c on 5117.
+- **Fixed-tenant mode** (`Telemetry:Collector:Authentication:Mode=FixedTenant` + `FixedTenantId`, a keyless single-customer install):
+  `FixedTenantAuthenticationHandler` is registered under the **same scheme name**, so the policy and mappings are unchanged; it succeeds as the
+  fixed tenant on collector endpoints and ignores any `Authorization` header. `FixedTenantStartupCheck` fails startup without the tenant's row
+  (via Core's `ControlPlaneDbConnection`, shared with `RetentionWindowCache`; on SQLite both hosts create the row first, see the SQLite notes) and, outside Development, without `AllowUnauthenticatedIngestion`.
+  `TenantQuota:MaxShare` defaults to 1 there; the key machinery stays registered and idle. Tests: `FixedTenantCollectorTests`.
 
 ### Reference-table dedup and caches (relational providers)
 
@@ -208,8 +213,10 @@ deletes for shorter ones (`ClickHouseRetentionMemory`). Parquet: day folders. Cl
   (5 s linger, 50,000-record buffers); the Parquet registration raises the gate defaults so a buffer fits. Compaction runs on the API host under
   a lease. Debug log `parquet-sql ms= files= sql=` (category `ParquetQueryEngine`) is the slow-SQL source. `PoisonRecordTestsBase` doesn't run on it.
 - **SQLite control plane**: `SqliteControlPlaneConnection` refuses relative paths and `:memory:`, forces foreign keys and pooling, and never
-  lets the configured string decide the open mode. **Only the API host creates/migrates** (`SqliteControlPlaneInitializer` before any
-  background service; forward-only chain with a `VACUUM INTO` backup); the collector and Admin tool check and fail. Timestamps are text in one
+  lets the configured string decide the open mode. **Both hosts create/migrate** (`SqliteControlPlaneInitializer`, inserted ahead of every
+  hosted service already registered so it runs before `FixedTenantStartupCheck`; creates a missing directory; forward-only chain with a `VACUUM INTO`
+  backup; with a fixed tenant it inserts that row as `Default`); the Admin tool only checks. The Parquet root and `_schema.json` are likewise
+  created by whichever host starts first (`ParquetSchemaFile.EnsureAndVerify`). Timestamps are text in one
   layout (`SqliteTime.Format`) bound through `ControlPlaneRepositoryBase.TimestampParam`; `AUTOINCREMENT` so tenant ids are never reused.
   `SqliteScriptTests` holds the script to the PostgreSQL one. Collector-side reads append `Mode=ReadOnly`.
 - **Relational physical layout:** SQL Server clusters hot tables on `(tenant_id, time, id)` / `(metric_id, time, id)`; MySQL makes those the
@@ -234,7 +241,9 @@ deletes for shorter ones (`ClickHouseRetentionMemory`). Parquet: day folders. Cl
   `app.UseRouting()` explicitly right after `UseKeryheTelemetryUi()`**, and `MapKeryheTelemetryUiFallback()` must stay `MapFallback` scoped to
   `{BasePath}/{*path:nonfile}`. A reverse proxy must forward the base path, not strip it.
 - UI pages live at `/t/:tenantId/...`; API services build URLs with `tenantApiUrl`; `authInterceptor` handles headers, 401 and tenant 403;
-  `downloadBlob` stays a fetch so the interceptor runs for exports.
+  `downloadBlob` stays a fetch so the interceptor runs for exports. `TelemetryUi:FixedTenantId` (`fixedTenantId` in `config.json`) makes it
+  single-tenant: `TenantService` always resolves to it, `tenantRouteGuard` redirects other tenants' URLs to it, the shell hides the selector.
+  A UI convenience, not access control.
 
 ### Test data generator
 

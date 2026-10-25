@@ -42,6 +42,12 @@ public sealed class TelemetryCollectorOptions
     public AuthFailureLimitOptions AuthFailureLimit { get; set; } = new();
 
     /// <summary>
+    /// How an export's tenant is decided: by its API key (the default), or one fixed tenant with no key
+    /// (<see cref="CollectorAuthenticationMode.FixedTenant"/>). Bound from <c>Telemetry:Collector:Authentication</c>.
+    /// </summary>
+    public CollectorAuthenticationOptions Authentication { get; set; } = new();
+
+    /// <summary>
     /// The port of the plaintext management endpoint that serves <c>/healthz/live</c> and <c>/healthz/ready</c> (HTTP/1.1,
     /// for load-balancer and orchestrator probes; the OTLP endpoints are HTTP/2-only). 0 (the default) takes the port of
     /// the Kestrel endpoint named <c>Management</c>, and when there is none the HTTP health endpoints are not mapped

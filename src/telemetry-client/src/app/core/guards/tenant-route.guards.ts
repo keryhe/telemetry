@@ -5,12 +5,23 @@ import { TenantService } from '../services/tenant.service';
 /**
  * On `t/:tenantId`: makes the route's tenant the current one *before* any page component exists,
  * so a page's first API call already targets it. Re-runs when only the id changes
- * (`runGuardsAndResolvers: 'paramsChange'`). A malformed id goes back to the default redirect.
+ * (`runGuardsAndResolvers: 'paramsChange'`). A malformed id goes back to the default redirect. On a
+ * single-tenant install any other tenant's URL goes to the same page under the fixed tenant.
  */
-export const tenantRouteGuard: CanActivateFn = (route) => {
+export const tenantRouteGuard: CanActivateFn = (route, state) => {
+  const router = inject(Router);
+  const tenants = inject(TenantService);
   const id = Number(route.paramMap.get('tenantId'));
-  if (!Number.isInteger(id) || id <= 0) return inject(Router).parseUrl('/');
-  inject(TenantService).enterTenantRoute(id);
+  if (!Number.isInteger(id) || id <= 0) return router.parseUrl('/');
+  if (tenants.fixedTenantId !== null && id !== tenants.fixedTenantId) {
+    const tree = router.parseUrl(state.url);
+    const segments = tree.root.children['primary']?.segments.map((s) => s.path) ?? [];
+    return router.createUrlTree(['/t', tenants.fixedTenantId, ...segments.slice(2)], {
+      queryParams: tree.queryParams,
+      fragment: tree.fragment ?? undefined,
+    });
+  }
+  tenants.enterTenantRoute(id);
   return true;
 };
 

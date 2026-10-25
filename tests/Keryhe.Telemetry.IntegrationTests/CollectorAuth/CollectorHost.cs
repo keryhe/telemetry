@@ -68,9 +68,12 @@ public sealed class CollectorHost : IAsyncDisposable
         _listener.Start();
     }
 
-    public static async Task<CollectorHost> StartAsync(Dictionary<string, string?>? config = null, Action<WebApplication>? map = null, bool fakeClientAddresses = false)
+    /// <param name="keepHostedService">Collector hosted services to keep (by type name), for a test of a startup check; every other one is dropped.</param>
+    /// <param name="addServices">More registrations after the collector's (a control-plane provider, as a host adds it); its hosted services are kept.</param>
+    public static async Task<CollectorHost> StartAsync(Dictionary<string, string?>? config = null, Action<WebApplication>? map = null, bool fakeClientAddresses = false,
+        string environmentName = "Development", Func<Type, bool>? keepHostedService = null, Action<IServiceCollection, IConfiguration>? addServices = null)
     {
-        var builder = WebApplication.CreateBuilder(new WebApplicationOptions { EnvironmentName = "Development" });
+        var builder = WebApplication.CreateBuilder(new WebApplicationOptions { EnvironmentName = environmentName });
         builder.WebHost.UseTestServer();
         builder.Configuration.AddInMemoryCollection(config ?? new());
 
@@ -83,8 +86,10 @@ public sealed class CollectorHost : IAsyncDisposable
 
         // Nothing here touches a database: drop the workers (they need bulk writers and touch stores).
         foreach (var d in builder.Services.Where(d => d.ServiceType == typeof(IHostedService)
-                     && d.ImplementationType?.Namespace?.StartsWith("Keryhe.Telemetry") == true).ToList())
+                     && d.ImplementationType?.Namespace?.StartsWith("Keryhe.Telemetry") == true
+                     && keepHostedService?.Invoke(d.ImplementationType) != true).ToList())
             builder.Services.Remove(d);
+        addServices?.Invoke(builder.Services, builder.Configuration);
 
         var lookup = new FakeLookup();
         var clock = new TestClock(new DateTimeOffset(2026, 10, 3, 12, 0, 0, TimeSpan.Zero));

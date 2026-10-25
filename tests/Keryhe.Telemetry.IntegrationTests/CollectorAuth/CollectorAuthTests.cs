@@ -28,10 +28,10 @@ public class CollectorAuthTests
 
     private static readonly string[] Signals = ["traces", "logs", "metrics"];
 
-    private static Metadata Bearer(string key) => new() { { "authorization", $"Bearer {key}" } };
+    internal static Metadata Bearer(string key) => new() { { "authorization", $"Bearer {key}" } };
 
     /// <summary>Exports one record of the signal; throws <see cref="RpcException"/> on a non-OK status.</summary>
-    private static async Task ExportAsync(CollectorHost host, string signal, Metadata? headers)
+    internal static async Task ExportAsync(CollectorHost host, string signal, Metadata? headers)
     {
         switch (signal)
         {
@@ -47,7 +47,7 @@ public class CollectorAuthTests
         }
     }
 
-    private static ExportTraceServiceRequest TraceRequest()
+    internal static ExportTraceServiceRequest TraceRequest()
     {
         var scope = new ScopeSpans();
         scope.Spans.Add(new Span
@@ -95,7 +95,7 @@ public class CollectorAuthTests
     }
 
     /// <summary>The tenant of every record the signal's channel holds (and drains it); empty when nothing got in.</summary>
-    private static List<long> TenantsEnqueued(CollectorHost host, string signal)
+    internal static List<long> TenantsEnqueued(CollectorHost host, string signal)
     {
         var tenants = new List<long>();
         switch (signal)

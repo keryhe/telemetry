@@ -32,10 +32,9 @@ on every host and tool, on one machine's local file system**. It works with any 
 
 | Key | Default | Host | Description |
 |---|---|---|---|
-| `Telemetry:ControlPlane:Sqlite:ApplySchema` | `true` | API | `true`: the API host creates the database if it has no schema and applies forward-only migrations at startup, before the alerting and retention workers start (the directory must exist; the file is created). `false`: it only checks, as the collector always does, for an operator who wants to create or migrate deliberately (`schema/apply-schema.sh controlplane sqlite <file>` creates a fresh file). A migration first copies the file to `<file>.bak-<version>-<time>-<id>`. A database at a newer version than the build, or an older one with no migration chain, fails startup naming both versions. |
+| `Telemetry:ControlPlane:Sqlite:ApplySchema` | `true` | Both | `true`: the host (collector or API) creates the database, and its directory, if it has no schema and applies forward-only migrations at startup, before anything else starts (the collector before it binds a port), so either host can start first. With a fixed tenant (the collector's `Authentication:FixedTenantId` in `FixedTenant` mode, the API host's `TelemetryUi:FixedTenantId`) it also creates that tenant, named `Default`, when it has no row. `false`: it only checks and creates nothing, for an operator who wants to create or migrate deliberately (`schema/apply-schema.sh controlplane sqlite <file>` creates a fresh file). A migration first copies the file to `<file>.bak-<version>-<time>-<id>`. A database at a newer version than the build, or an older one with no migration chain, fails startup naming both versions. |
 
-The collector and the Admin tool never create or migrate the file: they fail (the collector before it binds a port) when it is missing
-or not at exactly the build's schema version, so upgrade the API host first.
+The Admin tool never creates or migrates the file: it fails when the file is missing or not at exactly its build's schema version.
 
 ### Host settings
 
@@ -77,6 +76,20 @@ Host: `Keryhe.Telemetry.Collector.Server` (gRPC OTLP ingestion, the write path).
 | `AuthFailureLimit:MaxTrackedClients` | 100000 | Addresses tracked at once; past it, new ones share one overflow bucket. IPv6 addresses are grouped by /64. |
 | `ManagementPort` | 0 | Port of the plaintext HTTP/1.1 management endpoint that serves `/healthz/live` and `/healthz/ready`. 0 takes the port of the Kestrel endpoint named `Management` (the shipped `appsettings.json` defines one on `http://127.0.0.1:5119`); with neither, the HTTP health endpoints are not mapped. The gRPC `grpc.health.v1.Health` service is always available on the OTLP endpoints. |
 | `ManagementEndpoints` | `[]` | Plaintext management addresses allowed outside Development besides loopback and private-network ones, as the exact `Url` of the Kestrel endpoint (for example `http://0.0.0.0:8081` in a container whose port is not published). A plaintext `Management` endpoint on any other address still fails startup. |
+
+### Authentication mode (`Telemetry:Collector:Authentication`)
+
+`CollectorAuthenticationOptions`, read once at startup. The default is per-tenant API keys; `FixedTenant` is for a single-customer install
+that runs without keys (the Collector README's "Single-tenant install" section).
+
+| Key | Default | Description |
+|---|---|---|
+| `Mode` | `ApiKey` | `ApiKey`: every export carries `Authorization: Bearer <key>`, resolved against `api_keys`. `FixedTenant`: no key; every export on a collector endpoint is stored under `FixedTenantId` and an `Authorization` header is ignored. |
+| `FixedTenantId` | unset | The tenant every export is stored under (`FixedTenant` mode; required there and greater than 0). Its `tenants` row must exist: the collector checks the control plane before it listens and fails startup otherwise (retrying a connection error for 30 s, except on SQLite). On a SQLite control plane the collector creates the row, named `Default`, when it is missing (unless `Telemetry:ControlPlane:Sqlite:ApplySchema=false`). Set `TelemetryUi:FixedTenantId` to the same id on the API host. |
+| `AllowUnauthenticatedIngestion` | `false` | Outside Development, `FixedTenant` mode fails startup unless this is `true`: anyone who can reach the OTLP endpoints can then write telemetry. `AllowInsecureTransport` is separate and still applies. |
+
+In `FixedTenant` mode `Telemetry:Ingestion:TenantQuota:MaxShare` defaults to `1` (an explicit value is kept), no `auth_failures` are
+recorded, and readiness no longer depends on the control plane (no key lookups happen).
 
 ### Listening endpoint and certificate (`Kestrel:Endpoints`)
 
@@ -179,7 +192,8 @@ than the database can absorb fills it and every other tenant's exports are refus
 | `RecordsPerSecond` | 0 | The most records per second a tenant may send per signal (a token bucket with a one-second burst). Over it, an export is refused with `UNAVAILABLE` and the time until enough tokens return (reason `tenant_rate`). `0` turns the rate limit off. |
 | `Overrides:<tenantId>:MaxShare`, `Overrides:<tenantId>:RecordsPerSecond` | none | Per-tenant exceptions. |
 
-A **single-tenant installation** gets half the queue at the default share; set `MaxShare` to `1` there. On ClickHouse a tenant's share also
+A **single-tenant installation** gets half the queue at the default share; set `MaxShare` to `1` there (a collector in `FixedTenant`
+authentication mode does this itself unless `MaxShare` is set). On ClickHouse a tenant's share also
 counts the records waiting out the day-buffer linger, so a tenant at 40,000 records/s with the 2.5 s linger already holds about 100,000 (half
 the default 200,000 queue): raise the queue or the share for very high rates from few tenants. Who is holding the queue is visible on the
 `tenant_resident_records` gauge (tags `signal`, `tenant`).
@@ -411,6 +425,7 @@ API host (`AddKeryheTelemetryUi`). `TelemetryUiOptions`; full detail in
 | `BrandTagline` | `OpenTelemetry Visualization` | Tagline under the brand name. |
 | `HealthThresholds:ErrorRate:Warn` | unset (0.01 in the SPA) | Dashboard Error Rate warning threshold, a 0-1 fraction. |
 | `HealthThresholds:ErrorRate:Critical` | unset (0.05 in the SPA) | Error threshold; must be above `Warn`. |
+| `FixedTenantId` | unset | A single-tenant install: the header's Tenant selector is hidden and every page is this tenant's (tenant-less URLs and links to another tenant redirect to it; a missing or inaccessible tenant shows "Tenant N is not set up"). Must be greater than 0. On a SQLite control plane the API host creates that tenant, named `Default`, when it has no row. A UI convenience, not access control: the API still serves every tenant (restrict it with `Telemetry:Api:Authorization`). Set it to the collector's `Telemetry:Collector:Authentication:FixedTenantId`. |
 | `Auth:Mode` | `cookie` | `cookie` (the host owns sign-in) or `oidc` (the SPA signs in itself and sends a bearer token). |
 | `Auth:LoginUrl` | unset | Where the SPA sends the browser on a `401` (cookie mode). |
 | `Auth:LogoutUrl` | unset | Target of "Sign out" in the header's user menu (cookie mode). The user menu appears only while someone is signed in: in cookie mode the UI asks the API's `GET {base}/me` (anonymous-allowed, always 200, `signedIn:false` when nobody is) and in oidc mode it reads the session's own claims. |

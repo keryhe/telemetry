@@ -32,16 +32,14 @@ internal static class SqliteSchemaRunner
     }
 
     /// <summary>
-    /// Brings the file to the definition's version: creates it when no version is recorded, applies the migration chain when an
-    /// older one is, does nothing at the same version, and fails on a newer version or an older one with no complete chain.
+    /// Brings the file to the definition's version: creates it (and its directory) when no version is recorded, applies the migration
+    /// chain when an older one is, does nothing at the same version, and fails on a newer version or an older one with no complete
+    /// chain. With <paramref name="ensureTenantId"/> it also inserts that tenant, named <see cref="DefaultTenantName"/>, when it has no row.
     /// </summary>
     public static async Task EnsureCurrentAsync(
-        SqliteSchemaDefinition definition, SqliteControlPlaneConnection connection, ILogger logger, CancellationToken ct)
+        SqliteSchemaDefinition definition, SqliteControlPlaneConnection connection, ILogger logger, CancellationToken ct, long? ensureTenantId = null)
     {
-        var directory = Path.GetDirectoryName(connection.DataSource)!;
-        if (!Directory.Exists(directory))
-            throw new InvalidOperationException(
-                $"The directory '{directory}' for the SQLite control-plane database does not exist; create it (the host creates the file, never its directory).");
+        Directory.CreateDirectory(Path.GetDirectoryName(connection.DataSource)!);
 
         await using var db = connection.CreateDedicated(SqliteOpenMode.ReadWriteCreate);
         await db.OpenAsync(ct);
@@ -49,7 +47,7 @@ internal static class SqliteSchemaRunner
         await ExecuteAsync(db, null, "PRAGMA journal_mode = WAL", ct);
 
         var plan = Plan(definition, connection, await ReadRecordedVersionAsync(db, null, ct));
-        if (plan.IsNothing) return;
+        if (plan.IsNothing && (ensureTenantId is not { } wanted || await TenantExistsAsync(db, null, wanted, ct))) return;
 
         string? backup = null;
         if (plan.Chain is { Count: > 0 })
@@ -98,6 +96,16 @@ internal static class SqliteSchemaRunner
                 if (await reader.ReadAsync(ct))
                     throw new InvalidOperationException($"rows in table '{reader.GetString(0)}' reference a missing parent row");
             }
+
+            if (ensureTenantId is { } tenantId)
+            {
+                // The one tenant whose id is chosen rather than assigned (a fixed-tenant install names it in configuration). An explicit
+                // id moves sqlite_sequence past it, so tenants created later still get new ids. An existing row is left as it is.
+                step = $"creating tenant {tenantId}";
+                if (await ExecuteAsync(db, tx, "INSERT INTO tenants (id, name) VALUES (@id, @name) ON CONFLICT (id) DO NOTHING", ct,
+                        ("@id", tenantId), ("@name", DefaultTenantName)) > 0)
+                    logger.LogInformation("Created tenant {TenantId} '{Name}' in the SQLite control plane {File}", tenantId, DefaultTenantName, connection.DataSource);
+            }
             tx.Commit();
         }
         catch (Exception ex)
@@ -115,6 +123,16 @@ internal static class SqliteSchemaRunner
             tx?.Dispose();
             try { await ExecuteAsync(db, null, "PRAGMA foreign_keys = ON", CancellationToken.None); } catch { /* the connection is discarded next */ }
         }
+    }
+
+    /// <summary>The name of a tenant <see cref="EnsureCurrentAsync"/> creates.</summary>
+    public const string DefaultTenantName = "Default";
+
+    private static async Task<bool> TenantExistsAsync(SqliteConnection db, SqliteTransaction? tx, long tenantId, CancellationToken ct)
+    {
+        await using var command = Command(db, tx, "SELECT 1 FROM tenants WHERE id = @id");
+        command.Parameters.AddWithValue("@id", tenantId);
+        return await command.ExecuteScalarAsync(ct) is not null;
     }
 
     private sealed record SchemaPlan(Version? Recorded, IReadOnlyList<SqliteMigration>? Chain, bool IsNothing);
@@ -166,11 +184,11 @@ internal static class SqliteSchemaRunner
         return command;
     }
 
-    private static async Task ExecuteAsync(
+    private static async Task<int> ExecuteAsync(
         SqliteConnection db, SqliteTransaction? tx, string sql, CancellationToken ct, params (string Name, object Value)[] parameters)
     {
         await using var command = Command(db, tx, sql);
         foreach (var (name, value) in parameters) command.Parameters.AddWithValue(name, value);
-        await command.ExecuteNonQueryAsync(ct);
+        return await command.ExecuteNonQueryAsync(ct);
     }
 }

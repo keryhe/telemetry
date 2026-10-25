@@ -18,8 +18,8 @@ builder.Services.AddSqliteControlPlaneManagement(builder.Configuration);    // o
 ```
 
 Set `Database:Provider=Parquet` and `Telemetry:Parquet:RootPath` on both hosts (no `ConnectionStrings:Collector`/`:Api`), plus
-`ControlPlane:Provider` and `ConnectionStrings:ControlPlane`. Create the root first (`schema/apply-schema.sh telemetry parquet <root>`),
-then start the API host (it creates a SQLite control plane) and the collector. Publish with `-r <rid>` so only one platform's DuckDB
+`ControlPlane:Provider` and `ConnectionStrings:ControlPlane`. Either host creates the root and its
+`_schema.json` when they are missing (as both create a SQLite control plane), so the hosts start in either order. Publish with `-r <rid>` so only one platform's DuckDB
 library ships.
 
 ## Configuration (`Telemetry:Parquet`)

@@ -87,16 +87,26 @@ public sealed partial class TelemetryUiOptions
     public AuthOptions Auth { get; set; } = new();
 
     /// <summary>
+    /// A single-tenant install: when set, the UI hides the header's Tenant selector and every page is this tenant's (tenant-less
+    /// URLs and links to any other tenant redirect to it). Set it to the collector's <c>Telemetry:Collector:Authentication:FixedTenantId</c>.
+    /// A UI convenience, not access control: the API still serves every tenant that exists (restrict it with
+    /// <c>Telemetry:Api:Authorization</c>). Sent to the browser in <c>config.json</c> only when set.
+    /// </summary>
+    public long? FixedTenantId { get; set; }
+
+    /// <summary>
     /// Validates the settings that can be checked without knowing the SPA's defaults. Called at
     /// startup so a bad deployment fails there, rather than being ignored silently in each
     /// browser.
     /// </summary>
     /// <exception cref="InvalidOperationException">A health threshold is out of range, or a
-    /// <c>Warn</c> is not below its <c>Critical</c>.</exception>
+    /// <c>Warn</c> is not below its <c>Critical</c>, or <see cref="FixedTenantId"/> is not positive.</exception>
     internal void Validate()
     {
         HealthThresholds.Validate();
         Auth.Validate();
+        if (FixedTenantId is <= 0)
+            throw new InvalidOperationException($"TelemetryUi:FixedTenantId must be a tenant id greater than 0 (was {FixedTenantId}).");
     }
 
     /// <summary>

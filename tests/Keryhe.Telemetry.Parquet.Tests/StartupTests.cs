@@ -1,6 +1,7 @@
 using System.Text.Json;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Options;
 using Keryhe.Telemetry.Core;
 
 namespace Keryhe.Telemetry.Parquet.Tests;
@@ -63,11 +64,50 @@ public class StartupTests : IDisposable
     }
 
     [Fact]
-    public void AnApiHostRefusesARootTheCollectorHasNotInitialized()
+    public void VerifyAloneRefusesARootNoHostHasInitialized_AndCreatesNothing()
     {
         Directory.CreateDirectory(_root);
         var e = Assert.Throws<InvalidOperationException>(() => ParquetSchemaFile.Verify(_root));
         Assert.Contains("_schema.json", e.Message);
+        Assert.False(File.Exists(Path.Combine(_root, "_schema.json")));
+    }
+
+    private static ParquetApiStartup ApiStartup(string root) => new(Options.Create(new ParquetOptions { RootPath = root }));
+
+    [Fact]
+    public async Task TheApiHostCreatesAMissingRootAndItsSchemaFile_SoItCanStartBeforeTheCollector()
+    {
+        var nested = Path.Combine(_root, "a", "b");
+
+        await ApiStartup(nested).StartingAsync(CancellationToken.None);
+
+        var schema = JsonDocument.Parse(File.ReadAllText(Path.Combine(nested, "_schema.json"))).RootElement;
+        Assert.Equal(ParquetTables.DefinitionHash(), schema.GetProperty("tablesHash").GetString());
+        // A collector starting afterwards accepts the root the API host made.
+        using var collector = new ServiceCollection().AddLogging().AddParquetCollectorServices(new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?> { ["Telemetry:Parquet:RootPath"] = nested }).Build()).BuildServiceProvider();
+        collector.GetRequiredService<ParquetWriterIdentity>();
+    }
+
+    [Fact]
+    public async Task TheApiHostStillRefusesARootWrittenUnderOtherTableDefinitions()
+    {
+        Directory.CreateDirectory(_root);
+        File.WriteAllText(Path.Combine(_root, "_schema.json"),
+            JsonSerializer.Serialize(new { component = "telemetry", version = "4.0.0", tablesHash = "deadbeef" }));
+
+        var e = await Assert.ThrowsAsync<InvalidOperationException>(() => ApiStartup(_root).StartingAsync(CancellationToken.None));
+        Assert.Contains("deadbeef", e.Message);
+    }
+
+    [Fact]
+    public async Task TheApiHostAndACollectorStartingTogetherLeaveOneSchemaFile()
+    {
+        var api = Task.Run(() => ApiStartup(_root).StartingAsync(CancellationToken.None));
+        var collector = Task.Run(() => ParquetSchemaFile.EnsureAndVerify(_root));
+        await Task.WhenAll(api, collector);
+
+        Assert.Single(Directory.GetFiles(_root, "_schema.json*"));
     }
 
     [Fact]

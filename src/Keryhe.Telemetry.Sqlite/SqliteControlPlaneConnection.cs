@@ -17,7 +17,7 @@ namespace Keryhe.Telemetry.Sqlite;
 /// busy statement should wait rather than fail.</item>
 /// </list>
 /// The open mode is chosen by the caller, never taken from the configured string: Microsoft.Data.Sqlite creates a missing file by
-/// default, and only the API's schema step may do that.
+/// default, and only the hosts' schema step may do that.
 /// </summary>
 public sealed class SqliteControlPlaneConnection
 {

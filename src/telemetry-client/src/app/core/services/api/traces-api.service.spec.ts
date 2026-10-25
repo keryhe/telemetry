@@ -2,6 +2,7 @@ import { TestBed } from '@angular/core/testing';
 import { provideHttpClient } from '@angular/common/http';
 import { HttpTestingController, provideHttpClientTesting } from '@angular/common/http/testing';
 import { APP_CONFIG } from '../../config/app-config';
+import { TenantService } from '../tenant.service';
 import { TracesApiService } from './traces-api.service';
 
 describe('TracesApiService.getSpans', () => {
@@ -16,6 +17,8 @@ describe('TracesApiService.getSpans', () => {
         { provide: APP_CONFIG, useValue: { apiUrl: '/api' } },
       ],
     });
+    // The service builds its URLs under the route's tenant; select one rather than depend on what localStorage holds.
+    TestBed.inject(TenantService).enterTenantRoute(1);
     service = TestBed.inject(TracesApiService);
     http = TestBed.inject(HttpTestingController);
   });

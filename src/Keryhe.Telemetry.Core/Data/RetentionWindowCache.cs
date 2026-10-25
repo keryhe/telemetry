@@ -1,4 +1,3 @@
-using System.Data.Common;
 using Dapper;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging;
@@ -23,9 +22,8 @@ internal interface IRetentionWindows
 /// <summary>
 /// Reads every tenant's retention windows from the control plane's <c>tenants</c> table and caches them
 /// (re-read every <c>refreshSeconds</c>, a provider option). The collector registers no
-/// <c>IRetentionSettingsRepository</c> (it is API-side) and this project references no relational driver, so the
-/// connection is created by type name from <c>ControlPlane:Provider</c>: the host has loaded that provider's driver
-/// for its API-key lookup. Fails open: when the windows cannot be read, nothing is dropped as out-of-retention.
+/// <c>IRetentionSettingsRepository</c> (it is API-side), so the connection comes from <see cref="ControlPlaneDbConnection"/>.
+/// Fails open: when the windows cannot be read, nothing is dropped as out-of-retention.
 /// </summary>
 internal sealed class RetentionWindowCache(
     IConfiguration configuration,
@@ -33,23 +31,6 @@ internal sealed class RetentionWindowCache(
     TimeProvider time,
     ILogger<RetentionWindowCache> logger) : IRetentionWindows
 {
-    private static readonly Dictionary<string, string> ConnectionTypes = new(StringComparer.OrdinalIgnoreCase)
-    {
-        ["PostgreSQL"] = "Npgsql.NpgsqlConnection, Npgsql",
-        ["SqlServer"] = "Microsoft.Data.SqlClient.SqlConnection, Microsoft.Data.SqlClient",
-        ["MySql"] = "MySqlConnector.MySqlConnection, MySqlConnector",
-        ["Sqlite"] = "Microsoft.Data.Sqlite.SqliteConnection, Microsoft.Data.Sqlite"
-    };
-
-    /// <summary>
-    /// The connection string as this cache opens it. SQLite creates a missing file by default and this cache only reads, so it opens
-    /// read-only (the collector's startup check has already confirmed the file exists); the others are used as configured.
-    /// </summary>
-    private static string ConnectionStringFor(string provider, string connectionString) =>
-        provider.Equals("Sqlite", StringComparison.OrdinalIgnoreCase)
-            ? connectionString.TrimEnd().TrimEnd(';') + ";Mode=ReadOnly"
-            : connectionString;
-
     private volatile Dictionary<long, Windows>? _windows;
 
     private sealed class RetentionRow
@@ -77,12 +58,9 @@ internal sealed class RetentionWindowCache(
     {
         try
         {
-            var provider = configuration["ControlPlane:Provider"] ?? "";
-            var connectionString = configuration.GetConnectionString("ControlPlane");
-            if (!ConnectionTypes.TryGetValue(provider, out var typeName) || string.IsNullOrEmpty(connectionString))
+            await using var connection = ControlPlaneDbConnection.TryCreate(configuration);
+            if (connection is null)
                 return;
-            var type = Type.GetType(typeName) ?? throw new InvalidOperationException($"{typeName} is not loaded.");
-            await using var connection = (DbConnection)Activator.CreateInstance(type, ConnectionStringFor(provider, connectionString))!;
             await connection.OpenAsync(ct);
             var rows = await connection.QueryAsync<RetentionRow>(new CommandDefinition(
                 "SELECT id AS Id, trace_retention_days AS Trace, log_retention_days AS Log, metric_retention_days AS Metric FROM tenants",

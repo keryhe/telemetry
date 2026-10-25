@@ -4,7 +4,7 @@ namespace Keryhe.Telemetry.Parquet;
 
 /// <summary>
 /// <c>_schema.json</c> at the root (phase 1 decision 5): the telemetry schema version and a hash of the table
-/// definitions. The collector creates it on first start; both hosts refuse a root with another version or hash.
+/// definitions. Whichever host starts first (collector or API) creates it; both refuse a root with another version or hash.
 /// </summary>
 public static class ParquetSchemaFile
 {
@@ -19,7 +19,10 @@ public static class ParquetSchemaFile
 
     private static Content Expected() => new("telemetry", TelemetryVersion, ParquetTables.DefinitionHash());
 
-    /// <summary>Creates the root and its schema file if absent (collector, <c>apply-schema.sh</c>), then verifies it.</summary>
+    /// <summary>
+    /// Creates the root and its schema file if absent (both hosts at startup, <c>apply-schema.sh</c>), then verifies it. Two processes
+    /// creating it at once are safe: the file is written aside and moved into place without overwriting.
+    /// </summary>
     public static void EnsureAndVerify(string root)
     {
         Directory.CreateDirectory(root);
@@ -34,13 +37,13 @@ public static class ParquetSchemaFile
         Verify(root);
     }
 
-    /// <summary>Verifies an existing root (API host): a missing file means the collector has not initialized it.</summary>
+    /// <summary>Verifies an existing root without creating anything: a missing file means no host has initialized it.</summary>
     public static void Verify(string root)
     {
         var path = Path.Combine(root, FileName);
         if (!File.Exists(path))
             throw new InvalidOperationException(
-                $"'{root}' has no {FileName}: start the collector (it creates it) or run schema/apply-schema.sh telemetry parquet \"{root}\".");
+                $"'{root}' has no {FileName}: start the collector or the API host (either creates it) or run schema/apply-schema.sh telemetry parquet \"{root}\".");
 
         Content? found;
         try { found = JsonSerializer.Deserialize<Content>(File.ReadAllText(path), Options); }

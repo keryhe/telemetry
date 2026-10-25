@@ -12,12 +12,13 @@ Rules, behaviour, migrations and backups of the SQLite control plane ([`Keryhe.T
   different databases without any error; registration refuses both. Use the *same* path in every host's configuration and in
   `ConnectionStrings:Admin`.
 - **Write access to the directory**, for every service account that runs a host (including `install-service.bat` installs): WAL mode
-  creates `control-plane.db-wal` and `control-plane.db-shm` beside the file. The host creates the *file*, never its *directory*; a
-  missing directory fails startup, so a mistyped path cannot split the hosts onto two databases.
-- **The API host owns the schema; start it first.** At startup it creates the database if it has no schema and applies any later
-  forward-only migrations (below), before its alerting and retention workers start. The **collector** and the **Admin tool** never
-  create or migrate: they fail when the file is missing or not at exactly this build's version (the collector before it binds a port, with
-  a message that says to start the API host). So upgrade the API host first, then the others.
+  creates `control-plane.db-wal` and `control-plane.db-shm` beside the file. The hosts create the file and, when it is missing, its
+  directory; each logs the absolute path it created, so check that both hosts name the same one (a mistyped path gives a host its own empty database).
+- **Either host can start first.** At startup the collector and the API host each create the database if it has no schema and apply any
+  later forward-only migrations (below), before anything else starts (the collector before it binds a port). Two hosts starting together
+  take turns on the file's write lock, so the work is done once. With a fixed tenant (a `FixedTenant` collector's `FixedTenantId`, the API
+  host's `TelemetryUi:FixedTenantId`) the same step creates that tenant, named `Default`, when it has no row. The **Admin tool** never creates
+  or migrates: it fails when the file is missing or not at exactly its build's version, so start a host before using it.
 - **No downgrades.** A database newer than the build is refused, naming both versions.
 
 ## What the provider does for you
@@ -33,10 +34,9 @@ Rules, behaviour, migrations and backups of the SQLite control plane ([`Keryhe.T
 
 ## Creating the file ahead of time
 
-The API host does it for you. To create it yourself (needs the `sqlite3` CLI; the directory must exist; fresh files only):
+Either host does it for you. To create it yourself (needs the `sqlite3` CLI; creates a missing directory; fresh files only):
 
 ```bash
-mkdir -p /var/lib/keryhe
 schema/apply-schema.sh controlplane sqlite /var/lib/keryhe/control-plane.db
 ```
 
@@ -68,12 +68,11 @@ or `VACUUM INTO 'copy.db'` from any SQLite client.
 ## Registration
 
 ```csharp
-// A host that authenticates by API key (the collector): the key lookup, the last-used update, and a startup check that exits if the file is
-// not there / not current. It never creates or migrates.
-services.AddSqliteApiKeyLookup(configuration);
-// The host that owns the schema (the API host): alert rules, the tenant catalog, retention settings, and the startup step that creates /
-// migrates the file. A host that is neither can call either, or SqliteControlPlaneSchema directly.
-services.AddSqliteControlPlaneManagement(configuration);
+// The collector: the key lookup, the last-used update, and the startup step that creates / migrates the file (ApplySchema). The optional
+// second argument is a fixed tenant to create, named Default, when it has no row.
+services.AddSqliteApiKeyLookup(configuration, fixedTenantId: null);
+// The API host: alert rules, the tenant catalog, retention settings, and the same startup step.
+services.AddSqliteControlPlaneManagement(configuration, fixedTenantId: null);
 ```
 
 Both read `ConnectionStrings:ControlPlane` at registration and fail naming the key when it is missing, blank, relative or `:memory:`.

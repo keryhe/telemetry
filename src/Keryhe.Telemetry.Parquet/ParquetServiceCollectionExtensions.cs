@@ -146,15 +146,15 @@ internal sealed class ParquetCollectorStartup(
     }
 }
 
-/// <summary>API startup: the root must exist and carry the schema file this build expects.</summary>
+/// <summary>
+/// API startup: creates the root and its schema file when they are missing, as the collector does, so either host can start first,
+/// and refuses a root written under another schema.
+/// </summary>
 internal sealed class ParquetApiStartup(IOptions<ParquetOptions> options) : IHostedLifecycleService
 {
     public Task StartingAsync(CancellationToken cancellationToken)
     {
-        var root = options.Value.RootPath;
-        if (!Directory.Exists(root))
-            throw new InvalidOperationException($"{ParquetOptions.SectionName}:RootPath '{root}' does not exist; start the collector first (it creates it).");
-        ParquetSchemaFile.Verify(root);
+        ParquetSchemaFile.EnsureAndVerify(options.Value.RootPath);
         return Task.CompletedTask;
     }
 

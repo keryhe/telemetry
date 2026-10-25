@@ -1,7 +1,7 @@
 # Setup
 
 Full setup instructions for every supported database provider, deployment mode, and the
-alerting and retention subsystems. See the [README](../README.md) for a quick start with PostgreSQL, and
+alerting and retention subsystems. See the [README](../README.md) for a quick start with Parquet and SQLite (no database server), and
 [CONFIGURATION.md](CONFIGURATION.md) for every configuration key and its default. Component guides: [Architecture](ARCHITECTURE.md),
 [Collector](COLLECTOR.md), [API](API.md), [UI](UI.md), [Parquet](PARQUET.md), [ClickHouse](CLICKHOUSE.md), [SQLite](SQLITE.md),
 [provider packages](PROVIDERS.md), [stress tests](STRESS-TESTS.md).
@@ -24,7 +24,7 @@ alerting and retention subsystems. See the [README](../README.md) for a quick st
 The schema has two components, each with its own script per provider and its own version table:
 
 - **Control plane** (`tenants`, `api_keys`, `alert_rules`, `alert_events`): PostgreSQL, SQL Server, MySQL or
-  SQLite only. Apply `schema/<Provider>-ControlPlane.sql` (SQLite: the API host creates and migrates its own file at
+  SQLite only. Apply `schema/<Provider>-ControlPlane.sql` (SQLite: either host creates and migrates its own file at
   startup, so this step is optional; see below).
 - **Telemetry data** (resources, spans, logs, metrics, rollups): PostgreSQL, SQL Server, MySQL or ClickHouse. Apply
   `schema/<Provider>-Telemetry.sql`. (Parquet has no script: see below.)
@@ -59,8 +59,8 @@ createdb keryhe_control
 psql -d keryhe_control -f schema/PostgreSQL-ControlPlane.sql
 ```
 
-**Parquet** holds telemetry as files under one directory and needs no server or script: create the root (the collector
-writes `_schema.json` into it on first start) and run the control plane on PostgreSQL, SQL Server or MySQL as for ClickHouse.
+**Parquet** holds telemetry as files under one directory and needs no server or script: either host creates the root
+and writes `_schema.json` into it on first start (or create it with the script below) and run the control plane on PostgreSQL, SQL Server or MySQL as for ClickHouse.
 The collector and the API host must see the same directory on one machine's file system.
 
 ```bash
@@ -68,13 +68,11 @@ schema/apply-schema.sh telemetry parquet /var/lib/keryhe-telemetry   # just crea
 ```
 
 **SQLite** (control plane only) is one file that every host and tool opens, so they all run on one machine's local file system
-(no network share, no Docker Desktop bind mount). Create its **directory** (both service accounts need write access to it: the
-file's `-wal` and `-shm` siblings live beside it); the API host creates the file and applies any later schema migrations
-itself when it starts. The collector never creates it and exits at startup if the file is missing or not at its schema
-version, so **start the API host first** (and upgrade it first). To create the file ahead of time instead:
+(no network share, no Docker Desktop bind mount). Both service accounts need write access to its directory (the file's `-wal`
+and `-shm` siblings live beside it). Whichever host starts first, collector or API, creates the directory and the file and
+applies any later schema migrations, so the hosts can start in either order. To create the file ahead of time instead:
 
 ```bash
-mkdir -p /var/lib/keryhe
 schema/apply-schema.sh controlplane sqlite /var/lib/keryhe/control-plane.db   # needs the sqlite3 CLI; creates a fresh file only
 ```
 
@@ -168,6 +166,9 @@ database. Parquet takes no data connection string: set `Telemetry:Parquet:RootPa
 Ingestion is multi-tenant: the collector resolves the tenant by hashing the
 `Authorization: Bearer <key>` header against the control plane's `api_keys` table, so every OTLP sender
 needs a valid key. **No tenant or key is seeded**; create them before sending data.
+
+An install for one customer can skip the keys: the collector's `FixedTenant` authentication mode stores every export under one tenant, which
+you still create here. See [Single-tenant install](../src/Keryhe.Telemetry.Collector/README.md#single-tenant-install-no-api-keys).
 
 ### With the Admin tool (PostgreSQL, SQL Server, MySQL)
 
@@ -390,7 +391,7 @@ When using the MySQL provider (MySQL 8.0.19+), the schema mirrors the SQL Server
 
 When using the ClickHouse provider (25.8), each row carries its own resource and scope attributes, so there are no reference tables and no surrogate ids. Tables are plain `MergeTree` (the derived `trace_index` and rollups are `AggregatingMergeTree`) partitioned by day; attributes are `Map(LowCardinality(String), String)` (values are text, the original type is not kept); trace ids are `UUID` and span ids `UInt64`. The collector writes the derived tables itself after the raw insert, so a failed derived insert under-counts the cards, charts and metric catalog (`derived_rows_dropped`). Retention drops fully expired day partitions. ClickHouse has no control plane of its own (tenants, keys, alert rules and retention settings live in the PostgreSQL, SQL Server or MySQL database named by `ControlPlane:Provider`), so alert-rule edits and the cooldown fire-claim are as atomic as on those. See the [ClickHouse package README](../src/Keryhe.Telemetry.ClickHouse/README.md) for the full list of ClickHouse-specific behaviors.
 
-When using the Parquet provider, the data is Parquet files under `Telemetry:Parquet:RootPath`, one folder per table, tenant, day and hour, listed by manifests that readers follow (a file is visible only once listed). Like ClickHouse each row carries its own resource and scope attributes (values are text), the collector writes the derived tables, and trace ids are two `UBIGINT` halves. The collector holds records for `LingerMilliseconds` (30 s) before writing, so a crash loses that window and new data is readable about that long after it arrives. The compactor on the API host folds the many small files into larger ones, and retention deletes whole expired day folders. See the [Parquet package README](../src/Keryhe.Telemetry.Parquet/README.md) for the operator guide.
+When using the Parquet provider, the data is Parquet files under `Telemetry:Parquet:RootPath`, one folder per table, tenant, day and hour, listed by manifests that readers follow (a file is visible only once listed). Like ClickHouse each row carries its own resource and scope attributes (values are text), the collector writes the derived tables, and trace ids are two `UBIGINT` halves. The collector holds records for `LingerMilliseconds` (5 s) before writing, so a crash loses that window and new data is readable about that long after it arrives. The compactor on the API host folds the many small files into larger ones, and retention deletes whole expired day folders. See the [Parquet package README](../src/Keryhe.Telemetry.Parquet/README.md) for the operator guide.
 
 Free-text and `key:value` search is unindexed on every provider, so a search or "slow" request is limited to
 `Telemetry:Query:RawSearchWindowHours` (default 24); exports are limited to a provider-dependent window

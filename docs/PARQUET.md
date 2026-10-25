@@ -59,7 +59,7 @@ that overlap one wins and the other deletes its work.
   `compaction_failures`, `uncompacted_files` (the largest count in one partition at the last pass). A partition that fails is
   retried with back-off and never blocks the others.
 
-The root's `_schema.json` records the table definitions it was written with; a root written under other definitions is refused.
+The root's `_schema.json` records the table definitions it was written with; a root written under other definitions is refused. Whichever host starts first, collector or API, creates the root and the file, so the hosts start in either order.
 
 ## Operating it
 

@@ -182,6 +182,18 @@ public class ApiHttpTests
             await Assert.ThrowsAnyAsync<Exception>(() => StartDisposed(Opts(bad, realUi: true)));
     }
 
+    [Fact]
+    public async Task UiFixedTenant_ReachesConfigJson_OnlyWhenSet_AndANonPositiveOneFailsStartup()
+    {
+        await using (var host = await Start(Opts([("TelemetryUi:FixedTenantId", "7")], realUi: true)))
+            Assert.Equal(7, (await ConfigJson(host, "/config.json")).GetProperty("fixedTenantId").GetInt64());
+        await using (var host = await Start(Opts([], realUi: true)))
+            Assert.False((await ConfigJson(host, "/config.json")).TryGetProperty("fixedTenantId", out _));
+
+        foreach (var bad in new[] { "0", "-1" })
+            await Assert.ThrowsAnyAsync<Exception>(() => StartDisposed(Opts([("TelemetryUi:FixedTenantId", bad)], realUi: true)));
+    }
+
     private static async Task<JsonElement> ConfigJson(ApiHost host, string url) =>
         JsonDocument.Parse(await host.Client.GetStringAsync(url)).RootElement.Clone();
 

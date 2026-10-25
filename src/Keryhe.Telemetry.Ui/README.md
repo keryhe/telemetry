@@ -28,6 +28,7 @@ Pin `Keryhe.Telemetry.Ui` and `Keryhe.Telemetry.Api` to the same version.
 | `ApiBasePath` | `Telemetry:Api:BasePath` | Where the browser reaches the API (an absolute URL for another origin) |
 | `BrandName` / `BrandTagline` | `Sentinel` / `OpenTelemetry Visualization` | Header text and tab title |
 | `HealthThresholds:ErrorRate:Warn` / `Critical` | `0.01` / `0.05` | Dashboard error-rate colouring (0–1) |
+| `FixedTenantId` | none | A single-tenant install: hides the header's Tenant selector and makes every page this tenant's (other tenants' URLs redirect to it). Not access control: the API still serves every tenant |
 | `Auth:Mode` | `cookie` | `cookie` (the host signs users in) or `oidc` (the SPA signs in with PKCE) |
 | `Auth:LoginUrl` / `Auth:LogoutUrl` | none | Cookie mode: where a 401 sends the user, and the Sign out target |
 | `Auth:IncludeCredentials` | `false` | Send cookies on cross-origin API calls |

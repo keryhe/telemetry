@@ -15,22 +15,22 @@
 #   <provider>   controlplane: postgresql | sqlserver | mysql | sqlite
 #                telemetry:    postgresql | sqlserver | clickhouse | mysql | parquet
 #   [database]   target database name (default: telemetry); for parquet, the root directory (required);
-#                for sqlite, the database file (required; its directory must exist)
+#                for sqlite, the database file (required; a missing directory is created)
 #
 # On a relational provider both components normally go to the same database; apply the control
 # plane first (a running collector needs keys before it accepts data), though either order works
 # (no foreign key crosses the two). A ClickHouse deployment applies the telemetry component to
 # ClickHouse and the control plane to a separate PostgreSQL, SQL Server or MySQL database.
 #
-# The parquet provider has no scripts: `telemetry parquet <root>` only creates the root directory. The collector
-# writes <root>/_schema.json (the version and a hash of its table definitions) on first start, and both hosts
-# refuse a root with another version (plans/parquet-duckdb). It has no control plane: run `controlplane` on a
+# The parquet provider has no scripts: `telemetry parquet <root>` only creates the root directory. Whichever host
+# starts first (collector or API) writes <root>/_schema.json (the version and a hash of its table definitions), and
+# both hosts refuse a root with another version (plans/parquet-duckdb). It has no control plane: run `controlplane` on a
 # relational provider.
 #
 # The sqlite provider is for the control plane only (it lets a Parquet deployment run with no database server).
-# `controlplane sqlite <file>` needs the sqlite3 CLI and CREATES a fresh file; it never migrates. The API host does
-# that itself at startup (and creates the file too, so running this first is optional): an older file is refused here
-# with "start the API host to migrate it", a newer one is refused outright. Every host and tool must use the same
+# `controlplane sqlite <file>` needs the sqlite3 CLI and CREATES a fresh file; it never migrates. Both hosts do that
+# themselves at startup (and create the file and its directory too, so running this first is optional): an older file is
+# refused here with "start a host to migrate it", a newer one is refused outright. Every host and tool must use the same
 # absolute path as `ConnectionStrings:ControlPlane` (`Data Source=<file>`) on the same machine's local file system.
 #
 # Connection settings are taken from the standard client environment variables:
@@ -85,10 +85,7 @@ if [[ "$PROVIDER" == "sqlite" ]]; then
         exit 1
     fi
     SQLITE_DIR="$(dirname "$DATABASE")"
-    if [[ ! -d "$SQLITE_DIR" ]]; then
-        echo "error: the directory '$SQLITE_DIR' does not exist; create it first (the file is created, its directory is not)" >&2
-        exit 1
-    fi
+    mkdir -p "$SQLITE_DIR"
     SQLITE_FILE="$(cd "$SQLITE_DIR" && pwd)/$(basename "$DATABASE")"
     SQLITE_SCRIPT="$SCRIPT_DIR/SQLite-ControlPlane.sql"
     if [[ ! -f "$SQLITE_SCRIPT" ]]; then
@@ -102,7 +99,7 @@ if [[ "$PROVIDER" == "sqlite" ]]; then
             exit 0
         elif [[ -n "$RECORDED" ]]; then
             if [[ "$(printf '%s\n%s\n' "$RECORDED" "$CONTROLPLANE_TARGET_VERSION" | sort -V | head -1)" == "$RECORDED" ]]; then
-                echo "error: '$SQLITE_FILE' is at schema version $RECORDED, older than $CONTROLPLANE_TARGET_VERSION; this script only creates. Start the API host to migrate it." >&2
+                echo "error: '$SQLITE_FILE' is at schema version $RECORDED, older than $CONTROLPLANE_TARGET_VERSION; this script only creates. Start the collector or the API host to migrate it." >&2
             else
                 echo "error: '$SQLITE_FILE' is at schema version $RECORDED, newer than $CONTROLPLANE_TARGET_VERSION; downgrades are not supported." >&2
             fi

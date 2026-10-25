@@ -14,35 +14,51 @@ namespace Microsoft.Extensions.DependencyInjection;
 public static class SqliteServiceCollectionExtensions
 {
     /// <summary>
-    /// The API-key side of the control plane, for a host that authenticates callers by key: the key lookup and the <c>last_used_at</c>
-    /// update, and a startup check that fails (before the host starts serving) when the database is missing or not at this build's schema
-    /// version. It never creates or migrates the file: a host that calls <see cref="AddSqliteControlPlaneManagement"/> must have started
-    /// first. <c>CachingTenantResolver</c> and <c>ApiKeyTouchWorker</c> are provider-agnostic and registered with the collector.
+    /// The API-key side of the control plane, for the collector: the key lookup and the <c>last_used_at</c> update, and the startup step
+    /// that creates the database (and its directory) or migrates it forward, so the collector can start before the API host
+    /// (<c>Telemetry:ControlPlane:Sqlite:ApplySchema</c>, default true; false only checks). <paramref name="fixedTenantId"/> (a fixed-tenant
+    /// collector) is created, named <c>Default</c>, when it has no row. <c>CachingTenantResolver</c> and <c>ApiKeyTouchWorker</c> are
+    /// provider-agnostic and registered with the collector.
     /// </summary>
-    public static IServiceCollection AddSqliteApiKeyLookup(this IServiceCollection services, IConfiguration configuration)
+    public static IServiceCollection AddSqliteApiKeyLookup(this IServiceCollection services, IConfiguration configuration, long? fixedTenantId = null)
     {
-        // Read now, so a missing or relative ConnectionStrings:ControlPlane fails at startup with the key named.
-        services.AddSingleton(SqliteControlPlaneConnection.FromConfiguration(configuration));
+        AddSchemaStep(services, configuration, fixedTenantId);
         services.AddScoped<IApiKeyLookup, SqliteApiKeyLookup>();
         services.AddScoped<IApiKeyTouchStore, SqliteApiKeyTouchStore>();
-        services.AddHostedService<SqliteControlPlaneStartupCheck>();
         return services;
     }
 
     /// <summary>
-    /// The managing side of the control plane: alert rules, the tenant catalog and retention settings, and the startup step that creates
-    /// the database or migrates it forward (<c>Telemetry:ControlPlane:Sqlite:ApplySchema</c>, default true; false only checks). Call it
-    /// in the one host that owns the file's schema.
+    /// The managing side of the control plane, for the API host: alert rules, the tenant catalog and retention settings, and the same
+    /// startup step as <see cref="AddSqliteApiKeyLookup"/>. <paramref name="fixedTenantId"/> (the UI's <c>TelemetryUi:FixedTenantId</c>) is
+    /// created, named <c>Default</c>, when it has no row.
     /// </summary>
-    public static IServiceCollection AddSqliteControlPlaneManagement(this IServiceCollection services, IConfiguration configuration)
+    public static IServiceCollection AddSqliteControlPlaneManagement(this IServiceCollection services, IConfiguration configuration, long? fixedTenantId = null)
     {
-        services.AddSingleton(SqliteControlPlaneConnection.FromConfiguration(configuration));
-        services.AddSingleton(ReadOptions(configuration));
+        AddSchemaStep(services, configuration, fixedTenantId);
         services.AddScoped<IAlertRuleRepository, SqliteAlertRuleRepository>();
         services.AddScoped<ITenantCatalogRepository, SqliteTenantCatalogRepository>();
         services.AddScoped<IRetentionSettingsRepository, SqliteRetentionSettingsRepository>();
-        services.AddHostedService<SqliteControlPlaneInitializer>();
         return services;
+    }
+
+    private static void AddSchemaStep(IServiceCollection services, IConfiguration configuration, long? fixedTenantId)
+    {
+        if (fixedTenantId is <= 0)
+            throw new ArgumentOutOfRangeException(nameof(fixedTenantId), fixedTenantId, "A fixed tenant id must be positive.");
+
+        // Read now, so a missing or relative ConnectionStrings:ControlPlane fails at startup with the key named.
+        services.AddSingleton(SqliteControlPlaneConnection.FromConfiguration(configuration));
+        services.AddSingleton(ReadOptions(configuration));
+        services.AddSingleton(new SqliteFixedTenant(fixedTenantId));
+
+        // Ahead of every hosted service already registered, not after them: StartingAsync runs in registration order, and the
+        // collector's FixedTenantStartupCheck (registered by AddKeryheTelemetryCollector, usually first) reads the tenant row this
+        // step creates. Inserting here keeps that order whichever order a host registers the collector and the control plane in.
+        var descriptor = ServiceDescriptor.Singleton<IHostedService, SqliteControlPlaneInitializer>();
+        var firstHosted = services.ToList().FindIndex(d => d.ServiceType == typeof(IHostedService));
+        if (firstHosted < 0) services.Add(descriptor);
+        else services.Insert(firstHosted, descriptor);
     }
 
     private static SqliteControlPlaneOptions ReadOptions(IConfiguration configuration)

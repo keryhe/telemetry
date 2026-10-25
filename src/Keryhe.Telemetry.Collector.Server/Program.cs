@@ -1,7 +1,16 @@
+using Keryhe.Telemetry.Collector.Authentication;
+
 namespace Keryhe.Telemetry.Collector.Server;
 
 public class Program
 {
+    /// <summary>The fixed tenant of a fixed-tenant collector, or null in API-key mode.</summary>
+    private static long? FixedTenantId(IConfiguration configuration)
+    {
+        var auth = configuration.GetSection(CollectorAuthenticationOptions.SectionName).Get<CollectorAuthenticationOptions>();
+        return auth?.Mode == CollectorAuthenticationMode.FixedTenant ? auth.FixedTenantId : null;
+    }
+
     public static void Main(string[] args)
     {
         var builder = WebApplication.CreateBuilder(new WebApplicationOptions
@@ -35,8 +44,9 @@ public class Program
             case "SqlServer":  builder.Services.AddSqlServerControlPlaneCollectorServices(builder.Configuration);  break;
             case "PostgreSQL": builder.Services.AddPostgreSqlControlPlaneCollectorServices(builder.Configuration); break;
             case "MySql":      builder.Services.AddMySqlControlPlaneCollectorServices(builder.Configuration);      break;
-            // A file the API host creates and migrates; the collector only checks it (and exits if it is missing or not current).
-            case "Sqlite":     builder.Services.AddSqliteApiKeyLookup(builder.Configuration);     break;
+            // A file either host creates and migrates at startup (Telemetry:ControlPlane:Sqlite:ApplySchema); a fixed-tenant
+            // collector also creates its tenant there when it has no row.
+            case "Sqlite":     builder.Services.AddSqliteApiKeyLookup(builder.Configuration, FixedTenantId(builder.Configuration)); break;
             default: throw new InvalidOperationException(
                 "Unknown or missing ControlPlane:Provider (expected SqlServer, PostgreSQL, MySql, or Sqlite).");
         }
@@ -56,9 +66,9 @@ public class Program
         app.UseCors();
         app.UseRouting();
 
-// API key authentication for the OTLP endpoints (MapKeryheTelemetryCollector requires the collector policy).
-app.UseAuthentication();
-app.UseAuthorization();
+        // API-key (or fixed-tenant) authentication for the OTLP endpoints (MapKeryheTelemetryCollector requires the collector policy).
+        app.UseAuthentication();
+        app.UseAuthorization();
 
         // Map gRPC services
         app.MapKeryheTelemetryCollector();

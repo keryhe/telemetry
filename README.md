@@ -19,45 +19,52 @@ ClickHouse or Parquet files; tenants, API keys and alert rules (the control plan
 - Export to NDJSON or CSV, per-tenant retention
 - `Keryhe.Telemetry.Admin`, a console tool for tenants and API keys
 
-## Quick Start (PostgreSQL)
+## Quick Start (Parquet + SQLite)
+
+The shipped `appsettings.json` of both hosts stores telemetry as Parquet files and the control plane (tenants, API keys,
+alert rules) in a SQLite file, so the quick start needs **no database server**: one data directory and one file on one
+machine. Both paths must be absolute and the same for every host and tool.
 
 ```bash
-# 1. Create the database and apply the two schema scripts (control plane first, then telemetry)
-createdb telemetry
-psql -d telemetry -f schema/PostgreSQL-ControlPlane.sql
-psql -d telemetry -f schema/PostgreSQL-Telemetry.sql
+# 1. Pick the locations. Whichever host starts first creates the Parquet root and the SQLite file, so there is no schema step
+TELEMETRY_HOME="$HOME/keryhe-telemetry"
 
-# 2. Point both hosts at it via User Secrets (keeps credentials out of source control).
-#    ControlPlane:Provider and Database:Provider are PostgreSQL in the shipped appsettings.json.
+# 2. Point both hosts at them via User Secrets (Database:Provider=Parquet and ControlPlane:Provider=Sqlite are already set)
 dotnet user-secrets --project src/Keryhe.Telemetry.Api.Server \
-  set "ConnectionStrings:Api"          "Host=localhost;Port=5432;Database=telemetry;Username=postgres;Password=<password>"
+  set "Telemetry:Parquet:RootPath"     "$TELEMETRY_HOME/data"
 dotnet user-secrets --project src/Keryhe.Telemetry.Api.Server \
-  set "ConnectionStrings:ControlPlane" "Host=localhost;Port=5432;Database=telemetry;Username=postgres;Password=<password>"
+  set "ConnectionStrings:ControlPlane" "Data Source=$TELEMETRY_HOME/control-plane.db"
 dotnet user-secrets --project src/Keryhe.Telemetry.Collector.Server \
-  set "ConnectionStrings:Collector"    "Host=localhost;Port=5432;Database=telemetry;Username=postgres;Password=<password>"
+  set "Telemetry:Parquet:RootPath"     "$TELEMETRY_HOME/data"
 dotnet user-secrets --project src/Keryhe.Telemetry.Collector.Server \
-  set "ConnectionStrings:ControlPlane" "Host=localhost;Port=5432;Database=telemetry;Username=postgres;Password=<password>"
+  set "ConnectionStrings:ControlPlane" "Data Source=$TELEMETRY_HOME/control-plane.db"
 
 # 3. Build and run the two hosts (each in its own terminal): gRPC ingestion, then the REST API + UI
 dotnet build Telemetry.sln
 dotnet run --project src/Keryhe.Telemetry.Collector.Server
 dotnet run --project src/Keryhe.Telemetry.Api.Server
 
-# 4. Create a tenant and an API key (console tool; its connection string goes in its own user secrets)
+# 4. Create a tenant and an API key (console tool; it only checks the SQLite file, so run it after a host has started)
 dotnet user-secrets --project src/Keryhe.Telemetry.Admin \
-  set "ConnectionStrings:Admin" "Host=localhost;Port=5432;Database=telemetry;Username=postgres;Password=<password>"
+  set "ControlPlane:Provider"   "Sqlite"
+dotnet user-secrets --project src/Keryhe.Telemetry.Admin \
+  set "ConnectionStrings:Admin" "Data Source=$TELEMETRY_HOME/control-plane.db"
 dotnet run --project src/Keryhe.Telemetry.Admin
 
 # 5. Run the Angular dev server
 cd src/telemetry-client && npm install && npm start
 ```
 
+The collector buffers records for a few seconds (`Telemetry:Parquet:LingerMilliseconds`, 5 s) before writing a Parquet
+file, so new data shows up in the UI about that long after it arrives. Keep the directory on a local disk (not a network share): the collector, the API host and
+the Admin tool must all open the same files. See [Parquet](docs/PARQUET.md) and [SQLite](docs/SQLITE.md).
+
 Open `http://localhost:4201` (the Angular dev server), or `http://localhost:5188/telemetry`, where the API host serves the built UI. Ingestion requires an `Authorization: Bearer <key>` header on
 every OTLP request — see [Configure an API key](docs/SETUP.md#3-create-a-tenant-and-an-api-key)
 in the full setup guide. In Development the collector also listens on plaintext `http://localhost:5117`;
 outside Development it requires TLS (`https://…:7057`), because keys travel in every export.
 
-For the other providers, deployment and the test data generator see **[docs/SETUP.md](docs/SETUP.md)**; every setting is in
+For PostgreSQL, SQL Server, MySQL and ClickHouse, deployment and the test data generator see **[docs/SETUP.md](docs/SETUP.md)**; every setting is in
 **[docs/CONFIGURATION.md](docs/CONFIGURATION.md)**.
 
 ## Projects

@@ -94,12 +94,58 @@ public sealed class SqliteSchemaTests
     }
 
     [Fact]
-    public async Task A_missing_directory_fails_and_is_not_created()
+    public async Task A_missing_directory_is_created()
     {
         using var db = new SqliteTestDb(createDirectory: false);
-        var ex = await Assert.ThrowsAsync<InvalidOperationException>(() => SqliteControlPlaneSchema.EnsureCurrentAsync(db.Connection, Log));
-        Assert.Contains(db.Directory, ex.Message);
         Assert.False(Directory.Exists(db.Directory));
+
+        await SqliteControlPlaneSchema.EnsureCurrentAsync(db.Connection, Log);
+
+        Assert.True((await SqliteControlPlaneSchema.CheckAsync(db.Connection)).IsCurrent);
+    }
+
+    // ---- the fixed tenant ----------------------------------------------------------------------------------------------
+
+    [Fact]
+    public async Task A_fixed_tenant_is_created_on_a_new_file_and_a_second_run_changes_nothing()
+    {
+        using var db = new SqliteTestDb(createDirectory: false);
+
+        await SqliteControlPlaneSchema.EnsureCurrentAsync(db.Connection, Log, ensureTenantId: 5);
+        var created = await db.ScalarAsync<string>("SELECT created_at FROM tenants WHERE id = 5");
+        await SqliteControlPlaneSchema.EnsureCurrentAsync(db.Connection, Log, ensureTenantId: 5);
+
+        Assert.Equal(1, await db.ScalarAsync<long>("SELECT COUNT(*) FROM tenants"));
+        Assert.Equal("Default", await db.ScalarAsync<string>("SELECT name FROM tenants WHERE id = 5"));
+        Assert.Equal(created, await db.ScalarAsync<string>("SELECT created_at FROM tenants WHERE id = 5"));
+    }
+
+    [Fact]
+    public async Task A_fixed_tenant_is_added_to_a_current_file_and_later_tenants_get_higher_ids()
+    {
+        using var db = new SqliteTestDb();
+        await SqliteControlPlaneSchema.EnsureCurrentAsync(db.Connection, Log);
+        await db.ExecAsync("INSERT INTO tenants (name) VALUES ('first')");
+
+        await SqliteControlPlaneSchema.EnsureCurrentAsync(db.Connection, Log, ensureTenantId: 40);
+        await db.ExecAsync("INSERT INTO tenants (name) VALUES ('later')");
+
+        Assert.Equal("Default", await db.ScalarAsync<string>("SELECT name FROM tenants WHERE id = 40"));
+        Assert.Equal(41, await db.ScalarAsync<long>("SELECT id FROM tenants WHERE name = 'later'"));
+        Assert.Equal([SqliteControlPlaneSchema.TargetVersion], await db.VersionsAsync());
+    }
+
+    [Fact]
+    public async Task An_existing_tenant_with_the_fixed_id_keeps_its_name()
+    {
+        using var db = new SqliteTestDb();
+        await SqliteControlPlaneSchema.EnsureCurrentAsync(db.Connection, Log);
+        await db.ExecAsync("INSERT INTO tenants (name) VALUES ('acme')");
+
+        await SqliteControlPlaneSchema.EnsureCurrentAsync(db.Connection, Log, ensureTenantId: 1);
+
+        Assert.Equal(1, await db.ScalarAsync<long>("SELECT COUNT(*) FROM tenants"));
+        Assert.Equal("acme", await db.ScalarAsync<string>("SELECT name FROM tenants WHERE id = 1"));
     }
 
     [Fact]
@@ -134,7 +180,7 @@ public sealed class SqliteSchemaTests
 
     // ---- hosted services -----------------------------------------------------------------------------------------------
 
-    private static ServiceProvider Host(string file, bool collector, bool? applySchema = null)
+    private static ServiceProvider Host(string file, bool collector, bool? applySchema = null, long? fixedTenantId = null)
     {
         var settings = new Dictionary<string, string?> { ["ConnectionStrings:ControlPlane"] = $"Data Source={file}" };
         if (applySchema is { } apply) settings["Telemetry:ControlPlane:Sqlite:ApplySchema"] = apply.ToString();
@@ -142,8 +188,8 @@ public sealed class SqliteSchemaTests
         var services = new ServiceCollection();
         services.AddLogging();
         services.AddSingleton<ITenantContext>(new TestTenantContext()); // the API registers the real one
-        if (collector) services.AddSqliteApiKeyLookup(configuration);
-        else services.AddSqliteControlPlaneManagement(configuration);
+        if (collector) services.AddSqliteApiKeyLookup(configuration, fixedTenantId);
+        else services.AddSqliteControlPlaneManagement(configuration, fixedTenantId);
         // As a Development host builds it: every registration must be resolvable, and no scoped service held by a singleton.
         return services.BuildServiceProvider(new ServiceProviderOptions { ValidateOnBuild = true, ValidateScopes = true });
     }
@@ -163,27 +209,72 @@ public sealed class SqliteSchemaTests
         Assert.True((await SqliteControlPlaneSchema.CheckAsync(db.Connection)).IsCurrent);
     }
 
-    [Fact]
-    public async Task The_collector_fails_on_a_missing_file_without_creating_it()
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task Either_host_creates_a_missing_file_and_directory_and_its_fixed_tenant(bool collector)
     {
-        using var db = new SqliteTestDb();
-        await using var host = Host(db.File, collector: true);
-        var ex = await Assert.ThrowsAsync<InvalidOperationException>(() => StartingAsync(host));
-        Assert.Contains("does not exist", ex.Message);
-        Assert.Contains("API host", ex.Message);
-        Assert.False(File.Exists(db.File));
+        using var db = new SqliteTestDb(createDirectory: false);
+        await using var host = Host(db.File, collector, fixedTenantId: 3);
+
+        await StartingAsync(host);
+
+        Assert.True((await SqliteControlPlaneSchema.CheckAsync(db.Connection)).IsCurrent);
+        Assert.Equal("Default", await db.ScalarAsync<string>("SELECT name FROM tenants WHERE id = 3"));
     }
 
     [Fact]
-    public async Task The_collector_fails_on_an_empty_file_and_on_another_version_and_starts_on_a_current_one()
+    public async Task Without_a_fixed_tenant_no_tenant_is_created()
+    {
+        using var db = new SqliteTestDb();
+        await using var host = Host(db.File, collector: true);
+        await StartingAsync(host);
+        Assert.Equal(0, await db.ScalarAsync<long>("SELECT COUNT(*) FROM tenants"));
+    }
+
+    [Fact]
+    public async Task A_collector_and_an_api_host_starting_together_leave_one_version_row_and_one_tenant()
+    {
+        using var db = new SqliteTestDb(createDirectory: false);
+        await using var collector = Host(db.File, collector: true, fixedTenantId: 2);
+        await using var api = Host(db.File, collector: false, fixedTenantId: 2);
+
+        await Task.WhenAll(Task.Run(() => StartingAsync(collector)), Task.Run(() => StartingAsync(api)));
+
+        Assert.Equal([SqliteControlPlaneSchema.TargetVersion], await db.VersionsAsync());
+        Assert.Equal(1, await db.ScalarAsync<long>("SELECT COUNT(*) FROM tenants"));
+    }
+
+    [Fact]
+    public async Task The_schema_step_runs_before_hosted_services_registered_ahead_of_it()
+    {
+        var services = new ServiceCollection();
+        services.AddHostedService<NoopHostedService>();
+        services.AddSqliteApiKeyLookup(new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?>
+        {
+            ["ConnectionStrings:ControlPlane"] = $"Data Source={Path.Combine(Path.GetTempPath(), "unused.db")}"
+        }).Build());
+
+        var hosted = services.Where(d => d.ServiceType == typeof(IHostedService)).ToList();
+        Assert.Equal(typeof(SqliteControlPlaneInitializer), hosted[0].ImplementationType);
+        Assert.Equal(typeof(NoopHostedService), hosted[1].ImplementationType);
+    }
+
+    private sealed class NoopHostedService : IHostedService
+    {
+        public Task StartAsync(CancellationToken cancellationToken) => Task.CompletedTask;
+        public Task StopAsync(CancellationToken cancellationToken) => Task.CompletedTask;
+    }
+
+    [Fact]
+    public async Task The_collector_creates_an_empty_file_fails_on_another_version_and_starts_on_a_current_one()
     {
         using var db = new SqliteTestDb();
         await File.WriteAllBytesAsync(db.File, []);
         await using (var host = Host(db.File, collector: true))
-            await Assert.ThrowsAsync<InvalidOperationException>(() => StartingAsync(host));
-        Assert.Equal(0, new FileInfo(db.File).Length);
+            await StartingAsync(host);
+        Assert.True((await SqliteControlPlaneSchema.CheckAsync(db.Connection)).IsCurrent);
 
-        await SqliteControlPlaneSchema.EnsureCurrentAsync(db.Connection, Log);
         await using (var host = Host(db.File, collector: true))
             await StartingAsync(host);
 
@@ -196,19 +287,23 @@ public sealed class SqliteSchemaTests
             Assert.Contains("newer", (await Assert.ThrowsAsync<InvalidOperationException>(() => StartingAsync(host))).Message);
     }
 
-    [Fact]
-    public async Task ApplySchema_off_makes_the_api_only_check()
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task ApplySchema_off_makes_either_host_only_check_and_create_no_tenant(bool collector)
     {
         using var db = new SqliteTestDb();
-        await using (var host = Host(db.File, collector: false, applySchema: false))
+        await using (var host = Host(db.File, collector, applySchema: false, fixedTenantId: 1))
         {
-            await Assert.ThrowsAsync<InvalidOperationException>(() => StartingAsync(host));
+            var ex = await Assert.ThrowsAsync<InvalidOperationException>(() => StartingAsync(host));
+            Assert.Contains("does not exist", ex.Message);
             Assert.False(File.Exists(db.File));
         }
 
         await SqliteControlPlaneSchema.EnsureCurrentAsync(db.Connection, Log);
-        await using (var host = Host(db.File, collector: false, applySchema: false))
+        await using (var host = Host(db.File, collector, applySchema: false, fixedTenantId: 1))
             await StartingAsync(host);
+        Assert.Equal(0, await db.ScalarAsync<long>("SELECT COUNT(*) FROM tenants"));
     }
 
     [Fact]

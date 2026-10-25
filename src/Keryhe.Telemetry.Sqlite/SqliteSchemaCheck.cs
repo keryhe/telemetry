@@ -25,13 +25,13 @@ public sealed record SqliteSchemaCheck(SqliteSchemaState State, string DataSourc
     {
         SqliteSchemaState.Current => string.Empty,
         SqliteSchemaState.MissingFile =>
-            $"The SQLite control-plane database '{DataSource}' does not exist. Start the API host once to create it " +
-            $"(or run schema/apply-schema.sh controlplane sqlite '{DataSource}'), then start this host.",
+            $"The SQLite control-plane database '{DataSource}' does not exist. Start the collector or the API host once with " +
+            $"Telemetry:ControlPlane:Sqlite:ApplySchema on to create it (or run schema/apply-schema.sh controlplane sqlite '{DataSource}'), then start this host.",
         SqliteSchemaState.NotInitialized =>
-            $"The SQLite control-plane database '{DataSource}' exists but has no control-plane schema. Start the API host once to create it, then start this host.",
+            $"The SQLite control-plane database '{DataSource}' exists but has no control-plane schema. Start the collector or the API host once with Telemetry:ControlPlane:Sqlite:ApplySchema on to create it, then start this host.",
         SqliteSchemaState.Older =>
             $"The SQLite control-plane database '{DataSource}' is at schema version {RecordedVersion} but this build needs {TargetVersion}. " +
-            "Start the API host to migrate it, then start this host.",
+            "Start the collector or the API host with Telemetry:ControlPlane:Sqlite:ApplySchema on to migrate it, then start this host.",
         _ =>
             $"The SQLite control-plane database '{DataSource}' is at schema version {RecordedVersion}, newer than this build's {TargetVersion}. " +
             "Downgrades are not supported; use a build at least as new as the database."

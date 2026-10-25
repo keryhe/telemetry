@@ -95,8 +95,26 @@ public static class TelemetryCollectorServiceCollectionExtensions
         // Authentication: the API key check runs in the pipeline, before the protobuf body is read. No
         // default scheme is set here and the collector policy names its scheme explicitly; the handler
         // acts only on endpoints carrying CollectorEndpointMetadata (see ApiKeyAuthenticationHandler).
-        services.AddAuthentication()
-            .AddScheme<ApiKeyAuthenticationOptions, ApiKeyAuthenticationHandler>(TelemetryAuthenticationSchemes.ApiKey, null);
+        // FixedTenant mode puts a keyless handler under the same scheme name, so the policy and every
+        // mapping stay the same; the key machinery above stays registered and idle.
+        var authentication = configuration.GetSection(CollectorAuthenticationOptions.SectionName).Get<CollectorAuthenticationOptions>() ?? new();
+        if (authentication.Mode == CollectorAuthenticationMode.FixedTenant)
+        {
+            authentication.Validate();
+            services.AddAuthentication()
+                .AddScheme<FixedTenantAuthenticationOptions, FixedTenantAuthenticationHandler>(
+                    TelemetryAuthenticationSchemes.ApiKey, o => o.TenantId = authentication.FixedTenantId);
+            services.AddHostedService<FixedTenantStartupCheck>();
+            // One tenant: a share below 1 would refuse exports while the rest of the queue is empty and protect no one. An explicit
+            // value is kept.
+            if (configuration[$"{TenantQuotaOptions.SectionName}:{nameof(TenantQuotaOptions.MaxShare)}"] is null)
+                services.PostConfigure<TenantQuotaOptions>(o => o.MaxShare = 1);
+        }
+        else
+        {
+            services.AddAuthentication()
+                .AddScheme<ApiKeyAuthenticationOptions, ApiKeyAuthenticationHandler>(TelemetryAuthenticationSchemes.ApiKey, null);
+        }
         services.AddAuthorization(o => o.AddPolicy(CollectorAuthorization.CollectorPolicy, p => p
             .AddAuthenticationSchemes(TelemetryAuthenticationSchemes.ApiKey)
             .RequireAuthenticatedUser()
@@ -105,7 +123,7 @@ public static class TelemetryCollectorServiceCollectionExtensions
         // Refuses plaintext transport outside Development (decision 3). Bound from Telemetry:Collector.
         services.AddOptions<TelemetryCollectorOptions>()
             .Bind(configuration.GetSection(TelemetryCollectorOptions.SectionName))
-            .Validate(o => { o.AuthFailureLimit.Validate(); return true; })
+            .Validate(o => { o.AuthFailureLimit.Validate(); o.Authentication.Validate(); return true; })
             .ValidateOnStart();
         services.AddHostedService<PlaintextTransportGuard>();
 

@@ -6,9 +6,10 @@ namespace Keryhe.Telemetry.Sqlite;
 /// <summary>
 /// The SQLite control-plane schema: this build's version, its embedded create script and its forward-only migrations
 /// (<c>schema/SQLite-ControlPlane.sql</c> and <c>schema/SQLite-ControlPlane-Migrations</c>), and the two entry points any host can
-/// call. <see cref="EnsureCurrentAsync"/> creates the file or migrates it forward (the API host does this at startup);
-/// <see cref="CheckAsync"/> only verifies (the collector and the Admin tool do this, and fail when the file is missing or not at
-/// exactly this build's version, so the upgrade order is the API host first). Downgrades are not supported.
+/// call. <see cref="EnsureCurrentAsync"/> creates the file or migrates it forward (the collector and the API host both do this at
+/// startup, so either can start first); <see cref="CheckAsync"/> only verifies (the Admin tool, and either host with
+/// <c>Telemetry:ControlPlane:Sqlite:ApplySchema=false</c>, fail when the file is missing or not at exactly this build's version).
+/// Downgrades are not supported.
 /// </summary>
 public static class SqliteControlPlaneSchema
 {
@@ -30,11 +31,13 @@ public static class SqliteControlPlaneSchema
 
     /// <summary>
     /// Creates the database when it has no schema, migrates it forward when it records an older version, and does nothing when it
-    /// is current. Throws when it records a newer version, or an older one with no complete migration chain. The directory must
-    /// exist; the file is created. Safe to run from several processes at once.
+    /// is current. Throws when it records a newer version, or an older one with no complete migration chain. The file and its
+    /// directory are created. With <paramref name="ensureTenantId"/> (a fixed-tenant install) that tenant is also created, named
+    /// <c>Default</c>, when it has no row. Safe to run from several processes at once.
     /// </summary>
-    public static Task EnsureCurrentAsync(SqliteControlPlaneConnection connection, ILogger logger, CancellationToken cancellationToken = default) =>
-        SqliteSchemaRunner.EnsureCurrentAsync(Current, connection, logger, cancellationToken);
+    public static Task EnsureCurrentAsync(
+        SqliteControlPlaneConnection connection, ILogger logger, CancellationToken cancellationToken = default, long? ensureTenantId = null) =>
+        SqliteSchemaRunner.EnsureCurrentAsync(Current, connection, logger, cancellationToken, ensureTenantId);
 
     /// <summary>Reports whether the file exists and is at exactly this build's version. Never creates or changes anything.</summary>
     public static Task<SqliteSchemaCheck> CheckAsync(SqliteControlPlaneConnection connection, CancellationToken cancellationToken = default) =>

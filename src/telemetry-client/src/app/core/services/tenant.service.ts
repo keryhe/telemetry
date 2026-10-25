@@ -1,4 +1,5 @@
 import { Injectable, computed, inject, signal } from '@angular/core';
+import { APP_CONFIG } from '../config/app-config';
 import { Tenant } from '../models/alert.models';
 import { TenantsApiService } from './api/tenants-api.service';
 
@@ -8,10 +9,17 @@ const LAST_USED_KEY = 'selectedTenantId';
  * The tenant a page is about. The route is the source of truth (`/t/:tenantId/...`, set by
  * `tenantRouteGuard` before the page's component exists), so a copied link carries its tenant.
  * localStorage keeps only "last used", which decides where a tenant-less URL redirects to.
+ *
+ * A single-tenant install (`fixedTenantId` in config.json) has one tenant: it is the effective and
+ * default tenant whatever localStorage says, and `tenantRouteGuard` sends any other tenant's URL to it.
  */
 @Injectable({ providedIn: 'root' })
 export class TenantService {
   private readonly api = inject(TenantsApiService);
+
+  /** The install's only tenant, or null when the caller may choose among several. */
+  readonly fixedTenantId: number | null = inject(APP_CONFIG).fixedTenantId ?? null;
+  readonly isFixed = this.fixedTenantId !== null;
 
   /** The tenants the caller may access (the server filters the list by its access check). */
   readonly tenants = signal<Tenant[]>([]);
@@ -22,8 +30,9 @@ export class TenantService {
   readonly forbiddenTenantId = signal<number | null>(null);
   private readonly lastUsedId = signal<number | null>(this.loadLastUsed());
 
-  /** The route's tenant if any, else the last used one that is still permitted, else the first permitted. */
+  /** The fixed tenant, else the route's tenant if any, else the last used one that is still permitted, else the first permitted. */
   readonly effectiveTenantId = computed(() => {
+    if (this.fixedTenantId !== null) return this.fixedTenantId;
     const route = this.routeTenantId();
     if (route !== null) return route;
     const tenants = this.tenants();
@@ -67,8 +76,9 @@ export class TenantService {
     return this.loaded;
   }
 
-  /** Where a tenant-less URL goes: last used if permitted, else the first permitted tenant, else null. */
+  /** Where a tenant-less URL goes: the fixed tenant, else last used if permitted, else the first permitted tenant, else null. */
   async defaultTenantId(): Promise<number | null> {
+    if (this.fixedTenantId !== null) return this.fixedTenantId;
     const tenants = await this.whenLoaded();
     const last = this.lastUsedId();
     if (last !== null && (tenants.length === 0 || tenants.some((t) => t.id === last))) return last;

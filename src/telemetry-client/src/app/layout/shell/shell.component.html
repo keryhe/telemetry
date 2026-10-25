@@ -15,7 +15,7 @@
     <span class="spacer"></span>
 
     <div class="toolbar-controls">
-      @if (tenantService.tenants().length > 0) {
+      @if (!tenantService.isFixed && tenantService.tenants().length > 0) {
         <mat-form-field class="tenant-select" appearance="outline" subscriptSizing="dynamic">
           <mat-label>Tenant</mat-label>
           <mat-select
@@ -72,6 +72,9 @@
         @if (authService.notSignedIn()) {
           <app-empty-state icon="login" message="You are not signed in"
             hint="Sign in, then reload this page." />
+        } @else if (tenantService.noAccess() && tenantService.isFixed) {
+          <app-empty-state icon="lock" [message]="'Tenant ' + tenantService.fixedTenantId + ' is not set up'"
+            hint="This install shows one tenant. Create it with the Admin tool, or check that you have access to it." />
         } @else if (tenantService.noAccess()) {
           <app-empty-state icon="lock" message="No access to this tenant"
             hint="Choose another tenant from the Tenant selector above." />

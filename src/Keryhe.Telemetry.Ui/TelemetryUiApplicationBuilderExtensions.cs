@@ -96,6 +96,8 @@ public static class TelemetryUiApplicationBuilderExtensions
                     config["healthThresholds"] = healthThresholds;
                 if (options.Auth.ToConfigPayload() is { } auth)
                     config["auth"] = auth;
+                if (options.FixedTenantId is { } fixedTenantId)
+                    config["fixedTenantId"] = fixedTenantId;
 
                 await context.Response.WriteAsync(JsonSerializer.Serialize(config));
                 return;
