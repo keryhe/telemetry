@@ -47,7 +47,7 @@ public sealed class ParquetPartitionState(
 /// <summary>
 /// Which files of a partition a reader sees, and the generation helpers (README "Layout", phase 4). A reader's file set is
 /// the newest compacted generation's files plus each writer's files above that writer's <c>through</c>; the writers'
-/// manifests are read <i>first</i>, then the partition is listed again for the newest generation (phase 0 spike 3: the
+/// manifests are read <i>first</i>, then the partition is listed again for the newest generation (the
 /// opposite order loses files under concurrent commits and compactions). A day that was merged serves its closed hours from
 /// the <c>_day</c> folder, read in the same second step.
 /// </summary>

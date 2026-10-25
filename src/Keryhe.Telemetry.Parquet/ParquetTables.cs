@@ -12,7 +12,7 @@ public enum ParquetMerge { Key, Sum, Max, Min, Any }
 
 /// <summary>
 /// One column of a table. <see cref="Nested"/> columns (a <c>MAP</c> or a list of structs) cannot be written by the
-/// DuckDB appender, so the writer stages them as JSON text and the <c>COPY</c> converts them (phase 0 spike 1).
+/// DuckDB appender, so the writer stages them as JSON text and the <c>COPY</c> converts them.
 /// </summary>
 public sealed record ParquetColumn(string Name, string Type, bool Nested = false, ParquetMerge Merge = ParquetMerge.Key)
 {
@@ -119,7 +119,7 @@ public static class ParquetTables
     /// <summary>
     /// One row per (tenant, trace, service, hour of the span's start) in a flushed batch: the trace's earliest start and
     /// latest end there, a span count and an error flag. Sorted by trace id so a lookup by id prunes on the files'
-    /// min/max statistics (phase 0 spike 2: 27 ms over a day of hourly files). Derived: written by the collector after the
+    /// min/max statistics. Derived: written by the collector after the
     /// span files.
     /// </summary>
     public static readonly ParquetTable TraceIndexTable = new(

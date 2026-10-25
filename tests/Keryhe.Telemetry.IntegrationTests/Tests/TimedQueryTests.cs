@@ -8,9 +8,9 @@ namespace Keryhe.Telemetry.IntegrationTests.Tests;
 /// Pure-logic unit tests for <see cref="TimedQuery"/> — no database dependency (list-pages-server-side plan, Phase 1).
 ///
 /// A timeout is decided by the helper's own deadline, not by the exception's type (trace-summary-performance plan,
-/// Phase 1): in the 3.0.1 stress ramp every relational driver ended an aborted command with its own exception
+/// Phase 1): every relational driver ends an aborted command with its own exception
 /// (Npgsql's <c>NpgsqlException</c> wrapping a <c>TimeoutException</c>, SqlClient's <c>SqlException</c>,
-/// MySqlConnector's <c>MySqlException</c>), none of which the type-matching version caught, so each became a 500.
+/// MySqlConnector's <c>MySqlException</c>), none of which a type-matching version would catch, so each would become a 500.
 /// <see cref="TimedQueryProviderTestsBase"/> drives the real drivers.
 /// </summary>
 public class TimedQueryTests

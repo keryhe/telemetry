@@ -342,9 +342,8 @@ CREATE TABLE log_rollup_minute (
     KEY idx_log_rollup_id (id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
--- HOUR TIER (schema 3.2.1, MySQL only: the measurement gate in plans/summary-rollups.md found a week of
--- minute rows too slow to sum on MySQL, 2.3 s p95 against a 1 s budget; the other providers met it and
--- ship no hour tier). One row per (tenant, service, hour) -- request_rollup_hour -- and per (tenant,
+-- HOUR TIER (MySQL only: summing a week of minute rows is too slow on MySQL; the other providers ship no
+-- hour tier). One row per (tenant, service, hour) -- request_rollup_hour -- and per (tenant,
 -- service, severity, hour) -- log_rollup_hour -- rebuilt from the minute rows by the API host's
 -- RollupCompactionWorker. rollup_compaction records, per signal, the hour boundary below which the hour
 -- tier is authoritative; reads of a bucket an hour or wider use the hour tier before it and the minute

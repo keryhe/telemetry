@@ -11,7 +11,7 @@ namespace Keryhe.Telemetry.IntegrationTests.Tests;
 
 /// <summary>
 /// ClickHouse-only log and metric read behaviour on top of the shared bases (plans/clickhouse-redesign phase 5): how many rows a
-/// logs list and a chart read (the sort-key rules of Phase 0 spike 5), the word-versus-substring search forms, labels, exemplars,
+/// logs list and a chart read (the sort-key rules), the word-versus-substring search forms, labels, exemplars,
 /// the catalog and the service list.
 /// </summary>
 [Collection(ProviderNames.ClickHouse)]

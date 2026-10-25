@@ -6,60 +6,18 @@
 > tested at production scale, and its schema and APIs may change without notice or a migration path. Use it to
 > learn, experiment or borrow ideas, but do not rely on it for real workloads or sensitive data.
 
-A self-hosted OpenTelemetry (OTLP) ingestion and visualization platform for traces, metrics, and logs. Provides a gRPC server for receiving telemetry from any OpenTelemetry SDK, a REST API for querying the data, and an Angular UI for visualization.
+A self-hosted OpenTelemetry (OTLP) platform for traces, metrics and logs: a collector that receives OTLP from any
+OpenTelemetry SDK, a REST API to query it, and an Angular UI. Telemetry is stored in PostgreSQL, SQL Server, MySQL,
+ClickHouse or Parquet files; tenants, API keys and alert rules (the control plane) in PostgreSQL, SQL Server, MySQL or a SQLite file.
 
 ## Features
 
-- **Complete OTLP Support**: Handles traces, metrics, and logs as defined in opentelemetry-proto
-- **Angular UI**: Web interface (Angular 20) for exploring traces, metrics, logs, dashboards, and alerts
-- **REST API**: ASP.NET Core Web API (`Keryhe.Telemetry.Api`) with Swagger support
-- **Multiple Database Providers**: Choose between PostgreSQL, SQL Server, MySQL, ClickHouse (columnar/OLAP) or Parquet files read by an in-process DuckDB (no database server, one machine) for telemetry data; tenants (with their retention windows), API keys and alert rules (the control plane) live in PostgreSQL, SQL Server, MySQL or a single SQLite file (so a Parquet deployment needs no database server at all)
-- **Trace Correlation**: Links logs and metrics to traces via trace and span IDs
-- **Built-in Analytics**: Service maps, request and log summaries, latency heatmaps and log severity analysis; the cards and charts read per-minute rollups the collector writes as data arrives, so they stay fast over long ranges
-- **Multi-tenant**: Every OTLP export carries a per-tenant API key (hashed in the database, optional expiry); the REST API is scoped by tenant and supports pluggable authorization
-- **Export and retention**: Stream logs, traces and metrics as NDJSON or CSV; retention windows are editable in the UI and enforced by a background sweep
-- **Admin tool**: A console app (`Keryhe.Telemetry.Admin`) for creating tenants and API keys
-- **Alerting**: Rule-based alerts (metric threshold, error rate, slow traces, log severity spikes) with configurable cooldowns and webhook delivery
-
-## Architecture
-
-```
-OpenTelemetry SDKs (any language)
-  → OTLP gRPC (port 5117) → Keryhe.Telemetry.Collector.Server
-  → bounded ingestion channel → background worker → provider bulk writer
-  → PostgreSQL / SQL Server / MySQL / ClickHouse / Parquet files   (telemetry data)
-  → Keryhe.Telemetry.Api.Server (REST API, port 5188 / 7105)
-  → Angular SPA (src/telemetry-client, port 4201)
-```
-
-Tenants (with their retention windows), API keys and alert rules are the **control plane**: a small relational
-database the collector reads for API keys and the API reads and writes for everything else. On
-PostgreSQL, SQL Server and MySQL it is simply the same database as the telemetry data; a ClickHouse
-or Parquet deployment runs its control plane on one of those three, or (Parquet's natural pairing) in a
-SQLite file on the same machine, which needs no database server.
-
-Two providers are chosen at runtime, and both are required: `Database:Provider` for telemetry data
-(`PostgreSQL`, `SqlServer`, `MySql`, `ClickHouse`, or `Parquet`, with `ConnectionStrings:Collector` / `:Api`, or `Telemetry:Parquet:RootPath` for Parquet) and
-`ControlPlane:Provider` for the control plane (`PostgreSQL`, `SqlServer`, `MySql`, or `Sqlite`, with
-`ConnectionStrings:ControlPlane`; for `Sqlite`, `Data Source=<absolute path of the file>`, see
-[`Keryhe.Telemetry.Sqlite`](src/Keryhe.Telemetry.Sqlite/README.md)). Each provider ships its own implementation and is selected by the
-host at startup.
-
-| Project | Role |
-|---------|------|
-| `Keryhe.Telemetry.Core` | Domain interfaces and models, plus the provider-agnostic write repositories, ingestion channel + background worker and Dapper read-repository bases |
-| `Keryhe.Telemetry.PostgreSQL` / `.SqlServer` / `.MySql` / `.ClickHouse` / `.Parquet` | Per-provider implementations: telemetry reads and writes, and (PostgreSQL, SQL Server, MySQL) the control plane |
-| `Keryhe.Telemetry.Sqlite` | The SQLite control plane (a file on one machine; creates and migrates itself under the API host), for deployments with no database server |
-| `Keryhe.Telemetry.Collector` / `.Collector.Server` | OTLP ingestion over gRPC and HTTP with per-tenant API key authentication (class library + thin host); a sample client-side OpenTelemetry Collector configuration is in [`deploy/otel-collector`](deploy/otel-collector/README.md) |
-| `Keryhe.Telemetry.Api` / `.Api.Server` | REST API controllers, base-path routing and authorization, alert evaluation (rules, webhooks, periodic worker) and retention sweeps (class library + thin host) |
-| `Keryhe.Telemetry.Ui` | Prebuilt Angular UI, packaged as static web assets — see [Build your own host](#build-your-own-host) below |
-| `Keryhe.Telemetry.Admin` | Console tool for tenants and API keys (PostgreSQL, SQL Server, MySQL, SQLite: the control-plane providers) |
-| `Keryhe.Telemetry.TestDataGenerator` | Worker service that simulates a multi-tenant e-commerce system and emits realistic traces, logs and metrics (24h backfill, then live) |
-| `src/telemetry-client` | Angular 20 SPA source (Dashboard, Traces, Metrics, Logs, Alerts, Settings) — built into `Keryhe.Telemetry.Ui`, not part of the .sln |
-| `tests/` | Docker-based per-provider integration tests, a stress-test harness and the test data generator's tests — see [Testing](#testing) |
-
-See [CLAUDE.md](CLAUDE.md) for a deeper architectural walkthrough (composition roots, ingestion
-pipeline, multi-tenancy, provider-specific caveats).
+- Traces, metrics and logs over OTLP gRPC and HTTP, linked by trace and span ids
+- Dashboard, trace, metric and log explorers, service map and latency heatmaps
+- Multi-tenant: a per-tenant API key on every export, tenant-scoped API with pluggable authorization
+- Alerts (metric threshold, error rate, slow requests, log severity spikes) with webhooks
+- Export to NDJSON or CSV, per-tenant retention
+- `Keryhe.Telemetry.Admin`, a console tool for tenants and API keys
 
 ## Quick Start (PostgreSQL)
 
@@ -99,119 +57,29 @@ every OTLP request — see [Configure an API key](docs/SETUP.md#3-create-a-tenan
 in the full setup guide. In Development the collector also listens on plaintext `http://localhost:5117`;
 outside Development it requires TLS (`https://…:7057`), because keys travel in every export.
 
-For other database providers (SQL Server, MySQL, ClickHouse, Parquet), Docker recipes,
-running the two hosts, deploying to production, the full schema reference, and alerting
-configuration, see **[docs/SETUP.md](docs/SETUP.md)**. Every configuration key and its default is
-listed in **[docs/CONFIGURATION.md](docs/CONFIGURATION.md)**.
+For the other providers, deployment and the test data generator see **[docs/SETUP.md](docs/SETUP.md)**; every setting is in
+**[docs/CONFIGURATION.md](docs/CONFIGURATION.md)**.
 
-## Build your own host
+## Projects
 
-Every piece of this stack ships as a NuGet package — `Keryhe.Telemetry.Core`, `.Api`,
-`.Collector`, `.Ui`, and the five telemetry providers — so you can compose your own ASP.NET Core
-hosts instead of running `Keryhe.Telemetry.Api.Server`/`.Collector.Server` as-is: add your own middleware,
-combine it with an existing application, or change what gets exposed.
-
-```xml
-<ItemGroup>
-  <PackageReference Include="Keryhe.Telemetry.Api" Version="2.0.1" />
-  <PackageReference Include="Keryhe.Telemetry.Ui" Version="2.0.1" />
-  <!-- Plus the provider package for your telemetry data (Database:Provider) and the one for your
-       control plane (ControlPlane:Provider). On PostgreSQL, SQL Server or MySQL these are the same
-       package; a ClickHouse or Parquet consumer references Keryhe.Telemetry.ClickHouse or .Parquet and one of the others
-       (or Keryhe.Telemetry.Sqlite, a file-based control plane that needs no database server). -->
-  <PackageReference Include="Keryhe.Telemetry.PostgreSQL" Version="2.0.1" />
-</ItemGroup>
-```
-
-```csharp
-var builder = WebApplication.CreateBuilder(args);
-
-builder.Services.AddKeryheTelemetryApi(builder.Configuration); // controllers, tenant context, authorization
-builder.Services.AddKeryheTelemetryUi(builder.Configuration);  // binds the TelemetryUi section
-builder.Services.AddPostgreSqlApiServices(builder.Configuration);              // telemetry reads: ConnectionStrings:Api
-builder.Services.AddPostgreSqlControlPlaneApiServices(builder.Configuration);  // alerts, tenants and their retention windows: ConnectionStrings:ControlPlane
-
-var app = builder.Build();
-
-// Paired with an explicit UseRouting() call right after it, so routing does not select an
-// endpoint before the UI's static-file middleware runs.
-app.UseKeryheTelemetryUi();
-app.UseRouting();
-
-// Register your own authentication scheme and policies when you enable
-// Telemetry:Api:Authorization; with it off these are no-ops.
-app.UseAuthentication();
-app.UseAuthorization();
-
-app.MapKeryheTelemetryApi();   // maps the controllers; unknown API paths get a JSON 404
-app.MapKeryheTelemetryUiFallback();
-
-app.Run();
-```
-
-`Keryhe.Telemetry.Ui` ships the compiled Angular bundle prebuilt — no Node, no npm, nothing to
-build — and serves it at `/`, same-origin with the API at `/api` by default. If your host mounts
-the UI or the API somewhere else, or wants its own product name in the header bar and browser tab
-instead of "Sentinel", configure it rather than rebuilding it:
-
-```jsonc
-{
-  "TelemetryUi": {
-    "BasePath": "/telemetry",                 // serve the UI beside another app at "/"
-    "ApiBasePath": "/telemetry/api",          // only if the API moved too; "/api" otherwise
-    "BrandName": "Acme Watchtower",
-    "BrandTagline": "Custom Consumer Branding"
-  }
-}
-```
-
-`BasePath` rewrites the bundle's `<base href>` at startup, which re-roots its assets, its
-`config.json` fetch and its client-side router together. Behind a reverse proxy the prefix must be
-*forwarded* rather than stripped, and the origin root then returns 404 — see
-[the UI package README](src/Keryhe.Telemetry.Ui/README.md#hosting-the-ui-under-a-sub-path). The
-same settings are available in code via `AddKeryheTelemetryUi(configuration, options => ...)` or
-`app.UseKeryheTelemetryUi(options => ...)`, which take precedence over the configuration section.
-The Dashboard's error-rate thresholds are configurable the same way, under
-`TelemetryUi:HealthThresholds`; see
-[the UI package README](src/Keryhe.Telemetry.Ui/README.md#health-thresholds).
-
-The API is mounted under `Telemetry:Api:BasePath` (default `/api`) and its authorization is configured
-under `Telemetry:Api:Authorization` (off by default); see
-[the API package README](src/Keryhe.Telemetry.Api/README.md) and
-[docs/CONFIGURATION.md](docs/CONFIGURATION.md).
-
-Add `Keryhe.Telemetry.Collector` (plus `AddKeryheTelemetryCollector()`/`MapKeryheTelemetryCollector()`
-and the matching `Add<Provider>CollectorServices(configuration)` and
-`Add<Provider>ControlPlaneCollectorServices(configuration)` calls, e.g. `AddPostgreSqlCollectorServices`
-and `AddPostgreSqlControlPlaneCollectorServices`) the same way if your host should also ingest OTLP, running it
-as its own service (see [the collector README](src/Keryhe.Telemetry.Collector/README.md)). Pin the UI and API packages to the same version —
-they ship in lockstep, and a mismatch fails silently (a field goes missing from a rendered page)
-rather than with an error.
-
-## Testing
-
-```bash
-# Integration tests: every provider against real Testcontainers databases (requires Docker)
-dotnet test tests/Keryhe.Telemetry.IntegrationTests
-dotnet test tests/Keryhe.Telemetry.IntegrationTests --filter Provider=SqlServer   # one provider
-
-# Test data generator simulation tests (no database or Docker)
-dotnet test tests/Keryhe.Telemetry.TestDataGenerator.Tests
-```
-
-`tests/Keryhe.Telemetry.StressTests` is a manual, Docker-based load harness (never part of `dotnet test`);
-see [its README](tests/Keryhe.Telemetry.StressTests/README.md).
+| Project | Role |
+|---|---|
+| `Keryhe.Telemetry.Collector.Server` / `.Api.Server` | The two hosts: OTLP ingestion, and the REST API that also serves the UI |
+| `Keryhe.Telemetry.Collector`, `.Api`, `.Ui` | The libraries behind them, for [your own hosts](docs/ARCHITECTURE.md#build-your-own-host) |
+| `Keryhe.Telemetry.PostgreSQL`, `.SqlServer`, `.MySql`, `.ClickHouse`, `.Parquet`, `.Sqlite` | Storage providers |
+| `Keryhe.Telemetry.Admin` | Console tool for tenants and API keys |
+| `Keryhe.Telemetry.TestDataGenerator` | Emits simulated multi-tenant telemetry |
+| `src/telemetry-client` | The Angular source of the UI |
+| `tests/` | Integration tests, the stress harness and the generator's tests ([Testing](docs/SETUP.md#testing)) |
 
 ## Documentation
 
-- [docs/SETUP.md](docs/SETUP.md) — full setup, per-provider schema, deployment, alerting and retention
-- [docs/CONFIGURATION.md](docs/CONFIGURATION.md) — every configuration key and its default
-- [CLAUDE.md](CLAUDE.md) — architecture and implementation notes
+- [docs/SETUP.md](docs/SETUP.md): setup per provider, deployment, alerting, retention, testing
+- [docs/CONFIGURATION.md](docs/CONFIGURATION.md): every configuration key and its default
+- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md): how it fits together, building your own host
+- [Collector](docs/COLLECTOR.md), [API](docs/API.md), [UI](docs/UI.md), [Parquet](docs/PARQUET.md), [ClickHouse](docs/CLICKHOUSE.md),
+  [SQLite](docs/SQLITE.md), [provider packages](docs/PROVIDERS.md), [stress tests](docs/STRESS-TESTS.md)
 
 ## License
 
 [MIT](LICENSE)
-
-## Acknowledgments
-
-Built according to the [OpenTelemetry Protocol Specification](https://github.com/open-telemetry/opentelemetry-proto)

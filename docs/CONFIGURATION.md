@@ -257,8 +257,8 @@ and `MaxQueuedBytesPerSignal` to 2 GB, instead of the 200000 / 256 MB above; a k
 | `DuckDb:MemoryLimit` / `Threads` / `TempDirectory` | 2GB / processor count / `<RootPath>/_tmp/<host>` | The API host's read database. |
 | `Writer:DuckDb:MemoryLimit` / `Threads` | 1GB / 2 | The collector's file-writing database. |
 | `Compaction:Enabled` | true | Runs on the API host; one instance at a time holds the lease. |
-| `Compaction:IntervalSeconds` / `LeaseSeconds` | 60 / 300 | Worker wake-up and lease renewal; a lease not renewed for `LeaseSeconds` is taken over. |
-| `Compaction:MinorFileThreshold` / `MinorAgeSeconds` | 100 / 600 | Uncompacted files in a partition beyond this count (or older than this) are folded into one. |
+| `Compaction:IntervalSeconds` / `LeaseSeconds` | 15 / 300 | Worker wake-up and lease renewal; a lease not renewed for `LeaseSeconds` is taken over. |
+| `Compaction:MinorFileThreshold` / `MinorAgeSeconds` | 30 / 60 | Uncompacted files in a partition beyond this count (or older than this) are folded into one. |
 | `Compaction:CloseHourGraceMinutes` / `CloseDayGraceHours` | 15 / 6 | How long after it ends an hour is rewritten, and a day merged into one folder. |
 | `Compaction:MaxFileRows` / `MaxSortRows` | 10000000 / 20000000 | A compacted file's size cap, and the most rows one sorted write takes. |
 | `Compaction:GraceSeconds` | 600 | A superseded file is deleted this long after; must exceed your longest query or export. |

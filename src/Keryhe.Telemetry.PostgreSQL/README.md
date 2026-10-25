@@ -1,28 +1,7 @@
 # Keryhe.Telemetry.PostgreSQL
 
-PostgreSQL provider for [Keryhe Telemetry](https://github.com/keryhe/telemetry) — Npgsql/Dapper
-implementations of the write and read repositories for a PostgreSQL database, and a PostgreSQL control plane
-(tenants with their retention windows, API keys, alert rules).
-
-## What it provides
-
-Telemetry data (`Database:Provider = PostgreSQL`):
-
-- `AddPostgreSqlCollectorServices(configuration)` — registers a singleton `NpgsqlDataSource` (from
-  `ConnectionStrings:Collector`) and `ITelemetryBulkWriter`.
-- `AddPostgreSqlApiServices(configuration)` — registers a singleton `NpgsqlDataSource` (from
-  `ConnectionStrings:Api`), `ITraceReadRepository`, `IMetricReadRepository`,
-  `ILogReadRepository`, and `IRetentionSweeper`.
-
-Control plane (`ControlPlane:Provider = PostgreSQL`), on its own keyed `NpgsqlDataSource` (from
-`ConnectionStrings:ControlPlane`), so it can sit beside any telemetry provider, including ClickHouse:
-
-- `AddPostgreSqlControlPlaneCollectorServices(configuration)` — `IApiKeyLookup` and `IApiKeyTouchStore`.
-- `AddPostgreSqlControlPlaneApiServices(configuration)` — `IAlertRuleRepository`,
-  `ITenantCatalogRepository`, and `IRetentionSettingsRepository`.
-
-Install this package alongside `Keryhe.Telemetry.Collector` (write side) and/or
-`Keryhe.Telemetry.Api` (read side).
+PostgreSQL provider for [Keryhe Telemetry](https://github.com/keryhe/telemetry): Npgsql and Dapper. It can serve the telemetry data, the control
+plane (tenants, API keys, alert rules, retention settings), or both.
 
 ## Usage
 
@@ -36,21 +15,19 @@ builder.Services.AddPostgreSqlApiServices(builder.Configuration);
 builder.Services.AddPostgreSqlControlPlaneApiServices(builder.Configuration);
 ```
 
-Configuration:
+Apply the schema before first use:
 
-- `Database:Provider` / `ControlPlane:Provider` — `PostgreSQL` for whichever side this provider serves.
-- `ConnectionStrings:Collector` / `ConnectionStrings:Api` / `ConnectionStrings:ControlPlane` — Npgsql connection strings, e.g.
-  `Host=localhost;Port=5432;Database=telemetry;Username=postgres;Password=<password>`. `ControlPlane` is required
-  (no fallback) and normally names the same database.
+```bash
+schema/apply-schema.sh controlplane postgresql
+schema/apply-schema.sh telemetry postgresql
+```
 
-Apply `schema/PostgreSQL-ControlPlane.sql` and `schema/PostgreSQL-Telemetry.sql` (or `schema/apply-schema.sh controlplane postgresql`
-and `schema/apply-schema.sh telemetry postgresql`) before first use.
+## Configuration
 
-## Documentation
-
-See the [project README](https://github.com/keryhe/telemetry) and
-[CLAUDE.md](https://github.com/keryhe/telemetry/blob/main/CLAUDE.md) for the full architecture
-and setup guide.
+| Key | Meaning |
+|---|---|
+| `Database:Provider` / `ControlPlane:Provider` | `PostgreSQL` for the side(s) this package serves |
+| `ConnectionStrings:Collector` / `:Api` / `:ControlPlane` | e.g. `Host=localhost;Port=5432;Database=telemetry;Username=postgres;Password=<password>`; `ControlPlane` is required and normally names the same database |
 
 ## License
 

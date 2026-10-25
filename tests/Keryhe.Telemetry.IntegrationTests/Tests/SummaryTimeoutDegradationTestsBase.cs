@@ -10,8 +10,8 @@ namespace Keryhe.Telemetry.IntegrationTests.Tests;
 /// <summary>
 /// Every summary-class read through the real repositories with <c>Telemetry:Query:SummaryTimeoutSeconds = 0</c>, which
 /// forces each one down its timeout path deterministically, on every provider. Each must answer — flagged timed out or
-/// lower-bounded — and never throw: in the 3.0.1 stress ramp these paths answered 500 instead (the drivers' own timeout
-/// exceptions escaped <c>TimedQuery</c>, and the fallbacks reused the aborted connection). Covers:
+/// lower-bounded — and never throw (a driver's own timeout exception escaping <c>TimedQuery</c>, or a fallback reusing the
+/// aborted connection, would answer 500). Covers:
 /// <list type="bullet">
 /// <item>the request and log rollup reads and the slow-request count (plans/summary-rollups.md), which report a timeout
 /// instead of throwing;</item>

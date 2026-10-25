@@ -15,7 +15,7 @@ public enum HostTopology { Split }
 /// <param name="ControlPlaneProvider">The <c>ControlPlane:Provider</c> value (PostgreSQL for a ClickHouse run, the telemetry provider otherwise).</param>
 /// <param name="ControlPlaneConnectionString">Becomes <c>ConnectionStrings:ControlPlane</c> on both hosts.</param>
 /// <param name="RunDirectory">Where each host's console output is written (<c>host-&lt;role&gt;.log</c>).</param>
-/// <param name="RetentionIntervalSeconds">Short, so a retention sweep lands inside the measured window (Decision 11). Every other worker setting stays at its default.</param>
+/// <param name="RetentionIntervalSeconds">The profile's retention interval: a day in the built-in profiles (no sweep inside a run), 30 s with <c>--retention-interval stress</c> so sweeps land inside the measured window. Every other worker setting stays at its default.</param>
 public sealed record HostLaunchOptions(
     string Provider,
     string CollectorConnectionString,
@@ -243,8 +243,9 @@ public static class HostLauncher
             ["Logging__Console__FormatterName"] = "simple",
             ["Logging__Console__FormatterOptions__SingleLine"] = "true",
             ["Logging__Console__FormatterOptions__TimestampFormat"] = "yyyy-MM-ddTHH:mm:ss.fffZ ",
-            ["Logging__Console__FormatterOptions__UseUtcTimestamp"] = "true",
-            ["DOTNET_gcServer"] = "0"
+            ["Logging__Console__FormatterOptions__UseUtcTimestamp"] = "true"
+            // No GC override: the hosts run the Server GC their runtimeconfig ships with. --host-env DOTNET_gcServer=0 runs
+            // them under workstation GC.
         };
 
         Uri? grpc = null, api = null;
@@ -280,7 +281,7 @@ public static class HostLauncher
                 var port = PortFinder.GetFreePorts(1)[0];
                 Endpoint("Api", port, "Http1");
                 api = new Uri($"http://127.0.0.1:{port}");
-                // ClickHouse 25.x caches a predicate's matching granules, so a repeated read looks free in a measurement (Phase 0, spike 4):
+                // ClickHouse 25.x caches a predicate's matching granules, so a repeated read looks free in a measurement:
                 // the harness's API host reads with the cache off. Production queries do not.
                 if (options.Provider == "Parquet")
                 {

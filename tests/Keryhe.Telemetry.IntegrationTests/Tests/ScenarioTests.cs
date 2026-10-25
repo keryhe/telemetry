@@ -21,9 +21,10 @@ public class ScenarioTests
         Assert.False(p.IsRamp);
         Assert.Equal((name, warmup, measured, browsers), (p.Name, p.WarmupSeconds, p.MeasuredSeconds, p.Browsers.Users));
         Assert.Equal((rate, rate, rate), (p.Load.Traces.SpansPerSecond, p.Load.Logs.RecordsPerSecond, p.Load.Metrics.DataPointsPerSecond));
-        // Decision 11: backdated records flow, and the sweep interval is short enough to land inside the window.
-        Assert.True(p.Load.Time.BackdatedFraction > 0);
-        Assert.InRange(p.RetentionIntervalSeconds, 1, p.MeasuredSeconds / 2);
+        // No retention contention by default: no backdated records, and a daily sweep (only the one at host start, before any
+        // data). A run that measures retention opts in with --retention-interval and a profile that sets backdatedFraction.
+        Assert.Equal(0, p.Load.Time.BackdatedFraction);
+        Assert.Equal(86400, p.RetentionIntervalSeconds);
         // Decision 17: default container cap.
         Assert.Equal((4d, 8d), (p.ContainerCpus, p.ContainerMemoryGb));
     }
@@ -65,9 +66,10 @@ public class ScenarioTests
     public void Matrix_expands_provider_profile_and_all_means_every_value()
     {
         var all = RunCommand.BuildMatrix("all", "all", "smoke", "fixed", false, null);
-        Assert.Equal(4, all.Count);
+        Assert.Equal(ProviderContainerFactory.ProviderNames.Count, all.Count);
         Assert.Equal(all.Count, all.Select(s => s.Id).Distinct().Count());
         Assert.Contains(all, s => s.Id == "clickhouse-split-smoke");
+        Assert.Contains(all, s => s.Id == "parquet-split-smoke");
 
         var one = Assert.Single(RunCommand.BuildMatrix("sqlserver", "split", "smoke", "fixed", false, 3));
         Assert.Equal(("SqlServer", HostTopology.Split, 3), (one.Provider, one.Topology, one.Profile.Browsers.Users));
@@ -294,7 +296,7 @@ public class ScenarioTests
 
         var seconds = RunCommand.BuildMatrix("PostgreSQL", "split", "smoke", "fixed", false, null, "120").Single();
         Assert.Equal(120, seconds.Profile.RetentionIntervalSeconds);
-        Assert.Equal(30, RunCommand.BuildMatrix("PostgreSQL", "split", "smoke", "fixed", false, null).Single().Profile.RetentionIntervalSeconds);
+        Assert.Equal(86400, RunCommand.BuildMatrix("PostgreSQL", "split", "smoke", "fixed", false, null).Single().Profile.RetentionIntervalSeconds);
         Assert.Throws<ArgumentException>(() => RunCommand.BuildMatrix("PostgreSQL", "split", "smoke", "fixed", false, null, "hourly"));
     }
 

@@ -15,8 +15,8 @@ namespace Keryhe.Telemetry.ClickHouse.Services;
 /// <see cref="ILogReadRepository"/> over <c>log_records</c> (plans/clickhouse-redesign phase 5, README R4).
 ///
 /// The table's sort key is <c>(tenant_id, toStartOfFiveMinutes(timestamp), service_name, timestamp)</c>, so two rules run
-/// through every query (Phase 0 spike 5): <b>every time range also carries a <c>toStartOfFiveMinutes(timestamp)</c>
-/// predicate</b> (a predicate on <c>timestamp</c> alone does not prune the key: a 1-hour window read the whole table), and
+/// through every query: <b>every time range also carries a <c>toStartOfFiveMinutes(timestamp)</c>
+/// predicate</b> (a predicate on <c>timestamp</c> alone does not prune the key), and
 /// <b>lists read in widening slices</b> (5 minutes first, x4, the whole remainder once the next slice would cover half of it),
 /// each an ordered query with <c>LIMIT</c> on what is still missing, so a selective filter stops early instead of reading
 /// the window. A whole-word search term (letters and digits) uses the token index through <c>hasToken(lower(body), 'word')</c>;

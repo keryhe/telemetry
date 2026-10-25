@@ -228,11 +228,9 @@ public abstract class MetricPhase4TestsBase : IAsyncLifetime
     /// bucket entirely, and a duplicate counted twice would inflate the deltas.
     ///
     /// <b>Scope.</b> This passes both before and after <c>ToDictionaryNewest</c> replaced the baseline lookup's
-    /// plain <c>ToDictionary</c>, and that was measured on all five providers, not assumed: every provider's
+    /// plain <c>ToDictionary</c>: every provider's
     /// "last point per stream" SQL collapses appended duplicates before C# sees them (<c>ROW_NUMBER() ... WHERE
-    /// rn = 1</c>, or <c>argMax</c> + <c>GROUP BY</c> on ClickHouse), which was also confirmed directly against
-    /// MySQL including a deliberately spilled window sort. So re-delivery is NOT what produced the
-    /// <c>metrics/series</c> 500s in the 3.0.1 stress ramp; this test guards the end-to-end append-duplication
+    /// rn = 1</c>, or <c>argMax</c> + <c>GROUP BY</c> on ClickHouse). This test guards the end-to-end append-duplication
     /// invariant, and <c>DuplicateBaselineRowTests</c> is the negative-controlled test of the guard itself.
     /// </summary>
     [Fact]

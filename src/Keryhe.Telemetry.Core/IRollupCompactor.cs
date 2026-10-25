@@ -2,7 +2,7 @@ namespace Keryhe.Telemetry.Core;
 
 /// <summary>
 /// Folds the minute rollup into the hour tier (plans/summary-rollups.md, Phase 4). Registered only by a provider
-/// that has an hour tier (MySQL, the one the measurement gate named); driven by the API host's
+/// that has an hour tier (MySQL only); driven by the API host's
 /// <c>RollupCompactionWorker</c>, which idles when nothing is registered.
 /// </summary>
 public interface IRollupCompactor

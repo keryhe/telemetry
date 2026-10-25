@@ -1,1205 +1,254 @@
 # CLAUDE.md
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
-For end-user setup see [README.md](README.md) and [docs/SETUP.md](docs/SETUP.md); every configuration key and
-its default is in [docs/CONFIGURATION.md](docs/CONFIGURATION.md).
+
+User-facing docs live in `docs/`: [SETUP](docs/SETUP.md), [CONFIGURATION](docs/CONFIGURATION.md) (every key and default),
+[ARCHITECTURE](docs/ARCHITECTURE.md), [COLLECTOR](docs/COLLECTOR.md), [API](docs/API.md), [UI](docs/UI.md),
+[PARQUET](docs/PARQUET.md), [CLICKHOUSE](docs/CLICKHOUSE.md), [SQLITE](docs/SQLITE.md), [PROVIDERS](docs/PROVIDERS.md),
+[STRESS-TESTS](docs/STRESS-TESTS.md). This file holds what a code change can trip over; read the matching doc for behaviour.
 
 ## Commands
 
 Requires the .NET 10 SDK and Node.js (Angular 20 for the UI).
 
 ```bash
-# Build the whole .NET solution
 dotnet build Telemetry.sln
 
-# Run the two hosts (each in its own terminal; they share only the database):
-# gRPC OTLP ingestion server (write path; Development also listens on h2c http://localhost:5117)
-dotnet run --project src/Keryhe.Telemetry.Collector.Server
-# REST API (read path; also serves the Angular UI)
-dotnet run --project src/Keryhe.Telemetry.Api.Server
+# The two hosts, each in its own terminal (they share only the databases)
+dotnet run --project src/Keryhe.Telemetry.Collector.Server   # OTLP; Development also h2c http://localhost:5117
+dotnet run --project src/Keryhe.Telemetry.Api.Server         # REST API + bundled UI at http://localhost:5188/telemetry
 
-# Create tenants and API keys in the control plane (ControlPlane:Provider PostgreSQL, SqlServer, MySql or Sqlite).
-# Needs ConnectionStrings:Admin (the control-plane database; for Sqlite `Data Source=<the hosts' absolute path>`, and the API host must have created/migrated it) in its user secrets. scripts/new-api-key.sh (or New-ApiKey.ps1) only generates a
-# key + hash for a manual INSERT.
+# Tenants and API keys (needs ConnectionStrings:Admin in its user secrets; for Sqlite the API host must have created the file)
 dotnet run --project src/Keryhe.Telemetry.Admin
 
-# Run the Angular UI (dev server on http://localhost:4201 — development only)
+# UI dev server (http://localhost:4201, proxies /api to https://localhost:7105): run the API with --Telemetry:Api:BasePath=/api
 cd src/telemetry-client && npm install && npm start
 
-# Publish the hosts. The API host also builds + bundles the Angular UI, via Keryhe.Telemetry.Ui:
+# Publish (the API host also builds the Angular UI through Keryhe.Telemetry.Ui; -p:BuildSpa=false uses an existing dist)
 dotnet publish src/Keryhe.Telemetry.Collector.Server -c Release -o ./publish-collector
 dotnet publish src/Keryhe.Telemetry.Api.Server -c Release -o ./publish
-# Windows: install-service.bat [collector-publish-folder] [api-publish-folder] installs both as services
-# (KeryheTelemetryCollector, KeryheTelemetryApi); defaults are publish-collector and publish-api.
-# ...and to publish against an already-built src/telemetry-client/dist instead (the flag is on
-# Keryhe.Telemetry.Ui, not the host, but propagates transitively through the ProjectReference):
-dotnet publish src/Keryhe.Telemetry.Api.Server -c Release -p:BuildSpa=false
 
-# Run the test data generator: simulates three e-commerce tenants and emits them live through the real
-# OpenTelemetry SDK. Tenant API keys must already exist in the database and go in user secrets
-# (Generator:Tenants:N:ApiKey), never appsettings.
+# Schema: two components, one script per provider; the runner skips a component whose target version is recorded
+schema/apply-schema.sh <controlplane|telemetry> <postgresql|sqlserver|mysql|clickhouse|sqlite|parquet> [database]
+
+# Test data generator (tenant keys go in user secrets as Generator:Tenants:N:ApiKey). Backfill is opt-in; backfilling the
+# same window twice stores it twice (truncate the hot tables first, never the reference tables)
 dotnet run --project src/Keryhe.Telemetry.TestDataGenerator
-# Backfilling history (hand-built OTLP, then continues live) is opt-in; the window defaults to 24h.
-# A second backfill over the same window stores it twice, so truncate the hot tables first.
-dotnet run --project src/Keryhe.Telemetry.TestDataGenerator -- --Generator:Backfill:Enabled=true
-# e.g. only the last hour, and stop instead of going live:
-dotnet run --project src/Keryhe.Telemetry.TestDataGenerator -- --Generator:Backfill:Enabled=true --Generator:Backfill:Window=01:00:00 --Generator:Live=false
-# Its tests (no database or Docker; sinks are compared through an in-process fake collector):
-dotnet test tests/Keryhe.Telemetry.TestDataGenerator.Tests
-
-# Apply database schema: two components, each with its own script per provider and version table.
-# Control plane (tenants with their retention windows, api_keys, alert_rules, alert_events; PostgreSQL/SqlServer/MySQL/SQLite only):
-psql -d telemetry -f schema/PostgreSQL-ControlPlane.sql   # or SqlServer-ControlPlane.sql / MySQL-ControlPlane.sql
-# SQLite: a file on the machine the hosts run on (absolute path, directory must exist). The API host creates and migrates it itself at startup,
-# so this is optional; the collector and Admin tool never create it.
-schema/apply-schema.sh controlplane sqlite /var/lib/keryhe/control-plane.db
-# Telemetry data (everything else):
-psql -d telemetry -f schema/PostgreSQL-Telemetry.sql      # PostgreSQL
-sqlcmd -d telemetry -i schema/SqlServer-Telemetry.sql     # SqlServer
-mysql telemetry < schema/MySQL-Telemetry.sql              # MySQL
-clickhouse-client --database telemetry --multiquery < schema/ClickHouse-Telemetry.sql  # ClickHouse (no control plane: it runs on one of the three relational providers)
-
-# Or use the runner (skips a component whose target version is already recorded):
-schema/apply-schema.sh <controlplane|telemetry> <postgresql|sqlserver|mysql|clickhouse|sqlite> [database]
+dotnet run --project src/Keryhe.Telemetry.TestDataGenerator -- --Generator:Backfill:Enabled=true [--Generator:Backfill:Window=01:00:00 --Generator:Live=false]
 ```
 
-The schema has two components versioned independently, `control-plane` and `telemetry`, both 4.0.1, with the
-version rows in `control_plane_schema_version` and `telemetry_schema_version`. Each bumps only its own third digit,
-so a control-plane change edits the four `*-ControlPlane.sql` scripts (PostgreSQL, SQL Server, MySQL, SQLite) plus `CONTROLPLANE_TARGET_VERSION` in
-`apply-schema.sh` (and `SqliteControlPlaneSchema.TargetVersion` and the Admin tool's `SqliteSchemaGate.TargetVersion`, which tests tie to it), and a
-telemetry change edits the four `*-Telemetry.sql` scripts plus `TELEMETRY_TARGET_VERSION`, in one commit. There are no migration scripts: the scripts
-create a fresh database, **except the SQLite control plane**, which has forward-only migrations: that same control-plane change also adds
-`schema/SQLite-ControlPlane-Migrations/<from>-to-<to>.sql` (the previous create script goes to
-`tests/Keryhe.Telemetry.IntegrationTests/SqliteSchemas/<from>.sql` so a test can compare fresh with migrated), and the API host applies it at startup
-(see "SQLite control plane notes"). `apply-schema.sh` only skips a component when its target version row is already recorded and never migrates. No foreign key crosses the two components
-(`resources.tenant_id` is a plain column), so on a shared database either script may be applied first; apply
-the control plane first, since a running collector needs keys before it accepts data.
-
-There is one telemetry script per supported provider, all producing the same logical
-table/column set: `schema/PostgreSQL-Telemetry.sql`, `schema/SqlServer-Telemetry.sql`,
-`schema/MySQL-Telemetry.sql` and `schema/ClickHouse-Telemetry.sql`
-(columnar MergeTree family; see the ClickHouse notes below), and one control-plane script for each of the
-three relational providers (`schema/<Provider>-ControlPlane.sql`). The collector and the API always run as two
-hosts; development runs both.
-
-`tests/Keryhe.Telemetry.IntegrationTests` (xUnit) runs every provider's real
-`Add<Provider>CollectorServices`/`Add<Provider>ApiServices` and
-`Add<Provider>ControlPlane{Collector,Api}Services` registrations against real
-Testcontainers-managed databases, applying the actual `schema/*.sql` scripts and seeding through
-`ITelemetryBulkWriter` (not `Keryhe.Telemetry.TestDataGenerator`, whose OTLP/gRPC-based data is
-time-dependent and not hand-computable). Requires
-Docker. The container startup, schema application and tenant/API-key seeding these fixtures use
-live in `tests/Keryhe.Telemetry.TestInfrastructure` (one `ProviderContainer` per provider, plus
-`TenantSeeder` for N tenants), which the stress harness (below) shares;
-it also offers opt-in per-provider diagnostics and CPU/memory
-limits (and an optional `CpusetCpus` pin) via `ContainerOptions`, which the integration fixtures leave off.
-Each container exposes `ControlPlaneConnectionString`/`ControlPlaneProviderName`: the relational ones apply both
-scripts to their one `telemetry` database, and `ClickHouseProviderContainer` composes a control-plane-only
-`PostgreSqlProviderContainer` (so a ClickHouse-only test run starts PostgreSQL too); `ParquetProviderContainer`'s control plane is a **SQLite file by
-default** (`SqliteControlPlane`, applied through `SqliteControlPlaneSchema`, so `--filter Provider=Parquet` and `Provider=Sqlite` need no Docker at all;
-`ParquetControlPlane.PostgreSql` keeps the PostgreSQL option), and `ProviderContainer.UseSqliteControlPlane(dir)` moves any provider's control plane
-to a SQLite file (what the stress harness's `--control-plane sqlite` does); the diagnostics and limits `ContainerOptions` apply to the ClickHouse container only.
-
-Beyond the read-path tests, the suite covers per-provider retention (`RetentionTestsBase`: 200- and
-100-day-old rows, an hour either side of the cutoff, current — ClickHouse drops whole days so its "hour
-before the cutoff" row is not asserted (its test maps the base's table and column names to the ClickHouse ones); plus a tenant with data but no `tenants` row, which must still expire),
-the control-plane repositories (`ControlPlaneTestsBase`: alert-rule CRUD, atomic `TryClaimFireAsync`, tenant catalog,
-retention settings, key touch; run per control-plane provider, for ClickHouse on its PostgreSQL control plane, and for SQLite on the Parquet fixture's
-file as `SqliteControlPlaneTests`, beside `SqliteSchemaTests`/`SqliteMigrationTests`/`SqliteScriptTests`/`SqliteAdminTests`, all `Provider=Sqlite`),
-the trace-list anchor semantics
-(`TracePhase3TestsBase`), `GET /api/capabilities`' shape, SQL Server's `READ_COMMITTED_SNAPSHOT` and
-id-parameter plan (no `CONVERT_IMPLICIT`), and PostgreSQL's index-not-seq-scan plan, each
-negative-controlled.
+### Tests
 
 ```bash
-# All five providers (one xUnit collection fixture per provider, containers started once per run)
-dotnet test tests/Keryhe.Telemetry.IntegrationTests
-
-# One provider only (Provider trait: PostgreSQL | SqlServer | MySql | ClickHouse | Parquet | Sqlite)
-dotnet test tests/Keryhe.Telemetry.IntegrationTests --filter Provider=SqlServer
-# Parquet (control plane in a SQLite file) and Sqlite need no Docker at all
-dotnet test tests/Keryhe.Telemetry.IntegrationTests --filter "Provider=Parquet|Provider=Sqlite"
+dotnet test tests/Keryhe.Telemetry.IntegrationTests                                     # every provider (Docker)
+dotnet test tests/Keryhe.Telemetry.IntegrationTests --filter Provider=SqlServer        # PostgreSQL|SqlServer|MySql|ClickHouse|Parquet|Sqlite
+dotnet test tests/Keryhe.Telemetry.IntegrationTests --filter "Provider=Parquet|Provider=Sqlite"   # no Docker needed
+dotnet test tests/Keryhe.Telemetry.IntegrationTests --filter Suite=ApiHttp             # also Suite=CollectorAuth; in-process, no Docker
+dotnet test tests/Keryhe.Telemetry.IntegrationTests --filter "FullyQualifiedName~SlicedList"   # a single test
+dotnet test tests/Keryhe.Telemetry.Parquet.Tests                                       # Parquet unit suite, no Docker
+dotnet test tests/Keryhe.Telemetry.TestDataGenerator.Tests                             # run after touching a generator sink
 ```
 
-The Angular project has `npm test` (Karma/Jasmine) but no meaningful tests are set up.
+- Integration tests run the real `Add<Provider>…Services` registrations against Testcontainers databases with the real `schema/*.sql`,
+  seeded through `ITelemetryBulkWriter` (not the generator, whose data is time-dependent). Container start, schema and tenant/key
+  seeding live in `tests/Keryhe.Telemetry.TestInfrastructure` (one `ProviderContainer` per provider, `TenantSeeder`), shared with the
+  stress harness. ClickHouse's container composes a PostgreSQL control plane; Parquet's control plane is a SQLite file
+  (`ProviderContainer.UseSqliteControlPlane(dir)` moves any provider's there).
+- Behaviour shared by all providers is a `*TestsBase` with one subclass per provider (retention, control plane, trace anchors, rollups,
+  timeouts, export…). Several tests are negative-controlled; keep that when changing them.
+- The Angular project has `npm test` (Karma) but no meaningful tests.
+- **Opt-in lab benchmarks** (no-ops unless their env var is set): `TraceQueryBench` (`TRACE_BENCH_OUT=<file>`, `TRACE_BENCH_SQL=<file>` for raw
+  SQL variants) and `RollupQueryBench` (`ROLLUP_BENCH_OUT`). Run **one provider at a time** (xUnit runs provider collections in parallel):
+  `TRACE_BENCH_OUT=/tmp/b.txt dotnet test tests/Keryhe.Telemetry.IntegrationTests --no-build --filter "Provider=PostgreSQL&FullyQualifiedName~TraceQueryBench"`.
+- **Stress harness** (`tests/Keryhe.Telemetry.StressTests`, manual, never in `dotnet test`): `dotnet run --project tests/Keryhe.Telemetry.StressTests -- run --provider <p|all> --profile <smoke|ramp|ramp-write-only|…|file.json>`;
+  `report --in stress-results/<run>` rebuilds a report. Details in [docs/STRESS-TESTS.md](docs/STRESS-TESTS.md). It reuses the
+  Collector's generated gRPC client stubs, which is why the three `*_service.proto` entries are `GrpcServices="Both"`. The write path it
+  measures is `IngestionMetrics` (`commit_lag` is the read-independent health signal).
 
-### Stress tests
+## Schema versioning
 
-`tests/Keryhe.Telemetry.StressTests` is a manual, Docker-based harness (never part of `dotnet test`) that ingests OTLP load into each provider (collector + API
-hosts, the split topology) while headless Chromium walks the UI, then reports write/read latency, locking, resource use, slowest SQL and a data correctness check as
-`result.json`, `report.html` and (for a matrix) `comparison.html`. Its README covers prerequisites, profiles, ramp criteria and how to read the report;
-It reuses the Collector's generated gRPC stubs, which is why the three `*_service.proto` entries in the
-Collector csproj are `GrpcServices="Both"`.
+Two components, `control-plane` and `telemetry`, each at 4.0.1 with its own version table. A change bumps only its component's third digit,
+in one commit:
+- **Control plane:** the four `*-ControlPlane.sql` scripts (PostgreSQL, SQL Server, MySQL, SQLite), `CONTROLPLANE_TARGET_VERSION` in
+  `apply-schema.sh`, `SqliteControlPlaneSchema.TargetVersion` and the Admin tool's `SqliteSchemaGate.TargetVersion`, **plus** a SQLite migration
+  `schema/SQLite-ControlPlane-Migrations/<from>-to-<to>.sql` (plain DDL/DML, no transaction/pragma/version insert) and a copy of the previous
+  create script in `tests/Keryhe.Telemetry.IntegrationTests/SqliteSchemas/<from>.sql`.
+- **Telemetry:** the four `*-Telemetry.sql` scripts and `TELEMETRY_TARGET_VERSION`.
 
-```bash
-# One-time: fetch Chromium for the browser tour
-dotnet run --project tests/Keryhe.Telemetry.StressTests -- playwright-install
-
-# Run scenarios (provider/topology/profile each take a value or "all"; runs sequentially)
-dotnet run --project tests/Keryhe.Telemetry.StressTests -- run --provider PostgreSQL --topology split --profile smoke
-dotnet run --project tests/Keryhe.Telemetry.StressTests -- run --provider all --topology all --profile smoke
-dotnet run --project tests/Keryhe.Telemetry.StressTests -- run --provider SqlServer --scenario ramp
-# The provider's write ceiling with nothing reading (no browsers, no marker probes; stops on commit lag,
-# gate wait, drops and errors). Run it next to "ramp" on one commit: the difference is what reads cost writes.
-dotnet run --project tests/Keryhe.Telemetry.StressTests -- run --provider SqlServer --topology split --profile ramp-write-only
-
-# Rebuild the report from a finished run (output is in the gitignored stress-results/)
-dotnet run --project tests/Keryhe.Telemetry.StressTests -- report --in stress-results/<timestamp>
-```
-
-`--seed-days <n>` (1-60) with `--seed-spans-per-day <n>` sends backdated history through the real OTLP path before the warm-up (so the spans table
-holds many ClickHouse partitions) plus three large traces (1,000/5,000/20,000 spans) for the first tenant, ledgers them as current
-(the correctness check still balances), tags the profile name (`...-seed14d`), and after quiesce probes trace detail for them with and without the
-`?start=&end=` hint (the report's "History seed" section). A run with history is not comparable with one without. A database that stops answering under
-overload (ClickHouse sustained about 83,000 records/s write-only and 42,700 with the UI reading on the reference machine) is recorded as a `DatabaseOutage` finding
-(`docker inspect`: status, exit code, OOM-killed) and the steps that need it are skipped; the scenario still ends `error: none`. Removing the database
-container at the end is logged, not fatal. Any other `OperationCanceledException` is reported with its exception, never as "Cancelled." (that is Ctrl-C only).
-
-The write path it measures is instrumented on `IngestionMetrics` (see "Write path decoupling" below), including `commit_lag` (enqueue to commit), the
-signal a write-only ramp stops on because it does not depend on any read query; `RetentionWorker`'s "Retention sweep complete" log
-line carries the sweep's elapsed milliseconds for the same reason. The report lists every API route's server-side latency apart from the write
-instruments, and the comparison page pairs each write-only ramp with its full ramp (the isolation number). The correctness ledger
-counts a re-delivered span twice, since spans are plain appends.
-`--control-plane <postgresql|sqlite>` picks the control plane's database: the default is a SQLite file in the scenario folder for Parquet (no container),
-a PostgreSQL container for ClickHouse and the provider's own database for the relational ones; `sqlite` works for every provider. A choice that moves a
-provider off its default tags the scenario (`-cpsqlite`, `-cppostgresql`), and every `scenario.json` records `controlPlane` (the report prints it and
-the read/write isolation pairing requires equal control planes); Parquet results recorded before this option ran on PostgreSQL and carry no such field.
-`--db-cpuset <cpus>` pins the database container to CPUs of the Docker VM and the report says what the database shared CPUs with; pointing the
-harness at a database on another machine is not supported yet.
-
-### Query benchmark (lab)
-
-`tests/Keryhe.Telemetry.IntegrationTests/Tests/TraceQueryBench.cs` is an opt-in benchmark (a no-op unless
-`TRACE_BENCH_OUT` is set) that seeds a stress-harness-sized volume (default 60,000 traces of ~10 spans over six hours;
-`TRACE_BENCH_TRACES`) into each provider's container and times the repository's real trace queries (first/next
-page, errors, slow, search, operation, samples, detail with and without the start hint) to one table. It is for attributing
-a query change quickly; the stress harness remains the measure of record because it carries concurrent ingest and reads.
-**Run providers one at a time** (xUnit starts every provider's collection in parallel, which contaminates the timings):
-`TRACE_BENCH_OUT=/tmp/b.txt TRACE_BENCH_LABEL=x dotnet test tests/Keryhe.Telemetry.IntegrationTests --no-build --filter "Provider=PostgreSQL&FullyQualifiedName~TraceQueryBench"`,
-once per provider. `TRACE_BENCH_SQL=<file>` additionally times raw SQL variants (separated by `-- ### name`) over the same data.
-
-### Test data generator
-
-`src/Keryhe.Telemetry.TestDataGenerator` simulates a small e-commerce system (web-frontend → api-gateway →
-user/catalog/cart/order services → inventory/payment, with Postgres, Redis, a message queue, Stripe and an
-email provider behind them) for each configured tenant, and sends it to the collector. The shape worth knowing before touching it:
-
-- **One simulation core, two sinks.** `TenantSimulator` produces a neutral model (`Model/SimModel.cs`: span
-  trees with their logs and measurements attached, background logs, periodic samples) for any stretch of
-  *virtual* time. Every random decision is seeded from (seed, tenant, time), so the same range always gives
-  the same telemetry however it is chunked. Flows (`Flows/Journeys.cs`) build spans through `SpanScope`, whose
-  cursor makes durations nest by construction and propagates failures up the call chain.
-- **Backfill is hand-built OTLP (`Sinks/OtlpSink`).** The SDK cannot backdate logs (stamped at emit) or metrics
-  (stamped at export, cumulative from process start), so history goes straight to the Collector's generated
-  gRPC client stubs, with cumulative metrics from `MetricAggregator`, retry/backoff on backpressure and one
-  chunk (default 60 s) per metric interval. 24 h at the default volume takes a few minutes.
-- **Live is the real SDK (`Sinks/SdkSink`).** One tracer/meter/logger provider set per pod, authenticated as the
-  tenant. Spans are started with explicit start/end times; logs and measurements are recorded while their span is
-  the current `Activity`, which is how the SDK attaches trace ids and exemplars. A processor re-stamps each log
-  record with the simulated time. Live emission trails the clock by `LiveLagSeconds` so a request has finished.
-  A provider listens by source/meter *name*, so scope names are per pod and tenant (`<pod name>`), not a library name.
-- **Tenants and incidents.** `Generator:Tenants` (name, scale, API key); the same topology at each tenant's own
-  traffic level. `Generator:Incidents` are recurring daily windows in UTC (latency multiplier, extra error
-  rate, optional version change, which replaces the service's pods like a rollout and restores them on rollback).
-  Traffic follows a daily curve (peak 20:00 UTC), a weekend lift and per-minute bursts.
-- **Keys.** The generator does not create tenants or keys; they must exist (`api_keys.key_hash` is the
-  lowercase-hex SHA-256 of the bearer token). `Validate()` fails fast naming the missing user-secret.
-- **Guard rails.** `tests/Keryhe.Telemetry.TestDataGenerator.Tests` checks the simulation invariants (trees nest, a
-  failed child fails its parent, consumer traces link to producers, logs belong to their span) and runs the same
-  chunks through both sinks into an in-process fake collector, asserting the two look alike (spans, resources,
-  logs, metric names/units/types/attributes, exemplars). Change a sink and run them.
-- Re-running a backfill over a window already ingested stores those spans a second time (spans are plain appends,
-  and the simulation is deterministic, so the ids repeat). Truncate the hot tables first (leave the
-  reference tables alone: the host's `ResourceScopeCache` would then point at rows that no longer exist).
-
-### API base path, routes and authorization
-
-`Keryhe.Telemetry.Api` is meant to be mounted inside a consumer's host
-(the full consumer setup is its README). The shape worth knowing:
-
-- **Base path.** `Telemetry:Api:BasePath` (`TelemetryApiOptions`, default `/api`; `/`/empty rejected at startup)
-  prefixes every route. Controllers declare only their own segment (`[Route("traces")]`); `TelemetryApiConvention`
-  (an `IApplicationModelConvention`, this assembly's controllers only) adds the base path, plus
-  `tenants/{tenantId:long:min(1)}` for `[TenantScoped]` controllers (`Traces`, `Logs`, `Metrics`, `Resources`,
-  `Alerts`; `Capabilities`, `Tenants`, `Settings` are global) and the authorization filter.
-  `MapKeryheTelemetryApi()` (in place of `MapControllers()`) also maps `{base}/{**rest}` to a JSON 404 so an unknown API
-  path is not the SPA shell. The tenant is the route's `tenantId`.
-- **Authorization** (`Telemetry:Api:Authorization`, off by default). `TelemetryAuthorizationFilter` calls
-  `IAuthorizationService` with `TelemetryOperationRequirement` (each action carries exactly one
-  `[TelemetryOperation]`: Read/Export/ManageAlerts/ManageSettings, never inferred from the HTTP method; a test
-  enumerates every action) and, on tenant routes, `TenantAccessRequirement`, resource `TelemetryResource(tenantId)`.
-  Built-in handlers: `PolicyMappedOperationHandler` (operation -> a host-registered policy by name; Export falls back
-  to Read, ManageAlerts/ManageSettings to Admin, Read/Admin to the default policy) and
-  `ClaimMappedTenantAccessHandler` (`TenantMappings`: claim -> tenant names/ids/`"*"`, names resolved through
-  `ITenantCatalogRepository`, cached 30 s). A consumer adds ordinary handlers (`context.Fail()` narrows). 401 when
-  unauthenticated, 403 otherwise (a tenant refusal adds `X-Telemetry-Denied: tenant`, which the UI's
-  "no access to this tenant" keys on; an operation refusal does not); a `POST/PUT/DELETE` without a *bearer* token
-  needs `X-Telemetry-Client: 1` (CSRF; Basic/Negotiate do not exempt, browsers send those unprompted). A policy that
-  names `AuthenticationSchemes` is authenticated through `IPolicyEvaluator` first (`TelemetryPolicyResolver` maps the
-  operation to its policy), as the ASP.NET authorization middleware does.
-  `TelemetryApiStartupValidator` fails startup on undefined policies, no authentication scheme, malformed mappings, or
-  nothing able to grant tenant access, and warns when unauthenticated outside Development / Admin unset.
-  `AlertService.EvaluateAllAsync` sets `ITenantContext` directly, outside any request, so the filter never applies to it.
-- **The in-repo hosts are development examples** with no sign-in: they call `UseAuthentication()`/`UseAuthorization()`
-  (no-ops without a scheme) and `MapKeryheTelemetryApi()` and run with authorization disabled. The HTTP behaviour is tested
-  in-process by `tests/Keryhe.Telemetry.IntegrationTests/ApiHttp` (`--filter Suite=ApiHttp`; `TestServer`, fake
-  repositories, a header-driven test scheme, no Docker). A route whose repository is not faked answers 500 once it
-  clears authorization, which those tests read as "authorized".
-- **The UI** follows the API: with `TelemetryUi:ApiBasePath` unset it takes `Telemetry:Api:BasePath`. Its pages are at
-  `/t/:tenantId/...` (`tenantRouteGuard` sets `TenantService.routeTenantId` before the page exists; localStorage keeps
-  only "last used", used by the redirects of tenant-less URLs); API services build URLs with
-  `tenantApiUrl(apiUrl, tenantId)`. `TelemetryUi:Auth` (`cookie` default, or `oidc` via `angular-auth-oidc-client`,
-  imported on demand) reaches the SPA in `config.json`; `authInterceptor` (API URLs only) adds `X-Telemetry-Client`,
-  the bearer token or credentials, handles 401 (sign in) and 403 on a tenant route ("no access to this tenant").
-  `downloadBlob` stays a fetch so that interceptor runs for exports.
-
-### Default ports
-
-- gRPC ingestion (`Keryhe.Telemetry.Collector.Server`): `http://localhost:5117` (h2c), `https://localhost:7057` (HTTP/2)
-- OTLP/HTTP (same host, `Collector.Server`): `POST /v1/traces|logs|metrics` on the TLS port 7057 (`Https` is `Http1AndHttp2`, so ALPN serves gRPC on h2 and OTLP/HTTP on HTTP/1.1); in Development a plaintext HTTP/1.1 endpoint `OtlpHttp` at `http://localhost:5118` (h2c and HTTP/1.1 cannot share a plaintext port)
-- REST API (`Keryhe.Telemetry.Api.Server`): `http://localhost:5188`, `https://localhost:7105` — also serves the UI. As shipped its `appsettings.json` sets `Telemetry:Api:BasePath=/telemetry/api` and `TelemetryUi:BasePath=/telemetry` (the options' defaults are `/api` and `/`), so the UI is at `http://localhost:5188/telemetry`
-- Collector management endpoint (health probes, plain HTTP/1.1, loopback): `http://127.0.0.1:5119` (`/healthz/live`, `/healthz/ready`)
-- Angular dev server (`src/telemetry-client`): `http://localhost:4201` — **development only**
-
-`Collector.Server` configures its endpoints as named Kestrel endpoints, not `launchSettings.json`'s
-`applicationUrl` (which `Kestrel:Endpoints` overrides, so it would be dead): `appsettings.json` has `Https`
-(7057, `Http1AndHttp2` so ALPN serves gRPC and OTLP/HTTP on one port, no certificate: the Collector README shows the `Certificate` override), and
-`appsettings.Development.json` adds `Http` (`http://localhost:5117`, h2c/`Http2`), the plaintext endpoint the TestDataGenerator and stress harness
-use, and `OtlpHttp` (`http://localhost:5118`, `Http1`) for plaintext OTLP/HTTP. The two
-files merge by endpoint name. **Do not set `ASPNETCORE_URLS`** on it: it overrides `Kestrel:Endpoints` wholesale and
-would collapse the per-endpoint `Protocols`, breaking h2c gRPC on 5117 (and outside Development a plaintext address
-fails startup anyway, see "Collector authentication"). The collector also omits `UseHttpsRedirection()`.
-
-The API location is **runtime**, not build-time, configuration: the client fetches
-`GET /config.json` before it bootstraps (`src/telemetry-client/src/app/core/config/load-config.ts`)
-and reads `apiUrl` from it; nothing about the API location is baked into the compiled bundle (there is
-no `environments/` folder or `fileReplacements` swap). This is what lets one published bundle work regardless
-of where a given host mounts the API, which the standalone `Keryhe.Telemetry.Ui` package (see below) needs,
-since a consumer bundling it can't rebuild it to point at their own API path. The Angular dev server
-(`npm start`) proxies `/api` to `https://localhost:7105` (`src/telemetry-client/proxy.conf.json`), and its
-`public/config.json` says `/api`, so for UI development run the API host with `Telemetry:Api:BasePath=/api`
-(the shipped `appsettings.json` uses `/telemetry/api`). That same-origin shape means local development needs
-no CORS; the API host's CORS policy matters only for a UI hosted on a different origin than its API.
-
-### UI hosting
-
-The Angular UI ships as `Keryhe.Telemetry.Ui`, a Razor class library packaging the compiled SPA
-as static web assets — the same NuGet-package story as the other class libraries, so a consumer
-building their own host from the `Keryhe.Telemetry.Api`/`.Collector` packages gets the UI too,
-without cloning `src/telemetry-client` or installing Node. Its own csproj
-builds `src/telemetry-client` (`npm ci`/`npm run build`) and stages `dist/telemetry-client/browser`
-into *its own* `wwwroot` — incrementally (a stamp file plus MSBuild `Inputs`/`Outputs` skip the
-npm build once it's already current) and gracefully (a missing Node toolchain warns and packages
-an empty UI rather than failing the solution build). `Keryhe.Telemetry.Api.Server` references it via a
-plain `ProjectReference`; nothing else needs to know it exists.
-
-The package has the same `Add*`/`Use*` split as the API and collector sides.
-`builder.Services.AddKeryheTelemetryUi(configuration, configure?)` binds `TelemetryUiOptions` from
-the **`TelemetryUi`** configuration section (the `AddRetention`/`AddAlerting` shape) and registers
-the `TelemetryUiShell` singleton; it is **required** — `UseKeryheTelemetryUi()` throws a
-fail-fast `InvalidOperationException` naming it otherwise. That guard is deliberately on the shell
-singleton rather than on `IOptions<TelemetryUiOptions>`: the options open generic is registered by
-the host builder regardless, so guarding on it would resolve successfully and silently hand back
-defaults. Config binding is what lets a consumer relocate or rebrand a *prebuilt* bundle without
-recompiling, which is the whole premise of shipping it prebuilt.
-
-`app.UseKeryheTelemetryUi()` serves the packaged bundle at `TelemetryUiOptions.BasePath` — `/` by
-default — rather than the Razor class library default of `/_content/Keryhe.Telemetry.Ui/`, and
-answers `GET {BasePath}/config.json` with the host's configured options: API location plus
-`BrandName`/`BrandTagline`, the consumer-facing product name and tagline shown in the header bar
-and, via the Angular client's `BrandedTitleStrategy`, in every route's browser tab title. All
-default to this UI's own out-of-the-box branding ("Sentinel" / "OpenTelemetry Visualization"), so a
-host that sets nothing sees exactly what it always has. `config.json` also carries the optional
-`TelemetryUi:HealthThresholds` overrides for the Dashboard's error-rate bands, only the keys
-that are set (the defaults live in `health-thresholds.ts`, merged over in `main.ts` by
-`resolveHealthThresholds`; `TelemetryUiOptions.Validate()` fails startup on a bad value). It must
-run before authentication,
-so UI asset requests — `config.json` included — are public, and it also
-negotiates `.br`/`.gz` variants that the SDK generates automatically at the *host's* publish
-(`Keryhe.Telemetry.Ui` itself has no compressed variants — `MapStaticAssets()` would give that
-negotiation for free but can't be re-rooted for a referenced class library's assets, so
-`TelemetryUiApplicationBuilderExtensions` reimplements just that piece).
-
-**`BasePath` and the in-memory shell (`TelemetryUiShell`).** The built `index.html` carries
-`<base href="/">`, and *every* asset reference in it, the client's own relative `config.json` fetch
-(`load-config.ts`) and its router's `PathLocationStrategy` all resolve against that one attribute —
-so serving the file as-is pins the whole UI to the origin root. `BasePath` is therefore implemented
-by rewriting that attribute once at startup and serving the result **from memory**, never through
-`UseStaticFiles`/`MapFallbackToFile`, which would hand back the unpatched packaged file. Consequences
-worth knowing before touching this code:
-
-- `{BasePath}`, `{BasePath}/` **and `{BasePath}/index.html`** are all intercepted by the shell
-  middleware. The third is not optional — left to `UseStaticFiles` it would serve the unpatched
-  file. Handling it there also means the compression-negotiation middleware never sees `index.html`,
-  so it needs no special case for the one file whose `.br` sibling must not be served.
-- Serving from memory means the shell owns what those middlewares gave for free: `Content-Type`,
-  `Content-Length` (**the encoded length** — setting the identity length on a compressed body is
-  `ERR_CONTENT_DECODING_FAILED` by another route), `Cache-Control: no-cache`, `Vary`, a **distinct
-  strong ETag per representation** (identity/`-br`/`-gz`), and `If-None-Match` → 304. The 304 branch
-  returns before any content header is written.
-- `MapKeryheTelemetryUiFallback()` is **scoped** to `{BasePath}/{*path:nonfile}` and must be
-  `MapFallback` specifically, whose `Order = int.MaxValue` is what keeps `api/*` and the gRPC routes
-  winning. It reads the effective base path back off the shell and throws if `UseKeryheTelemetryUi`
-  has not run, so mapping the two out of order fails loudly instead of registering deep links at the
-  wrong prefix. Unlike `MapFallbackToFile` it *does* negotiate compression, since
-  the shell is already held in all three representations.
-- `BasePath` is fixed at startup, not derived per request from `PathBase`. A reverse proxy must
-  therefore **forward** the prefix, not strip it, and a non-empty value means `GET /` returns 404.
-- `NormalizeBasePath` validates against `^(/[A-Za-z0-9._~-]+)+$` rather than only trimming: the
-  normalized value is concatenated into a route-pattern literal, where `{`/`}`/`?`/`#`/`%` would
-  produce a corrupt template.
-- A build with no Node toolchain packages no `index.html` at all (the csproj warns rather than
-  failing). `TelemetryUiShell.Content` is nullable for exactly that case and must degrade to a 404,
-  never an exception.
-
-**The host must still call `app.UseRouting()` explicitly, immediately after
-`UseKeryheTelemetryUi()`** — left to `WebApplication`'s own implicit insertion, it lands ahead of
-that method's middleware (since a `Map*` call exists later in every such host), so routing
-pre-selects an endpoint before the UI's own static-file middleware runs, and `UseStaticFiles`
-correctly defers to an already-selected endpoint rather than serving. The shell itself is not
-exposed to this (it is written from memory, ahead of routing, without consulting the selected
-endpoint), but every other asset is, and the implicit insertion also silently moves `UseCors` and
-`UseAuthentication`/`UseAuthorization` to the wrong side of routing.
-
-Because static web assets flow through a plain `ProjectReference` at *build* time, not only at
-publish, `dotnet run --project src/Keryhe.Telemetry.Api.Server` serves the UI too. The Angular dev
-server (`npm start`) is the tool for UI development (HMR); the served bundle is what a consumer following
-the README will actually run.
+Otherwise there are no migrations: the scripts create a fresh database. No foreign key or query crosses the two components
+(`resources.tenant_id` is a plain column). `ColumnLimitsTests` fails when a sized client-text column and `ColumnLimits` disagree.
 
 ## Architecture
 
-This is an **OpenTelemetry (OTLP) ingestion and visualization platform** — a self-hosted
-alternative to tools like Jaeger or Grafana Tempo. It receives telemetry via gRPC, stores it
-in a database (PostgreSQL, SQL Server, MySQL, or ClickHouse) or as Parquet files, and exposes it through a
-REST API consumed by an Angular single-page application.
-
-### Projects
-
-| Project | Role |
-|---------|------|
-| `Keryhe.Telemetry.Core` | Domain interfaces and models shared across projects, plus the provider-agnostic pieces in `Core/Data`: thin write repositories, ingestion channel + worker, caches, Dapper read repository bases, helpers. There is no separate `Data` project |
-| `Keryhe.Telemetry.PostgreSQL` | PostgreSQL provider implementation (Npgsql + Dapper): telemetry data and control plane |
-| `Keryhe.Telemetry.SqlServer` | SQL Server provider implementation (Microsoft.Data.SqlClient + Dapper): telemetry data and control plane |
-| `Keryhe.Telemetry.ClickHouse` | ClickHouse provider implementation (ClickHouse.Client bulk-copy writes + Dapper reads): telemetry data only, no control plane |
-| `Keryhe.Telemetry.MySql` | MySQL provider implementation (MySqlConnector + Dapper): telemetry data and control plane |
-| `Keryhe.Telemetry.Sqlite` | SQLite **control plane only** (Microsoft.Data.Sqlite + Dapper): a file on one machine, created and migrated by the API host; with Parquet it makes a deployment with no database server (see "SQLite control plane notes") |
-| `Keryhe.Telemetry.Parquet` | Parquet + DuckDB provider (telemetry data only): all three signals work: spans, logs and metric points with their derived tables (`trace_index`, both rollups, `metric_catalog`, `metric_series`) written as per-tenant-hour Parquet files with per-writer manifests, read by an in-process DuckDB; a compactor on the API host (lease, minor/major/day compaction, grace deletes), retention by day folder; selectable as `Database:Provider=Parquet` on both hosts |
-| `Keryhe.Telemetry.Collector` | OTLP gRPC services and HTTP endpoints, API-key authentication, OpenTelemetry proto files → generated stubs (class library) |
-| `Keryhe.Telemetry.Collector.Server` | Thin ASP.NET Core host that maps the gRPC services and runs the ingestion worker |
-| `Keryhe.Telemetry.Api` | REST API controllers, base-path routing, authorization, read-service wiring, alerting (`Api/Alerting`: evaluators, webhooks, `AlertEvaluationWorker`) and retention (`Api/Retention`) (class library) |
-| `Keryhe.Telemetry.Api.Server` | Thin ASP.NET Core host that composes the API + OpenAPI + CORS |
-| `Keryhe.Telemetry.Ui` | Prebuilt Angular UI, packaged as static web assets (Razor class library; no .razor/.cshtml) |
-| `Keryhe.Telemetry.Admin` | Console (Spectre.Console) admin tool for tenants and API keys (create with optional expiry, list, deactivate, delete); PostgreSQL, SqlServer, MySql and Sqlite, the control-plane providers (see "Admin tool") |
-| `Keryhe.Telemetry.TestDataGenerator` | Worker service that simulates a multi-tenant e-commerce system and emits it as OTLP: hand-built OTLP for backfill, the OpenTelemetry SDK for live (see "Test data generator") |
-| `src/telemetry-client` | Angular 20 UI source (Angular Material, ApexCharts, ngx-graph) — not part of the .sln; built by `Keryhe.Telemetry.Ui`, not by any host directly |
-| `tests/Keryhe.Telemetry.IntegrationTests`, `.TestInfrastructure`, `.StressTests`, `.TestDataGenerator.Tests` | Docker-backed per-provider integration tests, the shared container/seeding infrastructure, the manual stress harness, and the generator's simulation tests (see "Commands") |
-
-Data access is Dapper throughout; there is no EF Core and no `DbContext`.
-
-### Data Flow
+OTLP ingestion and visualization: a **collector host** receives OTLP (gRPC and HTTP), a **REST API host** serves queries and the Angular UI.
+They always run as **two separate processes** sharing only the databases (different auth, transport guards and Kestrel protocols; the
+PostgreSQL provider registers a process-wide `NpgsqlDataSource` per side that two registrations would overwrite).
 
 ```
-OpenTelemetry SDKs (any language)
-  → OTLP gRPC (port 5117) → Keryhe.Telemetry.Collector (LogService/TraceService/MetricService)
-  → thin write repos (Core/Data) enqueue → TelemetryIngestionChannel (gated on resident record/span count)
-  → TelemetryIngestionWorker (background) → ITelemetryBulkWriter (active provider) → DB
-  (auth: Authorization bearer key → IApiKeyLookup → control-plane DB)
-
-Angular UI (localhost:4201)
-  → REST (Keryhe.Telemetry.Api.Server, /api) → controllers → I*ReadRepository (active provider, Dapper) → DB
-  (alert rules, tenants and their retention windows: control-plane DB; the retention sweep: IRetentionSweeper → telemetry DB)
+SDKs → Collector (OTLP services → OtlpIngestors → write repos → TelemetryIngestionChannel, gated)
+     → TelemetryIngestionWorker (or ClickHouse/Parquet's own partitioned worker) → ITelemetryBulkWriter → telemetry DB
+       (auth: bearer key → ITenantResolver → IApiKeyLookup → control-plane DB)
+UI → API controllers → I*ReadRepository (active provider, Dapper) → telemetry DB; alert rules, tenants, retention → control-plane DB
 ```
 
-### The two composition roots
-
-Both hosts are thin `Program.cs` shells; the real wiring lives in the class libraries,
-behind two matching extension pairs:
-
-- **Write side** — `AddKeryheTelemetryCollector(configuration)` / `MapKeryheTelemetryCollector()`
-  (`Keryhe.Telemetry.Collector/TelemetryCollectorExtensions.cs`): gRPC, the ingestion channel,
-  `ResourceScopeCache`, the `TelemetryIngestionWorker`, and the write repositories; then maps the
-  three gRPC services. It registers no database provider itself.
-- **Read side** — `AddKeryheTelemetryApi(configuration)` / `UseKeryheTelemetryApi()`
-  (`Keryhe.Telemetry.Api/TelemetryApiExtensions.cs`): controllers (via an MVC application part,
-  since they live in the class library) and the tenant context. It likewise registers no
-  database provider itself.
-
-Neither class library references any provider project — each host separately calls the active
-provider's own `Add<Provider>CollectorServices`/`Add<Provider>ApiServices` and the control-plane
-provider's `Add<Provider>ControlPlaneCollectorServices`/`Add<Provider>ControlPlaneApiServices` (see
-"Provider abstraction" below), which is what lets a consumer depend on only the provider packages they
-actually use instead of all four (a ClickHouse consumer references one relational package as well).
-
-`Keryhe.Telemetry.Collector.Server` calls the first pair (plus its own provider registration) and
-`Keryhe.Telemetry.Api.Server` the second (plus its own, `AddAlerting`, `AddRetention` and the SPA). The two never
-share a process: the collector's per-endpoint authentication, plaintext-transport guard and Kestrel protocol
-requirements differ from the API's, and the PostgreSQL provider registers a process-wide `NpgsqlDataSource`
-per side that two registrations in one container would silently overwrite.
-
-### Provider abstraction (the central pattern)
-
-Two providers are selected at runtime, both required, on both hosts:
-
-- **`Database:Provider`** (`"PostgreSQL"`, `"SqlServer"`, `"ClickHouse"`, `"MySql"` or `"Parquet"`) for the telemetry data. Each
-  provider project exposes `ServiceCollectionExtensions` with `Add<Provider>CollectorServices` /
-  `Add<Provider>ApiServices` (the bulk writer, the read repositories, the rollup and touch stores, and on the API side
-  `IRetentionSweeper`), and the hosts `switch` on the config key to call the right one.
-- **`ControlPlane:Provider`** (`"PostgreSQL"`, `"SqlServer"`, `"MySql"`, or `"Sqlite"`; never ClickHouse or Parquet) for the control plane:
-  `tenants` (which carries each tenant's retention windows), `api_keys`, `alert_rules`, `alert_events`. The same three provider projects (and `Keryhe.Telemetry.Sqlite`, which has no telemetry side) expose
-  `Add<Provider>ControlPlaneCollectorServices` (`IApiKeyLookup`, `IApiKeyTouchStore`) and
-  `Add<Provider>ControlPlaneApiServices` (`IAlertRuleRepository`, `ITenantCatalogRepository`,
-  `IRetentionSettingsRepository`), both against **`ConnectionStrings:ControlPlane`**. They are a pair because the
-  alert-rule repositories need `ITenantContext`, which only the API registers (a single method would fail the collector's
-  Development build-time DI validation). Each reads the connection string through
-  `ControlPlaneConnection.FromConfiguration` at registration, so a missing value fails startup naming the key, and the
-  repositories take it as a singleton rather than reading `IConfiguration` themselves. Core's
-  `ControlPlaneRepositoryBase` is their small shared base (connection + Dapper column mapping), deliberately apart from
-  `DapperReadRepository`'s telemetry-read machinery.
-
-An unknown or missing value for either key, or a missing `ConnectionStrings:ControlPlane`, throws at startup with the key
-named; there is no fallback from `ControlPlane` to `Collector`/`Api`. On the relational providers the control-plane string
-normally points at the same database as the data strings; ClickHouse deployments point it at a separate PostgreSQL,
-SQL Server or MySQL database, and a Parquet deployment can point it at a SQLite file. No query joins across the boundary: alert evaluation reads rules, then calls the data
-repositories separately.
-
-**PostgreSQL connection pools.** The PostgreSQL provider registers an unkeyed singleton `NpgsqlDataSource` for the
-telemetry side of each host and a **keyed** one (`PostgreSqlControlPlane.ServiceKey`, `"ControlPlane"`) for the control
-plane, so PostgreSQL can be both providers (or just the control plane beside ClickHouse) in one container. The
-control-plane classes (`TenantResolver`, `PostgreSqlApiKeyTouchStore`, `PostgreSqlAlertRuleRepository`,
-`PostgreSqlTenantCatalogRepository`, `PostgreSqlRetentionSettingsRepository`) take it through `[FromKeyedServices]`.
-
-**ClickHouse provider notes** (ClickHouse 25.8). ClickHouse is columnar/OLAP, so the provider diverges from the
-relational four in deliberate ways (all confined to the provider; Core interfaces and API responses are unchanged):
-- **One row carries everything.** No reference tables, no surrogate ids: the resource and scope attributes are copied onto
-  every span, log record and metric point (`ResourceScopeCache` is not used). Attributes are
-  `Map(LowCardinality(String), String)`; a value's type is not kept (`ClickHouseAttributes`), so a numeric
-  comparison casts. Trace ids are `UUID` and span ids `UInt64`, converted to hex only at the edges (`ClickHouseIds`;
-  never `hex(trace_id)` in SQL). `DateTime64(9)` is stored at the driver's 100 ns; `duration_ns` is exact.
-- **Tables** (all `PARTITION BY toDate(time)`): `spans`, `log_records`, `gauge_points`, `sum_points`, `histogram_points`,
-  `exp_histogram_points`, `summary_points`; derived `trace_index`, `request_rollup_minute`, `log_rollup_minute`,
-  `metric_catalog`, `metric_series`. Spans sort `(tenant_id, service_name, start_time)`; logs
-  `(tenant_id, toStartOfFiveMinutes(timestamp), service_name, timestamp)`; points
-  `(..., toStartOfHour(time), series_id, time)`. **A log time range must also carry a `toStartOfFiveMinutes(timestamp)`
-  bound and a metric time range a `toStartOfHour(time)` bound, or the sort key does not prune** (measured: a time bound
-  alone read the whole table); lists read in widening time slices. The tests prove pruning with `system.query_log`
-  `read_rows`.
-- **Plain `MergeTree` appends.** Each INSERT statement carries an `insert_deduplication_token` (reused on retry, a new one
-  for a re-batched set) so a retried flush is not stored twice; a client re-sending an export is stored twice and reads
-  tolerate it. No `FINAL`, no `LIMIT 1 BY`, no materialized views on any insert path.
-- **Derived data is written by the collector** after the raw insert succeeds (`ClickHouseBulkWriter.Derived.cs`): the
-  rollups, `trace_index`, `metric_catalog` and `metric_series`. If a derived insert fails the raw rows stay and the cards,
-  charts and catalog under-count that slice (`derived_rows_dropped`). A metric's id is a hash of (tenant, service, name,
-  type), so a catalog "instance" is one service's metric, not a resource.
-- **Large flushes are split.** A raw-table insert of at least `ParallelFlushMinRows` (50,000) rows is cut at fixed row
-  boundaries into up to `MaxParallelInserts` (4) pieces of at least `InsertPieceRows` rows that insert concurrently, each under
-  its own dedup token (`{token}:{table}:{i}`; smaller batches stay one insert under `{token}:{table}`), and spans and logs are
-  built into rows on several threads at that size (metrics too, per chunk with merged catalog/series notes, and a metrics batch's five points-table inserts run together). A flush can therefore land partly within one table; a retry with the same
-  token stores each piece once. Profiling showed the driver's serialization, not the database, limits the collector.
-- **Ingestion** has its own worker (`ClickHouseIngestionWorker`, `Telemetry:ClickHouse:Ingestion`) in place of the shared
-  one: records are buffered per UTC day (current day, then late days with a longer linger), tokens survive retries, records
-  past the retention window are dropped at ingest (`RetentionWindowCache`), and shutdown drains.
-- **Reads** are ClickHouse-specific repositories (`ClickHouseTrace/Log/Metric/ResourceReadRepository`) implementing the Core
-  interfaces; the metric math is shared with the relational providers through Core's `MetricSeriesPipeline`. Free-text
-  search of only letters and digits is a whole-word `hasToken` match through a token index; anything else scans.
-- **Trace anchors** stay the earliest span in scope: a candidate per time slice is confirmed against `trace_index`'s
-  per-service minimum start.
-- **Retention is `ALTER TABLE ... DROP PARTITION ID`** for every fully expired day, lightweight `DELETE`s for tenants on a
-  shorter window, and a lightweight `DELETE` of `metric_series`/`metric_catalog` rows not written to within the metrics
-  window; see "Retention".
-- **No control plane.** ClickHouse holds telemetry only; tenants, API keys, alert rules and retention settings run on
-  PostgreSQL, SQL Server or MySQL (`ControlPlane:Provider`), so alert CRUD and `TryClaimFireAsync` are as atomic as
-  they are there.
-
-**Parquet provider notes** (operator guide: `src/Keryhe.Telemetry.Parquet/README.md`; no database
-server for telemetry). Modelled on ClickHouse (one row carries everything, the collector writes the derived data, own
-ingestion worker and read repositories behind unchanged Core interfaces), with file management in place of a server:
-- **Config.** `Database:Provider=Parquet` and `Telemetry:Parquet:RootPath` on both hosts (no `ConnectionStrings:Collector`/`:Api`); the control plane
-  runs on PostgreSQL, SQL Server or MySQL as for ClickHouse, or in a SQLite file (`ControlPlane:Provider=Sqlite`: Parquet plus SQLite has no database server). **The root must be on one machine's file system** (a local disk or a volume shared by
-  containers on one Linux host; a network share, and Docker Desktop's host bind mounts, gave stale manifests). `schema/apply-schema.sh telemetry parquet <root>` only creates the directory.
-- **Layout.** `<table>/tenant_id=<t>/date=<day>/hour=<HH>/` holds a collector's `part-<writer>-<seq>-<token>.parquet` files, its `_manifest.<writer>.json`
-  and the compactor's `_compacted.<gen>.json`; a merged day lives in `_day/`. A file is visible only once a manifest lists it, manifests are swapped by atomic
-  rename, and a reader's file set is the newest compacted generation plus each writer's files above its `through` (writers' manifests read first, then the
-  generation: the opposite order loses files). A batch's file name carries its deduplication token, so a retried flush is stored once.
-- **Types.** Timestamps are `BIGINT` `*_unix_nano`; a trace id is two `UBIGINT` columns `trace_hi`/`trace_lo` (DuckDB does not prune `UUID` statistics);
-  attributes are `MAP(VARCHAR, VARCHAR)` (values are text, as ClickHouse); the appender cannot write `MAP`/`STRUCT`, so they are staged as JSON and converted
-  with `json_transform` in the `COPY`.
-- **Reads** go through `ParquetQueryEngine`: a connection per statement group with `TEMP VIEW`s over the file lists the manifests resolve for the request's
-  tenant and time range (never a glob), so shared SQL (the rollup base) runs unchanged; `NamedParameterConnection` rewrites `@name` to DuckDB's `$name`.
-  At `Debug` the category `Keryhe.Telemetry.Parquet.ParquetQueryEngine` logs `parquet-sql ms= files= sql=` per statement, the stress harness's slowest-SQL source.
-- **Ingestion** is `PartitionedIngestionWorker` (Core, extracted from ClickHouse's worker) per tenant-hour buffers with a 5 s linger (50,000-record buffers); a crash loses the
-  buffer (no write-ahead log), shutdown drains. The ingestion gates must each hold at least `MaxBufferRecords` (startup warning).
-- **Compaction** runs on the API host under a lease (`ParquetCompactor`, `ParquetCompactionWorker`): minor (fold uncompacted writer files), hour and day
-  merges, superseded files deleted after `GraceSeconds`; a query or export running longer than the grace may fail on a deleted file.
-- **Retention** deletes day folders at once (see "Retention"); a read reaching back past the window can fail on a deleted file, anything inside it cannot.
-- **Tests.** `--filter Provider=Parquet` runs the shared bases against a temp root (and `ParquetCompacted*` with a forced compaction after every flush);
-  `tests/Keryhe.Telemetry.Parquet.Tests` is the no-Docker unit suite. `PoisonRecordTestsBase` is not run on Parquet (no column length limit).
-- **Stress harness.** `--provider Parquet` has no database container: `ParquetObserver` counts rows with DuckDB over the manifests, samples file counts instead
-  of locks, reads statement timings from the API host log, and reports no container stats (the hosts' process metrics carry resource use); the control plane
-  is a PostgreSQL container as for ClickHouse.
-
-**SQLite control plane notes** (`Keryhe.Telemetry.Sqlite`, operator guide: its README; control plane only, never a `Database:Provider`).
-`ControlPlane:Provider=Sqlite`, `ConnectionStrings:ControlPlane=Data Source=<absolute path>`; works with any telemetry provider and exists so a
-Parquet deployment needs no database server. The shape worth knowing:
-- **One machine, a local file system, one absolute path.** `SqliteControlPlaneConnection` (built once at registration; every repository and startup
-  service opens connections through it) refuses a relative path or `:memory:`, forces `Foreign Keys=True` and `Pooling=True`, defaults the busy wait
-  (`Default Timeout`) to 30 s, and takes the open mode from the caller, never the configured string (Microsoft.Data.Sqlite creates a missing file by
-  default; only the API's schema step may). WAL mode is stored in the file by the create script.
-- **The API host creates and migrates; the collector and Admin tool only check.** `SqliteControlPlaneSchema` (public: `TargetVersion`, `EnsureCurrentAsync`,
-  `CheckAsync`; the logic is in internal `SqliteSchemaRunner`/`SqliteSchemaDefinition`) holds the embedded `schema/SQLite-ControlPlane.sql` and the
-  embedded `schema/SQLite-ControlPlane-Migrations/*.sql`. `SqliteControlPlaneInitializer` (API, `IHostedLifecycleService.StartingAsync`, so before any
-  `BackgroundService`) calls `EnsureCurrentAsync` (or only `CheckAsync` with `Telemetry:ControlPlane:Sqlite:ApplySchema=false`);
-  `SqliteControlPlaneStartupCheck` (collector, before Kestrel binds) calls `CheckAsync` and throws when the file is missing or not exactly this build's
-  version. So upgrade the API host first. The recorded version is the highest row of `control_plane_schema_version` (the table is the upgrade history).
-- **Forward only.** No version row: run the full create script. Same version: nothing. Older: run the migration chain from the recorded version
-  (`<from>-to-<to>.sql`, each `<from>` once, `<to>` greater, no gap, none past the target; checked when the definition is built and before the file is
-  touched), after a `VACUUM INTO <file>.bak-<from>-<time>-<id>` backup; foreign keys off, `BEGIN IMMEDIATE`, re-read the version inside the lock (two API
-  processes starting together serialize), run each step and insert its version row, `PRAGMA foreign_key_check`, commit, foreign keys on. Any failure rolls
-  back and keeps the backup. Newer, or older with no chain: startup fails naming the versions. A migration script holds plain DDL/DML only (a test enforces
-  no `BEGIN`/`COMMIT`, `PRAGMA foreign_keys` or version insert). `apply-schema.sh controlplane sqlite <file>` creates a fresh file with the `sqlite3` CLI
-  and never migrates. There are no migrations yet: the mechanism is tested against test-only chains (`SqliteMigrationTests`), and `Fresh_equals_migrated`
-  compares a database built from `SqliteSchemas/<version>.sql` plus the chain with a fresh one once the first real migration exists.
-- **Dialect.** `INTEGER PRIMARY KEY AUTOINCREMENT` (SQLite reuses the highest rowid without it, and a reused tenant id would hand a deleted tenant's telemetry
-  to a new tenant), `STRICT` tables, `CHECK`s for the `VARCHAR(n)` lengths and `json_valid`, a partial index for enabled rules. Every timestamp is `TEXT` in UTC
-  in one layout (`SqliteTime.Format`, `yyyy-MM-dd HH:mm:ss.fffffff`; Microsoft.Data.Sqlite's own binding trims trailing zeros, which would break text
-  comparison), so the alert cooldown claim is one `UPDATE` comparing text; repositories bind timestamps through `ControlPlaneRepositoryBase.TimestampParam`
-  (a hook that is the identity on the relational providers). `RETURNING id` returns inserted ids. `SqliteScriptTests` holds the script to the PostgreSQL one
-  (tables, columns, nullability, limits, defaults, indexes) and the embedded copies to the files on disk.
-- **Collector retention cache.** `RetentionWindowCache` (ClickHouse/Parquet collectors) reads `tenants` from the control plane by connection type name; for
-  `Sqlite` it appends `Mode=ReadOnly` so it can never create a file.
-- **Native library.** Microsoft.Data.Sqlite 10.0.5 brings `SQLitePCLRaw.lib.e_sqlite3` 2.1.11, which NuGet flags (GHSA-2m69-gcr7-jv3q); the library and the Admin
-  tool reference 2.1.13 directly. Re-check when bumping.
-
-**Search and capabilities.** Free-text and `key:value` search is
-unindexed and time-window bounded on **every** provider: one predicate form per dialect (the
-`LIKE`/`ILIKE` text form and `LOWER(col ->> key)` / `JSON_VALUE` / `JSON_EXTRACT` /
-`JSONExtractRaw` attribute comparison, all case-insensitive), no GIN/trigram/skip indexes (ClickHouse is the exception: its
-`Map` attribute columns are compared directly and a free-text term of only letters and digits is a whole-word `hasToken`
-match through a token index on the log body), and a
-search or `mode=slow` request over a window longer than `Telemetry:Query:RawSearchWindowHours`
-(default 24) is rejected (`400`) by `RawSearchWindowGuard`. `ProviderCapabilities` carries `RawSearchWindowHours`, `ExportMaxWindowDays`
-(7 on PostgreSQL/ClickHouse, 1 on SQL Server/MySQL) and `Limits` (the row caps of the capped lists,
-`Telemetry:Query:Limits`: logs 1,000, traces 500, metrics catalog 500, exemplars 500), and
-`GET /api/capabilities` reports them (`logListLimit`, `traceListLimit`, `metricCatalogLimit`, `exemplarLimit`); the Angular client reads it once at startup
-(`CapabilitiesService`) and reuses it everywhere a page needs a limit.
-
-**MySQL is MySQL 8.0.19+ only** (no MariaDB): upserts use the `INSERT ... VALUES (...) AS new ON
-DUPLICATE KEY UPDATE col = new.col` alias form.
-
-### Key Patterns
-
-**Write path decoupling — `TelemetryIngestionChannel`** (Core/Data, singleton): three unbounded
-`System.Threading.Channels` (one per signal type, `SingleReader = false`). Backpressure is not the
-channel's own capacity but a paired `RecordCountGate` per signal, bounding resident RECORDS (spans,
-not traces, for the trace signal) rather than resident batches — an OTLP export's size is entirely
-client-controlled, so a batch-count bound does not actually cap memory. Write repositories
-(`TraceWriteRepository`, etc.) acquire the gate before enqueuing and return; they do no deletes
-(retention is an API-host concern, see "Retention"). The Traces channel specifically carries flat `List<SpanModel>`,
-not `List<TraceModel>`: `TraceWriteRepository` flattens each trace's spans and resolves each span's
-effective resource/scope (its own override, else its trace's) once, at that single point, so
-`ITelemetryBulkWriter.FlushTracesAsync` and every provider behind it read an already-flat,
-already-resolved span list with no grouping to unwrap and no fallback to re-apply.
-`TelemetryIngestionWorker` runs `FlushConcurrency` concurrent
-drain loops per signal (`TelemetryIngestionOptions`, section `Telemetry:Ingestion`) so DB write
-latency overlaps instead of one flush blocking the next; the in-memory drain step itself stays
-serialized per signal via an internal lock, since interleaving it across loops would corrupt the
-batch-size accounting the gate release depends on. Each drained batch is merged up to a configurable
-per-signal size, flushed through the active provider's `ITelemetryBulkWriter` with bounded
-exponential-backoff retry (`MaxFlushRetries`), and the gate is released for what was drained
-regardless of outcome. A batch that still fails after retries are exhausted is dropped and recorded
-on `IngestionMetrics`'s `records_dropped` counter — the three gRPC `Export` methods' partial-success
-responses reflect only enqueue success, never this later, asynchronous drop; each documents that
-explicitly. This isolates gRPC latency from DB write latency and provides backpressure.
-
-**Backpressure and bad records.** A full queue does not hold an export open:
-the write repositories call `TelemetryIngestionChannel.AcquireOrRejectAsync` (`RecordCountGate.TryAcquireAsync`, waiting at most
-`Telemetry:Ingestion:MaxGateWaitMilliseconds`: unset = 2 s, ClickHouse = its linger + 2 s since its worker frees room a whole day
-buffer at a time) and throw `IngestionRejectedException`; the three gRPC services map it to `UNAVAILABLE` + `google.rpc.RetryInfo`
-(`ExportRejections`, protos in `Collector/Protos/google/rpc`). A service first calls `ThrottleIfSaturated`'s pre-check
-(`ThrowIfSaturated`), which refuses before conversion once the gate has been refusing callers for the whole wait. Flush errors go
-through the provider's `IFlushErrorClassifier` (registered by each `Add<Provider>CollectorServices`; the default treats everything as
-transient): transient errors retry with backoff, a permanent one is not retried and `BatchBisector` splits the batch down to the
-refused records (`MaxSplitFlushes`), in both the shared worker and `ClickHouseIngestionWorker` (each split piece gets a new
-deduplication token). `records_dropped` always carries a `reason`; `records_accepted`/`records_refused` count per tenant. Health:
-gRPC `grpc.health.v1` on the OTLP endpoints and `/healthz/live|ready` on the `Management` Kestrel endpoint
-(`CollectorReadinessCheck`: shutting down, `ControlPlaneHealth` failing, a gate refusing longer than `ReadinessSaturatedSeconds`).
-The stress harness retries a throttled export after its `RetryInfo` delay and has a `throttled_rate` ramp criterion.
-
-**Load balancing and client Collector.** `ConnectionAgeMiddleware` (added at the start of the pipeline by an
-`IStartupFilter` from `AddKeryheTelemetryCollector`, so hosts need no call) calls `IConnectionLifetimeNotificationFeature.RequestClose()` on a
-connection older than `Telemetry:Collector:MaxConnectionAgeSeconds` (+ up to 10% jitter): an HTTP/2 `GOAWAY` the client reconnects on without losing
-an export (`ConnectionAgeTests`, real Kestrel). `deploy/otel-collector/` holds the tested client-side OpenTelemetry Collector configuration
-(`client-gateway.yaml`, contrib distribution for `file_storage`), a compose file with `telemetrygen`, and the record of the end-to-end check.
-
-**OTLP over HTTP.** The three gRPC services are thin adapters over `OtlpTraceIngestor`/`OtlpLogIngestor`/
-`OtlpMetricIngestor` (scoped; `IngestAsync(request, tenantId, protocol, ct)` returns an `IngestResult`, or throws `IngestionRejectedException`, which
-the gRPC services map to `UNAVAILABLE` + `RetryInfo`), and `OtlpHttpEndpoints` (`Collector/Http`, minimal-API `MapPost` routes at
-`{Telemetry:Collector:HttpBasePath}/v1/...`) are the HTTP adapters, behind the same `CollectorPolicy` and handler (`CollectorEndpointMetadata.Protocol`
-makes the handler's challenge an HTTP status with a `google.rpc.Status` body instead of gRPC trailers: 401, 429 without `Retry-After`, 503 with it).
-`OtlpHttpBodyReader` checks content type/encoding (415), reads the body streaming through `GZipStream` and stops at `MaxReceiveMessageSizeBytes` of
-DECOMPRESSED data (413), and `OtlpJsonReader` rewrites the hex id fields (`traceId`, `spanId`, `parentSpanId`) to base64 in a DOM pass before
-Google.Protobuf's `JsonParser` (unknown fields ignored). A queue that is already refusing callers refuses an HTTP export before its body is read.
-`Generator:Protocol=http/protobuf` makes the test data generator's live SDK export over HTTP. In a plaintext proxy setup the gRPC endpoint must be
-`Http2`-only and OTLP/HTTP needs its own `Http1` endpoint (Kestrel cannot negotiate protocols without TLS).
-
-**Tenant isolation and auth abuse.** `RecordCountGate` also keeps records and bytes **per tenant**:
-`TryAcquireAsync(tenantId, maxShare, ...)` refuses with `Result.TenantQuota` when the tenant would hold more than `maxShare` of the
-record (or byte) capacity unless it holds nothing, and the workers give a tenant its share back through a `TenantTally`
-(`gate.Release(tally)`: the shared worker tallies each merged export by `TenantOf.Of(items[0])`, `ClickHouseIngestionWorker` each record into
-its day buffer's tally). `TelemetryIngestionChannel.AcquireOrRejectAsync(signal, gate, count, ct, bytes, tenantId)` first applies the tenant's
-rate (`TenantRateLimiter`, a token bucket per tenant and signal) then the gate; `Telemetry:Ingestion:TenantQuota` (`TenantQuotaOptions`,
-`IOptionsMonitor`, per-tenant `Overrides`) supplies share and rate; the refusal reasons are `tenant_quota` and `tenant_rate`; a tenant
-refused for its share does not make `SaturatedFor` (readiness) grow. `tenant_resident_records` shows who holds the queue. In
-`ApiKeyAuthenticationHandler`, `AuthFailureLimiter` (a token bucket of failures per client address, IPv6 by /64, bounded, from
-`Telemetry:Collector:AuthFailureLimit`) refuses an address that has used up its failures with `RESOURCE_EXHAUSTED` and no `RetryInfo`
-(`auth_failures{reason=throttled}`) before any lookup, unless `ITenantResolver.IsCached` says the key is valid in the cache. Uncached lookups
-go through `ApiKeyLookupCoordinator` (singleton): same-key lookups coalesce, at most `MaxConcurrentLookups` run, and one that cannot start
-within `LookupQueueTimeoutMilliseconds` is `UNAVAILABLE` (the shared query runs in its own scope). The address is the connection's remote address;
-the collector does not trust `X-Forwarded-For`. The stress harness prints per-tenant lines and has a `noisy-tenant` profile.
-
-**Input limits.** Each gate also bounds resident **bytes** (`MaxQueuedBytesPerSignal`, the
-protobuf `CalculateSize()` of the request, passed by the services as `requestBytes` and carried to the release in the
-`TelemetryIngestionChannel.MarkEnqueued`/`TryTakeEnqueued` side table; `RecordCountGate` takes a records and a bytes argument and
-admits when both fit or it is empty). `ClickHouseIngestionWorker` apportions an export's bytes equally over its records (remainder on the
-first) so each day buffer, and each out-of-retention drop, releases its own share. `OtlpAttributeConverter` (Collector/Services) is the one
-place OTLP attributes and values are converted: it applies `Telemetry:Ingestion:Limits` (`IngestionLimitsOptions`,
-0 = unlimited), raises the record's dropped counts by what it cut and counts cuts on `records_truncated`; the services clip every sized-column
-value to `ColumnLimits` (resource `service.name` and schema URLs before the resource is hashed). `ColumnLimitsTests` parses the three
-relational schema scripts and fails when a sized client-text column is missing from `ColumnLimits` or its size differs. The gRPC receive
-limit is `Telemetry:Collector:MaxReceiveMessageSizeBytes` (4 MiB); because grpc-dotnet checks it against the wire size only,
-`BoundedGzipCompressionProvider` replaces its gzip and refuses a message that decompresses past the limit.
-
-The write path is instrumented on `IngestionMetrics`'s `Keryhe.Telemetry.Ingestion` meter, every
-instrument tagged by `signal` (`logs`/`traces`/`metrics`): `records_dropped` (counter),
-`gate_wait` (histogram, ms — time `RecordCountGate.AcquireAsync` spent waiting, the backpressure
-signal), `resident_records` (observable gauge — each gate's current count, registered by
-`TelemetryIngestionChannel`, which owns the gates), `flush_duration` (histogram, ms, extra tag
-`outcome` = `ok`/`failed`, one measurement per flush *attempt*), `flush_retries` (counter),
-`records_flushed` (counter), `flush_batch_size` (histogram, one measurement per merged batch) and
-`commit_lag` (histogram, ms — enqueue to the commit of the flush that persisted it, one measurement per
-export; the repositories stamp each export with `TelemetryIngestionChannel.MarkEnqueued`, a weak side
-table keyed by the export's list, and the worker reads it back — this is the write-path health signal,
-independent of any read query).
-All are readable out-of-process (e.g. `dotnet-counters`) with no exporter configured.
-On host shutdown the worker **drains rather than abandons** the queue (everything in it was already
-acknowledged to clients): `StopAsync` completes the channel writers, so a late export gets gRPC
-`UNAVAILABLE` (retryable, unlike a partial-success rejection), and the loops keep flushing until the
-channels are empty or the host's `ShutdownTimeout` (30s default, shared with Kestrel's request
-drain) expires — at which point whatever is left is counted on `records_dropped` and logged.
-
-**gRPC services** (`Keryhe.Telemetry.Collector/Services/`): inherit from protobuf-generated base
-classes, convert OTLP protobuf messages to Core domain models, delegate to write repositories,
-return partial-success responses.
-
-**REST controllers** (`Keryhe.Telemetry.Api/Controllers/`): `Traces`, `Metrics`, `Logs`,
-`Alerts`, `Tenants` — each wraps the corresponding read repository with query/aggregation
-logic.
-
-**Query layer**: the logs/traces lists, the
-metrics catalog and a metric's exemplars share one shape, all in `Keryhe.Telemetry.Core/Data/Read`. They are
-**capped, not paged**: `GET .../logs/list`, `.../traces/list`, `.../metrics/catalog` and `.../metrics/exemplars`
-return at most `limit` rows (default and ceiling `Telemetry:Query:Limits:*`; a request may ask for fewer, never more)
-as `{items, truncated}`. The query fetches `limit + 1` rows, so `truncated` is exact, and the UI says so and suggests
-narrowing the time range or filters. Logs and traces take `order=newest|oldest` (default `newest`) so both ends of a
-window are reachable; the catalog keeps its order (most recently first seen first) and exemplars are newest first. There
-are no cursors, no `nav`, no page numbers and no `asOf` pin: a list is one request, so there is nothing to keep stable
-between requests, and it refreshes when the user re-applies the time range. There is no unbounded time-range read of
-logs; export streams everything. A summary/count query
-that risks running long (an unindexed scan, a `COUNT(*)` over a large filtered set) goes through
-**`TimedQuery.RunAsync`**, which enforces `Telemetry:Query:SummaryTimeoutSeconds` (default 5) and
-returns a lower-bound/"≥ N" result instead of blocking the request indefinitely — the rollup reads
-(`IRollupReadRepository`, see "Summary rollups"), `CountSlowInboundSpansAsync`, `GetMetricSeriesAsync` (retrying once at a quarter of the
-requested point count), the dashboard's `GetTraceSamplesAsync` and the logs page's `GetLogFacetsAsync` all
-use it. The lists have no exact total: the cards and charts above them come from the rollup. Two rules, which a
-ramp that answered timeouts as 500s showed are needed: **a timeout is decided by
-`TimedQuery`'s own deadline, not the exception type** — any exception after the budget counts, because every driver
-ends an aborted command with its own type (Npgsql an `NpgsqlException` wrapping `TimeoutException`, SqlClient a
-`SqlException` even on token cancellation, MySqlConnector a `MySqlException`; ClickHouse.Client does not enforce
-`CommandTimeout` at all) — and the driver gets the budget plus `DriverTimeoutGraceSeconds` (2) so the token fires
-first; and **a connection a timed-out query ran on is never reused**: fallbacks open a fresh one, and a fallback
-that still needs a connection opens its own. Timeouts are counted on the
-`Keryhe.Telemetry.Query` meter's `query_timeouts`, tagged with the exception type (the stress harness collects it). `samples` reports a timeout as
-an empty array plus `X-Telemetry-Timed-Out: true` (the body stays an array); facets as `timedOut` in its body. Still
-unbounded (driver default, 30 s): the trace analytics reads (dependencies, operation stats/counts, average latencies),
-`GetMetricLabelsAsync` and `GetMetricsSummaryAsync`, each a bare-list contract; exports are unbounded by design. `SqlServer`'s own read repositories additionally
-wrap each call in `ExecuteWithRetryAsync`, retrying once on error 1205 — every other provider's
-override is a no-op. Hot reads filter on `tenant_id`/`service_name` columns carried by `spans`,
-`log_records` and `metrics` themselves (copied from the resolved resource at ingest by
-`TelemetryIngestionHelpers.TenantAndService`); they join `resources` only where its columns are selected.
-Trace/span ids are bound through the `IdParam` hook (a sized ANSI `DbString` on SQL Server, whose id
-columns are `varchar` with a binary collation, so a lookup is a seek with no `CONVERT_IMPLICIT`) and
-matched in lists through `IdInPredicate` (`= ANY(@ids)` on PostgreSQL).
-
-**Deduplication of the reference tables**: three entities are deduplicated, by two different
-mechanisms, and the distinction is deliberate.
-
-*Hash-keyed* — Resources and InstrumentationScopes dedup on an unbounded attribute map, so they
-carry a SHA-256 hash column (`ResourceHash`, `ScopeHash`) with a UNIQUE constraint.
-
-**A resource hash is not a resource identity.** `HashResource` covers only schema URL + attributes,
-so two tenants running the same service with the same attributes produce the same hash — which is
-why every schema keys resources on `UNIQUE (tenant_id, resource_hash)`, and why anything holding a
-resource identity in memory must go through `TelemetryIngestionHelpers.ResourceKey(tenantId, hash)`.
-`ResourceScopeCache.TryGetResource`/`SetResource` take the tenant as a parameter for exactly this
-reason. Scopes are the deliberate exception: `UNIQUE (scope_hash)` with no tenant, because a scope is
-an instrumentation library and is shared across tenants on purpose.
-
-**`HashResource`/`HashScope` memoize on the model instance** (`ResourceModel.CachedHash` /
-`InstrumentationScopeModel.CachedHash`, internal fields, never set outside these two methods). Each
-bulk writer hashes the same resource/scope twice per row — once resolving the batch's distinct
-resources, again per row rebuilding the lookup key — and the gRPC services hand every record under
-one `ResourceLogs`/`ResourceSpans`/`ResourceMetrics` block the *same* `ResourceModel` instance, so
-memoizing on the instance turns the second-and-later hash of a batch's dominant resource(s) into a
-field read. The cache is populated once and never invalidated within a model's lifetime — treat a
-`ResourceModel`/`InstrumentationScopeModel` as immutable once anything has hashed it.
-
-*Natural-keyed* — Metrics dedup on `uk_metric_identity UNIQUE (resource_id, name, type, scope_id)`,
-four bounded scalar columns already on the row, so there is no metric hash column. `type` is part
-of the key rather than merely refreshed on conflict: the write path picks a data-point table from
-the *incoming* type while the read path picks from the *stored* type, so a metric that changed
-type and matched an existing row would write points the reader never looks for.
-
-Inserts use ON CONFLICT DO UPDATE (Postgres), MERGE ... WITH (HOLDLOCK) (SqlServer),
-ON DUPLICATE KEY UPDATE ... AS new (MySql); ClickHouse has no reference tables to dedup. Spans, log records and
-the data-point tables are NOT deduplicated: they are plain appends with no unique key and
-no foreign keys, so a re-delivered batch is stored again and reads tolerate it (the trace-list row's span
-count is `COUNT(DISTINCT span_id)` and trace detail drops a duplicate span id). A metric's `tenant_id` and
-`service_name` are written when its catalog row is first inserted only (a cache miss) and cannot go stale:
-the resource hash includes `service.name`, so a rename produces a new resource and new `metrics` rows. A singleton
-`ResourceScopeCache` (`ConcurrentDictionary`) short-circuits DB lookups for all three, so a warm
-process resolves them with no round trip. The cache needs no invalidation because nothing deletes a
-resource, scope or metrics catalog row — retention only ever deletes telemetry rows. If a delete
-that removes catalog rows is ever added, it must clear the cache, or every flush keeps writing rows that
-point at a catalog row that no longer exists until the process restarts (the hot tables have no foreign
-keys to catch it, so it would be silent).
-
-**`metric_last_seen`**: a
-separate table, deliberately not a column on `metrics`, that the metrics catalog reads for its
-"has data in range" check instead of scanning the five data-point tables. No FK to `metrics` — a
-FK would make every touch lock-check the `metrics` row, reintroducing the contention the table
-exists to avoid, and nothing deletes `metrics` rows so orphans can't occur. On the relational
-providers it's written by a periodic `MetricTouchWorker`/`MetricTouchTracker` pair (mirroring
-`ApiKeyTouchWorker`/`ApiKeyTouchTracker` above, registered unconditionally by
-`AddKeryheTelemetryCollector`, bound from its own `Telemetry:MetricTouch` section), draining a
-`metric_id → newest time_unix_nano` map each interval into batches sorted by `metric_id` and
-capped under 4,000 rows so concurrent collector instances always lock in the same order and never
-escalate to a table lock on SQL Server (`DEADLOCK_PRIORITY LOW` plus one retry on error 1205
-there). ClickHouse and Parquet have no `metric_last_seen`: their `metric_catalog` carries `last_seen`, written by the collector.
-`IMetricTouchStore`'s ClickHouse and Parquet implementations are deliberate no-ops purely so `MetricTouchWorker` can stay registered
-unconditionally on every provider. "Seen in range" is an approximation
-(`last_seen_unix_nano >= start AND metrics.created_at <= end`), falling back to an exact
-per-candidate `EXISTS` over the five data-point tables when the window's end is more than an hour
-in the past.
-
-On Postgres, resource/scope/metric-catalog upserts run as their own
-auto-committed statements **before** the data transaction opens, not inside it —
-`ResourceScopeCache` is populated the moment each upsert returns, with no post-commit deferral, and the
-upsert row locks on the reference tables are not held for the length of the bulk data insert.
-`TelemetryIngestionWorker`'s retry backoff also carries full jitter (random within
-[50%, 100%] of the exponential delay) for a related reason: a transient failure like this tends to
-hit several concurrent flushes at once, so fixed backoff would retry them all at the same moment.
-
-SqlServer follows the same shape for a related reason: its upserts are `MERGE ... WITH (HOLDLOCK)`
-(serializable key-range locks), and held inside the data transaction those ranges would last through
-the bulk copy until commit, deadlocking concurrent flushes, worst on a cold cache. Auto-committed,
-they last one statement. Its metrics `MERGE` also updates `description`/`unit` only when they
-actually differ, rather than locking the matched row on every cache miss. The SqlServer retention
-sweep deletes in 4,000-row chunks (below the lock-escalation threshold) at `DEADLOCK_PRIORITY LOW`.
-Spans are written by `SqlBulkCopy` straight into the table (no staging table, no unique key).
-
-`metrics.created_at` means "first seen", not the data timestamp, so metric retention deletes the five
-data-point tables on `time_unix_nano` (per tenant, through `metric_id`) and never cascades from `metrics`.
-
-**JSONB for attributes**: OpenTelemetry key-value attributes are stored as JSONB/`nvarchar`
-columns (`Attributes`, `FilteredAttributes`) rather than normalized tables; Dapper maps them
-via `JsonAttributesTypeHandler`.
-
-**Exemplars live on the data point**. OTLP declares `repeated Exemplar exemplars` on
-every data point except Summary, so each point carries its list in an
-`exemplars_json` column on `gauge_data_points`, `sum_data_points`, `histogram_data_points` and
-`exponential_histogram_data_points`, serialized by `MetricService.ConvertExemplars` and read back by
-`MetricReadRepositoryBase.DeserializeExemplars`. A child table was rejected because it would need
-each data point's generated id, which none of the bulk-load paths (binary `COPY`, `SqlBulkCopy`,
-`ClickHouseBulkCopy`) hands back. Trade-off: an exemplar's `trace_id` is not indexable; no read
-path queries it. Note the .NET SDK emits no exemplars unless a meter provider sets `SetExemplarFilter`
-— `Keryhe.Telemetry.TestDataGenerator`'s live sink does, and records each measurement while the span
-it belongs to is the current `Activity`, so it carries trace ids; its backfill sink attaches exemplars itself.
-
-**Cumulative histogram/exp-histogram Min/Max are sometimes an estimate, not the true bucket
-extreme** (`MetricBucketPoint.MinMaxApproximate`, `MetricReadRepositoryBase.EstimateMax`/
-`EstimateMin`). OTLP's cumulative temporality reports Min/Max since the stream started, not since
-the previous export, so a bucket's own extreme can only be recovered exactly when it's provably
-attributable to that bucket: the counter started/reset there, or the lifetime extreme itself moved
-there (a moved extreme can only have moved within the interval since the previous observation).
-Otherwise the reported value is a bound, tightened — for `HISTOGRAM` only, via the explicit bucket
-that received new observations — to the smaller of the lifetime value and that bucket's own edge;
-`EXPONENTIAL_HISTOGRAM` keeps the coarser lifetime-value bound, since recovering a real boundary
-value from an (index, scale) pair isn't implemented in this read path (same gap
-`FinalizeExpHistogramBounds`'s own doc comment records for exp-histogram bucket bounds generally).
-Delta temporality is always exact — the flag only ever applies to cumulative points. The metric
-detail page marks the Min/Max stat cards and the percentile chart's Max line with "≈" when any
-charted point is approximate.
-
-**Multi-tenant architecture**: `resources`, `api_keys`, `alert_rules`, `spans`, `log_records` and
-`metrics` carry a `tenant_id` column, so the hot reads filter on it directly; the five
-data-point tables get neither `tenant_id` nor `service_name`, because `metric_id` already identifies
-exactly one tenant and service. The ingestion server
-resolves tenants in an authentication handler (see "Collector authentication"), by hashing the
-`Authorization: Bearer <key>` gRPC header against `api_keys` (`ITenantResolver`); the gRPC services only read the
-resulting tenant claim. The API takes the tenant from the route (`{base}/tenants/{tenantId}/...`), checks the
-caller's access in `TelemetryAuthorizationFilter` and carries it via a scoped `ITenantContext`
-(`ApiTenantContext`); read queries filter on `tenant_id`.
-
-**Collector authentication** (`Keryhe.Telemetry.Collector/Authentication`).
-Every OTLP export carries a per-tenant API key (`Authorization: Bearer <key>`); the check lives in the pipeline, not
-the services:
-- **Handler.** `ApiKeyAuthenticationHandler` (scheme `TelemetryAuthenticationSchemes.ApiKey` = `"KeryheTelemetryApiKey"`,
-  registered by `AddKeryheTelemetryCollector` with no default scheme) hashes the key (SHA-256, lowercase hex; the Admin
-  TUI's `ApiKeyHashing` and the test infrastructure's `ApiKeyHasher` are deliberate byte-identical copies), resolves it
-  through `ITenantResolver` and builds a principal with `TelemetryClaimTypes.TenantId`/`ApiKeyId`. **It acts only on
-  endpoints carrying `CollectorEndpointMetadata`** (added by `MapKeryheTelemetryCollector()`); on any other endpoint it
-  returns `NoResult` and records nothing, which keeps a collector co-hosted with other endpoints (unsupported) from running
-  its check on them, and `TelemetryApiStartupValidator` ignores this scheme when checking that the API has one.
-- **Enforcement.** `MapKeryheTelemetryCollector()` applies `RequireAuthorization(CollectorPolicy)` to each service
-  (authenticated by that scheme, with a tenant claim); the host calls `UseAuthentication()`/`UseAuthorization()` after
-  `UseRouting()`. A rejected call never reaches a service, so its body is never deserialized. The handler overrides
-  challenge/forbid to write a **trailers-only gRPC response** (HTTP 200, `grpc-status`, `grpc-message`): `16
-  UNAUTHENTICATED` with the reason (`missing`, `malformed`, `invalid`, `expired`), or `14 UNAVAILABLE` when the key lookup
-  threw (a bare 401 carries no message, and an unhandled lookup exception would be a 500/`UNKNOWN`, which exporters do not
-  retry, dropping data the write path would have buffered). The three `Export` methods read the tenant with
-  `TenantClaims.GetRequiredTenantId` and carry `catch (RpcException) { throw; }` ahead of their generic catch, so an
-  `RpcException` is never swallowed into an OK partial-success response.
-- **Resolution.** `ITenantResolver.ResolveAsync` returns a `TenantResolution` (`TenantId`, `ApiKeyId`, `Failure`).
-  `CachingTenantResolver` caches the `IApiKeyLookup` result itself (positive 30 s, negative 5 s), so a negative-cached key
-  keeps its reason, and compares `expires_at` against an injected `TimeProvider` on **every** resolution, cache hits
-  included, so an expiring key stops exactly at its expiry. A lookup that throws is reported `Unavailable` and never
-  cached. `IApiKeyLookup` returns the active row with `expires_at` (not filtered in SQL).
-- **Observability.** `auth_failures` on `IngestionMetrics` (tags `signal`, `reason`), recorded in the challenge, once per
-  rejected request; `Debug` per request and one `Warning` per key-hash prefix per minute; the key itself is never logged,
-  only the first 8 hex characters of its hash.
-- **Transport.** `PlaintextTransportGuard` (an `IHostedLifecycleService`, bound from `Telemetry:Collector`) fails startup
-  outside Development on a plaintext TCP address (`Kestrel:Endpoints:*:Url`; `urls`/`HTTP_PORTS` only when no
-  Kestrel endpoint is configured or `preferHostingUrls` is set, since Kestrel ignores them otherwise and the aspnet container
-  image sets `ASPNETCORE_HTTP_PORTS=8080`) unless
-  `AllowInsecureTransport` is true (TLS terminated by a proxy in front); `StartingAsync` runs before Kestrel binds, and a
-  backstop on `ApplicationStarted` checks `IServerAddressesFeature` (addresses added in code) and stops the host with a
-  non-zero exit code. Unix-socket addresses are exempt.
-- **Keys.** Keys are `ktel_` + 43 base64url characters (a secret-scanning pattern; the collector does not require the
-  prefix). Optional `api_keys.expires_at` (UTC). Rotation = create the new key,
-  roll it out, watch the old key's `last_used_at`, revoke. A revoke takes effect on a collector within
-  `PositiveCacheTtlSeconds` (30 s). The key lookup depends on the control-plane database: a control-plane outage longer than
-  the positive TTL stops ingestion for keys not in the cache. The Collector README is the operator guide (TLS, exporter
-  settings, SQL for MySQL).
-- **Tests.** `tests/Keryhe.Telemetry.IntegrationTests/CollectorAuth` (`--filter Suite=CollectorAuth`; real gRPC over
-  `TestServer`, a fake `IApiKeyLookup`, a controllable `TimeProvider`, the ingestion channel read directly; no Docker) and
-  the per-provider `*ApiKeyLookupTests` (Testcontainers; `expires_at` an hour either side of now).
-
-**Alerting** (`Keryhe.Telemetry.Api/Alerting`): `AlertService.EvaluateAllAsync` iterates all
-tenants with enabled rules, dispatching each rule type to a registered `IAlertEvaluator`
-(`MetricThreshold`, `ErrorRate`, `SlowTrace`, `LogSeveritySpike`). `ErrorRateEvaluator` and
-`LogSeveritySpikeEvaluator` read the **summary rollups** (see "Summary rollups"): requests (inbound spans) in
-`[writtenThrough - window, writtenThrough)` in whole minutes, so a rule fires about 1.75 minutes later than it would on
-raw data and a 1-minute rule always reads one full minute. `SlowTraceEvaluator` ("slow requests") stays on **raw
-spans**: `ITraceReadRepository.CountSlowInboundSpansAsync`, an exact count of inbound spans (kind SERVER/CONSUMER) at or
-over the threshold in the rule's window (a doubling duration band straddling the threshold would make a rollup count
-wrong near it); its message's p99 is an approximate one from the request rollup, and a timeout is logged and the rule
-not fired that run. An atomic `TryClaimFireAsync` (UPDATE with cooldown check) prevents duplicate fires under
-load balancing. The API's `AlertsController` handles rule CRUD via `IAlertRuleRepository`. Evaluation is driven
-by `AlertEvaluationWorker` (a `BackgroundService` in `Api/Alerting`, registered by `AddAlerting(configuration)`,
-which `Api.Server` calls): it wakes every `Telemetry:AlertEvaluation:IntervalSeconds` (default 60), creates a DI
-scope and calls `IAlertService.EvaluateAllAsync`; `Telemetry:AlertEvaluation:Enabled=false` turns the loop off
-while leaving rule CRUD available.
-
-**Admin tool** (`src/Keryhe.Telemetry.Admin`, in the .sln): an interactive Spectre.Console console app, not a host.
-Menus for tenants and API keys: create a tenant, create a key (shows the plaintext `ktel_...` key once, stores
-only its SHA-256 hash through `Security/ApiKeyHashing`, optional expiry of 30/90/365 days or a UTC date), list keys,
-activate/deactivate (the revoke) and delete them. It talks to the **control plane** only, directly, through
-`IAdminRepository` (`NpgsqlAdminRepository`, `SqlServerAdminRepository`, `MySqlAdminRepository`, `SqliteAdminRepository`, one per control-plane
-provider (the SQLite one opens the file without permission to create it and runs its own copy of the version gate, `SqliteSchemaGate`: it never creates or migrates); its `AdminProvider` values are the `ControlPlane:Provider` values). `ControlPlane:Provider` comes from its
-`appsettings.json` and `ConnectionStrings:Admin` (the control-plane database) from its own User Secrets or the
-`ConnectionStrings__Admin` environment variable (none ships in appsettings). A revoke reaches a running collector within
-`PositiveCacheTtlSeconds` (30 s).
-
-**Retention** (`Keryhe.Telemetry.Api/Retention/`): the single application-level mechanism for
-telemetry retention, on every provider, with **per-tenant windows and no global default**. Each tenant's `trace_retention_days`,
-`log_retention_days` and `metric_retention_days` (default 30/30/30) and `retention_updated_at` are columns on its control-plane
-`tenants` row (`RetentionSettings`); telemetry whose `tenant_id` has no `tenants` row (a deleted tenant, a different
-control-plane database) expires on `RetentionDefaults` (Core, 30/30/30; a test keeps it equal to the schema defaults).
-`RetentionWorker`, a `BackgroundService` structurally mirroring `AlertEvaluationWorker`, wakes on
-`Telemetry:Retention:IntervalSeconds` (default 3600s, config only), resolves the scoped `IRetentionSettingsRepository`
-(control plane) and `IRetentionSweeper` (telemetry database), reads every tenant's windows with `GetAllAsync` into one
-`RetentionPolicy` (a fixed "now"; `CutoffFor(signal, tenant)`, `DistinctWindows`, `LongestWindow`, `TenantsWithWindow`; it refuses a
-negative window), then runs the sweeper's `DeleteOldTracesAsync`/`DeleteOldMetricDataPointsAsync`/`DeleteOldLogRecordsAsync` with it.
-Each sweep ends with a "Retention sweep complete" log line that includes the rows removed and the sweep's elapsed milliseconds.
-The tenants a sweep visits come from the **telemetry** side (`resources`, the Parquet folders, ClickHouse's own rows), never from
-`tenants`, so orphan data still expires. The mechanism is per telemetry provider:
-
-| Provider | Retention |
-|---|---|
-| PostgreSQL, SQL Server, MySQL | Spans and logs: bounded-batch deletes **per tenant** (`tenant_id = @t AND time < @thatTenantsCutoff`) through the `(tenant_id, time)` access path; data points (no `tenant_id` column): bounded batches per tenant through `metric_id IN (SELECT id FROM metrics WHERE tenant_id = @t)`, served by the `(metric_id, time_unix_nano, id)` index (plan tests on PostgreSQL and SQL Server; MySQL plans that form as a scan, so `MySqlRetentionSweeper` sets `MetricIdsFirst`: it reads the tenant's metric ids and deletes by id list in chunks). The shared loop is `RetentionSweeperBase`; a provider supplies only `BatchedDeleteSql` (PostgreSQL has no primary key on these tables, so a batch is `DELETE ... WHERE ctid = ANY (ARRAY(SELECT ctid ... LIMIT n))`; SQL Server `DELETE TOP (n)` at `DEADLOCK_PRIORITY LOW`, batch kept under the lock-escalation threshold; MySQL `DELETE ... LIMIT n`). |
-| Parquet | `ParquetRetentionSweeper`: enumerates `date=` folders up to the cutoff day of the **shortest** window (the latest cutoff) and deletes each `(tenant, day)` for every table of the signal's window (derived tables with it) once the day is before **that tenant's** cutoff day; tenants are the folders present, so a tenant gone from the control plane still expires (on the built-in window); the count is the raw tables' rows summed from the manifests before the delete. Granularity is the day. |
-| ClickHouse | Per signal: `ALTER TABLE ... DROP PARTITION ID` for each day wholly before the cutoff of the **longest** window in effect (the built-in one always included; rows of the raw tables counted from `system.parts` first); then for every shorter window one lightweight `DELETE` (`SETTINGS lightweight_deletes_sync = 1`) of that window's tenants over the days between the longest cutoff and their own (a second statement, `tenant_id NOT IN (known)`, for tenants with no control-plane row when the window is the built-in one), with the `toStartOfFiveMinutes(timestamp)` / `toStartOfHour(time)` bounds the sort key needs to prune. A delete already done for the same days is skipped (`ClickHouseRetentionMemory`, a singleton keyed by table, window and tenant set; a restart repeats each once). `metric_series`/`metric_catalog` (unpartitioned) get a lightweight `DELETE ... WHERE tenant_id IN (...) AND last_seen < @cutoff` per distinct window. Granularity is the day; queries skip masked rows on the affected parts until merges remove them. |
-
-`RetentionWindowCache` (collector side, ClickHouse and Parquet) reads `SELECT id, *_retention_days FROM tenants` into a tenant → windows
-map every refresh interval and `IRetentionWindows.OldestAllowedUtc(signal, tenantId)` gives the ingest-time cutoff
-(`PartitionedIngestionWorker.Drain` memoizes it per tenant per drain; an unknown tenant takes the built-in window; never loaded = drop
-nothing). After a window is lengthened, records between the old and new cutoff are still dropped at ingest for up to the refresh interval.
-
-`AddRetention()` registers the worker; called from `Api.Server`'s `Program.cs` only, never `Collector.Server` — retention is entirely an
-API-host concern. `TenantSettingsController` (`[TenantScoped]`, `GET`/`PUT {base}/tenants/{tenantId}/settings/retention`, Read /
-ManageSettings; 404 for a tenant with no row, 400 for a window outside 1..3650) exposes `IRetentionSettingsRepository` for the Angular
-settings page (`t/:tenantId/settings`, the nav item "Settings") — no caching layer, since the worker reads the windows once per sweep
-interval. `UpdateSettingsAsync(tenantId, ...)` is always an `UPDATE` of the tenant's row and returns false when there is none. There
-is no global retention route. The Admin tool does not touch retention (a created tenant takes the column defaults).
-
-**Header menus and `GET {base}/me`.** The header carries a gear (`GlobalSettingsMenuComponent`: global settings, per browser in
-localStorage, today the theme select; add a setting as one more row) and, when someone is signed in, a user button
-(`UserMenuComponent`: picture, else the first-name initial, else a person icon; the menu shows name and email and **Sign out**, the only
-Sign out). `UserService` (`core/auth`) reads OIDC user data client-side, or in cookie mode calls `GET {base}/me` once (`MeController`,
-`[TelemetryAnonymous]`: skipped by `TelemetryAuthorizationFilter`, always 200, `{signedIn:false}` when nobody is signed in, `Cache-Control:
-no-store`; claims by a fixed fallback list: `name`/`ClaimTypes.Name`/`Identity.Name`, `given_name`/`ClaimTypes.GivenName`,
-`email`/`ClaimTypes.Email`/`preferred_username` containing `@`, `picture` only if an absolute http(s) URL; when the Read operation's policy
-names `AuthenticationSchemes` the caller is authenticated through them). A failed lookup is the `unknown` state: the generic icon, and Sign
-out stays reachable when a sign-out mechanism exists. The default OIDC scope is `openid profile email`; the Entra photo (Graph) is out of
-scope. Every library action carries exactly one of `[TelemetryOperation]` and `[TelemetryAnonymous]`.
-
-**Export** (`Keryhe.Telemetry.Api/Controllers/*.cs`'s `GetExport` actions plus
-`Keryhe.Telemetry.Api/Export/ExportWriters.cs`):
-`GET /api/logs/export`, `/api/traces/export`, `/api/metrics/export` stream every matching row —
-full log records, one `TraceInfo` row per trace, or one `(display series, bucket)` row per metric
-series — as NDJSON or CSV, with no row cap, reusing each signal's existing filter compilation so
-export can never see a different population than the list it's exporting from. Two limits apply
-before any query runs: `ExportWindowGuard` rejects (`400`) a window wider than
-`ProviderCapabilities.ExportMaxWindowDays` (7 on PostgreSQL/ClickHouse, 1 on SQL Server/MySQL, `Telemetry:Export:MaxWindowDaysOverride`)
-regardless of filters — export has no row cap, so the window is the only thing bounding the work —
-and `ExportConcurrencyGate`, a singleton `SemaphoreSlim` shared across all three signals, caps
-concurrent exports per API instance at `Telemetry:Export:MaxConcurrent` (default 2), returning
-`429` rather than queuing. Logs stream via `SqlMapper.ExecuteReaderAsync` +
-`SqlMapper.GetRowParser<T>` (Dapper's own `QueryUnbufferedAsync` has no `CommandDefinition`/
-cancellation-token overload in the pinned Dapper version) so the reader advances one row at a time
-and `CancellationToken` — bound by MVC to `HttpContext.RequestAborted` — reaches the underlying
-database command on client disconnect, not just the enumeration loop; `CommandTimeout = 0` is set
-explicitly since Dapper's 30s default would cut off a large export. Traces export derives the anchors ONCE and streams them
-through the same kind of reader (re-running the anchor query per chunk would repeat the whole window scan for every chunk); every 1,000
-anchors a second connection fetches that chunk's exact span counts and whole-trace bounds, so memory stays bounded to one chunk and
-`CancellationToken` still reaches the database command. Metrics export reuses `GetMetricSeriesAsync`'s bucketed
-pipeline with `Top = int.MaxValue`, so `BuildDisplaySeriesAndOther`'s fold-into-"other" step is
-always empty and every series is included — the pipeline already collapses raw data
-points down to (streams × buckets) rows in SQL before this ever runs, so there's no separate raw
-row set to stream unbuffered. SQL Server runs with `READ_COMMITTED_SNAPSHOT ON`, so a
-slow-downloading client never holds a shared page lock against ingestion. CSV cells get a
-formula-injection guard (`CsvFormulaGuard`): a cell starting with `=`, `+`, `-` or `@` is prefixed
-with `'`.
-
-**Trace anchors.** Every trace-list read — list,
-samples, export — is defined by one **anchor** per trace (the cards and charts do not use anchors: see "Summary rollups"): the trace's **earliest span in scope** (ranked by
-`(start, id)`), where scope is the selected service's own spans when a service is selected (any span kind) and
-the whole trace's otherwise. A trace without a root, or whose root arrives late, simply anchors on whatever its
-earliest span is at the time of the query. That definition is expressed in three SQL shapes
-(measured each; the lab benchmark is `TraceQueryBench`, below):
-- **`AnchorsSql`, a whole window** (export, errors mode, ClickHouse pages). Unscoped, and in
-  errors mode, it is a hash aggregate joined back to the anchor span (`GROUP BY trace_id` for the earliest start and
-  error flag, then the span read by `(trace_id, span_id)`; a tie on start keeps the lowest `id`), which was 2x
-  (PostgreSQL, SQL Server) to 5x (MySQL) faster than a window function. With a service selected the narrow
-  `(tenant, service, start)` index range makes the `ROW_NUMBER()`/`MAX() OVER (PARTITION BY trace_id)` form
-  faster, so that form is used. ClickHouse: `GROUP BY trace_id` with `argMin`. In errors mode (`errorsOnly`) the
-  group is restricted to traces with an ERROR span in scope found through the errors index
-  (`trace_id IN (SELECT ... status_code = 'ERROR')`), so errors mode never ranks the traces that cannot qualify
-  (about 100x faster).
-- **`SeekAnchorsSql`, a range of start times** (the trace-list page, slow mode, the slowest-traces samples; every
-  relational provider, `SupportsSeekAnchors`). A span is its trace's anchor when `NOT EXISTS` an earlier in-scope span
-  of the same trace at or after the look-back start, checked by one `(trace_id, span_id)` seek per candidate. The
-  cost follows the candidates, not the window, so a list reads **slices**: `FetchSlicedAnchorPageAsync` starts at
-  `Telemetry:Query:PageSliceSeconds` (default 2) of trace start times from the window's newest end (or its oldest, for
-  `order=oldest`), widens by `PageSliceGrowth` (default 4) until it has `limit + 1` anchors, and takes the
-  whole remainder once the next slice would cover half of it (bounding a rare search or operation filter). Slices are
-  disjoint, so rows concatenate in the final order, and every filter applies to each slice unchanged. Slow mode filters
-  on the anchor's own duration (a few percent of spans), so it reads the whole range in one pass. The anchor's error
-  flag is not computed per candidate; the list reads it for its own rows in the follow-up query (`ErrorScope`: service,
-  look-back range). A first page takes 4-15 ms (measured against 190-3,800 ms for a whole-window derivation).
-  `SlicedList_MatchesTheAnchorDefinition_...` checks every filter, order, limit and slice width against the
-  definition restated in LINQ over the seeded spans, and was negative-controlled.
-- ClickHouse has its own anchor reads (time slices confirmed against `trace_index`, see its provider notes); the seek form above is relational only.
-- **Duration is the anchor span's own** `end - start` everywhere — the row and the `mode=slow` filter. The row's service, operation, kind and `DisplaySpanIdHex` are the anchor's;
-  the error flag is "any span in scope has ERROR" (so `mode=errors` is that flag); the span count is exact,
-  `COUNT(DISTINCT span_id)` over the page's traces in a follow-up query, scoped to the selected service when
-  one is selected. The follow-up also supplies the WHOLE trace's start/end for the detail link. The list
-  shows every kind and displays it (the cards and charts count only inbound spans, from the rollup).
-- **Operation filter = the anchor's own name** (what the row shows), not "any span in the trace".
-  **Search matches any span in the whole trace regardless of the service filter** ("traces containing X"), as an
-  `EXISTS` through `(trace_id, span_id)` per candidate anchor within the search window; the row stays anchored
-  per the rule above.
-- **Look-back margin**: the derivation scans `[start - lookback, end]` (`Telemetry:Query:AnchorLookbackMinutes`,
-  default 5) and drops anchors that start before the window, so a trace that began inside the margin before the
-  window is excluded from it rather than anchored on a later span. A trace that began before the margin is
-  anchored on its earliest span inside it (accepted).
-- **No pin.** A list is one request over the spans as they are at that moment, so a root that arrives after one read is
-  the anchor on the next. `spans` and `log_records` carry no `created_at` because nothing pins on it.
-
-**Summary rollups.** The cards and charts of the dashboard, trace list and logs page, and the error-rate and
-log-spike alerts, read pre-aggregated per-minute rows whose count follows the range, services and collectors, not
-traffic:
-- **Tables.** `request_rollup_minute` (tenant, service, minute; `request_count`, `error_count`, duration sum/max and a
-  24-band doubling duration histogram `h00`..`h23`) counts **inbound spans** (kind SERVER/CONSUMER), so the numbers are
-  *requests*, not traces, and a request through three services counts three times. `log_rollup_minute` (tenant,
-  service, severity number, minute; `record_count`) counts log records, with `-1` for a NULL severity. Rows are
-  **partial**: no unique key, plain appends, reads `SUM` them. `DurationBands.IndexOf` is the one definition of the
-  bands (band 0 under 0.25 ms, band N `[0.25 ms * 2^(N-1), 0.25 ms * 2^N)`, band 23 from 1,048.6 s; a negative duration
-  counts as 0); ClickHouse's writer computes the same with `toUInt8(floor(log2(intDiv(d, 250000))))` (ClickHouse has
-  no `intLog2`) and the per-provider tests check both at every edge +-1 ns. Percentiles interpolate within the band
-  (`DurationBands.Percentile`), so they are approximate (up to 2x in the worst case).
-- **Write path (relational providers).** `TelemetryIngestionWorker` calls `RollupAccumulator.AddSpans`/`AddLogs` only
-  **after a flush succeeds**, so a dropped batch is never counted. The accumulator folds a batch into a local dictionary
-  and merges it under one lock (a swap-without-a-lock like `MetricTouchTracker`'s would lose increments, a permanent
-  under-count here). `RollupWorker` (registered by `AddKeryheTelemetryCollector` **before** the ingestion worker, so
-  the host stops it after the ingestion drain) every `Telemetry:Rollup:FlushIntervalSeconds` (15) appends the minutes
-  that have **closed** (`CloseGraceSeconds`, 30, past their end) through `IRollupStore`, sorted and in batches under
-  4,000 rows, keeping the open minutes in memory; a late span for a written minute goes out as one more partial row.
-  A failed append keeps its rows (up to `MaxBufferedRows`, then the oldest are dropped and counted on
-  `rollup_rows_dropped`); on shutdown `StopAsync` writes everything, open minutes included, within the host's
-  `ShutdownTimeout`. A crash loses what is in memory (about a minute plus the grace and a flush interval) while the
-  stored spans survive: charts under-count that slice. `RollupWorker.StartAsync` decides whether the accumulator is
-  enabled (`IRollupStore.FedByViews`), not `ExecuteAsync`: .NET 10 does not guarantee the synchronous part of
-  `ExecuteAsync` has run when `StartAsync` returns. **ClickHouse and Parquet** have no accumulator or worker: their collector-side ingestion worker folds each batch into the rollup rows
-  and writes them right after the raw rows (on ClickHouse `AggregatingMergeTree`, no materialized views), and their `IRollupStore` is a no-op.
-- **Retention.** The request rollup follows the traces window and the log rollup the logs window, swept with them
-  (per-tenant deletes, ClickHouse `DROP PARTITION`, Parquet day folders); the counts those sweeps return are the
-  raw rows' only.
-- **Read path.** `RollupReadRepositoryBase` (one statement per call, a derived table that computes
-  `floor(minute / width) * width` and a `GROUP BY (bucket, service)` or `(bucket, severity)`) under `TimedQuery`;
-  `RollupSummaryBuilder` plans the window and folds the rows. The window starts rounded **down** and ends rounded **up**
-  to whole minutes, is clamped to `writtenThrough` (now minus `CloseGraceSeconds`, `FlushIntervalSeconds` and
-  `Telemetry:Rollup:ArrivalMarginSeconds`, 60, rounded down to the minute: a conservative margin, not a promise), and
-  the bucket width is the smallest of the fixed ladder (1, 2, 5, 10, 15, 30 min, 1, 2, 3, 6, 12 h, 1 d) giving at most
-  `bucketCount` (60) buckets over it. An unaligned window has partial edge buckets (`coveredSeconds`), so a result can
-  hold `bucketCount + 1` of them and every rate divides by what a bucket covers. The API reads `FlushIntervalSeconds` and
-  `CloseGraceSeconds` from the same `Telemetry:Rollup` section as the collector, so a change on one side must be made on
-  the other.
-- **API.** `GET .../traces/summary?start&end&service&bucketCount` returns `{bucketSeconds, writtenThrough, summary,
-  buckets, services, latency, timedOut}` and `GET .../logs/summary?start&end&service&minSeverity&bucketCount` returns
-  `{bucketSeconds, writtenThrough, total, buckets, timedOut}`. Neither takes mode, operation, duration or search
-  parameters: the cards and charts describe the **time range and service** (and, for logs, the minimum severity) and
-  nothing else.
-- **UI.** The trace list's first card is **Requests**; its latency chart is one color and a bubble click zooms to the
-  bubble's span and switches the list to Slow mode with the band's duration range (`shared/utils/latency-bands.ts`:
-  maximum = band's upper edge minus 1 ns, an explicit minimum of 0 for band 0, no maximum for band 23, and the time
-  range clamped to `rawSearchWindowHours` because slow mode is under `RawSearchWindowGuard`).
-- **Hour tier (MySQL only).** The measurement gate (`RollupQueryBench`: twelve services, a week of minute rows, three
-  partials per service-minute) put the 7-day unscoped request summary at 2.3 s p95 on MySQL against a 1 s budget, so
-  MySQL has `request_rollup_hour`, `log_rollup_hour` and `rollup_compaction` and the other providers do not
-  (PostgreSQL 180 ms, SQL Server 93 ms, ClickHouse 44 ms). `MySqlRollupCompactor`, driven by the API
-  host's `RollupCompactionWorker` (registered by `AddRetention`; idles on a provider that registers no
-  `IRollupCompactor`) every `CompactionIntervalSeconds` (300) under `GET_LOCK`, re-folds each closed hour from
-  `min(compacted_through, now - RecompactHours)` (6) to the hour of `writtenThrough` (`min`, not `max`: in steady state
-  `compacted_through` is the last closed hour, so `max` would never fold the late rows of the last hours), one
-  transaction per hour. A bucket of an hour or wider reads whole hours from the hour rows below `compacted_through`
-  (read in the same statement) and the partial edges and uncompacted hours from the minute rows. A minute row later than
-  `RecompactHours` stays in the minute tier only, so a 3-day chart can differ from a 24-hour one by such rows. The
-  `signal_kind` column is not called `signal`: that is a reserved word in MySQL.
-- **Tests.** `RollupUnitTests`, `RollupSummaryBuilderTests` and `RollupAlertEvaluatorTests` (no Docker);
-  `RollupSummaryHttpTests` (`ApiHttp`); per provider `*RollupWriteTests` (seed through the bulk writer plus the accumulator
-  path, ClickHouse through its writer, compare with a LINQ restatement; reads, retention and the slow-request count too;
-  negative-controlled by perturbing `DurationBands`) and `MySqlRollupHourTierTests`; the stress ledger counts both rollup
-  tables (`RollupTables`, waits up to 150 s for the rollup to catch up with the closed minutes) and
-  `RollupQueryBench` is the lab gate (`ROLLUP_BENCH_OUT=<file>`, one provider at a time).
-
-**Trace detail** (`GET /api/traces/{traceId}/spans?start=`, `TraceDetailResponse`): the response lists each distinct
-resource and instrumentation scope once and the spans refer to them by `resourceIndex`/`scopeIndex`, so a trace of
-thousands of spans does not repeat a few large attribute sets thousands of times (3.9x smaller than a copy per span on
-a 31-span test trace with large resources). The repository hands every span of a resource the same instance, parsing each distinct resource's and scope's attribute
-JSON once. On the relational providers the span query keeps its single plain join to the reference tables (one round
-trip, one trace probe); three alternatives were measured and rejected: three round trips (+40-60% per detail), one
-batched statement with the reference selects as `IN (SELECT ... FROM spans WHERE <trace>)` sub-selects (the trace
-predicate runs three times, and SQL Server's plan degraded under concurrency, 32 -> 180 ms p95 in the stress run), and `ROW_NUMBER()` to send each resource's attributes once (the
-windows sort every row: a 20,000-span trace 551 ms on SQL Server). ClickHouse has no reference rows (resource and scope are on the span row). The optional `start` and `end` (used
-together) are the trace's extent, which the list rows and dashboard widgets already carry (`traceStartTime`/`traceEndTime`)
-and pass in the link (`?start=&end=`; a log's timestamp is NOT such a hint, so log links do not pass one). ClickHouse
-uses them (its own trace repository): `[start - margin, end + margin]` (`Telemetry:Query:TraceHintMarginMinutes`,
-default 1; `Telemetry:Query:TraceHintEnabled=false` ignores every hint) replaces the `trace_index` round trip; PostgreSQL, SQL Server and
-MySQL seek `(trace_id, span_id)` and ignore it. The range is the trace's own extent on purpose: bounding only the start
-(`[start - 5 min, start + 24 h]`) measured slower under live ingestion (a wide range over the data being written gives
-the planner a time-index path it misjudges from stale statistics). A hint that finds
-nothing falls back to the unbounded read (a wrong hint is never a 404). A span that arrived after the list was read and lies
-beyond the margin is missing from a hinted read, which is the limit of a hint; an unhinted read is always whole.
-
-### Database
-
-Telemetry providers: PostgreSQL, SQL Server 2022, ClickHouse, MySQL 8.0.19+, or Parquet files (no server). Control-plane providers: PostgreSQL,
-SQL Server 2022, MySQL 8.0.19+, or SQLite (a file). Schema 4.0.1 (fresh install). The schema is two components, each with
-its own scripts and version table (see "Commands"):
-
-- **Control plane** (`schema/<Provider>-ControlPlane.sql`, relational only): `tenants`, `api_keys`, `alert_rules`,
-  `alert_events`, `control_plane_schema_version`. Foreign keys stay inside it (`api_keys` and
-  `alert_rules` -> `tenants`; `alert_events` -> `alert_rules`).
-- **Telemetry** (`schema/<Provider>-Telemetry.sql`): everything else (below), plus `telemetry_schema_version`.
-- **Nothing crosses the boundary**: `resources.tenant_id` is a plain `BIGINT NOT NULL` (no foreign key to `tenants`,
-  no default), and no query joins the two sides. The retention sweep takes its tenants from `resources`.
-
-Telemetry tables:
-
-- **Hot tables are append targets.** `spans`, `log_records` and the five data-point tables have no unique
-  key (a re-delivered span is stored twice) and no foreign keys to `resources`, scopes or
-  `metrics` (reference rows are committed before the data transaction, so a hot-table FK only cost insert
-  time — ~7-8% of PostgreSQL flush time). `metrics` keeps its FKs to `resources` and scopes. `id` is an
-  identity/auto-increment used only as the ordering tiebreak and has no index of its own on PostgreSQL.
-- **`tenant_id` and `service_name` columns** on `spans`, `log_records` and `metrics`; the five data-point
-  tables get neither (`metric_id` identifies one tenant and service).
-- **Id columns match their driver's parameter type**: `text` on PostgreSQL; `varchar(32)`/
-  `varchar(16)` `COLLATE Latin1_General_BIN2` on SQL Server (sent as sized `AnsiString`); `char(32)`/`char(16)`
-  `ascii_bin` on MySQL; `UUID` (trace) and `UInt64` (span) on ClickHouse, converted to hex at the edges (`ClickHouseIds`).
-- **Index set (relational), every index serving a named query**: `spans (trace_id, span_id)` (trace detail, span
-  by id, spans by parent, service-map parent join), `(tenant_id, start_time_unix_nano)` (unscoped anchors,
-  windows, search, service-map child range, per-tenant retention), `(tenant_id, service_name, start_time_unix_nano)`
-  (service-scoped anchors) and an errors index (`WHERE status_code = 'ERROR'` partial/filtered on PostgreSQL
-  and SQL Server; MySQL has no filtered index, so `(tenant_id, status_code, start_time_unix_nano)`); `log_records (tenant_id,
-  time_unix_nano, id)` and `(trace_id)`; `metrics` unique `(resource_id, name, type, scope_id)` and
-  `(tenant_id, service_name, name)`; data points `(metric_id, time_unix_nano, id)` only (per-tenant metric retention
-  goes through `metric_id`, so there is no time-only index);
-  `resources` unique `(tenant_id, resource_hash)` and `(tenant_id, service_name)`;
-  `instrumentation_scopes` unique `(scope_hash)`. No GIN/trigram/skip indexes, no `pg_trgm`.
-- **SQL Server** clusters on the access path, not an IDENTITY: `spans (tenant_id, start_time_unix_nano, id)`,
-  `log_records (tenant_id, time_unix_nano, id)`, data points `(metric_id, time_unix_nano, id)` (unique clustered
-  indexes, so `id` only makes the key unique), so concurrent flushes append at one tail per tenant instead of
-  contending for one last page. `ALTER DATABASE CURRENT SET READ_COMMITTED_SNAPSHOT ON` (in both SQL Server scripts:
-  idempotent, needed by the export reads on the telemetry side); reads run at `DEADLOCK_PRIORITY LOW` on a
-  distinct Application Name. Spans are written by `SqlBulkCopy` straight into the table.
-- **MySQL** InnoDB clusters on the primary key, so `spans` is `PRIMARY KEY (tenant_id, start_time_unix_nano, id)`,
-  `log_records (tenant_id, time_unix_nano, id)`, data points `(metric_id, time_unix_nano, id)`, each with
-  `KEY (id)` (InnoDB needs an auto-increment column to lead some index). Span rows are sorted by
-  `(trace_id, span_id)` and log rows by time before the multi-row insert: unordered inserts deadlock on
-  secondary indexes.
-- **PostgreSQL** is plain heap tables (day partitioning can be added later without re-keying).
-  **ClickHouse** and **Parquet** are described in their provider notes above.
-- No views, no migration scripts.
-
-**Telemetry (13)**: `resources`, `instrumentation_scopes`, `spans` (events and links are its
-`events_json`/`links_json` columns; there are no separate `span_events`/`span_links` tables), `metrics`, `metric_last_seen`, `gauge_data_points`, `sum_data_points`,
-`histogram_data_points`, `exponential_histogram_data_points`, `summary_data_points`, `log_records`, `request_rollup_minute`,
-`log_rollup_minute` (MySQL adds `request_rollup_hour`, `log_rollup_hour` and `rollup_compaction`), plus
-`telemetry_schema_version`
-
-**Multi-tenant/auth (2)**: `tenants`, `api_keys`
-
-**Alerting (2)**: `alert_rules`, `alert_events`
-
-**Retention**: three `*_retention_days` columns and `retention_updated_at` on `tenants` (no separate table)
-
-**Utility (1)**: `control_plane_schema_version` (in the control-plane scripts; the telemetry scripts carry
-`telemetry_schema_version`)
-
-The relational providers have no views; their only derived tables are the rollups. ClickHouse and Parquet have their own
-table set (see their provider notes): no `resources`, `instrumentation_scopes`, `metrics` or `metric_last_seen`, and the
-derived `trace_index`, `metric_catalog` and `metric_series` written by the collector.
-
-Connection strings and providers (both hosts need all of these; see "Provider abstraction"):
-- Ingestion server reads `ConnectionStrings:Collector` (telemetry) and `ConnectionStrings:ControlPlane` in
-  `Keryhe.Telemetry.Collector.Server/appsettings.json`
-- API server reads `ConnectionStrings:Api` (telemetry) and `ConnectionStrings:ControlPlane` in
-  `Keryhe.Telemetry.Api.Server/appsettings.json`
-- Both select the providers via the `Database:Provider` and `ControlPlane:Provider` keys in the same file; the shipped
-  files set both to `PostgreSQL` and leave the connection strings empty (User Secrets supply them)
-
-### Proto Files
-
-OpenTelemetry proto files live under `src/Keryhe.Telemetry.Collector/opentelemetry/` and are
-compiled to C# gRPC stubs automatically via MSBuild (`Grpc.Tools`). Covers traces, metrics,
-logs, profiles, resources, and common types.
+- **Composition roots.** Both hosts are thin `Program.cs` shells. `AddKeryheTelemetryCollector`/`MapKeryheTelemetryCollector`
+  (`Keryhe.Telemetry.Collector/TelemetryCollectorExtensions.cs`) and `AddKeryheTelemetryApi`/`MapKeryheTelemetryApi` (`Keryhe.Telemetry.Api`)
+  register no database provider: each host `switch`es on config and calls the provider's own methods, so neither library references a
+  provider project.
+- **Two providers, both required, on both hosts.** `Database:Provider` (`PostgreSQL`, `SqlServer`, `MySql`, `ClickHouse`, `Parquet`) →
+  `Add<P>CollectorServices`/`Add<P>ApiServices`. `ControlPlane:Provider` (`PostgreSQL`, `SqlServer`, `MySql`, `Sqlite`) →
+  `Add<P>ControlPlaneCollectorServices`/`Add<P>ControlPlaneApiServices` (SQLite: `AddSqliteApiKeyLookup`/`AddSqliteControlPlaneManagement`),
+  against `ConnectionStrings:ControlPlane`. They are a pair because the alert-rule repositories need `ITenantContext`, which only the API
+  registers. Unknown/missing values throw at startup naming the key; there is no fallback between connection strings.
+- **Data access is Dapper throughout** (no EF Core). Provider-agnostic pieces (write repos, channel, worker, caches, read-repository bases,
+  `TimedQuery`, `MetricSeriesPipeline`, rollup builder) are in `Keryhe.Telemetry.Core/Data`; there is no separate Data project.
+- **PostgreSQL pools:** an unkeyed `NpgsqlDataSource` for telemetry and a keyed one (`PostgreSqlControlPlane.ServiceKey`) for the control
+  plane, taken via `[FromKeyedServices]`, so PostgreSQL can be both or only the control plane.
+- **Proto files** under `src/Keryhe.Telemetry.Collector/opentelemetry/` compile to stubs via `Grpc.Tools`.
+
+### Write path
+
+- **Channel and gates.** `TelemetryIngestionChannel` has one unbounded channel per signal; backpressure is a `RecordCountGate` per signal
+  bounding resident **records** (spans for traces) and **bytes** (protobuf size), per tenant as well (`maxShare`, `TenantRateLimiter`).
+  A full gate refuses after `MaxGateWaitMilliseconds` with `IngestionRejectedException` → gRPC `UNAVAILABLE` + `RetryInfo` (HTTP 503).
+- **The traces channel carries flat `List<SpanModel>`**: `TraceWriteRepository` resolves each span's effective resource/scope once, so bulk
+  writers never regroup or re-apply fallbacks.
+- **Worker.** `FlushConcurrency` drain loops per signal; the in-memory drain step is serialized per signal (interleaving corrupts the gate
+  accounting). Flush retries with jittered backoff; `IFlushErrorClassifier` marks permanent errors and `BatchBisector` splits down to the bad
+  records. Gates are released for everything drained regardless of outcome; an eventual drop is counted on `records_dropped{reason}` and is
+  **not** reflected in the export's partial-success response. On shutdown the worker drains (late exports get `UNAVAILABLE`).
+- **Enqueue stamping.** `TelemetryIngestionChannel.MarkEnqueued`/`TryTakeEnqueued` is a weak side table keyed by the export's list, carrying the
+  enqueue time and bytes to the flush (`commit_lag`, byte release).
+- **Attributes and limits.** `OtlpAttributeConverter` is the only place OTLP values are converted and `Telemetry:Ingestion:Limits` applied;
+  sized columns are clipped to `ColumnLimits` (resource `service.name` before hashing).
+- **Collector auth** lives in the pipeline: `ApiKeyAuthenticationHandler` acts only on endpoints with `CollectorEndpointMetadata`, hashes the
+  bearer key (SHA-256 lowercase hex; the Admin tool's `ApiKeyHashing` and the test `ApiKeyHasher` are deliberate byte-identical copies) and
+  writes a trailers-only gRPC response on refusal. `CachingTenantResolver` caches positive 30 s / negative 5 s and checks `expires_at` on every
+  call; a throwing lookup is `Unavailable` (retryable), never cached. The `Export` methods must keep `catch (RpcException) { throw; }` ahead of
+  their generic catch. `PlaintextTransportGuard` fails startup on a plaintext address outside Development. **Never set `ASPNETCORE_URLS` on the
+  collector**: it replaces `Kestrel:Endpoints` and breaks h2c on 5117.
+
+### Reference-table dedup and caches (relational providers)
+
+- `resources` are keyed `UNIQUE (tenant_id, resource_hash)`: **a resource hash is not an identity**, so in-memory keys go through
+  `TelemetryIngestionHelpers.ResourceKey(tenantId, hash)`. Scopes are `UNIQUE (scope_hash)` with no tenant, on purpose.
+- `HashResource`/`HashScope` memoize on the model instance (`CachedHash`): treat a model as immutable once hashed.
+- `metrics` dedup on `(resource_id, name, type, scope_id)`; `type` is in the key because write and read pick the points table from it.
+- Upserts run auto-committed **before** the data transaction (PostgreSQL `ON CONFLICT`, SQL Server `MERGE … HOLDLOCK`, MySQL
+  `… AS new ON DUPLICATE KEY UPDATE`, MySQL 8.0.19+ only). Holding them inside it deadlocks concurrent flushes.
+- `ResourceScopeCache` never invalidates because nothing deletes resource, scope or metric catalog rows. **Any delete of catalog rows must
+  clear it**, or flushes silently write rows pointing at missing parents (hot tables have no FKs).
+- Hot tables (`spans`, `log_records`, five data-point tables) are plain appends: no unique key, no FKs. Reads tolerate duplicates
+  (`COUNT(DISTINCT span_id)`, detail drops repeated span ids, baseline lookups use `ToDictionaryNewest`).
+- `metric_last_seen` is a separate table (no FK) written by `MetricTouchWorker` in batches sorted by `metric_id`, under 4,000 rows (SQL Server
+  lock escalation). `metrics.created_at` means first seen; metric retention deletes points by `time_unix_nano`, never cascading.
+- Exemplars are an `exemplars_json` column on the data points (bulk loaders return no generated ids).
+- Cumulative histogram Min/Max can be estimates (`MinMaxApproximate`); the UI marks them "≈".
+
+### Read path
+
+- **Capped lists, no paging.** Logs/traces lists, metrics catalog and exemplars return at most `limit` (`Telemetry:Query:Limits`) as
+  `{items, truncated}` by fetching `limit + 1`. Logs and traces take `order=newest|oldest`. No cursors.
+- **`TimedQuery.RunAsync`** bounds summary-class reads (`SummaryTimeoutSeconds`) and returns a lower bound. A timeout is decided by **its own
+  deadline, not the exception type** (each driver throws its own type), the driver gets budget + `DriverTimeoutGraceSeconds`, and **a
+  connection a timed-out query ran on is never reused**. Timeouts count on `query_timeouts`.
+- **Search** is unindexed and window-bounded on every provider (`RawSearchWindowGuard`, 24 h); `ProviderCapabilities` and
+  `GET /api/capabilities` report the limits the UI uses.
+- Ids bind through `IdParam` (sized ANSI `DbString` on SQL Server, binary-collation `varchar`, no `CONVERT_IMPLICIT`) and lists through
+  `IdInPredicate`. SQL Server reads retry once on deadlock 1205 (`ExecuteWithRetryAsync`) and run at `DEADLOCK_PRIORITY LOW` with RCSI on.
+- **Trace anchors.** Every trace-list read (list, samples, export) has one anchor per trace: its **earliest span in scope** by `(start, id)`,
+  scope = the selected service's spans, else the whole trace. Duration, service, operation and kind are the anchor's; the error flag is "any
+  span in scope"; the operation filter matches the anchor's name; search matches any span of the trace regardless of service. The scan covers
+  `[start - AnchorLookbackMinutes, end]` and drops anchors before `start`. Three SQL shapes: `AnchorsSql` (whole window, hash aggregate; window
+  function when a service is selected; errors mode restricted through the errors index), `SeekAnchorsSql` + `FetchSlicedAnchorPageAsync`
+  (relational lists read widening start-time slices with a `NOT EXISTS` seek per candidate), and ClickHouse/Parquet's own slices confirmed
+  against `trace_index` (Parquet confirms in list order and stops once the page is full). `SlicedList_MatchesTheAnchorDefinition` restates the
+  definition in LINQ: keep it passing.
+- **Trace detail** returns each distinct resource/scope once with spans referring by index. The relational query is one plain join (the
+  alternatives were rejected). `?start=&end=` hints are used by ClickHouse and Parquet only; a hint that finds nothing falls back to an
+  unbounded read.
+- **Export** streams NDJSON/CSV with no row cap, bounded by `ExportWindowGuard` and `ExportConcurrencyGate` (429). Readers advance row by row
+  with `CommandTimeout = 0` and the request's token; trace export derives anchors once and fetches span counts per 1,000-anchor chunk.
+  CSV cells pass `CsvFormulaGuard`.
+
+### Summary rollups
+
+Cards, charts and the error-rate/log-spike alerts read `request_rollup_minute` (inbound SERVER/CONSUMER spans: *requests*, with a 24-band
+duration histogram, `DurationBands` is the one band definition) and `log_rollup_minute`. Rows are partial appends; reads `SUM`.
+- Relational providers: `RollupAccumulator` is fed **only after a flush succeeds** and merges under one lock; `RollupWorker` (registered before
+  the ingestion worker so it stops after the drain) appends closed minutes. ClickHouse and Parquet write rollups in their ingestion worker;
+  their `IRollupStore` is a no-op.
+- `RollupSummaryBuilder` clamps to `writtenThrough` and picks a bucket from a fixed ladder. **The API reads `Telemetry:Rollup`
+  `FlushIntervalSeconds`/`CloseGraceSeconds` too: change them on both hosts.**
+- MySQL alone has an hour tier (`request_rollup_hour`, `log_rollup_hour`, `rollup_compaction`, `MySqlRollupCompactor` driven by the API's
+  `RollupCompactionWorker`); the column is `signal_kind` because `signal` is reserved.
+- `SlowTraceEvaluator` stays on raw spans (`CountSlowInboundSpansAsync`); `TryClaimFireAsync` is an atomic UPDATE with a cooldown check.
+
+### Retention
+
+Per-tenant windows on the control-plane `tenants` row (30/30/30 defaults, no global default); telemetry with no `tenants` row expires on
+`RetentionDefaults` (a test keeps it equal to the schema defaults). `RetentionWorker` (API host only, `AddRetention`) builds one `RetentionPolicy`
+and calls `IRetentionSweeper`. Tenants to sweep come from the **telemetry** side, so orphans expire. Relational: per-tenant batched deletes via
+`RetentionSweeperBase` (`BatchedDeleteSql`; MySQL reads metric ids first). ClickHouse: `DROP PARTITION` past the longest window, lightweight
+deletes for shorter ones (`ClickHouseRetentionMemory`). Parquet: day folders. ClickHouse/Parquet collectors also drop expired records at ingest
+(`RetentionWindowCache`).
+
+### Providers that diverge
+
+- **ClickHouse** (25.8, telemetry only): one row carries resource/scope attributes (`Map(LowCardinality(String), String)`, values as text); trace
+  ids `UUID`, span ids `UInt64`, hex only at the edges (`ClickHouseIds`, never `hex()` in SQL). **A log time range needs a
+  `toStartOfFiveMinutes(timestamp)` bound and a metric range a `toStartOfHour(time)` bound, or the sort key doesn't prune** (tests check
+  `system.query_log` read rows). Inserts carry an `insert_deduplication_token` reused on retry; large flushes split into parallel pieces
+  (`{token}:{table}:{i}`). Derived tables (`trace_index`, rollups, `metric_catalog`, `metric_series`) are written by the collector after the
+  raw insert; no materialized views, no `FINAL`. Own ingestion worker (`ClickHouseIngestionWorker`, per-UTC-day buffers).
+- **Parquet** (telemetry only, one machine): per tenant-hour Parquet files listed by per-writer manifests (atomic rename), read by an in-process
+  DuckDB through `ParquetQueryEngine` (TEMP VIEWs over the resolved file list, never a glob; `NamedParameterConnection` rewrites `@x` to `$x`).
+  **Readers list writers' manifests first, then the compacted generation** (the opposite order loses files). Trace ids are `trace_hi`/`trace_lo`
+  `UBIGINT`; nested values are staged as JSON (the appender can't write MAP/STRUCT). `PartitionedIngestionWorker` (Core) buffers per tenant-hour
+  (5 s linger, 50,000-record buffers); the Parquet registration raises the gate defaults so a buffer fits. Compaction runs on the API host under
+  a lease. Debug log `parquet-sql ms= files= sql=` (category `ParquetQueryEngine`) is the slow-SQL source. `PoisonRecordTestsBase` doesn't run on it.
+- **SQLite control plane**: `SqliteControlPlaneConnection` refuses relative paths and `:memory:`, forces foreign keys and pooling, and never
+  lets the configured string decide the open mode. **Only the API host creates/migrates** (`SqliteControlPlaneInitializer` before any
+  background service; forward-only chain with a `VACUUM INTO` backup); the collector and Admin tool check and fail. Timestamps are text in one
+  layout (`SqliteTime.Format`) bound through `ControlPlaneRepositoryBase.TimestampParam`; `AUTOINCREMENT` so tenant ids are never reused.
+  `SqliteScriptTests` holds the script to the PostgreSQL one. Collector-side reads append `Mode=ReadOnly`.
+- **Relational physical layout:** SQL Server clusters hot tables on `(tenant_id, time, id)` / `(metric_id, time, id)`; MySQL makes those the
+  primary key (plus `KEY (id)`) and sorts span rows by `(trace_id, span_id)` before insert (unordered inserts deadlock); PostgreSQL uses plain
+  heaps (batched deletes go by `ctid`). Every relational index serves a named query; no GIN/trigram indexes.
+
+### API and UI hosting
+
+- **Routes.** `Telemetry:Api:BasePath` (default `/api`; `/` rejected) is added by `TelemetryApiConvention`, plus
+  `tenants/{tenantId:long:min(1)}` for `[TenantScoped]` controllers. Controllers declare only their own segment. `MapKeryheTelemetryApi()` also
+  maps a JSON 404 for unknown API paths.
+- **Authorization** (off by default): every action carries exactly one `[TelemetryOperation]` (Read/Export/ManageAlerts/ManageSettings, never
+  inferred from the verb) or `[TelemetryAnonymous]`; a test enumerates them. `TelemetryAuthorizationFilter` checks the operation policy and, on
+  tenant routes, `TenantAccessRequirement`; a tenant refusal adds `X-Telemetry-Denied: tenant` (the UI keys on it). Writes without a bearer token
+  need `X-Telemetry-Client: 1`. `AlertService.EvaluateAllAsync` sets `ITenantContext` itself, outside requests. The in-repo hosts are
+  development examples with authorization off.
+- **UI package** (`Keryhe.Telemetry.Ui`, a Razor class library whose csproj builds `src/telemetry-client` incrementally and warns, not fails,
+  without Node). The client fetches `config.json` before bootstrapping, so nothing about the API location is compiled in.
+  `UseKeryheTelemetryUi` rewrites `<base href>` for `BasePath` and serves the shell **from memory** (it owns `{BasePath}`, `{BasePath}/` and
+  `{BasePath}/index.html`, content length of the encoded body, per-representation ETags); `TelemetryUiShell.Content` is null without a build and
+  must 404, not throw. `AddKeryheTelemetryUi` is required (the guard is on the shell singleton, not on options). **The host must call
+  `app.UseRouting()` explicitly right after `UseKeryheTelemetryUi()`**, and `MapKeryheTelemetryUiFallback()` must stay `MapFallback` scoped to
+  `{BasePath}/{*path:nonfile}`. A reverse proxy must forward the base path, not strip it.
+- UI pages live at `/t/:tenantId/...`; API services build URLs with `tenantApiUrl`; `authInterceptor` handles headers, 401 and tenant 403;
+  `downloadBlob` stays a fetch so the interceptor runs for exports.
+
+### Test data generator
+
+`TenantSimulator` produces a neutral model for any range of virtual time, deterministically seeded from (seed, tenant, time). Two sinks:
+**backfill** is hand-built OTLP through the Collector's gRPC stubs (`OtlpSink`, `MetricAggregator` for cumulative metrics), because the SDK
+can't backdate logs or metrics; **live** is the real SDK (`SdkSink`), one provider set per pod, logs and measurements recorded while their span
+is the current `Activity`. Its tests compare both sinks through an in-process fake collector.
+
+## Default ports
+
+Collector: h2c gRPC `http://localhost:5117` and OTLP/HTTP `http://localhost:5118` (Development), TLS `https://localhost:7057` (gRPC + OTLP/HTTP
+by ALPN), management `http://127.0.0.1:5119` (`/healthz/live|ready`). Endpoints are named `Kestrel:Endpoints` that merge across appsettings
+files by name. API: `http://localhost:5188`, `https://localhost:7105`; shipped `appsettings.json` sets `Telemetry:Api:BasePath=/telemetry/api`
+and `TelemetryUi:BasePath=/telemetry`. Angular dev server: `http://localhost:4201`.
+
+Connection strings come from user secrets (`ConnectionStrings:Collector`/`:Api`/`:ControlPlane`); the shipped appsettings set both providers to
+`PostgreSQL` with empty strings.

@@ -146,7 +146,7 @@ public sealed partial class ParquetBulkWriter
         }
     }
 
-    // ---- nested values as JSON text (the appender cannot write lists of structs, phase 0 spike 1) ----
+    // ---- nested values as JSON text (the appender cannot write lists of structs) ----
 
     private static double Finite(double value) => double.IsFinite(value) ? value : 0d;
 

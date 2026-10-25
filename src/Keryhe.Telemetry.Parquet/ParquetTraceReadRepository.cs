@@ -29,7 +29,7 @@ namespace Keryhe.Telemetry.Parquet;
 ///
 /// <b>Detail.</b> The trace's hours come from the <c>?start=&amp;end=</c> hint, else from <c>trace_index</c> (which carries the
 /// trace id in sorted order, so the lookup prunes on file statistics); then only those hours' span files are scanned for
-/// <c>trace_hi = ? AND trace_lo = ?</c> (phase 0 spike 2). A hint that finds nothing falls back to the unhinted read.
+/// <c>trace_hi = ? AND trace_lo = ?</c>. A hint that finds nothing falls back to the unhinted read.
 /// </summary>
 public sealed class ParquetTraceReadRepository : DapperReadRepository, ITraceReadRepository
 {
@@ -435,12 +435,14 @@ public sealed class ParquetTraceReadRepository : DapperReadRepository, ITraceRea
             if (descending) { sliceTo = hi; sliceFrom = Math.Max(lo, hi - width); }
             else { sliceFrom = lo; sliceTo = Math.Min(hi, lo + width); }
 
+            // Confirm in list order and stop once the page is full: a widened slice can hold thousands of candidates, each chunk
+            // of which is a trace_index scan, and confirmation is per candidate, so the first confirmed are the page's rows.
             var candidates = await CandidatesAsync(conn, f, sliceFrom, sliceTo, ct);
-            var confirmed = await ConfirmAsync(conn, candidates, f.Service, ct);
             var ordered = descending
-                ? confirmed.OrderByDescending(a => a.AnchorStart).ThenByDescending(a => a.AnchorSpanId)
-                : confirmed.OrderBy(a => a.AnchorStart).ThenBy(a => a.AnchorSpanId);
-            rows.AddRange(ordered.Take(need - rows.Count));
+                ? candidates.OrderByDescending(a => a.AnchorStart).ThenByDescending(a => a.AnchorSpanId)
+                : candidates.OrderBy(a => a.AnchorStart).ThenBy(a => a.AnchorSpanId);
+            var confirmed = await ConfirmAsync(conn, ordered.ToList(), f.Service, ct, stopAfter: need - rows.Count);
+            rows.AddRange(confirmed.Take(need - rows.Count));
 
             if (descending) hi = sliceFrom; else lo = sliceTo;
             var remaining = hi - lo;
@@ -479,12 +481,14 @@ public sealed class ParquetTraceReadRepository : DapperReadRepository, ITraceRea
 
     /// <summary>
     /// Keeps the candidates that are their trace's anchor (start equals the trace's earliest start in scope per
-    /// <c>trace_index</c>) and fills the whole-trace bounds and the scoped error flag.
+    /// <c>trace_index</c>) and fills the whole-trace bounds and the scoped error flag, in the candidates' order. With
+    /// <paramref name="stopAfter"/>, no further chunk is read once that many are confirmed.
     /// </summary>
-    private async Task<List<Anchor>> ConfirmAsync(NamedParameterConnection conn, List<Anchor> candidates, string? service, CancellationToken ct)
+    private async Task<List<Anchor>> ConfirmAsync(
+        NamedParameterConnection conn, List<Anchor> candidates, string? service, CancellationToken ct, int stopAfter = int.MaxValue)
     {
         var confirmed = new List<Anchor>();
-        for (var offset = 0; offset < candidates.Count; offset += IdChunkSize)
+        for (var offset = 0; offset < candidates.Count && confirmed.Count < stopAfter; offset += IdChunkSize)
         {
             var chunk = candidates.Skip(offset).Take(IdChunkSize).ToList();
             var index = await TraceIndexAsync(conn, chunk.Select(c => c.Key).ToArray(), service, ct);

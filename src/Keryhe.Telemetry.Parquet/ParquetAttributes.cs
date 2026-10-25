@@ -8,7 +8,7 @@ namespace Keryhe.Telemetry.Parquet;
 /// Converts an OTLP attribute set to the <c>MAP(VARCHAR, VARCHAR)</c> every table stores (README D4), the ClickHouse
 /// provider's R7 rule: a string as is; int, double and bool as their text; array and kvlist as JSON text; bytes as base64.
 /// The original type is not kept, so a numeric comparison casts. The map is serialized to JSON text for the staging
-/// table (the appender cannot write a <c>MAP</c>, phase 0 spike 1) and converted by the <c>COPY</c>.
+/// table (the appender cannot write a <c>MAP</c>) and converted by the <c>COPY</c>.
 /// </summary>
 internal static class ParquetAttributes
 {

@@ -12,9 +12,8 @@ namespace Keryhe.Telemetry.IntegrationTests.Tests;
 /// keys), so a re-delivered point is stored twice and any "one row per stream" result set is only as unique as the
 /// query that derived it. The cumulative-delta loaders key their pre-window baseline row on
 /// <c>metric_id + attributes_json</c>, which nothing in the schema enforces as unique; a plain <c>ToDictionary</c>
-/// there threw <see cref="ArgumentException"/> and the API answered <c>metrics/series</c> with a 500 (seen 10 times
-/// on MySQL in the 3.0.1 stress ramp, from <c>ComputeCumulativeDeltas</c> and
-/// <c>ComputeHistogramCumulativeDeltas</c>). This is the guard that replaced it: keep the newest observation
+/// there threw <see cref="ArgumentException"/> and the API answered <c>metrics/series</c> with a 500 (from
+/// <c>ComputeCumulativeDeltas</c> and <c>ComputeHistogramCumulativeDeltas</c>). This is the guard that replaced it: keep the newest observation
 /// instead of throwing.
 /// </summary>
 public class DuplicateBaselineRowTests

@@ -317,7 +317,7 @@ public sealed class ParquetCompactor : IDisposable
     /// Writes <paramref name="inputPaths"/> as sorted compacted files into <paramref name="target"/> (committed under names unique to
     /// this compactor, listed by nobody yet) and returns their manifest entries. A derived table pre-sums; a bigger-than-
     /// <c>MaxSortRows</c> input is cut on the first column of the sort key into separately sorted ranges, so one sort stays bounded
-    /// (phase 0 spike 2: dictionaries are not spilled, so memory, not time, is the limit); a range is split into files of
+    /// (dictionaries are not spilled, so memory, not time, is the limit); a range is split into files of
     /// <c>MaxFileRows</c>.
     /// </summary>
     internal async Task<List<ParquetManifestFile>> WriteCompactedAsync(

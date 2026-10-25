@@ -176,10 +176,8 @@ public abstract class TraceReadRepositoryBase : DapperReadRepository, ITraceRead
             """;
 
         // One statement, the same single join the read always used. Window functions to send each resource's attributes once
-        // (ROW_NUMBER per resource and scope) and batched sub-selects were both measured: the windows sort every row (20,000 spans:
-        // 551 ms on SQL Server, 392 on MySQL against about 190 for the plain join) and the sub-selects repeat the trace predicate (a
-        // hypertable probes every chunk three times; SQL Server's plan degraded under concurrency, 32 -> 180 ms p95). So the join
-        // stays plain, and the repeated attribute JSON is parsed once per distinct resource and scope below, not once per span.
+        // (ROW_NUMBER per resource and scope) and batched sub-selects were both rejected: the windows sort every row and the
+        // sub-selects repeat the trace predicate. So the join stays plain, and the repeated attribute JSON is parsed once per distinct resource and scope below, not once per span.
         var sql = $"""
             SELECT
                 {spanColumns},
@@ -262,16 +260,15 @@ public abstract class TraceReadRepositoryBase : DapperReadRepository, ITraceRead
     /// Shaped as a hash aggregate joined back to the anchor span, not a <c>ROW_NUMBER()</c> window: one pass groups each
     /// trace's spans in <c>[@anchorFrom, @end]</c> for their earliest start and error flag (dropping traces that start before
     /// <c>@start</c>), then the earliest span is read back by <c>(trace_id, span_id)</c> and a trace with two spans starting
-    /// at the same instant keeps the lowest <c>id</c>. That avoids sorting every span by trace id, which is what made the
-    /// window function 2x (PostgreSQL, SQL Server) to 5x (MySQL) slower in the lab benchmark. With
+    /// at the same instant keeps the lowest <c>id</c>. That avoids sorting every span by trace id, which makes the
+    /// window function slower. With
     /// <paramref name="errorsOnly"/> the group is restricted to traces with an ERROR span in scope, found through the errors
     /// index, so errors mode never ranks the traces that cannot qualify.
     /// </summary>
     protected string AnchorsSql(bool hasService, bool errorsOnly = false)
     {
         // A selected service narrows the scan to its own index range (<c>idx_spans_tenant_service_time</c>), small enough
-        // that the window form below beat the hash aggregate in the lab benchmark (a service-scoped 6h summary: 203 vs 299 ms
-        // on PostgreSQL, 599 vs 796 ms on MySQL); errors mode has no such narrowing and always uses the aggregate.
+        // that the window form below beats the hash aggregate; errors mode has no such narrowing and always uses the aggregate.
         if (hasService && !errorsOnly) return WindowAnchorsSql();
 
         var service = hasService ? " AND service_name = @service" : "";
@@ -431,7 +428,7 @@ public abstract class TraceReadRepositoryBase : DapperReadRepository, ITraceRead
         var candidate = new StringBuilder();
         var selective = false;
         // The anchor's own name narrows the candidates before the seek, but still reads in slices: on SQL Server a
-        // single whole-range pass ordered every matching candidate's seek before the top-N cut (6 ms to 600 ms), where a
+        // single whole-range pass orders every matching candidate's seek before the top-N cut, where a
         // slice only ever verifies the few hundred candidates it holds.
         if (!string.IsNullOrEmpty(query.Operation))
             candidate.Append(" AND s.name = @operation");
@@ -675,8 +672,8 @@ public abstract class TraceReadRepositoryBase : DapperReadRepository, ITraceRead
             ORDER BY {order}
             {PagingClause}
             """;
-        // Bounded like the summaries: this derives anchors over the whole window too, and without a budget it ran into the
-        // driver's 30 s default and answered 500 under load (3.0.1 ramp). On timeout the follow-up below is
+        // Bounded like the summaries: this derives anchors over the whole window too, and without a budget it would run into the
+        // driver's 30 s default and answer 500. On timeout the follow-up below is
         // skipped, so nothing else runs on the aborted connection (see TimedQuery).
         var (rows, timedOut) = await TimedQuery.RunAsync(
             async (timeoutSeconds, ct) => (await conn.QueryAsync<AnchorRow>(new CommandDefinition(

@@ -125,7 +125,7 @@ public class HostOrchestrationTests
         Assert.Equal("control-plane-cs", apiEnv["ConnectionStrings__ControlPlane"]);
         Assert.Equal("PostgreSQL", apiEnv["ControlPlane__Provider"]);
         // The harness calls the API at /api; the shipped appsettings mount it at /telemetry/api, so this must be set or
-        // the readiness probe is a 404 (the ramp failed exactly that way after the base-path change).
+        // the readiness probe is a 404.
         Assert.Equal("/api", apiEnv["Telemetry__Api__BasePath"]);
         // Not inherited from whatever appsettings the hosts were published with.
         Assert.Equal("5", apiEnv["Telemetry__Query__SummaryTimeoutSeconds"]);

@@ -6,7 +6,7 @@ namespace Keryhe.Telemetry.Parquet;
 
 /// <summary>
 /// Writes one Parquet file per call with DuckDB (README U1): rows go through the appender into a temp table (nested
-/// columns as JSON text, phase 0 spike 1), then <c>COPY (SELECT ... ORDER BY &lt;sort key&gt;) TO &lt;temp path&gt;</c>.
+/// columns as JSON text), then <c>COPY (SELECT ... ORDER BY &lt;sort key&gt;) TO &lt;temp path&gt;</c>.
 /// One in-memory database per process holds the memory, thread and temp-directory limits; each write takes its own
 /// connection to it. The file is written wherever <c>tempPath</c> points; committing it is the caller's job.
 /// </summary>

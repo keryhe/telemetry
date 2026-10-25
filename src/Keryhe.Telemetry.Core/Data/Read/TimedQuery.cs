@@ -12,12 +12,12 @@ namespace Keryhe.Telemetry.Core.Data.Read;
 /// <para><b>A timeout is decided by this helper's own deadline, not by the exception's type.</b> Any exception
 /// raised once the budget has elapsed (or once its own token has fired) is a timeout, unless the caller's token was
 /// cancelled, in which case it propagates as the request abort it is. Matching exception types does not work: under
-/// load every provider surfaces an aborted command differently. The 3.0.1 stress ramp recorded Npgsql's
+/// load every provider surfaces an aborted command differently: Npgsql's
 /// <c>NpgsqlException</c> wrapping a <c>TimeoutException</c> ("Exception while reading from stream", raised when the
 /// cancel request itself goes unanswered, after which the connector is broken), SqlClient's <c>SqlException</c>
 /// "Execution Timeout Expired" (-2) and MySqlConnector's <c>MySqlException</c> "The Command Timeout expired". None
-/// of them is an <see cref="OperationCanceledException"/> or a bare <see cref="TimeoutException"/>, so each one
-/// escaped as a 500 and the "≥ N" fallback never ran.</para>
+/// of them is an <see cref="OperationCanceledException"/> or a bare <see cref="TimeoutException"/>, so matching on
+/// type would let each escape as a 500 and skip the "≥ N" fallback.</para>
 ///
 /// <para>The <paramref name="query"/> delegate receives a command timeout for the driver that is the budget plus
 /// <see cref="DriverTimeoutGraceSeconds"/>, so this helper's token always fires first and the driver's own command

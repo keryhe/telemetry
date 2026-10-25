@@ -417,3 +417,16 @@ public sealed class ClickHouseTraceQueryBench(ClickHouseFixture fixture) : Trace
         await cmd.ExecuteNonQueryAsync();
     }
 }
+
+// Uncompacted: each 10,000-span flush leaves one file per table and tenant-hour, as a live collector does between compactions.
+[Collection(ProviderNames.Parquet)]
+[Trait("Provider", ProviderNames.Parquet)]
+public sealed class ParquetTraceQueryBench(ParquetFixture fixture) : TraceQueryBenchBase(fixture)
+{
+    protected override async Task<System.Data.Common.DbConnection> OpenRawAsync()
+    {
+        var c = new DuckDB.NET.Data.DuckDBConnection("DataSource=:memory:");
+        await c.OpenAsync();
+        return c;
+    }
+}

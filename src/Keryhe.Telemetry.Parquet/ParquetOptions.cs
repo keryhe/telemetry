@@ -126,16 +126,18 @@ public sealed class CompactionOptions
     public bool Enabled { get; set; } = true;
 
     /// <summary>How often the worker wakes: to renew its lease and, while it holds it, to run a pass.</summary>
-    public int IntervalSeconds { get; set; } = 60;
+    public int IntervalSeconds { get; set; } = 15;
 
     /// <summary>Another instance takes the lease over once it has not been renewed for this long.</summary>
     public int LeaseSeconds { get; set; } = 300;
 
-    /// <summary>A partition with more uncompacted writer files than this is folded (phase 0 spike 5: up to about 120 files read as fast as one).</summary>
-    public int MinorFileThreshold { get; set; } = 100;
+    /// <summary>
+    /// A partition with more uncompacted writer files than this is folded.
+    /// </summary>
+    public int MinorFileThreshold { get; set; } = 30;
 
     /// <summary>Uncompacted writer files older than this are folded even below the threshold.</summary>
-    public int MinorAgeSeconds { get; set; } = 600;
+    public int MinorAgeSeconds { get; set; } = 60;
 
     /// <summary>An hour is rewritten into one file set once it has been over this long.</summary>
     public int CloseHourGraceMinutes { get; set; } = 15;
@@ -163,7 +165,7 @@ public sealed class CompactionOptions
     /// <summary>...and, every this-many minutes, at every partition.</summary>
     public int FullScanMinutes { get; set; } = 60;
 
-    /// <summary>The compactor's own DuckDB database (an hour of 36 M spans sorts in about 140 s at a 4 GB peak, phase 0 spike 2).</summary>
+    /// <summary>The compactor's own DuckDB database (dictionaries are not spilled, so the memory limit bounds a sort).</summary>
     public DuckDbOptions DuckDb { get; set; } = new() { MemoryLimit = "3GB", Threads = 4 };
 
     internal void Validate(string path)

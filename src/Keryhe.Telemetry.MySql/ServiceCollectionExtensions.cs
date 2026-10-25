@@ -35,7 +35,7 @@ public static class MySqlServiceCollectionExtensions
         services.AddScoped<IMetricReadRepository, MySqlMetricReadRepository>();
         services.AddScoped<ILogReadRepository, MySqlLogReadRepository>();
         services.AddScoped<IRollupReadRepository, MySqlRollupReadRepository>();
-        // The hour tier exists on MySQL only (the measurement gate named it); driven by the API host's RollupCompactionWorker.
+        // The hour tier exists on MySQL only; driven by the API host's RollupCompactionWorker.
         services.AddScoped<IRollupCompactor, MySqlRollupCompactor>();
         services.AddScoped<IResourceReadRepository, MySqlResourceReadRepository>();
         services.AddScoped<IRetentionSweeper, MySqlRetentionSweeper>();

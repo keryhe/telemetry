@@ -13,8 +13,7 @@ namespace Keryhe.Telemetry.IntegrationTests.Tests;
 /// <list type="bullet">
 /// <item><b>Token path</b> — the command honours <see cref="TimedQuery"/>'s token, the normal case now that the driver
 /// timeout outlasts the budget.</item>
-/// <item><b>Driver-timeout path</b> — the command ignores the token and the driver's own command timeout ends it, the
-/// way the 3.0.1 stress ramp's queries ended (the budget and the driver timeout were equal then). Each driver throws
+/// <item><b>Driver-timeout path</b> — the command ignores the token and the driver's own command timeout ends it. Each driver throws
 /// its own type here — Npgsql an <c>NpgsqlException</c> wrapping a <c>TimeoutException</c>, SqlClient a
 /// <c>SqlException</c>, MySqlConnector a <c>MySqlException</c> — which is exactly what the type-matching
 /// <see cref="TimedQuery"/> let escape as a 500.</item>
@@ -34,8 +33,8 @@ public abstract class TimedQueryProviderTestsBase(ProviderFixture fixture, ITest
     protected abstract DbConnection CreateConnection(string connectionString);
 
     /// <summary>
-    /// Whether the driver ends a command on its own <c>CommandTimeout</c>. ClickHouse.Client does not (measured: a
-    /// ~10 s statement with <c>commandTimeout: 2</c> ran to completion), so on ClickHouse the driver timeout is no
+    /// Whether the driver ends a command on its own <c>CommandTimeout</c>. ClickHouse.Client does not (a
+    /// statement with <c>commandTimeout: 2</c> runs to completion), so on ClickHouse the driver timeout is no
     /// backstop at all and <see cref="TimedQuery"/>'s token is the only thing bounding a summary.
     /// </summary>
     protected virtual bool DriverEnforcesCommandTimeout => true;
@@ -123,7 +122,7 @@ public sealed class SqlServerTimedQueryTests(SqlServerFixture fixture, ITestOutp
 [Trait("Provider", ProviderNames.MySql)]
 public sealed class MySqlTimedQueryTests(MySqlFixture fixture, ITestOutputHelper output) : TimedQueryProviderTestsBase(fixture, output)
 {
-    // A 10^8-row cross join: ~6 s uninterrupted on the reference machine, and interrupting it is an error ("Query
+    // A 10^8-row cross join: several seconds uninterrupted, and interrupting it is an error ("Query
     // execution was interrupted"), as it is for a real summary query. SLEEP() and BENCHMARK() both return normally
     // when killed, so they cannot stand in for one.
     protected override string SlowSql => "WITH d AS (SELECT 0 AS x UNION ALL SELECT 1 UNION ALL SELECT 2 UNION ALL SELECT 3 UNION ALL SELECT 4 UNION ALL SELECT 5 UNION ALL SELECT 6 UNION ALL SELECT 7 UNION ALL SELECT 8 UNION ALL SELECT 9) SELECT COUNT(*) FROM d a, d b, d c, d e, d f, d g, d h, d i";
@@ -134,7 +133,7 @@ public sealed class MySqlTimedQueryTests(MySqlFixture fixture, ITestOutputHelper
 [Trait("Provider", ProviderNames.ClickHouse)]
 public sealed class ClickHouseTimedQueryTests(ClickHouseFixture fixture, ITestOutputHelper output) : TimedQueryProviderTestsBase(fixture, output)
 {
-    // ~9.5 s uninterrupted on the reference machine, across many blocks, so cancellation can land between them.
+    // Several seconds uninterrupted, across many blocks, so cancellation can land between them.
     protected override string SlowSql => "SELECT sum(cityHash64(number)) FROM numbers(4000000000)";
     protected override bool DriverEnforcesCommandTimeout => false;
     protected override DbConnection CreateConnection(string connectionString) => new global::ClickHouse.Client.ADO.ClickHouseConnection(connectionString);

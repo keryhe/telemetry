@@ -18,7 +18,7 @@ public sealed class ClickHouseFixture : ProviderFixture
 
     protected override ProviderContainer Container => _container;
 
-    // The opt-in benchmarks read with the 25.x query condition cache off, or a repeated predicate looks free (Phase 0, spike 4).
+    // The opt-in benchmarks read with the 25.x query condition cache off, or a repeated predicate looks free.
     // The row-count tests read from system.query_log and are not affected, so they keep the production setting.
     protected override string ApiConnectionString =>
         Environment.GetEnvironmentVariable("TRACE_BENCH_OUT") is null && Environment.GetEnvironmentVariable("ROLLUP_BENCH_OUT") is null

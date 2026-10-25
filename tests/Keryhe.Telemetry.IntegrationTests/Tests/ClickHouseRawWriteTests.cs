@@ -282,7 +282,7 @@ public sealed class ClickHouseRawWriteTests(ClickHouseFixture fixture) : IAsyncL
     [Fact]
     public async Task BatchLargerThanOldBatchSize_IsStoredWhole_UnderOneToken()
     {
-        // Phase 0 spike 3: with BatchSize 100,000 the 2nd and 3rd INSERT of a 250,000-row write shared the token and were dropped.
+        // With BatchSize 100,000 a 250,000-row write is three INSERTs; a token shared between them would drop the 2nd and 3rd.
         const int count = 250_000;
         var resource = Resource();
         var scope = new InstrumentationScopeModel { Name = "bulk" };

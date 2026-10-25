@@ -2,7 +2,9 @@
 
 Full setup instructions for every supported database provider, deployment mode, and the
 alerting and retention subsystems. See the [README](../README.md) for a quick start with PostgreSQL, and
-[CONFIGURATION.md](CONFIGURATION.md) for every configuration key and its default.
+[CONFIGURATION.md](CONFIGURATION.md) for every configuration key and its default. Component guides: [Architecture](ARCHITECTURE.md),
+[Collector](COLLECTOR.md), [API](API.md), [UI](UI.md), [Parquet](PARQUET.md), [ClickHouse](CLICKHOUSE.md), [SQLite](SQLITE.md),
+[provider packages](PROVIDERS.md), [stress tests](STRESS-TESTS.md).
 
 ## Prerequisites
 
@@ -222,11 +224,10 @@ The collector accepts OTLP over gRPC and over HTTP (`POST /v1/traces`, `/v1/logs
 Development gRPC is on `http://localhost:5117` and OTLP/HTTP on `http://localhost:5118`.
 
 **Through your own OpenTelemetry Collector.** An application need not hold a key: run an OpenTelemetry Collector on your side, send to it with
-no key, and let its `otlp` exporter add the tenant's key. It also queues on disk through a Keryhe outage. A tested configuration and a local
-`docker compose` setup are in [`deploy/otel-collector`](../deploy/otel-collector/README.md); the Collector README
-([Sending through an OpenTelemetry Collector](../src/Keryhe.Telemetry.Collector/README.md#sending-through-an-opentelemetry-collector)) explains
+no key, and let its `otlp` exporter add the tenant's key. It also queues on disk through a Keryhe outage. A sample configuration and a local
+`docker compose` setup are in [`deploy/otel-collector`](../deploy/otel-collector/README.md); [Sending through an OpenTelemetry Collector](COLLECTOR.md#sending-through-an-opentelemetry-collector) explains
 the key handling and what the client sees when Keryhe is full. Running several collectors is in
-[Running more than one collector](../src/Keryhe.Telemetry.Collector/README.md#running-more-than-one-collector).
+[Running more than one collector](COLLECTOR.md#running-more-than-one-collector).
 
 ## 4. Build
 
@@ -310,7 +311,7 @@ lifecycle. Do not set `ASPNETCORE_URLS` on the collector: it overrides the per-e
 separate web server for the SPA and no CORS configuration.
 
 The Angular UI is packaged separately, as `Keryhe.Telemetry.Ui` (a NuGet package like the other
-class libraries; see the [README](../README.md#build-your-own-host) if you're composing your own
+class libraries; see the [README](ARCHITECTURE.md#build-your-own-host) if you're composing your own
 host rather than running this one as-is). `Keryhe.Telemetry.Api.Server` references it via a plain
 `ProjectReference`, so publishing it also builds `src/telemetry-client` (`npm ci && npm run build`)
 and stages the output into `Keryhe.Telemetry.Ui`'s own `wwwroot`, from where it flows into the
