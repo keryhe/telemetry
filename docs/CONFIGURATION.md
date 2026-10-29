@@ -15,8 +15,8 @@ to both.
 
 | Key | Default | Host | Description |
 |---|---|---|---|
-| `Database:Provider` | none (required) | collector, API | The telemetry data provider: `PostgreSQL`, `SqlServer`, `ClickHouse`, `MySql` or `Parquet` (files + DuckDB; no connection string, see `Telemetry:Parquet`). Unknown or missing fails startup. |
-| `ControlPlane:Provider` | none (required) | collector, API, Admin | The control-plane provider (tenants and their retention windows, API keys, alert rules): `PostgreSQL`, `SqlServer`, `MySql` or `Sqlite` (a file; see [`Telemetry:ControlPlane:Sqlite`](#sqlite-control-plane) below). ClickHouse and Parquet are not control-plane providers. Unknown or missing fails startup naming the key. |
+| `Telemetry:Collector:Provider:Database`, `Telemetry:Api:Provider:Database` | none (required) | collector, API (each its own) | The telemetry data provider: `PostgreSQL`, `SqlServer`, `ClickHouse`, `MySql` or `Parquet` (files + DuckDB; no connection string, see `Telemetry:Parquet`). Unknown or missing fails startup. |
+| `Telemetry:Collector:Provider:ControlPlane`, `Telemetry:Api:Provider:ControlPlane` (Admin tool: `ControlPlane:Provider`) | none (required) | collector, API, Admin (each its own) | The control-plane provider (tenants and their retention windows, API keys, alert rules): `PostgreSQL`, `SqlServer`, `MySql` or `Sqlite` (a file; see [`Telemetry:ControlPlane:Sqlite`](#sqlite-control-plane) below). ClickHouse and Parquet are not control-plane providers. Unknown or missing fails startup naming the key. |
 | `ConnectionStrings:Collector` | none (required) | collector | Write path: the telemetry bulk writer, metric-touch and rollup stores. |
 | `ConnectionStrings:Api` | none (required) | API | Read path: every telemetry read repository and the retention sweeper. |
 | `ConnectionStrings:ControlPlane` | none (required) | collector, API | The control-plane database: the collector's API-key lookup and touch, the API's alert rules, tenant catalog and each tenant's retention windows. No fallback to `Collector`/`Api`; missing fails startup naming the key. On PostgreSQL, SQL Server and MySQL it normally points at the same database as the data strings. For `Sqlite` it is `Data Source=<absolute path of the file>` (a relative path or `:memory:` fails startup); `Mode`/`Cache` are ignored (the host decides whether it may create the file), `Foreign Keys` and `Pooling` are forced on, and `Default Timeout` (the busy wait) is 30 s unless set. |
@@ -26,13 +26,13 @@ The committed `appsettings.json` files leave the connection strings empty; local
 
 ### SQLite control plane
 
-`ControlPlane:Provider=Sqlite` keeps the control plane in one file (`Keryhe.Telemetry.Sqlite`; operator guide in its README).
+A control-plane provider of `Sqlite` keeps the control plane in one file (`Keryhe.Telemetry.Sqlite`; operator guide in its README).
 `ConnectionStrings:ControlPlane` (and `ConnectionStrings:Admin` for the Admin tool) is `Data Source=<absolute path>`, the **same file
-on every host and tool, on one machine's local file system**. It works with any `Database:Provider`.
+on every host and tool, on one machine's local file system**. It works with any telemetry database provider.
 
 | Key | Default | Host | Description |
 |---|---|---|---|
-| `Telemetry:ControlPlane:Sqlite:ApplySchema` | `true` | Both | `true`: the host (collector or API) creates the database, and its directory, if it has no schema and applies forward-only migrations at startup, before anything else starts (the collector before it binds a port), so either host can start first. With a fixed tenant (the collector's `Authentication:FixedTenantId` in `FixedTenant` mode, the API host's `TelemetryUi:FixedTenantId`) it also creates that tenant, named `Default`, when it has no row. `false`: it only checks and creates nothing, for an operator who wants to create or migrate deliberately (`schema/apply-schema.sh controlplane sqlite <file>` creates a fresh file). A migration first copies the file to `<file>.bak-<version>-<time>-<id>`. A database at a newer version than the build, or an older one with no migration chain, fails startup naming both versions. |
+| `Telemetry:ControlPlane:Sqlite:ApplySchema` | `true` | Both | `true`: the host (collector or API) creates the database, and its directory, if it has no schema and applies forward-only migrations at startup, before anything else starts (the collector before it binds a port), so either host can start first. With a fixed tenant (the collector's `Authentication:FixedTenantId` in `FixedTenant` mode, the API host's `Telemetry:Api:FixedTenantId`) it also creates that tenant, named `Default`, when it has no row. `false`: it only checks and creates nothing, for an operator who wants to create or migrate deliberately (`schema/apply-schema.sh controlplane sqlite <file>` creates a fresh file). A migration first copies the file to `<file>.bak-<version>-<time>-<id>`. A database at a newer version than the build, or an older one with no migration chain, fails startup naming both versions. |
 
 The Admin tool never creates or migrates the file: it fails when the file is missing or not at exactly its build's schema version.
 
@@ -46,8 +46,8 @@ The Admin tool never creates or migrates the file: it fails when the file is mis
 
 ## Collector
 
-Host: `Keryhe.Telemetry.Collector.Server` (gRPC OTLP ingestion, the write path). Uses `Database:Provider`,
-`ControlPlane:Provider`, `ConnectionStrings:Collector` and `ConnectionStrings:ControlPlane` above.
+Host: `Keryhe.Telemetry.Collector.Server` (gRPC OTLP ingestion, the write path). Uses `Telemetry:Collector:Provider:Database`,
+`Telemetry:Collector:Provider:ControlPlane`, `ConnectionStrings:Collector` and `ConnectionStrings:ControlPlane` above.
 
 ```json
 {
@@ -85,7 +85,7 @@ that runs without keys (the Collector README's "Single-tenant install" section).
 | Key | Default | Description |
 |---|---|---|
 | `Mode` | `ApiKey` | `ApiKey`: every export carries `Authorization: Bearer <key>`, resolved against `api_keys`. `FixedTenant`: no key; every export on a collector endpoint is stored under `FixedTenantId` and an `Authorization` header is ignored. |
-| `FixedTenantId` | unset | The tenant every export is stored under (`FixedTenant` mode; required there and greater than 0). Its `tenants` row must exist: the collector checks the control plane before it listens and fails startup otherwise (retrying a connection error for 30 s, except on SQLite). On a SQLite control plane the collector creates the row, named `Default`, when it is missing (unless `Telemetry:ControlPlane:Sqlite:ApplySchema=false`). Set `TelemetryUi:FixedTenantId` to the same id on the API host. |
+| `FixedTenantId` | unset | The tenant every export is stored under (`FixedTenant` mode; required there and greater than 0). Its `tenants` row must exist: the collector checks the control plane before it listens and fails startup otherwise (retrying a connection error for 30 s, except on SQLite). On a SQLite control plane the collector creates the row, named `Default`, when it is missing (unless `Telemetry:ControlPlane:Sqlite:ApplySchema=false`). Set `Telemetry:Api:FixedTenantId` to the same id on the API host. |
 | `AllowUnauthenticatedIngestion` | `false` | Outside Development, `FixedTenant` mode fails startup unless this is `true`: anyone who can reach the OTLP endpoints can then write telemetry. `AllowInsecureTransport` is separate and still applies. |
 
 In `FixedTenant` mode `Telemetry:Ingestion:TenantQuota:MaxShare` defaults to `1` (an explicit value is kept), no `auth_failures` are
@@ -223,7 +223,7 @@ pair. The `limit` tag then names the column (`span_name`, `service_name`, `schem
 
 ### ClickHouse ingestion (`Telemetry:ClickHouse:Ingestion`)
 
-`ClickHouseIngestionOptions`, read by the collector when `Database:Provider` is `ClickHouse`. Records are sorted into
+`ClickHouseIngestionOptions`, read by the collector when `Telemetry:Collector:Provider:Database` is `ClickHouse`. Records are sorted into
 per-day buffers (by the UTC day of their time) and flushed as one insert per day per table.
 
 | Key | Default | Description |
@@ -247,7 +247,7 @@ All values must be greater than 0. Extra instrument: `late_buffer_records` (reco
 
 ### Parquet (`Telemetry:Parquet`)
 
-`ParquetOptions`, read by both hosts when `Database:Provider` is `Parquet` (there is no `ConnectionStrings:Collector`/`:Api` for it).
+`ParquetOptions`, read by both hosts when their `Provider:Database` is `Parquet` (there is no `ConnectionStrings:Collector`/`:Api` for it).
 The collector writes tenant-hour Parquet files; the API host reads them with an in-process DuckDB and runs the compactor. Both
 must see the same `RootPath` **on one machine's file system** (a local disk, or a volume shared by containers on one Linux host; not a network share).
 `Compaction` is read by the API host only, `Writer` by the collector only. Ingestion buffers per hour like ClickHouse's per day, so the
@@ -327,8 +327,8 @@ the first two on the collector must change them on the API too.**
 
 ## API
 
-Host: `Keryhe.Telemetry.Api.Server` (REST API, background workers and the UI). Uses `Database:Provider`,
-`ControlPlane:Provider`, `ConnectionStrings:Api` and `ConnectionStrings:ControlPlane` above.
+Host: `Keryhe.Telemetry.Api.Server` (REST API, background workers and the UI). Uses `Telemetry:Api:Provider:Database`,
+`Telemetry:Api:Provider:ControlPlane`, `ConnectionStrings:Api` and `ConnectionStrings:ControlPlane` above.
 
 ```json
 {
@@ -354,6 +354,7 @@ API host. `TelemetryApiOptions`; full detail in [src/Keryhe.Telemetry.Api/README
 | `Authorization:Enabled` | false | Turns on operation and tenant authorization. |
 | `Authorization:Policies:{Read\|Admin\|Export\|ManageAlerts\|ManageSettings}` | unset | Name of a host-registered policy per operation. Export falls back to Read, ManageAlerts/ManageSettings to Admin, Read/Admin to the default policy. |
 | `Authorization:TenantMappings` | `[]` | List of `{ ClaimType, ClaimValue, Tenants }`: callers with that claim may access those tenants (names, ids or `"*"`). |
+| `FixedTenantId` | unset | A single-tenant install: the bundled UI hides the header's Tenant selector and every page is this tenant's (tenant-less URLs and links to another tenant redirect to it; a missing or inaccessible tenant shows "Tenant N is not set up"). Must be greater than 0. On a SQLite control plane the API host creates that tenant, named `Default`, when it has no row. A UI convenience, not access control: the API still serves every tenant (restrict it with `Telemetry:Api:Authorization`). Set it to the collector's `Telemetry:Collector:Authentication:FixedTenantId`. |
 
 ### Read queries (`Telemetry:Query`)
 
@@ -425,7 +426,6 @@ API host (`AddKeryheTelemetryUi`). `TelemetryUiOptions`; full detail in
 | `BrandTagline` | `OpenTelemetry Visualization` | Tagline under the brand name. |
 | `HealthThresholds:ErrorRate:Warn` | unset (0.01 in the SPA) | Dashboard Error Rate warning threshold, a 0-1 fraction. |
 | `HealthThresholds:ErrorRate:Critical` | unset (0.05 in the SPA) | Error threshold; must be above `Warn`. |
-| `FixedTenantId` | unset | A single-tenant install: the header's Tenant selector is hidden and every page is this tenant's (tenant-less URLs and links to another tenant redirect to it; a missing or inaccessible tenant shows "Tenant N is not set up"). Must be greater than 0. On a SQLite control plane the API host creates that tenant, named `Default`, when it has no row. A UI convenience, not access control: the API still serves every tenant (restrict it with `Telemetry:Api:Authorization`). Set it to the collector's `Telemetry:Collector:Authentication:FixedTenantId`. |
 | `Auth:Mode` | `cookie` | `cookie` (the host owns sign-in) or `oidc` (the SPA signs in itself and sends a bearer token). |
 | `Auth:LoginUrl` | unset | Where the SPA sends the browser on a `401` (cookie mode). |
 | `Auth:LogoutUrl` | unset | Target of "Sign out" in the header's user menu (cookie mode). The user menu appears only while someone is signed in: in cookie mode the UI asks the API's `GET {base}/me` (anonymous-allowed, always 200, `signedIn:false` when nobody is) and in oidc mode it reads the session's own claims. |
@@ -458,9 +458,10 @@ sets every value and is the working example. API keys go in User Secrets, never 
 | `LiveMetricIntervalSeconds` | 15 | Metric export interval when live. |
 | `LiveLagSeconds` | 10 | How far behind the clock live emission runs, so requests have finished. |
 | `Live` | true | Keep emitting live after any backfill. |
+| `FixedTenant` | false | For a collector in `FixedTenant` mode: send no `Authorization` header, require no `ApiKey`, and simulate only the first of `Tenants` (the rest are skipped; the collector stores everything under its one tenant). |
 | `Backfill:Enabled` | false | Send history first (hand-built OTLP). Re-running over the same window stores it twice. |
 | `Backfill:Window` | `1.00:00:00` (24 h) | How much history. |
 | `Backfill:ChunkSeconds` | 60 | Simulated time per chunk (one metric interval). |
 | `Backfill:MaxSpansPerExport` | 2000 | Spans per OTLP export during backfill. |
-| `Tenants` | `[]` | List of `{ Name, ApiKey, Scale }`; `ApiKey` must already exist in the database. |
+| `Tenants` | `[]` | List of `{ Name, ApiKey, Scale }`; `ApiKey` must already exist in the database (not needed with `FixedTenant`). |
 | `Incidents` | `[]` | Recurring daily windows: `{ Name, Tenant, Service, Route, At, Duration, LatencyMultiplier, ExtraErrorRate, Version }`. |

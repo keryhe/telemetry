@@ -13,7 +13,7 @@ How the OTLP collector ([`Keryhe.Telemetry.Collector`](../src/Keryhe.Telemetry.C
   three gRPC services and the OTLP/HTTP routes and requires API key authentication on each.
 - The control plane serves the key lookup and the `last_used_at` update. A control-plane outage longer than the positive cache
   TTL (30 s) stops ingestion for keys that are not cached; the cache and the retryable `UNAVAILABLE` on a failed lookup cover a
-  short one. With `ControlPlane:Provider=Sqlite` the collector creates the file (and its directory) or migrates it forward at startup,
+  short one. With `Telemetry:Collector:Provider:ControlPlane=Sqlite` the collector creates the file (and its directory) or migrates it forward at startup,
   as the API host does, so either can start first (`Telemetry:ControlPlane:Sqlite:ApplySchema=false` makes it only check).
 
 ## Authentication

@@ -111,7 +111,9 @@ public class HostOrchestrationTests
         Assert.DoesNotContain("ConnectionStrings__Api", collector.Keys);
         // Both hosts need the control plane (the collector for key lookup, the API for rules, tenants and retention settings).
         Assert.Equal("control-plane-cs", collector["ConnectionStrings__ControlPlane"]);
-        Assert.Equal("PostgreSQL", collector["ControlPlane__Provider"]);
+        Assert.Equal("PostgreSQL", collector["Telemetry__Collector__Provider__Database"]);
+        Assert.Equal("PostgreSQL", collector["Telemetry__Collector__Provider__ControlPlane"]);
+        Assert.DoesNotContain("Telemetry__Api__Provider__Database", collector.Keys);
         Assert.Equal("Http2", collector["Kestrel__Endpoints__Https__Protocols"]);
         Assert.StartsWith("http://127.0.0.1:", collector["Kestrel__Endpoints__Https__Url"]);
         // The plaintext endpoint is intended: without this the collector's transport guard refuses to start.
@@ -123,7 +125,9 @@ public class HostOrchestrationTests
         Assert.Contains("ConnectionStrings__Api", apiEnv.Keys);
         Assert.DoesNotContain("ConnectionStrings__Collector", apiEnv.Keys);
         Assert.Equal("control-plane-cs", apiEnv["ConnectionStrings__ControlPlane"]);
-        Assert.Equal("PostgreSQL", apiEnv["ControlPlane__Provider"]);
+        Assert.Equal("PostgreSQL", apiEnv["Telemetry__Api__Provider__Database"]);
+        Assert.Equal("PostgreSQL", apiEnv["Telemetry__Api__Provider__ControlPlane"]);
+        Assert.DoesNotContain("Telemetry__Collector__Provider__Database", apiEnv.Keys);
         // The harness calls the API at /api; the shipped appsettings mount it at /telemetry/api, so this must be set or
         // the readiness probe is a 404.
         Assert.Equal("/api", apiEnv["Telemetry__Api__BasePath"]);

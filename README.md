@@ -29,7 +29,7 @@ machine. Both paths must be absolute and the same for every host and tool.
 # 1. Pick the locations. Whichever host starts first creates the Parquet root and the SQLite file, so there is no schema step
 TELEMETRY_HOME="$HOME/keryhe-telemetry"
 
-# 2. Point both hosts at them via User Secrets (Database:Provider=Parquet and ControlPlane:Provider=Sqlite are already set)
+# 2. Point both hosts at them via User Secrets (their Provider:Database=Parquet and Provider:ControlPlane=Sqlite, under Telemetry:Collector and Telemetry:Api, are already set)
 dotnet user-secrets --project src/Keryhe.Telemetry.Api.Server \
   set "Telemetry:Parquet:RootPath"     "$TELEMETRY_HOME/data"
 dotnet user-secrets --project src/Keryhe.Telemetry.Api.Server \

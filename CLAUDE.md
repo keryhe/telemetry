@@ -35,6 +35,7 @@ schema/apply-schema.sh <controlplane|telemetry> <postgresql|sqlserver|mysql|clic
 # same window twice stores it twice (truncate the hot tables first, never the reference tables)
 dotnet run --project src/Keryhe.Telemetry.TestDataGenerator
 dotnet run --project src/Keryhe.Telemetry.TestDataGenerator -- --Generator:Backfill:Enabled=true [--Generator:Backfill:Window=01:00:00 --Generator:Live=false]
+dotnet run --project src/Keryhe.Telemetry.TestDataGenerator -- --Generator:FixedTenant=true   # FixedTenant collector: no key, first tenant only
 ```
 
 ### Tests
@@ -95,8 +96,8 @@ UI → API controllers → I*ReadRepository (active provider, Dapper) → teleme
   (`Keryhe.Telemetry.Collector/TelemetryCollectorExtensions.cs`) and `AddKeryheTelemetryApi`/`MapKeryheTelemetryApi` (`Keryhe.Telemetry.Api`)
   register no database provider: each host `switch`es on config and calls the provider's own methods, so neither library references a
   provider project.
-- **Two providers, both required, on both hosts.** `Database:Provider` (`PostgreSQL`, `SqlServer`, `MySql`, `ClickHouse`, `Parquet`) →
-  `Add<P>CollectorServices`/`Add<P>ApiServices`. `ControlPlane:Provider` (`PostgreSQL`, `SqlServer`, `MySql`, `Sqlite`) →
+- **Two providers, both required, on both hosts.** `Telemetry:{Collector|Api}:Provider:Database` (`PostgreSQL`, `SqlServer`, `MySql`, `ClickHouse`, `Parquet`) →
+  `Add<P>CollectorServices`/`Add<P>ApiServices`. `Telemetry:{Collector|Api}:Provider:ControlPlane` (`PostgreSQL`, `SqlServer`, `MySql`, `Sqlite`) →
   `Add<P>ControlPlaneCollectorServices`/`Add<P>ControlPlaneApiServices` (SQLite: `AddSqliteApiKeyLookup`/`AddSqliteControlPlaneManagement`),
   against `ConnectionStrings:ControlPlane`. They are a pair because the alert-rule repositories need `ITenantContext`, which only the API
   registers. Unknown/missing values throw at startup naming the key; there is no fallback between connection strings.
@@ -241,7 +242,7 @@ deletes for shorter ones (`ClickHouseRetentionMemory`). Parquet: day folders. Cl
   `app.UseRouting()` explicitly right after `UseKeryheTelemetryUi()`**, and `MapKeryheTelemetryUiFallback()` must stay `MapFallback` scoped to
   `{BasePath}/{*path:nonfile}`. A reverse proxy must forward the base path, not strip it.
 - UI pages live at `/t/:tenantId/...`; API services build URLs with `tenantApiUrl`; `authInterceptor` handles headers, 401 and tenant 403;
-  `downloadBlob` stays a fetch so the interceptor runs for exports. `TelemetryUi:FixedTenantId` (`fixedTenantId` in `config.json`) makes it
+  `downloadBlob` stays a fetch so the interceptor runs for exports. `Telemetry:Api:FixedTenantId` (`fixedTenantId` in `config.json`) makes it
   single-tenant: `TenantService` always resolves to it, `tenantRouteGuard` redirects other tenants' URLs to it, the shell hides the selector.
   A UI convenience, not access control.
 

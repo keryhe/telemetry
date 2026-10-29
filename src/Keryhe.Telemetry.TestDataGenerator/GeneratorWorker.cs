@@ -46,18 +46,23 @@ public sealed class GeneratorWorker : BackgroundService
         var endpoint = new Uri(_options.OtlpEndpoint);
         var chunkSeconds = Math.Max(1, _options.Backfill.ChunkSeconds);
         var liveStart = FloorTo(DateTimeOffset.UtcNow.AddSeconds(-_options.LiveLagSeconds), chunkSeconds);
-        var simulators = _options.Tenants.Select(t => new TenantSimulator(t, _options)).ToList();
+        var tenants = _options.ActiveTenants;
+        var simulators = tenants.Select(t => new TenantSimulator(t, _options)).ToList();
+        if (_options.FixedTenant && _options.Tenants.Count > tenants.Count)
+            _logger.LogInformation(
+                "FixedTenant: sending without an API key and simulating {Tenant} only; skipping {Skipped}",
+                tenants[0].Name, string.Join(", ", _options.Tenants.Skip(tenants.Count).Select(t => t.Name)));
 
         _logger.LogInformation(
             "Generating for {Tenants} (peak {Peak} req/s x scale), seed {Seed}, endpoint {Endpoint}",
-            string.Join(", ", _options.Tenants.Select(t => $"{t.Name} x{t.Scale}")), _options.PeakRequestsPerSecond, _options.Seed, endpoint);
+            string.Join(", ", tenants.Select(t => $"{t.Name} x{t.Scale}")), _options.PeakRequestsPerSecond, _options.Seed, endpoint);
 
         if (_options.Backfill.Enabled)
         {
             var from = liveStart - _options.Backfill.Window;
             _logger.LogInformation("Backfilling {Window} of history: {From:u} to {To:u}", _options.Backfill.Window, from, liveStart);
             var started = DateTimeOffset.UtcNow;
-            await Task.WhenAll(simulators.Select((sim, i) => BackfillAsync(sim, _options.Tenants[i], endpoint, from, liveStart, chunkSeconds, ct)));
+            await Task.WhenAll(simulators.Select((sim, i) => BackfillAsync(sim, tenants[i], endpoint, from, liveStart, chunkSeconds, ct)));
             _logger.LogInformation("Backfill complete in {Elapsed:mm\\:ss}", DateTimeOffset.UtcNow - started);
         }
 
@@ -69,13 +74,16 @@ public sealed class GeneratorWorker : BackgroundService
         }
 
         _logger.LogInformation("Going live from {Start:u} (trailing the clock by {Lag}s)", liveStart, _options.LiveLagSeconds);
-        await Task.WhenAll(simulators.Select((sim, i) => LiveAsync(sim, _options.Tenants[i], endpoint, liveStart, ct)));
+        await Task.WhenAll(simulators.Select((sim, i) => LiveAsync(sim, tenants[i], endpoint, liveStart, ct)));
     }
+
+    /// <summary>The bearer key the sinks send, or null (no <c>Authorization</c> header) for a <c>FixedTenant</c> collector.</summary>
+    private string? ApiKeyOf(TenantOptions tenant) => _options.FixedTenant ? null : tenant.ApiKey;
 
     private async Task BackfillAsync(
         TenantSimulator sim, TenantOptions tenant, Uri endpoint, DateTimeOffset from, DateTimeOffset to, int chunkSeconds, CancellationToken ct)
     {
-        await using var sink = new OtlpSink(tenant.Name, tenant.ApiKey, endpoint, _options.Backfill.MaxSpansPerExport, _options.Seed, _logger);
+        await using var sink = new OtlpSink(tenant.Name, ApiKeyOf(tenant), endpoint, _options.Backfill.MaxSpansPerExport, _options.Seed, _logger);
         var total = (to - from).TotalSeconds;
         var nextReport = 0.1;
         var step = TimeSpan.FromSeconds(chunkSeconds);
@@ -96,7 +104,7 @@ public sealed class GeneratorWorker : BackgroundService
 
     private async Task LiveAsync(TenantSimulator sim, TenantOptions tenant, Uri endpoint, DateTimeOffset start, CancellationToken ct)
     {
-        await using var sink = new SdkSink(endpoint, tenant.ApiKey, _options.LiveMetricIntervalSeconds, _options.Protocol.Equals("http/protobuf", StringComparison.OrdinalIgnoreCase));
+        await using var sink = new SdkSink(endpoint, ApiKeyOf(tenant), _options.LiveMetricIntervalSeconds, _options.Protocol.Equals("http/protobuf", StringComparison.OrdinalIgnoreCase));
         var cursor = start;
         var lastSample = start;
         var sampleEvery = TimeSpan.FromSeconds(_options.LiveMetricIntervalSeconds);

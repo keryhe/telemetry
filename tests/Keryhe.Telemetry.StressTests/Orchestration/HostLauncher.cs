@@ -9,10 +9,10 @@ namespace Keryhe.Telemetry.StressTests.Orchestration;
 
 public enum HostTopology { Split }
 
-/// <param name="Provider">The <c>Database:Provider</c> value.</param>
+/// <param name="Provider">The telemetry database provider (each host's <c>Telemetry:{Collector|Api}:Provider:Database</c>).</param>
 /// <param name="CollectorConnectionString">Becomes <c>ConnectionStrings:Collector</c> (ingestion side).</param>
 /// <param name="ApiConnectionString">Becomes <c>ConnectionStrings:Api</c>.</param>
-/// <param name="ControlPlaneProvider">The <c>ControlPlane:Provider</c> value (PostgreSQL for a ClickHouse run, the telemetry provider otherwise).</param>
+/// <param name="ControlPlaneProvider">The control-plane provider (each host's <c>Telemetry:{Collector|Api}:Provider:ControlPlane</c>; PostgreSQL for a ClickHouse run, the telemetry provider otherwise).</param>
 /// <param name="ControlPlaneConnectionString">Becomes <c>ConnectionStrings:ControlPlane</c> on both hosts.</param>
 /// <param name="RunDirectory">Where each host's console output is written (<c>host-&lt;role&gt;.log</c>).</param>
 /// <param name="RetentionIntervalSeconds">The profile's retention interval: a day in the built-in profiles (no sweep inside a run), 30 s with <c>--retention-interval stress</c> so sweeps land inside the measured window. Every other worker setting stays at its default.</param>
@@ -235,8 +235,6 @@ public static class HostLauncher
     {
         var env = new Dictionary<string, string>
         {
-            ["Database__Provider"] = options.Provider,
-            ["ControlPlane__Provider"] = options.ControlPlaneProvider,
             ["ConnectionStrings__ControlPlane"] = options.ControlPlaneConnectionString,
             ["Telemetry__Retention__IntervalSeconds"] = options.RetentionIntervalSeconds.ToString(),
             // One line per entry with a UTC timestamp, which HostLogScanner parses.
@@ -268,6 +266,8 @@ public static class HostLauncher
                 // The shipped appsettings add a loopback management endpoint (health probes) on a fixed port; a free one avoids
                 // a clash with a collector the developer already has running.
                 Endpoint("Management", ports[1], "Http1");
+                env["Telemetry__Collector__Provider__Database"] = options.Provider;
+                env["Telemetry__Collector__Provider__ControlPlane"] = options.ControlPlaneProvider;
                 env["Telemetry__Collector__AllowInsecureTransport"] = "true";
                 grpc = new Uri($"http://127.0.0.1:{port}");
                 if (options.Provider == "Parquet")
@@ -280,6 +280,8 @@ public static class HostLauncher
             {
                 var port = PortFinder.GetFreePorts(1)[0];
                 Endpoint("Api", port, "Http1");
+                env["Telemetry__Api__Provider__Database"] = options.Provider;
+                env["Telemetry__Api__Provider__ControlPlane"] = options.ControlPlaneProvider;
                 api = new Uri($"http://127.0.0.1:{port}");
                 // ClickHouse 25.x caches a predicate's matching granules, so a repeated read looks free in a measurement:
                 // the harness's API host reads with the cache off. Production queries do not.

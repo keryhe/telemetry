@@ -12,7 +12,7 @@ namespace Keryhe.Telemetry.TestInfrastructure.Sqlite;
 /// </summary>
 public sealed class SqliteControlPlane : IAsyncDisposable
 {
-    /// <summary>The <c>ControlPlane:Provider</c> value.</summary>
+    /// <summary>The <c>Telemetry:{Collector|Api}:Provider:ControlPlane</c> value.</summary>
     public const string ProviderName = "Sqlite";
 
     private readonly string _directory;

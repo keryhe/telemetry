@@ -13,7 +13,7 @@ namespace Keryhe.Telemetry.TestDataGenerator.Sinks;
 public sealed class SdkSink : ISink
 {
     private readonly Uri _endpoint;
-    private readonly string _apiKey;
+    private readonly string? _apiKey;
     private readonly int _metricIntervalMs;
     private readonly Dictionary<string, PodTelemetry> _pods = [];
 
@@ -22,7 +22,8 @@ public sealed class SdkSink : ISink
 
     private readonly bool _http;
 
-    public SdkSink(Uri endpoint, string apiKey, int metricIntervalSeconds, bool httpProtobuf = false)
+    /// <param name="apiKey">The tenant's bearer key, or null to send no <c>Authorization</c> header (a <c>FixedTenant</c> collector).</param>
+    public SdkSink(Uri endpoint, string? apiKey, int metricIntervalSeconds, bool httpProtobuf = false)
     {
         _http = httpProtobuf;
         _endpoint = endpoint;

@@ -36,7 +36,7 @@ internal sealed class FixedTenantStartupCheck(
             "Collector authentication is FixedTenant: every export is stored under tenant {TenantId} with no API key, so anyone who can reach the OTLP endpoints can write telemetry",
             auth.FixedTenantId);
 
-        var provider = configuration["ControlPlane:Provider"] ?? "";
+        var provider = configuration[ProviderKeys.CollectorControlPlane] ?? "";
         var retry = !provider.Equals("Sqlite", StringComparison.OrdinalIgnoreCase);
         var deadline = DateTime.UtcNow + RetryWindow;
         while (true)
@@ -63,7 +63,7 @@ internal sealed class FixedTenantStartupCheck(
     private async Task<bool> TenantExistsAsync(long tenantId, CancellationToken ct)
     {
         await using var connection = ControlPlaneDbConnection.TryCreate(configuration)
-            ?? throw new InvalidOperationException("ControlPlane:Provider and ConnectionStrings:ControlPlane are required.");
+            ?? throw new InvalidOperationException($"{ProviderKeys.CollectorControlPlane} and ConnectionStrings:ControlPlane are required.");
         await connection.OpenAsync(ct);
         var count = await connection.ExecuteScalarAsync<long>(new CommandDefinition(
             "SELECT COUNT(*) FROM tenants WHERE id = @id", new { id = tenantId }, cancellationToken: ct));

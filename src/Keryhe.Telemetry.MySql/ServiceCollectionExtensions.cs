@@ -7,9 +7,9 @@ namespace Microsoft.Extensions.DependencyInjection;
 
 /// <summary>
 /// MySQL provider registration extensions. The host selects this provider via
-/// <c>Database:Provider = "MySql"</c>. Telemetry connection strings come from
+/// <c>Telemetry:{Collector|Api}:Provider:Database = "MySql"</c>. Telemetry connection strings come from
 /// <c>ConnectionStrings:Collector</c> (server) and <c>ConnectionStrings:Api</c> (client/api). The same provider can
-/// also host the control plane (<c>ControlPlane:Provider</c>, <c>ConnectionStrings:ControlPlane</c>).
+/// also host the control plane (<c>Telemetry:{Collector|Api}:Provider:ControlPlane</c>, <c>ConnectionStrings:ControlPlane</c>).
 /// Targets MySQL 8.0+ (native JSON, window functions, CHECK constraints).
 /// </summary>
 public static class MySqlServiceCollectionExtensions

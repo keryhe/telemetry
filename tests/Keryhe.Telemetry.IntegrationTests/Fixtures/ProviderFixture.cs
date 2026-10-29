@@ -89,7 +89,9 @@ public abstract class ProviderFixture : IAsyncLifetime
             ["ConnectionStrings:Collector"] = CollectorConnectionString,
             ["ConnectionStrings:Api"] = ApiConnectionString,
             ["ConnectionStrings:ControlPlane"] = Container.ControlPlaneConnectionString,
-            ["ControlPlane:Provider"] = Container.ControlPlaneProviderName
+            // Services from both hosts are built from this one configuration, so each host's key is set.
+            [ProviderKeys.CollectorControlPlane] = Container.ControlPlaneProviderName,
+            [ProviderKeys.ApiControlPlane] = Container.ControlPlaneProviderName
         };
         foreach (var (key, value) in ProviderSettings) settings[key] = value;
         if (overrides is not null)

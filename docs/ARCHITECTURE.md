@@ -19,9 +19,9 @@ PostgreSQL, SQL Server and MySQL it is simply the same database as the telemetry
 or Parquet deployment runs its control plane on one of those three, or (Parquet's natural pairing) in a
 SQLite file on the same machine, which needs no database server.
 
-Two providers are chosen at runtime, and both are required: `Database:Provider` for telemetry data
+Two providers are chosen at runtime, and both are required: `Telemetry:{Collector|Api}:Provider:Database` for telemetry data
 (`PostgreSQL`, `SqlServer`, `MySql`, `ClickHouse`, or `Parquet`, with `ConnectionStrings:Collector` / `:Api`, or `Telemetry:Parquet:RootPath` for Parquet) and
-`ControlPlane:Provider` for the control plane (`PostgreSQL`, `SqlServer`, `MySql`, or `Sqlite`, with
+`Telemetry:{Collector|Api}:Provider:ControlPlane` for the control plane (`PostgreSQL`, `SqlServer`, `MySql`, or `Sqlite`, with
 `ConnectionStrings:ControlPlane`; for `Sqlite`, `Data Source=<absolute path of the file>`, see
 [`Keryhe.Telemetry.Sqlite`](../src/Keryhe.Telemetry.Sqlite/README.md)). Each provider ships its own implementation and is selected by the
 host at startup.
@@ -53,8 +53,8 @@ combine it with an existing application, or change what gets exposed.
 <ItemGroup>
   <PackageReference Include="Keryhe.Telemetry.Api" Version="2.0.2" />
   <PackageReference Include="Keryhe.Telemetry.Ui" Version="2.0.2" />
-  <!-- Plus the provider package for your telemetry data (Database:Provider) and the one for your
-       control plane (ControlPlane:Provider). On PostgreSQL, SQL Server or MySQL these are the same
+  <!-- Plus the provider package for your telemetry data (Provider:Database) and the one for your
+       control plane (Provider:ControlPlane). On PostgreSQL, SQL Server or MySQL these are the same
        package; a ClickHouse or Parquet consumer references Keryhe.Telemetry.ClickHouse or .Parquet and one of the others
        (or Keryhe.Telemetry.Sqlite, a file-based control plane that needs no database server). -->
   <PackageReference Include="Keryhe.Telemetry.PostgreSQL" Version="2.0.2" />

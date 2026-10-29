@@ -76,7 +76,8 @@ applies any later schema migrations, so the hosts can start in either order. To 
 schema/apply-schema.sh controlplane sqlite /var/lib/keryhe/control-plane.db   # needs the sqlite3 CLI; creates a fresh file only
 ```
 
-Then set `ControlPlane:Provider=Sqlite` and `ConnectionStrings:ControlPlane=Data Source=/var/lib/keryhe/control-plane.db`
+Then set the control-plane provider to `Sqlite` (`Telemetry:Collector:Provider:ControlPlane` and `Telemetry:Api:Provider:ControlPlane` on the
+hosts, `ControlPlane:Provider` on the Admin tool) and `ConnectionStrings:ControlPlane=Data Source=/var/lib/keryhe/control-plane.db`
 (an absolute path) on both hosts and the Admin tool. With **Parquet for the telemetry data this is a setup with no database
 server**: a Parquet root directory and one SQLite file. `Telemetry:ControlPlane:Sqlite:ApplySchema=false` stops the API host from
 creating or migrating (it then only checks), for a deliberate migration with a backup of your own. See
@@ -97,11 +98,13 @@ The two components are versioned independently: each script records its own vers
 Update `src/Keryhe.Telemetry.Collector.Server/appsettings.json` (gRPC ingestion / write path):
 ```json
 {
-  "Database": {
-    "Provider": "PostgreSQL"
-  },
-  "ControlPlane": {
-    "Provider": "PostgreSQL"
+  "Telemetry": {
+    "Collector": {
+      "Provider": {
+        "Database": "PostgreSQL",
+        "ControlPlane": "PostgreSQL"
+      }
+    }
   },
   "ConnectionStrings": {
     "Collector": "Host=localhost;Port=5432;Database=telemetry;Username=postgres;Password=<password>",
@@ -113,11 +116,13 @@ Update `src/Keryhe.Telemetry.Collector.Server/appsettings.json` (gRPC ingestion 
 Update `src/Keryhe.Telemetry.Api.Server/appsettings.json` (REST API / read path):
 ```json
 {
-  "Database": {
-    "Provider": "PostgreSQL"
-  },
-  "ControlPlane": {
-    "Provider": "PostgreSQL"
+  "Telemetry": {
+    "Api": {
+      "Provider": {
+        "Database": "PostgreSQL",
+        "ControlPlane": "PostgreSQL"
+      }
+    }
   },
   "ConnectionStrings": {
     "Api": "Host=localhost;Port=5432;Database=telemetry;Username=postgres;Password=<password>",
@@ -126,8 +131,9 @@ Update `src/Keryhe.Telemetry.Api.Server/appsettings.json` (REST API / read path)
 }
 ```
 
-Set `Database:Provider` to `PostgreSQL`, `SqlServer`, `MySql`, `ClickHouse`, or `Parquet` to match your telemetry backend, and
-`ControlPlane:Provider` to `PostgreSQL`, `SqlServer`, `MySql`, or `Sqlite` for the control plane (both hosts must agree on both). Both
+Set each host's `Provider:Database` (under `Telemetry:Collector` and `Telemetry:Api`) to `PostgreSQL`, `SqlServer`, `MySql`, `ClickHouse`, or
+`Parquet` to match your telemetry backend, and its `Provider:ControlPlane` to `PostgreSQL`, `SqlServer`, `MySql`, or `Sqlite` for the control
+plane (both hosts must agree on both). Both
 keys and `ConnectionStrings:ControlPlane` are **required**: a missing or unknown value fails startup with the key
 named, and there is no fallback from `ControlPlane` to `Collector`/`Api`. On the relational backends the control-plane
 string normally points at the same database as the data strings; with ClickHouse or Parquet it points at the separate control-plane
@@ -389,7 +395,7 @@ charts above them come from the rollups, which count **requests** (inbound serve
 
 When using the MySQL provider (MySQL 8.0.19+), the schema mirrors the SQL Server relational layout with MySQL-native types (`AUTO_INCREMENT` surrogate keys, `JSON` columns for attributes, `BIGINT` Unix-nanosecond timestamps). Hash-based deduplication of resources/scopes uses `INSERT ... ON DUPLICATE KEY UPDATE`, and writes are batched as multi-row inserts.
 
-When using the ClickHouse provider (25.8), each row carries its own resource and scope attributes, so there are no reference tables and no surrogate ids. Tables are plain `MergeTree` (the derived `trace_index` and rollups are `AggregatingMergeTree`) partitioned by day; attributes are `Map(LowCardinality(String), String)` (values are text, the original type is not kept); trace ids are `UUID` and span ids `UInt64`. The collector writes the derived tables itself after the raw insert, so a failed derived insert under-counts the cards, charts and metric catalog (`derived_rows_dropped`). Retention drops fully expired day partitions. ClickHouse has no control plane of its own (tenants, keys, alert rules and retention settings live in the PostgreSQL, SQL Server or MySQL database named by `ControlPlane:Provider`), so alert-rule edits and the cooldown fire-claim are as atomic as on those. See the [ClickHouse package README](../src/Keryhe.Telemetry.ClickHouse/README.md) for the full list of ClickHouse-specific behaviors.
+When using the ClickHouse provider (25.8), each row carries its own resource and scope attributes, so there are no reference tables and no surrogate ids. Tables are plain `MergeTree` (the derived `trace_index` and rollups are `AggregatingMergeTree`) partitioned by day; attributes are `Map(LowCardinality(String), String)` (values are text, the original type is not kept); trace ids are `UUID` and span ids `UInt64`. The collector writes the derived tables itself after the raw insert, so a failed derived insert under-counts the cards, charts and metric catalog (`derived_rows_dropped`). Retention drops fully expired day partitions. ClickHouse has no control plane of its own (tenants, keys, alert rules and retention settings live in the PostgreSQL, SQL Server or MySQL database named by the hosts' `Provider:ControlPlane`), so alert-rule edits and the cooldown fire-claim are as atomic as on those. See the [ClickHouse package README](../src/Keryhe.Telemetry.ClickHouse/README.md) for the full list of ClickHouse-specific behaviors.
 
 When using the Parquet provider, the data is Parquet files under `Telemetry:Parquet:RootPath`, one folder per table, tenant, day and hour, listed by manifests that readers follow (a file is visible only once listed). Like ClickHouse each row carries its own resource and scope attributes (values are text), the collector writes the derived tables, and trace ids are two `UBIGINT` halves. The collector holds records for `LingerMilliseconds` (5 s) before writing, so a crash loses that window and new data is readable about that long after it arrives. The compactor on the API host folds the many small files into larger ones, and retention deletes whole expired day folders. See the [Parquet package README](../src/Keryhe.Telemetry.Parquet/README.md) for the operator guide.
 

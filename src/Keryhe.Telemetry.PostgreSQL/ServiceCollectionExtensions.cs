@@ -8,8 +8,8 @@ namespace Microsoft.Extensions.DependencyInjection;
 
 /// <summary>
 /// PostgreSQL provider registration extensions. The host selects this provider for telemetry data via
-/// <c>Database:Provider = "PostgreSQL"</c> and/or for the control plane via
-/// <c>ControlPlane:Provider = "PostgreSQL"</c>. Each side owns its pool: the telemetry side registers an
+/// <c>Telemetry:{Collector|Api}:Provider:Database = "PostgreSQL"</c> and/or for the control plane via
+/// <c>Telemetry:{Collector|Api}:Provider:ControlPlane = "PostgreSQL"</c>. Each side owns its pool: the telemetry side registers an
 /// unkeyed singleton <see cref="NpgsqlDataSource"/>, the control plane a keyed one
 /// (<see cref="PostgreSqlControlPlane.ServiceKey"/>), so both can be PostgreSQL in one container.
 /// </summary>

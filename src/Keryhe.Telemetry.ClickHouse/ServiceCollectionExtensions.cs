@@ -11,10 +11,10 @@ namespace Microsoft.Extensions.DependencyInjection;
 
 /// <summary>
 /// ClickHouse provider registration extensions. The host selects this provider via
-/// <c>Database:Provider = "ClickHouse"</c>. Connection strings come from
+/// <c>Telemetry:{Collector|Api}:Provider:Database = "ClickHouse"</c>. Connection strings come from
 /// <c>ConnectionStrings:Collector</c> (ingestion collector) and <c>ConnectionStrings:Api</c>
 /// (API). It has no control plane: a ClickHouse deployment runs the control plane (tenants, API keys,
-/// alert rules, retention settings) on PostgreSQL, SQL Server or MySQL (<c>ControlPlane:Provider</c>). Unlike the Postgres provider there is no pooled data-source singleton — like the
+/// alert rules, retention settings) on PostgreSQL, SQL Server or MySQL (<c>Telemetry:{Collector|Api}:Provider:ControlPlane</c>). Unlike the Postgres provider there is no pooled data-source singleton — like the
 /// SqlServer provider, connections are created per operation from the connection string
 /// (ClickHouse.Client pools HTTP connections internally).
 /// </summary>

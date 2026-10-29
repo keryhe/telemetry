@@ -7,9 +7,9 @@ using Microsoft.Extensions.Hosting;
 namespace Microsoft.Extensions.DependencyInjection;
 
 /// <summary>
-/// SQLite control-plane registration extensions. The host selects them with <c>ControlPlane:Provider = "Sqlite"</c>; the database is
+/// SQLite control-plane registration extensions. The host selects them with <c>Telemetry:{Collector|Api}:Provider:ControlPlane = "Sqlite"</c>; the database is
 /// the file named by <c>ConnectionStrings:ControlPlane</c> (<c>Data Source=&lt;absolute path&gt;</c>). SQLite is a control-plane provider
-/// only, never a <c>Database:Provider</c>, and every process that opens the file must run on the same machine's local file system.
+/// only, never a <c>Telemetry:{Collector|Api}:Provider:Database</c>, and every process that opens the file must run on the same machine's local file system.
 /// </summary>
 public static class SqliteServiceCollectionExtensions
 {
@@ -30,7 +30,7 @@ public static class SqliteServiceCollectionExtensions
 
     /// <summary>
     /// The managing side of the control plane, for the API host: alert rules, the tenant catalog and retention settings, and the same
-    /// startup step as <see cref="AddSqliteApiKeyLookup"/>. <paramref name="fixedTenantId"/> (the UI's <c>TelemetryUi:FixedTenantId</c>) is
+    /// startup step as <see cref="AddSqliteApiKeyLookup"/>. <paramref name="fixedTenantId"/> (the API's <c>Telemetry:Api:FixedTenantId</c>) is
     /// created, named <c>Default</c>, when it has no row.
     /// </summary>
     public static IServiceCollection AddSqliteControlPlaneManagement(this IServiceCollection services, IConfiguration configuration, long? fixedTenantId = null)

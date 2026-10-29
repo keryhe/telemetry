@@ -67,7 +67,7 @@ export interface AppConfig {
   auth: AuthConfig;
 
   /**
-   * A single-tenant install (`TelemetryUi:FixedTenantId`): the header's Tenant selector is hidden
+   * A single-tenant install (`Telemetry:Api:FixedTenantId` on the API host): the header's Tenant selector is hidden
    * and every page is this tenant's (see `TenantService` and `tenantRouteGuard`). Present only
    * when the host sets it, so it is not part of {@link DEFAULT_APP_CONFIG}.
    */

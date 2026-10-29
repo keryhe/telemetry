@@ -447,7 +447,7 @@ public sealed class SqliteSchemaTests
 
         static IConfiguration Config(string file) => new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?>
         {
-            ["ControlPlane:Provider"] = "Sqlite",
+            [ProviderKeys.CollectorControlPlane] = "Sqlite",
             ["ConnectionStrings:ControlPlane"] = $"Data Source={file}"
         }).Build();
     }

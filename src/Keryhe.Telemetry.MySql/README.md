@@ -26,7 +26,7 @@ schema/apply-schema.sh telemetry mysql
 
 | Key | Meaning |
 |---|---|
-| `Database:Provider` / `ControlPlane:Provider` | `MySql` for the side(s) this package serves |
+| `Telemetry:{Collector|Api}:Provider:Database` / `…:Provider:ControlPlane` | `MySql` for the side(s) this package serves |
 | `ConnectionStrings:Collector` / `:Api` / `:ControlPlane` | e.g. `Server=localhost;Port=3306;Database=telemetry;User ID=root;Password=<password>`; `ControlPlane` is required and normally names the same database |
 
 ## License

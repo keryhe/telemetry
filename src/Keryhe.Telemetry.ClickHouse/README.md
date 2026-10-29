@@ -21,9 +21,9 @@ Apply `schema/apply-schema.sh telemetry clickhouse` to ClickHouse, and the contr
 
 | Key | Meaning |
 |---|---|
-| `Database:Provider` | `ClickHouse` |
+| `Telemetry:{Collector|Api}:Provider:Database` | `ClickHouse` |
 | `ConnectionStrings:Collector` / `:Api` | HTTP interface, e.g. `Host=localhost;Port=8123;Username=default;Password=<password>;Database=telemetry` |
-| `ControlPlane:Provider` / `ConnectionStrings:ControlPlane` | `PostgreSQL`, `SqlServer`, `MySql` or `Sqlite`, and its connection string |
+| `Telemetry:{Collector|Api}:Provider:ControlPlane` / `ConnectionStrings:ControlPlane` | `PostgreSQL`, `SqlServer`, `MySql` or `Sqlite`, and its connection string |
 | `Telemetry:ClickHouse:Ingestion:*` | Day buffers, linger and parallel inserts; see [CONFIGURATION.md](../../docs/CONFIGURATION.md#clickhouse-ingestion-telemetryclickhouseingestion) |
 
 ## License

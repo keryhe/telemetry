@@ -1,6 +1,6 @@
 -- OpenTelemetry SQLite control-plane schema -- control-plane schema 4.0.1
 -- Tenants (with their retention windows), API keys and alert rules: the small, mutable, relational state that
--- sits beside the telemetry data. SQLite is a control-plane provider only (never a Database:Provider): it lets a
+-- sits beside the telemetry data. SQLite is a control-plane provider only (never a Telemetry:{Collector|Api}:Provider:Database): it lets a
 -- Parquet deployment run with no database server. The tables, columns, defaults and indexes are those of
 -- MySQL-ControlPlane.sql / PostgreSQL-ControlPlane.sql, translated:
 --   * ids are INTEGER PRIMARY KEY AUTOINCREMENT: without AUTOINCREMENT SQLite reuses the highest rowid after a

@@ -6,7 +6,7 @@ namespace Keryhe.Telemetry.Sqlite.Services;
 /// <summary>
 /// Both hosts: creates the SQLite control-plane database (and its directory) or migrates it forward before anything else starts, so
 /// the collector and the API host can start in either order; with a fixed tenant (a fixed-tenant collector, or the API host's
-/// <c>TelemetryUi:FixedTenantId</c>) it also creates that tenant when it has no row. With <see cref="SqliteControlPlaneOptions.ApplySchema"/>
+/// <c>Telemetry:Api:FixedTenantId</c>) it also creates that tenant when it has no row. With <see cref="SqliteControlPlaneOptions.ApplySchema"/>
 /// off it only checks and fails when the file is missing or not at this build's version. Runs in <c>StartingAsync</c>, which the host
 /// calls on every hosted service before any <c>StartAsync</c> (so before Kestrel binds); a failure stops the host with a non-zero exit code.
 /// </summary>

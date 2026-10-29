@@ -4,7 +4,7 @@ using Microsoft.Extensions.Configuration;
 namespace Keryhe.Telemetry.Core.Data;
 
 /// <summary>
-/// Opens a read connection to the control plane from <c>ControlPlane:Provider</c> and <c>ConnectionStrings:ControlPlane</c>, for the
+/// Opens a read connection to the control plane from <c>Telemetry:Collector:Provider:ControlPlane</c> and <c>ConnectionStrings:ControlPlane</c>, for the
 /// collector-side readers that have no control-plane repository of their own (<see cref="RetentionWindowCache"/>, the fixed-tenant
 /// startup check). Core references no relational driver, so the connection is created by type name: the host has loaded that provider's
 /// driver for its API-key lookup.
@@ -31,7 +31,7 @@ internal static class ControlPlaneDbConnection
     /// <summary>An unopened connection, or null when the provider is unknown or the connection string is empty.</summary>
     public static DbConnection? TryCreate(IConfiguration configuration)
     {
-        var provider = configuration["ControlPlane:Provider"] ?? "";
+        var provider = configuration[ProviderKeys.CollectorControlPlane] ?? "";
         var connectionString = configuration.GetConnectionString("ControlPlane");
         if (!ConnectionTypes.TryGetValue(provider, out var typeName) || string.IsNullOrEmpty(connectionString))
             return null;

@@ -1,5 +1,6 @@
 using Keryhe.Telemetry.Api.Controllers;
 using Keryhe.Telemetry.Core;
+using Keryhe.Telemetry.Core.Data;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.Configuration;
 using Xunit;
@@ -20,7 +21,7 @@ public class CapabilitiesTests
     public void Response_HasNoTierOrIndexedSearch_AndKeepsTheRemainingFields()
     {
         var capabilities = ProviderCapabilities.Default();
-        var controller = new CapabilitiesController(capabilities, Config(("Database:Provider", "PostgreSQL")));
+        var controller = new CapabilitiesController(capabilities, Config((ProviderKeys.ApiDatabase, "PostgreSQL")));
 
         var dto = Assert.IsType<OkObjectResult>(controller.GetCapabilities().Result).Value as CapabilitiesDto;
 

@@ -1,4 +1,5 @@
 using Keryhe.Telemetry.Collector.Authentication;
+using Keryhe.Telemetry.Core.Data;
 
 namespace Keryhe.Telemetry.Collector.Server;
 
@@ -25,8 +26,8 @@ public class Program
         // Registers gRPC, the ingestion channel + worker, and the write repositories.
         builder.Services.AddKeryheTelemetryCollector(builder.Configuration);
 
-        // The active provider's write services (Database:Provider + ConnectionStrings:Collector).
-        switch (builder.Configuration["Database:Provider"])
+        // The active provider's write services (Telemetry:Collector:Provider:Database + ConnectionStrings:Collector).
+        switch (builder.Configuration[ProviderKeys.CollectorDatabase])
         {
             case "SqlServer":  builder.Services.AddSqlServerCollectorServices(builder.Configuration);  break;
             case "PostgreSQL": builder.Services.AddPostgreSqlCollectorServices(builder.Configuration); break;
@@ -34,12 +35,12 @@ public class Program
             case "MySql":      builder.Services.AddMySqlCollectorServices(builder.Configuration);      break;
             case "Parquet":    builder.Services.AddParquetCollectorServices(builder.Configuration);    break;
             default: throw new InvalidOperationException(
-                "Unknown or missing Database:Provider (expected SqlServer, PostgreSQL, ClickHouse, MySql, or Parquet).");
+                $"Unknown or missing {ProviderKeys.CollectorDatabase} (expected SqlServer, PostgreSQL, ClickHouse, MySql, or Parquet).");
         }
 
-        // The control plane (tenants and API keys): ControlPlane:Provider + ConnectionStrings:ControlPlane, both
+        // The control plane (tenants and API keys): Telemetry:Collector:Provider:ControlPlane + ConnectionStrings:ControlPlane, both
         // required. It may be a different provider (and database) from the telemetry data above.
-        switch (builder.Configuration["ControlPlane:Provider"])
+        switch (builder.Configuration[ProviderKeys.CollectorControlPlane])
         {
             case "SqlServer":  builder.Services.AddSqlServerControlPlaneCollectorServices(builder.Configuration);  break;
             case "PostgreSQL": builder.Services.AddPostgreSqlControlPlaneCollectorServices(builder.Configuration); break;
@@ -48,7 +49,7 @@ public class Program
             // collector also creates its tenant there when it has no row.
             case "Sqlite":     builder.Services.AddSqliteApiKeyLookup(builder.Configuration, FixedTenantId(builder.Configuration)); break;
             default: throw new InvalidOperationException(
-                "Unknown or missing ControlPlane:Provider (expected SqlServer, PostgreSQL, MySql, or Sqlite).");
+                $"Unknown or missing {ProviderKeys.CollectorControlPlane} (expected SqlServer, PostgreSQL, MySql, or Sqlite).");
         }
 
         // Add CORS for web clients if needed

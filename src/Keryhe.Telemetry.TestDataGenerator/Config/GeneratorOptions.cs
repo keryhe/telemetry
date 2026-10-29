@@ -39,7 +39,16 @@ public sealed class GeneratorOptions
     /// <summary>Continue emitting in real time after the backfill (or instead of it).</summary>
     public bool Live { get; set; } = true;
 
+    /// <summary>
+    /// For a collector in <c>FixedTenant</c> mode, which stores every export under its one tenant: no <c>Authorization</c> header is sent,
+    /// <see cref="TenantOptions.ApiKey"/> is not required, and only the first of <see cref="Tenants"/> is simulated.
+    /// </summary>
+    public bool FixedTenant { get; set; }
+
     public List<TenantOptions> Tenants { get; set; } = [];
+
+    /// <summary>The tenants simulated: the first one with <see cref="FixedTenant"/>, every one otherwise.</summary>
+    public IReadOnlyList<TenantOptions> ActiveTenants => FixedTenant ? Tenants.Take(1).ToList() : Tenants;
 
     public List<IncidentOptions> Incidents { get; set; } = [];
 
@@ -51,7 +60,7 @@ public sealed class GeneratorOptions
         {
             if (string.IsNullOrWhiteSpace(t.Name))
                 throw new InvalidOperationException($"{SectionName}:Tenants:{i}:Name is not set.");
-            if (string.IsNullOrWhiteSpace(t.ApiKey))
+            if (!FixedTenant && string.IsNullOrWhiteSpace(t.ApiKey))
                 throw new InvalidOperationException(
                     $"{SectionName}:Tenants:{i}:ApiKey is not set for tenant '{t.Name}'. Put it in user secrets: " +
                     $"dotnet user-secrets set \"{SectionName}:Tenants:{i}:ApiKey\" \"<key>\" --project src/Keryhe.Telemetry.TestDataGenerator");
@@ -86,7 +95,10 @@ public sealed class TenantOptions
 {
     public string Name { get; set; } = "";
 
-    /// <summary>The tenant's API key. Supply through user secrets or the environment, never appsettings.json.</summary>
+    /// <summary>
+    /// The tenant's API key. Supply through user secrets or the environment, never appsettings.json. Not used with
+    /// <see cref="GeneratorOptions.FixedTenant"/>.
+    /// </summary>
     public string ApiKey { get; set; } = "";
 
     /// <summary>Traffic multiplier relative to <see cref="GeneratorOptions.PeakRequestsPerSecond"/>.</summary>

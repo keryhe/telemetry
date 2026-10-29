@@ -17,7 +17,7 @@ Rules, behaviour, migrations and backups of the SQLite control plane ([`Keryhe.T
 - **Either host can start first.** At startup the collector and the API host each create the database if it has no schema and apply any
   later forward-only migrations (below), before anything else starts (the collector before it binds a port). Two hosts starting together
   take turns on the file's write lock, so the work is done once. With a fixed tenant (a `FixedTenant` collector's `FixedTenantId`, the API
-  host's `TelemetryUi:FixedTenantId`) the same step creates that tenant, named `Default`, when it has no row. The **Admin tool** never creates
+  host's `Telemetry:Api:FixedTenantId`) the same step creates that tenant, named `Default`, when it has no row. The **Admin tool** never creates
   or migrates: it fails when the file is missing or not at exactly its build's version, so start a host before using it.
 - **No downgrades.** A database newer than the build is refused, naming both versions.
 

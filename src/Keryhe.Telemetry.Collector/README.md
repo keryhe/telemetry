@@ -23,8 +23,8 @@ app.Run();
 
 | Key | Default | Meaning |
 |---|---|---|
-| `Database:Provider` / `ConnectionStrings:Collector` | (required) | The telemetry database |
-| `ControlPlane:Provider` / `ConnectionStrings:ControlPlane` | (required) | The database holding tenants and API keys |
+| `Telemetry:Collector:Provider:Database` / `ConnectionStrings:Collector` | (required) | The telemetry database |
+| `Telemetry:Collector:Provider:ControlPlane` / `ConnectionStrings:ControlPlane` | (required) | The database holding tenants and API keys |
 | `Telemetry:Collector:AllowInsecureTransport` | `false` | Outside Development the collector refuses a plaintext address; set `true` only when TLS ends at a proxy in front |
 | `Telemetry:Collector:Authentication:Mode` | `ApiKey` | `FixedTenant` accepts exports with no API key, for one tenant (see below) |
 | `Kestrel:Endpoints:Https:Certificate` | development certificate | The TLS certificate (`Path` + password, or `Store`/`Location`/`Subject`) |
@@ -49,7 +49,7 @@ stays empty.
 
 1. Create the tenant: the Admin tool's "Create tenant", or `INSERT INTO tenants (name) VALUES ('<name>');` on the control plane. Note its id.
    With a SQLite control plane there is nothing to do: whichever host starts first creates the file, and the collector (and the API host,
-   with `TelemetryUi:FixedTenantId`) creates the tenant, named `Default`, with the configured id when it has no row.
+   with `Telemetry:Api:FixedTenantId`) creates the tenant, named `Default`, with the configured id when it has no row.
 2. Configure the collector:
 
    ```json
@@ -59,8 +59,8 @@ stays empty.
 
    `AllowUnauthenticatedIngestion` is required outside Development. The collector checks the tenant's row before it listens and refuses to
    start without it (a connection error is retried for 30 s, except on SQLite). It logs a warning at every start.
-3. On the API host set `TelemetryUi:FixedTenantId` to the same id: the UI hides its Tenant selector and every page is that tenant's.
-4. Point exporters at the collector with no `OTEL_EXPORTER_OTLP_HEADERS`.
+3. On the API host set `Telemetry:Api:FixedTenantId` to the same id: the UI hides its Tenant selector and every page is that tenant's.
+4. Point exporters at the collector with no `OTEL_EXPORTER_OTLP_HEADERS`. The test data generator does this with `--Generator:FixedTenant=true`.
 
 What changes:
 

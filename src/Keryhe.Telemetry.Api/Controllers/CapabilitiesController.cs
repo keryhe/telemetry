@@ -1,4 +1,5 @@
 using Keryhe.Telemetry.Core;
+using Keryhe.Telemetry.Core.Data;
 using Keryhe.Telemetry.Api.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.Configuration;
@@ -20,11 +21,11 @@ public class CapabilitiesController(ProviderCapabilities capabilities, IConfigur
     [HttpGet]
     public ActionResult<CapabilitiesDto> GetCapabilities()
     {
-        // Database:Provider is the same config key every host switches on to select a provider
+        // Telemetry:Api:Provider:Database is the same config key the API host switches on to select a provider
         // (see CLAUDE.md's "Provider abstraction" section); ProviderCapabilities itself carries no
         // provider name, so this is read straight from configuration rather than threading a name
         // through the registration call in all five providers.
-        var provider = configuration["Database:Provider"] ?? "Unknown";
+        var provider = configuration[ProviderKeys.ApiDatabase] ?? "Unknown";
         return Ok(new CapabilitiesDto(
             provider,
             capabilities.RawSearchWindowHours,

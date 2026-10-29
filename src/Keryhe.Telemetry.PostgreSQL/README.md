@@ -26,7 +26,7 @@ schema/apply-schema.sh telemetry postgresql
 
 | Key | Meaning |
 |---|---|
-| `Database:Provider` / `ControlPlane:Provider` | `PostgreSQL` for the side(s) this package serves |
+| `Telemetry:{Collector|Api}:Provider:Database` / `…:Provider:ControlPlane` | `PostgreSQL` for the side(s) this package serves |
 | `ConnectionStrings:Collector` / `:Api` / `:ControlPlane` | e.g. `Host=localhost;Port=5432;Database=telemetry;Username=postgres;Password=<password>`; `ControlPlane` is required and normally names the same database |
 
 ## License

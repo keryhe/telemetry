@@ -4,7 +4,7 @@ namespace Keryhe.Telemetry.StressTests.Observers.Database;
 
 public static class DatabaseObserverFactory
 {
-    /// <summary>Creates the observer for a <c>Database:Provider</c> value over the container's own connection string and logs.</summary>
+    /// <summary>Creates the observer for a <c>Telemetry:{Collector|Api}:Provider:Database</c> value over the container's own connection string and logs.</summary>
     public static DatabaseObserverBase Create(string provider, ProviderContainer container) =>
         Create(provider, container.ConnectionString, container.GetLogsAsync);
 

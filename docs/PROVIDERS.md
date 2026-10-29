@@ -27,7 +27,7 @@ transitively.
 
 ## PostgreSQL (`Keryhe.Telemetry.PostgreSQL`)
 
-Telemetry data (`Database:Provider = PostgreSQL`):
+Telemetry data (`Telemetry:{Collector|Api}:Provider:Database = PostgreSQL`):
 
 - `AddPostgreSqlCollectorServices(configuration)` — registers a singleton `NpgsqlDataSource` (from
   `ConnectionStrings:Collector`) and `ITelemetryBulkWriter`.
@@ -35,7 +35,7 @@ Telemetry data (`Database:Provider = PostgreSQL`):
   `ConnectionStrings:Api`), `ITraceReadRepository`, `IMetricReadRepository`,
   `ILogReadRepository`, and `IRetentionSweeper`.
 
-Control plane (`ControlPlane:Provider = PostgreSQL`), on its own keyed `NpgsqlDataSource` (from
+Control plane (`Telemetry:{Collector|Api}:Provider:ControlPlane = PostgreSQL`), on its own keyed `NpgsqlDataSource` (from
 `ConnectionStrings:ControlPlane`), so it can sit beside any telemetry provider, including ClickHouse:
 
 - `AddPostgreSqlControlPlaneCollectorServices(configuration)` — `IApiKeyLookup` and `IApiKeyTouchStore`.
@@ -47,14 +47,14 @@ Install this package alongside `Keryhe.Telemetry.Collector` (write side) and/or
 
 ## SQL Server (`Keryhe.Telemetry.SqlServer`)
 
-Telemetry data (`Database:Provider = SqlServer`):
+Telemetry data (`Telemetry:{Collector|Api}:Provider:Database = SqlServer`):
 
 - `AddSqlServerCollectorServices(configuration)` — registers `ITelemetryBulkWriter` (SqlBulkCopy/MERGE-based), connecting via `ConnectionStrings:Collector`.
 - `AddSqlServerApiServices(configuration)` — registers `ITraceReadRepository`,
   `IMetricReadRepository`, `ILogReadRepository`, and `IRetentionSweeper`, connecting via
   `ConnectionStrings:Api`.
 
-Control plane (`ControlPlane:Provider = SqlServer`), connecting via `ConnectionStrings:ControlPlane`, so it can sit
+Control plane (`Telemetry:{Collector|Api}:Provider:ControlPlane = SqlServer`), connecting via `ConnectionStrings:ControlPlane`, so it can sit
 beside any telemetry provider, including ClickHouse:
 
 - `AddSqlServerControlPlaneCollectorServices(configuration)` — `IApiKeyLookup` and `IApiKeyTouchStore`.
@@ -66,14 +66,14 @@ Install this package alongside `Keryhe.Telemetry.Collector` (write side) and/or
 
 ## MySQL (`Keryhe.Telemetry.MySql`)
 
-Telemetry data (`Database:Provider = MySql`):
+Telemetry data (`Telemetry:{Collector|Api}:Provider:Database = MySql`):
 
 - `AddMySqlCollectorServices(configuration)` — registers `ITelemetryBulkWriter`, connecting via `ConnectionStrings:Collector`.
 - `AddMySqlApiServices(configuration)` — registers `ITraceReadRepository`,
   `IMetricReadRepository`, `ILogReadRepository`, and `IRetentionSweeper`, connecting via
   `ConnectionStrings:Api`.
 
-Control plane (`ControlPlane:Provider = MySql`), connecting via `ConnectionStrings:ControlPlane`, so it can sit
+Control plane (`Telemetry:{Collector|Api}:Provider:ControlPlane = MySql`), connecting via `ConnectionStrings:ControlPlane`, so it can sit
 beside any telemetry provider, including ClickHouse:
 
 - `AddMySqlControlPlaneCollectorServices(configuration)` — `IApiKeyLookup` and `IApiKeyTouchStore`.
@@ -94,7 +94,7 @@ Install this package alongside `Keryhe.Telemetry.Collector` (write side) and/or
 **ClickHouse holds telemetry data only.** Tenants, API keys, alert rules and each tenant's retention windows (the control
 plane) live in PostgreSQL, SQL Server, MySQL or a SQLite file: also reference that provider's package and register its
 `Add<Provider>ControlPlaneCollectorServices` / `Add<Provider>ControlPlaneApiServices`
-(`ControlPlane:Provider`, `ConnectionStrings:ControlPlane`).
+(`Telemetry:{Collector|Api}:Provider:ControlPlane`, `ConnectionStrings:ControlPlane`).
 
 Install this package alongside `Keryhe.Telemetry.Collector` (write side) and/or
-`Keryhe.Telemetry.Api` (read side), and set `Database:Provider` to `ClickHouse`.
+`Keryhe.Telemetry.Api` (read side), and set both hosts' `Provider:Database` to `ClickHouse`.

@@ -31,12 +31,13 @@ Routes are `{BasePath}/...`, tenant data under `{BasePath}/tenants/{tenantId}/..
 
 | Key | Default | Meaning |
 |---|---|---|
-| `Database:Provider` / `ConnectionStrings:Api` | (required) | The telemetry database |
-| `ControlPlane:Provider` / `ConnectionStrings:ControlPlane` | (required) | The database holding tenants, alert rules and retention settings |
+| `Telemetry:Api:Provider:Database` / `ConnectionStrings:Api` | (required) | The telemetry database |
+| `Telemetry:Api:Provider:ControlPlane` / `ConnectionStrings:ControlPlane` | (required) | The database holding tenants, alert rules and retention settings |
 | `Telemetry:Api:BasePath` | `/api` | Prefix of every route; `/` and empty are rejected |
 | `Telemetry:Api:Authorization:Enabled` | `false` | Off: every tenant is readable |
 | `Telemetry:Api:Authorization:Policies` | (default policy) | Operation → your policy name: `Read`, `Admin`, `Export`, `ManageAlerts`, `ManageSettings` |
 | `Telemetry:Api:Authorization:TenantMappings` | none | Claim → tenant names or ids (`"*"` for all), e.g. `{ "ClaimType": "groups", "ClaimValue": "payments-team", "Tenants": ["payments"] }` |
+| `Telemetry:Api:FixedTenantId` | none | A single-tenant install (the collector's `FixedTenantId`): the bundled UI hides its Tenant selector and every page is this tenant's; on SQLite the host creates the tenant. Not access control: the API still serves every tenant |
 
 Query limits, export, alert evaluation and retention settings are in [CONFIGURATION.md](../../docs/CONFIGURATION.md#api).
 

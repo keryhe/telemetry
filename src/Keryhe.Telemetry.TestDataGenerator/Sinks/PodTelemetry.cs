@@ -28,7 +28,7 @@ internal sealed class PodTelemetry : IDisposable
     private readonly Dictionary<string, ILogger> _loggers = [];
     private readonly ConcurrentDictionary<(string Instrument, string AttrKey), SimSample> _samples = new();
 
-    public PodTelemetry(ServiceInstance instance, Uri endpoint, string apiKey, int metricIntervalMs, bool httpProtobuf = false)
+    public PodTelemetry(ServiceInstance instance, Uri endpoint, string? apiKey, int metricIntervalMs, bool httpProtobuf = false)
     {
         _instance = instance;
         // One source/meter name per pod and tenant: a provider listens by name, so a shared name would
@@ -37,12 +37,12 @@ internal sealed class PodTelemetry : IDisposable
         Source = new ActivitySource(scopeName, OtlpMapper.ScopeVersion);
         _meter = new Meter(scopeName, OtlpMapper.ScopeVersion);
         var resource = ResourceFactory.Builder(instance);
-        var headers = $"Authorization=Bearer {apiKey}";
+        var headers = string.IsNullOrEmpty(apiKey) ? null : $"Authorization=Bearer {apiKey}";
 
         // gRPC takes the endpoint as it is. OTLP/HTTP needs each signal's own path: set in code, the SDK uses the address verbatim.
         Action<OtlpExporterOptions> For(string signal) => o =>
         {
-            o.Headers = headers;
+            if (headers is not null) o.Headers = headers;
             if (httpProtobuf)
             {
                 o.Protocol = OtlpExportProtocol.HttpProtobuf;

@@ -17,8 +17,8 @@ builder.Services.AddParquetApiServices(builder.Configuration);
 builder.Services.AddSqliteControlPlaneManagement(builder.Configuration);    // or AddPostgreSqlControlPlaneApiServices, ...
 ```
 
-Set `Database:Provider=Parquet` and `Telemetry:Parquet:RootPath` on both hosts (no `ConnectionStrings:Collector`/`:Api`), plus
-`ControlPlane:Provider` and `ConnectionStrings:ControlPlane`. Either host creates the root and its
+Set `Provider:Database=Parquet` (under `Telemetry:Collector` and `Telemetry:Api`) and `Telemetry:Parquet:RootPath` on both hosts (no `ConnectionStrings:Collector`/`:Api`), plus
+`Provider:ControlPlane` and `ConnectionStrings:ControlPlane`. Either host creates the root and its
 `_schema.json` when they are missing (as both create a SQLite control plane), so the hosts start in either order. Publish with `-r <rid>` so only one platform's DuckDB
 library ships.
 

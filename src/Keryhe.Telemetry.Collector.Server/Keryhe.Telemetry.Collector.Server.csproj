@@ -12,7 +12,7 @@
     </ItemGroup>
 
     <ItemGroup>
-      <!-- All providers are referenced; the active one is chosen at runtime via Database:Provider. -->
+      <!-- All providers are referenced; the active one is chosen at runtime via Telemetry:{Collector|Api}:Provider:Database. -->
       <ProjectReference Include="../Keryhe.Telemetry.Collector/Keryhe.Telemetry.Collector.csproj" />
       <ProjectReference Include="../Keryhe.Telemetry.SqlServer/Keryhe.Telemetry.SqlServer.csproj" />
       <ProjectReference Include="../Keryhe.Telemetry.PostgreSQL/Keryhe.Telemetry.PostgreSQL.csproj" />

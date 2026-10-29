@@ -7,9 +7,9 @@ namespace Microsoft.Extensions.DependencyInjection;
 
 /// <summary>
 /// SqlServer provider registration extensions. The host selects this provider via
-/// <c>Database:Provider = "SqlServer"</c>. Telemetry connection strings come from
+/// <c>Telemetry:{Collector|Api}:Provider:Database = "SqlServer"</c>. Telemetry connection strings come from
 /// <c>ConnectionStrings:Collector</c> (server) and <c>ConnectionStrings:Api</c> (client/api). The same provider can
-/// also host the control plane (<c>ControlPlane:Provider</c>, <c>ConnectionStrings:ControlPlane</c>).
+/// also host the control plane (<c>Telemetry:{Collector|Api}:Provider:ControlPlane</c>, <c>ConnectionStrings:ControlPlane</c>).
 /// </summary>
 public static class SqlServerServiceCollectionExtensions
 {

@@ -7,7 +7,7 @@
 -- control_plane_schema_version.
 --
 -- A ClickHouse deployment has no control-plane script of its own: it runs this one on PostgreSQL,
--- SQL Server or MySQL (ControlPlane:Provider).
+-- SQL Server or MySQL (Telemetry:{Collector|Api}:Provider:ControlPlane).
 --
 -- Schema 4.0.x is a fresh-install schema: there is no upgrade path from 2.x or 3.x.
 --

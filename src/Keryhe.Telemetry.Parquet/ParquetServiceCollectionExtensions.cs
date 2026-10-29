@@ -10,9 +10,9 @@ using Keryhe.Telemetry.Parquet;
 namespace Microsoft.Extensions.DependencyInjection;
 
 /// <summary>
-/// Parquet provider registration. The host selects it with <c>Database:Provider = "Parquet"</c> and configures
+/// Parquet provider registration. The host selects it with <c>Telemetry:{Collector|Api}:Provider:Database = "Parquet"</c> and configures
 /// <c>Telemetry:Parquet</c> (<see cref="ParquetOptions"/>); there is no connection string. It has no control plane:
-/// a Parquet deployment runs that on PostgreSQL, SQL Server or MySQL (<c>ControlPlane:Provider</c>).
+/// a Parquet deployment runs that on PostgreSQL, SQL Server or MySQL (<c>Telemetry:{Collector|Api}:Provider:ControlPlane</c>).
 /// </summary>
 public static class ParquetServiceCollectionExtensions
 {

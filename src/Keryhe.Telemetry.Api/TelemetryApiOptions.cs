@@ -23,6 +23,14 @@ public sealed partial class TelemetryApiOptions
     /// <summary>Authorization settings. Disabled by default.</summary>
     public TelemetryApiAuthorizationOptions Authorization { get; set; } = new();
 
+    /// <summary>
+    /// A single-tenant install: set it to the collector's <c>Telemetry:Collector:Authentication:FixedTenantId</c>. The bundled UI
+    /// (<c>Keryhe.Telemetry.Ui</c>) then hides its Tenant selector and makes every page this tenant's, and on a SQLite control plane
+    /// the API host creates the tenant when it has no row. Not access control: the API still serves every tenant that exists
+    /// (restrict it with <see cref="Authorization"/>). Must be greater than 0 when set.
+    /// </summary>
+    public long? FixedTenantId { get; set; }
+
     /// <summary>The base path as a leading-slash, no-trailing-slash value (<c>/api</c>).</summary>
     public string NormalizedBasePath => NormalizeBasePath(BasePath);
 

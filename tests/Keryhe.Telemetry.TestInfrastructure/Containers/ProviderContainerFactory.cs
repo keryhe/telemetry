@@ -1,6 +1,6 @@
 namespace Keryhe.Telemetry.TestInfrastructure.Containers;
 
-/// <summary>Creates the container for a <c>Database:Provider</c> value.</summary>
+/// <summary>Creates the container for a <c>Telemetry:{Collector|Api}:Provider:Database</c> value.</summary>
 public static class ProviderContainerFactory
 {
     public static readonly IReadOnlyList<string> ProviderNames = ["PostgreSQL", "SqlServer", "MySql", "ClickHouse", "Parquet"];

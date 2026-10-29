@@ -31,4 +31,4 @@ How the ClickHouse provider ([`Keryhe.Telemetry.ClickHouse`](../src/Keryhe.Telem
   rows nothing has written to within a tenant's metrics window are deleted.
 
 Because ClickHouse has no control plane here, nothing in this package needs a relational database except the
-`ControlPlane:Provider` you register beside it.
+`Telemetry:{Collector|Api}:Provider:ControlPlane` you register beside it.

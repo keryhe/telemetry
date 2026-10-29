@@ -1,3 +1,5 @@
+using Keryhe.Telemetry.Api;
+using Keryhe.Telemetry.Core.Data;
 using Microsoft.AspNetCore.ResponseCompression;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -40,8 +42,8 @@ builder.Services.AddKeryheTelemetryApi(builder.Configuration);
 // prebuilt bundle without recompiling anything.
 builder.Services.AddKeryheTelemetryUi(builder.Configuration);
 
-// The active provider's read services (Database:Provider + ConnectionStrings:Api) and retention sweeper.
-switch (builder.Configuration["Database:Provider"])
+// The active provider's read services (Telemetry:Api:Provider:Database + ConnectionStrings:Api) and retention sweeper.
+switch (builder.Configuration[ProviderKeys.ApiDatabase])
 {
     case "SqlServer":  builder.Services.AddSqlServerApiServices(builder.Configuration);  break;
     case "PostgreSQL": builder.Services.AddPostgreSqlApiServices(builder.Configuration); break;
@@ -49,25 +51,25 @@ switch (builder.Configuration["Database:Provider"])
     case "MySql":      builder.Services.AddMySqlApiServices(builder.Configuration);      break;
     case "Parquet":    builder.Services.AddParquetApiServices(builder.Configuration);    break;
     default: throw new InvalidOperationException(
-        "Unknown or missing Database:Provider (expected SqlServer, PostgreSQL, ClickHouse, MySql, or Parquet).");
+        $"Unknown or missing {ProviderKeys.ApiDatabase} (expected SqlServer, PostgreSQL, ClickHouse, MySql, or Parquet).");
 }
 
-// The control plane (tenants, alert rules, retention settings): ControlPlane:Provider +
+// The control plane (tenants, alert rules, retention settings): Telemetry:Api:Provider:ControlPlane +
 // ConnectionStrings:ControlPlane, both required. It may be a different provider (and database) from the
 // telemetry data above.
-switch (builder.Configuration["ControlPlane:Provider"])
+switch (builder.Configuration[ProviderKeys.ApiControlPlane])
 {
     case "SqlServer":  builder.Services.AddSqlServerControlPlaneApiServices(builder.Configuration);  break;
     case "PostgreSQL": builder.Services.AddPostgreSqlControlPlaneApiServices(builder.Configuration); break;
     case "MySql":      builder.Services.AddMySqlControlPlaneApiServices(builder.Configuration);      break;
     // Creates the file and applies forward-only migrations at startup (Telemetry:ControlPlane:Sqlite:ApplySchema), as the collector
-    // does, so either host can start first; with TelemetryUi:FixedTenantId it also creates that tenant when it has no row.
+    // does, so either host can start first; with Telemetry:Api:FixedTenantId it also creates that tenant when it has no row.
     case "Sqlite":
-        var fixedTenantId = builder.Configuration.GetValue<long?>($"{TelemetryUiOptions.SectionName}:{nameof(TelemetryUiOptions.FixedTenantId)}");
-        builder.Services.AddSqliteControlPlaneManagement(builder.Configuration, fixedTenantId is > 0 ? fixedTenantId : null); // TelemetryUiOptions.Validate refuses the rest
+        var fixedTenantId = builder.Configuration.GetValue<long?>($"{TelemetryApiOptions.SectionName}:{nameof(TelemetryApiOptions.FixedTenantId)}");
+        builder.Services.AddSqliteControlPlaneManagement(builder.Configuration, fixedTenantId is > 0 ? fixedTenantId : null); // the options validation refuses the rest
         break;
     default: throw new InvalidOperationException(
-        "Unknown or missing ControlPlane:Provider (expected SqlServer, PostgreSQL, MySql, or Sqlite).");
+        $"Unknown or missing {ProviderKeys.ApiControlPlane} (expected SqlServer, PostgreSQL, MySql, or Sqlite).");
 }
 
 // ── ALERTING ──────────────────────────────────────────────────────────────────

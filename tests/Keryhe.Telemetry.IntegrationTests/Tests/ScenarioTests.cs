@@ -150,9 +150,10 @@ public class ScenarioTests
         var (collector, _, _) = HostLauncher.BuildEnvironment(options, HostRole.Collector);
         var (api, _, _) = HostLauncher.BuildEnvironment(options, HostRole.Api);
 
+        Assert.Equal("Sqlite", collector["Telemetry__Collector__Provider__ControlPlane"]);
+        Assert.Equal("Sqlite", api["Telemetry__Api__Provider__ControlPlane"]);
         foreach (var env in new[] { collector, api })
         {
-            Assert.Equal("Sqlite", env["ControlPlane__Provider"]);
             var connectionString = env["ConnectionStrings__ControlPlane"];
             Assert.StartsWith("Data Source=", connectionString);
             Assert.True(Path.IsPathRooted(connectionString["Data Source=".Length..]), connectionString);

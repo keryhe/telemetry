@@ -50,7 +50,7 @@ public sealed record ScenarioResult(
     DatabaseOutage? Outage = null,
     string? ControlPlane = null)
 {
-    // ControlPlane is the ControlPlane:Provider the hosts ran on (Sqlite, PostgreSQL, SqlServer, MySql). Results from before it was recorded have
+    // ControlPlane is the Telemetry:{Collector|Api}:Provider:ControlPlane the hosts ran on (Sqlite, PostgreSQL, SqlServer, MySql). Results from before it was recorded have
     // none: for Parquet and ClickHouse those ran on a PostgreSQL container, for the relational providers on the telemetry database itself.
     /// <summary>
     /// 2 (database-performance plan, Phase 0): pin-adjusted lag criteria and <c>lag_absolute</c>, maybe-landed export accounting, provider

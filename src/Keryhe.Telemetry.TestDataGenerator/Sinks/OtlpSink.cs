@@ -13,7 +13,7 @@ namespace Keryhe.Telemetry.TestDataGenerator.Sinks;
 
 /// <summary>
 /// The backfill sink: builds OTLP messages directly, so every timestamp is the simulation's, and sends them
-/// over gRPC with the tenant's bearer key. Used for history only; live data goes through the real SDK.
+/// over gRPC with the tenant's bearer key (none for a <c>FixedTenant</c> collector). Used for history only; live data goes through the real SDK.
 /// </summary>
 public sealed class OtlpSink : ISink
 {
@@ -31,14 +31,14 @@ public sealed class OtlpSink : ISink
     private MetricAggregator? _aggregator;
     private readonly int _seed;
 
-    public OtlpSink(string tenant, string apiKey, Uri endpoint, int maxSpansPerExport, int seed, ILogger logger)
+    public OtlpSink(string tenant, string? apiKey, Uri endpoint, int maxSpansPerExport, int seed, ILogger logger)
     {
         _tenant = tenant;
         _maxSpansPerExport = maxSpansPerExport;
         _seed = seed;
         _logger = logger;
         _channel = GrpcChannel.ForAddress(endpoint);
-        _headers = new Metadata { { "authorization", $"Bearer {apiKey}" } };
+        _headers = string.IsNullOrEmpty(apiKey) ? new Metadata() : new Metadata { { "authorization", $"Bearer {apiKey}" } };
         _traces = new TraceService.TraceServiceClient(_channel);
         _logs = new LogsService.LogsServiceClient(_channel);
         _metrics = new MetricsService.MetricsServiceClient(_channel);

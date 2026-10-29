@@ -2,7 +2,7 @@
 -- Fresh install only: there is no upgrade path from any earlier layout (recreate the database).
 -- ClickHouse holds telemetry data only: tenants (with their retention windows), API keys and alert rules are the
 -- control plane, which a ClickHouse deployment runs on PostgreSQL, SQL Server or MySQL
--- (PostgreSQL-ControlPlane.sql and its siblings, ControlPlane:Provider).
+-- (PostgreSQL-ControlPlane.sql and its siblings, Telemetry:{Collector|Api}:Provider:ControlPlane).
 --
 -- Row model: plans/clickhouse-row-model.md. In short:
 --   * Every row carries its own resource and scope (attributes, schema URL, name, version): no reference tables,

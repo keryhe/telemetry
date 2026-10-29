@@ -26,7 +26,7 @@ schema/apply-schema.sh telemetry sqlserver
 
 | Key | Meaning |
 |---|---|
-| `Database:Provider` / `ControlPlane:Provider` | `SqlServer` for the side(s) this package serves |
+| `Telemetry:{Collector|Api}:Provider:Database` / `…:Provider:ControlPlane` | `SqlServer` for the side(s) this package serves |
 | `ConnectionStrings:Collector` / `:Api` / `:ControlPlane` | e.g. `Server=localhost;Database=telemetry;User Id=sa;Password=<password>;TrustServerCertificate=true`; `ControlPlane` is required and normally names the same database |
 
 ## License

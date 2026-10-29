@@ -30,13 +30,13 @@ public abstract class ProviderContainer : IAsyncDisposable
     /// </summary>
     public string ControlPlaneConnectionString => _sqliteControlPlane?.ConnectionString ?? DefaultControlPlaneConnectionString;
 
-    /// <summary>The <c>ControlPlane:Provider</c> value the control plane runs on.</summary>
+    /// <summary>The <c>Telemetry:{Collector|Api}:Provider:ControlPlane</c> value the control plane runs on.</summary>
     public string ControlPlaneProviderName => _sqliteControlPlane is null ? DefaultControlPlaneProviderName : SqliteControlPlane.ProviderName;
 
     /// <summary>The control plane this provider has when nothing moved it to SQLite.</summary>
     protected virtual string DefaultControlPlaneConnectionString => ConnectionString;
 
-    /// <summary>The <c>ControlPlane:Provider</c> value of <see cref="DefaultControlPlaneConnectionString"/>.</summary>
+    /// <summary>The <c>Telemetry:{Collector|Api}:Provider:ControlPlane</c> value of <see cref="DefaultControlPlaneConnectionString"/>.</summary>
     protected virtual string DefaultControlPlaneProviderName => ProviderName;
 
     private SqliteControlPlane? _sqliteControlPlane;

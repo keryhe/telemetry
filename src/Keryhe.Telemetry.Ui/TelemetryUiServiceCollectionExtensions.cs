@@ -41,6 +41,10 @@ public static class TelemetryUiServiceCollectionExtensions
             services.Configure<TelemetryUiOptions>(o => o.ApiBasePath = "/" + apiBasePath.Trim().Trim('/'));
 
         services.Configure<TelemetryUiOptions>(configuration.GetSection(TelemetryUiOptions.SectionName));
+        // The fixed tenant is the API's setting (Telemetry:Api:FixedTenantId), never this section's: applied after the binding so a
+        // TelemetryUi:FixedTenantId is ignored, before the delegate so code can still set it.
+        var fixedTenantId = configuration.GetValue<long?>("Telemetry:Api:FixedTenantId");
+        services.Configure<TelemetryUiOptions>(o => o.FixedTenantId = fixedTenantId);
         if (configure is not null)
             services.Configure(configure);
 

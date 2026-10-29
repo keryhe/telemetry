@@ -41,7 +41,7 @@ public static class TelemetryApiServiceCollectionExtensions
         IConfiguration configuration,
         Action<TelemetryApiOptions>? configure = null)
     {
-        // Base path and authorization settings (Telemetry:Api). An invalid base path fails startup.
+        // Base path, authorization and fixed-tenant settings (Telemetry:Api). An invalid base path or fixed tenant fails startup.
         var apiOptions = services.AddOptions<TelemetryApiOptions>()
             .Bind(configuration.GetSection(TelemetryApiOptions.SectionName));
         if (configure is not null) apiOptions.Configure(configure);
@@ -51,6 +51,7 @@ public static class TelemetryApiServiceCollectionExtensions
                 try { TelemetryApiOptions.NormalizeBasePath(o.BasePath); return true; }
                 catch (InvalidOperationException) { return false; }
             }, $"{TelemetryApiOptions.SectionName}:BasePath is not a usable API path prefix (use e.g. '/api' or '/telemetry/api'; '/' is not allowed).")
+            .Validate(o => o.FixedTenantId is null or > 0, $"{TelemetryApiOptions.SectionName}:FixedTenantId must be a tenant id greater than 0.")
             .ValidateOnStart();
 
         // Prefix the library's routes with the base path (and tenants/{tenantId}) and add the

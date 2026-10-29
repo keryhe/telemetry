@@ -143,7 +143,7 @@ public class FixedTenantCollectorTests
 
     private static Dictionary<string, string?> WithControlPlane(Dictionary<string, string?> config, string connectionString)
     {
-        config["ControlPlane:Provider"] = SqliteControlPlane.ProviderName;
+        config[ProviderKeys.CollectorControlPlane] = SqliteControlPlane.ProviderName;
         config["ConnectionStrings:ControlPlane"] = connectionString;
         return config;
     }
