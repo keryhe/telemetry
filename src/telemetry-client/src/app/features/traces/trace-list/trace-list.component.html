@@ -27,7 +27,8 @@
     </mat-button-toggle-group>
 
     @if (filterMode() === 'slow') {
-      <mat-form-field appearance="outline" subscriptSizing="dynamic" class="min-duration-field">
+      <mat-form-field appearance="outline" subscriptSizing="dynamic" class="min-duration-field"
+                      matTooltip="Filters on the whole trace's duration, as shown in the Duration column.">
         <mat-label>Min Duration (ms)</mat-label>
         <input matInput type="number" min="1"
                [ngModel]="minDurationMs()" (ngModelChange)="onMinDurationChange($event)"
@@ -232,7 +233,7 @@
               </ng-container>
               <ng-container matColumnDef="duration">
                 <th mat-header-cell *matHeaderCellDef
-                    matTooltip="The entry span's own duration — the trace's earliest span, or the selected service's earliest span — not the whole trace's.">Span duration</th>
+                    matTooltip="The whole trace's duration: from its earliest span's start to its latest span's end, across every service.">Duration</th>
                 <td mat-cell *matCellDef="let t" class="duration-cell">
                   <span class="dur-bar-fill" [style.width.%]="durationBarPct(t)"></span>
                   <span class="mono dur-text">{{ formatDuration(parseDuration(t.traceDuration)) }}</span>

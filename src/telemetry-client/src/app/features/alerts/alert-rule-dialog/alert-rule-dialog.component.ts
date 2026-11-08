@@ -81,7 +81,7 @@ export interface AlertRuleDialogData {
         <!-- Slow Trace -->
         @if (type() === AlertRuleType.SlowTrace) {
           <mat-form-field appearance="outline" class="half-width">
-            <mat-label>Duration threshold (ms)</mat-label>
+            <mat-label>Request duration threshold (ms)</mat-label>
             <input matInput type="number" formControlName="minDurationMs" />
           </mat-form-field>
           <mat-form-field appearance="outline" class="half-width">

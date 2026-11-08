@@ -1,7 +1,8 @@
 /** Shared categorical palette for coloring services across the trace views. */
 export const SERVICE_COLORS = [
-  '#1976d2', '#f57c00', '#388e3c', '#7b1fa2',
-  '#00838f', '#5d4037', '#558b2f', '#4527a0',
+  // No green/red/orange/yellow: those read as success/error/warning.
+  '#1976d2', '#c2187e', '#0097a7', '#7b1fa2', // blue, magenta, cyan, purple
+  '#546e7a', '#9575cd', '#283593', '#64b5f6', // slate, lavender, indigo, sky
 ];
 
 /**

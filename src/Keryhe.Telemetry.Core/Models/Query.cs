@@ -112,10 +112,10 @@ public sealed class TraceQuery
     /// <summary>Only traces whose anchor span has this name (the operation shown on the row), when set (decision 15).</summary>
     public string? Operation { get; init; }
 
-    /// <summary>Minimum trace duration in milliseconds, applied to the anchor span's own duration (decision 11). Only meaningful for <c>slow</c> mode.</summary>
+    /// <summary>Minimum trace duration in milliseconds, applied to the whole trace's duration (<see cref="TraceInfo.TraceDuration"/>). Only meaningful for <c>slow</c> mode.</summary>
     public double? MinDurationMs { get; init; }
 
-    /// <summary>Maximum trace duration in milliseconds, applied to the anchor span's own duration. Only meaningful for <c>slow</c> mode.</summary>
+    /// <summary>Maximum trace duration in milliseconds, applied to the whole trace's duration. Only meaningful for <c>slow</c> mode.</summary>
     public double? MaxDurationMs { get; init; }
 
     /// <summary>Raw search text: free text, <c>key:value</c>/<c>key=value</c>, negation, trace id — parsed server-side, matched against any span in the whole trace regardless of the service filter (decision 16).</summary>

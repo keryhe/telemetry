@@ -1,6 +1,7 @@
 import type { ApexOptions } from 'ng-apexcharts';
 import { getSeverityLabel, SEVERITY_COLORS } from '../../core/models/log.models';
 import { MetricBucketPoint, MetricType } from '../../core/models/metric.models';
+import { SERVICE_COLORS } from './service-colors';
 
 /** Shared grid / separator line color: light gray in light mode, darker gray in dark mode. */
 function gridLineColor(isDark: boolean): string {
@@ -422,9 +423,7 @@ export function parseDotnetTimespan(ts: string): number {
  * Shared categorical palette for multi-slice charts (donut share). Slices are assigned by index
  * modulo the length, matching the per-service coloring used elsewhere.
  */
-export const CATEGORICAL_COLORS = [
-  '#1976d2', '#f57c00', '#388e3c', '#7b1fa2', '#00838f', '#5d4037', '#558b2f', '#4527a0',
-];
+export const CATEGORICAL_COLORS = SERVICE_COLORS;
 
 /**
  * Donut chart of share-of-total across slices (e.g. one slice per display series/service). Slices

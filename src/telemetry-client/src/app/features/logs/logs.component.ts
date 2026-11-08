@@ -170,6 +170,7 @@ export class LogsComponent implements OnDestroy {
   protected services = signal<string[]>([]);
 
   protected severityOptions = [
+    { num: 5, label: 'Debug' },
     { num: 9, label: 'Info' },
     { num: 13, label: 'Warn' },
     { num: 17, label: 'Error' },

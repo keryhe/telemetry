@@ -163,8 +163,10 @@ UI → API controllers → I*ReadRepository (active provider, Dapper) → teleme
 - Ids bind through `IdParam` (sized ANSI `DbString` on SQL Server, binary-collation `varchar`, no `CONVERT_IMPLICIT`) and lists through
   `IdInPredicate`. SQL Server reads retry once on deadlock 1205 (`ExecuteWithRetryAsync`) and run at `DEADLOCK_PRIORITY LOW` with RCSI on.
 - **Trace anchors.** Every trace-list read (list, samples, export) has one anchor per trace: its **earliest span in scope** by `(start, id)`,
-  scope = the selected service's spans, else the whole trace. Duration, service, operation and kind are the anchor's; the error flag is "any
-  span in scope"; the operation filter matches the anchor's name; search matches any span of the trace regardless of service. The scan covers
+  scope = the selected service's spans, else the whole trace. Service, operation and kind are the anchor's; **duration is the whole trace's**
+  (latest end - earliest start over all its spans, any service: relational `WholeTraceDurationSql`, ClickHouse/Parquet `trace_index`
+  bounds), and slow mode and the slowest samples filter/rank on it (checked after the anchor, never as a candidate-span predicate); the
+  error flag is "any span in scope"; the operation filter matches the anchor's name; search matches any span of the trace regardless of service. The scan covers
   `[start - AnchorLookbackMinutes, end]` and drops anchors before `start`. Three SQL shapes: `AnchorsSql` (whole window, hash aggregate; window
   function when a service is selected; errors mode restricted through the errors index), `SeekAnchorsSql` + `FetchSlicedAnchorPageAsync`
   (relational lists read widening start-time slices with a `NOT EXISTS` seek per candidate), and ClickHouse/Parquet's own slices confirmed

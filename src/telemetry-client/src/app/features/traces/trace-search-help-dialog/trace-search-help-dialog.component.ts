@@ -66,7 +66,7 @@ import { CapabilitiesService } from '../../../core/services/capabilities.service
         <strong>Tip:</strong> Search finds <em>traces containing a matching span</em>. It looks at every
         span in the trace — its own attributes and its resource attributes — whichever service it
         belongs to, so the matching span may be several levels deep and in a service other than the
-        one selected. The row shown is still the trace's entry span (see the Operation and Duration
+        one selected. The row shown is still the trace's entry span (see the Operation and Kind
         columns). Attribute keys are always case-sensitive; free-text substring matching is
         case-insensitive, and so is attribute value matching.
       </div>

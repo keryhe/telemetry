@@ -12,11 +12,6 @@
     <button mat-icon-button [matTooltip]="copied() ? 'Copied!' : 'Copy trace ID'" (click)="copyTraceId()">
       <mat-icon>{{ copied() ? 'check' : 'content_copy' }}</mat-icon>
     </button>
-    @if (hasSpans) {
-      <span class="trace-time">
-        {{ nanoToDate(rootStartNano()) | date:'MM/dd/yyyy, h:mm:ss a' }}
-      </span>
-    }
     <a mat-stroked-button class="view-logs" [routerLink]="tenant.link('logs')" [queryParams]="{ q: id }">
       <mat-icon>receipt_long</mat-icon> View Logs
     </a>
@@ -25,6 +20,12 @@
   @if (hasSpans) {
     <!-- Summary -->
     <div class="stat-grid">
+      @let started = nanoToDate(rootStartNano());
+      <app-stat-card
+        label="Started"
+        icon="schedule"
+        [value]="(started | date:'h:mm:ss a') ?? ''"
+        [subtitle]="(started | date:'MMM d, y') ?? ''" />
       <app-stat-card label="Duration" icon="timer" [value]="formatDuration(totalDurationMs())" />
       <app-stat-card label="Spans" icon="account_tree" [value]="spans().length" />
       <app-stat-card label="Services" icon="cloud" [value]="serviceNames().length" />

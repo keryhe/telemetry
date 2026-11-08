@@ -11,8 +11,8 @@ namespace Keryhe.Telemetry.IntegrationTests.Tests;
 /// <summary>
 /// Trace-list correctness checks for the schema-simplification plan's anchor semantics (decisions
 /// 7, 10-12 and 14-18): each trace is anchored on its EARLIEST span in scope (the selected service's
-/// own earliest span when a service is selected); duration, error flag and span count are scoped to
-/// the row; the operation filter matches the anchor's name; search matches any span in the whole
+/// own earliest span when a service is selected); error flag and span count are scoped to the row,
+/// while duration is always the whole trace's; the operation filter matches the anchor's name; search matches any span in the whole
 /// trace; and a re-delivered span batch is stored twice but counted and shown once. Also the capped
 /// list's order, limit and truncation (plans/list-caps.md).
 /// </summary>
@@ -58,7 +58,8 @@ public abstract class TracePhase3TestsBase : IAsyncLifetime
 
     private async Task<TraceListResult> ListAsync(
         string? service = null, string? operation = null, string? search = null, string mode = "all",
-        DateTime? start = null, DateTime? end = null, double? minDurationMs = null, string order = ListOrder.Newest, int limit = 500)
+        DateTime? start = null, DateTime? end = null, double? minDurationMs = null, string order = ListOrder.Newest, int limit = 500,
+        double? maxDurationMs = null)
     {
         using var scope = Scope();
         return await scope.ServiceProvider.GetRequiredService<ITraceReadRepository>().GetTraceListAsync(new TraceQuery
@@ -66,7 +67,7 @@ public abstract class TracePhase3TestsBase : IAsyncLifetime
             Start = start ?? WindowStart.AddMinutes(-1),
             End = end ?? WindowStart.AddHours(1),
             Service = service, Operation = operation, Search = search, Mode = mode, Limit = limit, Order = order,
-            MinDurationMs = minDurationMs
+            MinDurationMs = minDurationMs, MaxDurationMs = maxDurationMs
         });
     }
 
@@ -99,7 +100,8 @@ public abstract class TracePhase3TestsBase : IAsyncLifetime
         Assert.Equal(TimeSpan.FromMilliseconds(120), a.TraceDuration);
         var b = Assert.Single(page.Items, t => t.TraceIdHex == rootless);
         Assert.Equal("rootless-early", b.RootOperationName);
-        Assert.Equal(TimeSpan.FromMilliseconds(200), b.TraceDuration);
+        // The whole trace: the early span's start (1 s) to the late span's end (3 s + 20 ms).
+        Assert.Equal(TimeSpan.FromMilliseconds(2020), b.TraceDuration);
     }
 
     [Fact]
@@ -117,7 +119,7 @@ public abstract class TracePhase3TestsBase : IAsyncLifetime
         var after = await ListAsync();
         var item = Assert.Single(after.Items);
         Assert.Equal("the-root", item.RootOperationName);
-        Assert.Equal(TimeSpan.FromMilliseconds(500), item.TraceDuration);
+        Assert.Equal(TimeSpan.FromMilliseconds(5030), item.TraceDuration);   // the root's start to the late span's end
     }
 
     [Fact]
@@ -135,7 +137,7 @@ public abstract class TracePhase3TestsBase : IAsyncLifetime
         Assert.Equal(traceId, backend.TraceIdHex);
         Assert.Equal("svc-backend", backend.ServiceName);
         Assert.Equal("handle", backend.RootOperationName);
-        Assert.Equal(TimeSpan.FromMilliseconds(100), backend.TraceDuration);
+        Assert.Equal(TimeSpan.FromMilliseconds(300), backend.TraceDuration);   // the whole trace's, not the service's 100 ms
         Assert.Equal(2, backend.SpanCount);          // the service's own spans, not the whole trace's four
         Assert.False(backend.HasErrors);              // the error span belongs to another service
 
@@ -151,25 +153,137 @@ public abstract class TracePhase3TestsBase : IAsyncLifetime
     }
 
     [Fact]
-    public async Task SlowFilter_AndRowDuration_UseTheAnchorsOwnDuration()
+    public async Task SlowFilter_AndRowDuration_UseTheWholeTracesDuration()
     {
-        var slow = NewTraceId();
+        var slowRoot = NewTraceId();
+        var slowTail = NewTraceId();
         var fast = NewTraceId();
         await FlushAsync(
-            Span(slow, "svc-a", "slow-op", SpanKind.SERVER, WindowStart, 1234),
-            // The fast trace's anchor is short even though a late child makes the whole trace long.
-            Span(fast, "svc-a", "fast-op", SpanKind.SERVER, WindowStart.AddSeconds(1), 20),
-            Span(fast, "svc-a", "long-tail", SpanKind.CLIENT, WindowStart.AddSeconds(1).AddMilliseconds(5), 5000));
+            Span(slowRoot, "svc-a", "slow-op", SpanKind.SERVER, WindowStart, 1234),
+            // A short anchor with a late, long child: the whole trace runs 5 ms + 5000 ms.
+            Span(slowTail, "svc-a", "short-root", SpanKind.SERVER, WindowStart.AddSeconds(1), 20),
+            Span(slowTail, "svc-a", "long-tail", SpanKind.CLIENT, WindowStart.AddSeconds(1).AddMilliseconds(5), 5000),
+            // Negative control: every span of this trace ends within 100 ms of its start.
+            Span(fast, "svc-a", "fast-op", SpanKind.SERVER, WindowStart.AddSeconds(2), 100),
+            Span(fast, "svc-a", "fast-child", SpanKind.CLIENT, WindowStart.AddSeconds(2).AddMilliseconds(10), 50));
 
-        var page = await ListAsync(mode: "slow", minDurationMs: 1000);
-        var row = Assert.Single(page.Items);
-        Assert.Equal(slow, row.TraceIdHex);
-        Assert.Equal(TimeSpan.FromMilliseconds(1234), row.TraceDuration);
+        var slow = await ListAsync(mode: "slow", minDurationMs: 1000);
+        Assert.Equal(new[] { slowRoot, slowTail }.Order(), slow.Items.Select(i => i.TraceIdHex).Order());
+        Assert.Equal(TimeSpan.FromMilliseconds(5005), Assert.Single(slow.Items, i => i.TraceIdHex == slowTail).TraceDuration);
+        Assert.Equal("short-root", Assert.Single(slow.Items, i => i.TraceIdHex == slowTail).RootOperationName);
 
-        // Unfiltered, both anchors are listed (the fast trace's anchor is 20 ms even though a late child makes the whole trace long).
+        // The bounds apply to the whole trace too: the short anchor does not let a 5 s trace under a 2 s max.
+        var bounded = await ListAsync(mode: "slow", minDurationMs: 1000, maxDurationMs: 2000);
+        Assert.Equal(slowRoot, Assert.Single(bounded.Items).TraceIdHex);
+        var longOnly = await ListAsync(mode: "slow", minDurationMs: 5000);
+        Assert.Equal(slowTail, Assert.Single(longOnly.Items).TraceIdHex);
+
         var all = await ListAsync();
-        Assert.Equal(2, all.Items.Count);
-        Assert.Equal(new[] { 20.0, 1234.0 }, all.Items.Select(i => i.TraceDuration.TotalMilliseconds).Order().ToArray());
+        Assert.Equal(3, all.Items.Count);
+        Assert.Equal(new[] { 100.0, 1234.0, 5005.0 }, all.Items.Select(i => i.TraceDuration.TotalMilliseconds).Order().ToArray());
+    }
+
+    [Fact]
+    public async Task SlowestSamples_RankTracesByTheirWholeDuration()
+    {
+        var longRoot = NewTraceId();
+        var longTail = NewTraceId();
+        var shortTrace = NewTraceId();
+        await FlushAsync(
+            Span(longRoot, "svc-a", "long-root", SpanKind.SERVER, WindowStart, 1600),
+            // The anchor is 5 ms, under the floor on its own; the trace runs 9 s.
+            Span(longTail, "svc-a", "tiny-root", SpanKind.SERVER, WindowStart.AddSeconds(1), 5),
+            Span(longTail, "svc-b", "slow-child", SpanKind.CLIENT, WindowStart.AddSeconds(1).AddMilliseconds(1), 9000),
+            // Negative control: under the 500 ms floor as a whole.
+            Span(shortTrace, "svc-a", "short", SpanKind.SERVER, WindowStart.AddSeconds(2), 300));
+
+        using var scope = Scope();
+        var samples = await scope.ServiceProvider.GetRequiredService<ITraceReadRepository>().GetTraceSamplesAsync(new TraceSamplesQuery
+        {
+            Start = WindowStart.AddMinutes(-1), End = WindowStart.AddHours(1), Kind = "slowest", Limit = 10
+        });
+
+        Assert.False(samples.TimedOut);
+        Assert.Equal(new[] { longTail, longRoot }, samples.Items.Select(i => i.TraceIdHex).ToArray());
+        Assert.Equal(TimeSpan.FromMilliseconds(9001), samples.Items[0].TraceDuration);
+        Assert.Equal("tiny-root", samples.Items[0].RootOperationName);
+        Assert.Equal(TimeSpan.FromMilliseconds(1600), samples.Items[1].TraceDuration);
+    }
+
+    [Fact]
+    public async Task SlowestSamples_MeasureATraceThatRunsPastTheWindowsEnd()
+    {
+        var end = WindowStart.AddMinutes(10);
+        var pastEnd = NewTraceId();
+        var inside = NewTraceId();
+        await FlushAsync(
+            // 100 ms inside the window; the long child starts 2 s after End: the trace runs 6.1 s (End - 1 s to End + 5.1 s).
+            Span(pastEnd, "svc-a", "late-root", SpanKind.SERVER, end.AddSeconds(-1), 100),
+            Span(pastEnd, "svc-b", "after-end", SpanKind.CLIENT, end.AddSeconds(2), 3100),
+            Span(inside, "svc-a", "inside", SpanKind.SERVER, WindowStart.AddMinutes(1), 1600));
+
+        using var scope = Scope();
+        var samples = await scope.ServiceProvider.GetRequiredService<ITraceReadRepository>().GetTraceSamplesAsync(new TraceSamplesQuery
+        {
+            Start = WindowStart.AddMinutes(-1), End = end, Kind = "slowest", Limit = 10
+        });
+
+        Assert.False(samples.TimedOut);
+        Assert.Equal(new[] { pastEnd, inside }, samples.Items.Select(i => i.TraceIdHex).ToArray());
+        Assert.Equal(TimeSpan.FromMilliseconds(6100), samples.Items[0].TraceDuration);
+    }
+
+    [Fact]
+    public async Task SlowList_MeasuresATraceThatCrossesMidnight()
+    {
+        // WindowStart is midnight: the window ends before it and the trace's long child runs on into the next day.
+        var crossing = NewTraceId();
+        var shortOne = NewTraceId();
+        await FlushAsync(
+            Span(crossing, "svc-a", "before-midnight", SpanKind.SERVER, WindowStart.AddSeconds(-10), 100),
+            Span(crossing, "svc-b", "after-midnight", SpanKind.CLIENT, WindowStart.AddSeconds(5), 30_000),
+            // Negative control: short as a whole.
+            Span(shortOne, "svc-a", "short", SpanKind.SERVER, WindowStart.AddSeconds(-20), 100));
+
+        var page = await ListAsync(mode: "slow", minDurationMs: 500, start: WindowStart.AddMinutes(-1), end: WindowStart.AddSeconds(-1));
+
+        var row = Assert.Single(page.Items);
+        Assert.Equal(crossing, row.TraceIdHex);
+        Assert.Equal(TimeSpan.FromSeconds(45), row.TraceDuration);
+    }
+
+    [Fact]
+    public async Task SlowExport_MatchesTheSlowList()
+    {
+        var slowRoot = NewTraceId();
+        var slowTail = NewTraceId();
+        var fast = NewTraceId();
+        await FlushAsync(
+            Span(slowRoot, "svc-a", "slow-op", SpanKind.SERVER, WindowStart, 1234),
+            Span(slowTail, "svc-a", "short-root", SpanKind.SERVER, WindowStart.AddSeconds(1), 20),
+            Span(slowTail, "svc-a", "long-tail", SpanKind.CLIENT, WindowStart.AddSeconds(1).AddMilliseconds(5), 5000),
+            // Negative control: every span of this trace ends within 100 ms of its start.
+            Span(fast, "svc-a", "fast-op", SpanKind.SERVER, WindowStart.AddSeconds(2), 100));
+
+        foreach (var (min, max, expected) in new (double, double?, string[])[]
+                 {
+                     (1000, null, [slowRoot, slowTail]),
+                     (1000, 2000, [slowRoot]),
+                     (5000, null, [slowTail]),
+                 })
+        {
+            var list = await ListAsync(mode: "slow", minDurationMs: min, maxDurationMs: max, order: ListOrder.Oldest);
+            using var scope = Scope();
+            var exported = new List<TraceInfo>();
+            await foreach (var info in scope.ServiceProvider.GetRequiredService<ITraceReadRepository>().ExportTracesAsync(new TraceExportQuery
+            {
+                Start = WindowStart.AddMinutes(-1), End = WindowStart.AddHours(1), Mode = "slow", MinDurationMs = min, MaxDurationMs = max
+            }))
+                exported.Add(info);
+
+            Assert.Equal(expected, list.Items.Select(i => i.TraceIdHex).ToArray());
+            Assert.Equal(list.Items.Select(i => (i.TraceIdHex, i.TraceDuration)), exported.Select(i => (i.TraceIdHex, i.TraceDuration)));
+        }
     }
 
     [Fact]
@@ -269,7 +383,7 @@ public abstract class TracePhase3TestsBase : IAsyncLifetime
         var startNs = SeededDataBuilder.ToUnixNano(windowStart);
         var endNs = SeededDataBuilder.ToUnixNano(windowEnd);
         var fromNs = startNs - 5 * 60_000_000_000L;
-        string ServiceOf(SpanModel s) => (string)s.Resource.Attributes["service.name"];
+        string ServiceOf(SpanModel s) => (string)s.Resource!.Attributes["service.name"];
 
         var result = new List<ExpectedTrace>();
         foreach (var trace in spans.GroupBy(s => s.TraceIdHex))
@@ -279,7 +393,8 @@ public abstract class TracePhase3TestsBase : IAsyncLifetime
             if (inScope.Count == 0) continue;
             var anchor = inScope.OrderBy(s => s.StartTimeUnixNano).First();
             if (anchor.StartTimeUnixNano < startNs) continue;
-            var duration = anchor.EndTimeUnixNano - anchor.StartTimeUnixNano;
+            // The whole trace's, over every span of it: no time or service bound.
+            var duration = trace.Max(s => s.EndTimeUnixNano) - trace.Min(s => s.StartTimeUnixNano);
             var hasError = inScope.Any(s => s.StatusCode == SpanStatusCode.ERROR);
             if (operation != null && anchor.Name != operation) continue;
             if (mode == "errors" && !hasError) continue;
@@ -320,7 +435,7 @@ public abstract class TracePhase3TestsBase : IAsyncLifetime
                 // A tie with the trace's first span: identical in everything observable, so which row is the anchor does not matter.
                 if (t % 7 == 0 && k == 1 && first is not null)
                 {
-                    svc = (string)first.Resource.Attributes["service.name"];
+                    svc = (string)first.Resource!.Attributes["service.name"];
                     offset = 0; duration = (int)((first.EndTimeUnixNano - first.StartTimeUnixNano) / 1_000_000);
                     name = first.Name; status = first.StatusCode; kind = first.Kind;
                 }
@@ -482,7 +597,7 @@ public abstract class TracePhase3TestsBase : IAsyncLifetime
             var (service, library) = combos[(i - 1) % combos.Length];
             var child = Span(traceId, service, $"child-{i}", SpanKind.CLIENT, WindowStart.AddMilliseconds(10 * i), 20, parent: rootId);
             child.InstrumentationScope = SeededDataBuilder.Scope(library);
-            child.Resource.Attributes["k8s.pod.annotations"] = new string('x', 2000); // a large resource, repeated per span in the old shape
+            child.Resource!.Attributes["k8s.pod.annotations"] = new string('x', 2000); // a large resource, repeated per span in the old shape
             spans.Add(child);
         }
         await FlushAsync(spans);

@@ -49,16 +49,17 @@ public sealed class ContainerStatsSampler : IAsyncDisposable
     /// <summary>Converts one Docker stats frame. Returns null for the first frame, which has no previous CPU reading to diff against.</summary>
     internal static ContainerStatsSample? ToSample(ContainerStatsResponse r)
     {
+        if (r.CPUStats is not { } cpu || r.PreCPUStats is not { } pre) return null; // no CPU reading to diff
         double Cpu(CPUStats c) => (double)(c.CPUUsage?.TotalUsage ?? 0);
-        var cpuDelta = Cpu(r.CPUStats) - Cpu(r.PreCPUStats);
-        var systemDelta = (double)(r.CPUStats.SystemUsage ?? 0) - (double)(r.PreCPUStats.SystemUsage ?? 0);
-        if (Cpu(r.PreCPUStats) == 0 || systemDelta <= 0) return null;
-        var cpus = (r.CPUStats.OnlineCPUs ?? 0) > 0 ? (int)r.CPUStats.OnlineCPUs! : (r.CPUStats.CPUUsage?.PercpuUsage?.Count ?? 1);
+        var cpuDelta = Cpu(cpu) - Cpu(pre);
+        var systemDelta = (double)(cpu.SystemUsage ?? 0) - (double)(pre.SystemUsage ?? 0);
+        if (Cpu(pre) == 0 || systemDelta <= 0) return null;
+        var cpus = (cpu.OnlineCPUs ?? 0) > 0 ? (int)cpu.OnlineCPUs! : (cpu.CPUUsage?.PercpuUsage?.Count ?? 1);
         var cores = cpuDelta / systemDelta * cpus;
 
         // Like `docker stats`, page cache is not counted as used memory.
         long cache = 0;
-        if (r.MemoryStats.Stats is { } stats)
+        if (r.MemoryStats?.Stats is { } stats)
         {
             if (stats.TryGetValue("inactive_file", out var inactive)) cache = (long)inactive;
             else if (stats.TryGetValue("cache", out var c)) cache = (long)c;
@@ -67,7 +68,7 @@ public sealed class ContainerStatsSampler : IAsyncDisposable
         long Blk(string op) => r.BlkioStats?.IoServiceBytesRecursive?.Where(e => string.Equals(e.Op, op, StringComparison.OrdinalIgnoreCase)).Sum(e => (long)e.Value) ?? 0;
 
         return new ContainerStatsSample(
-            DateTimeOffset.UtcNow, cores, (long)r.MemoryStats.Usage - cache, (long)r.MemoryStats.Limit,
+            DateTimeOffset.UtcNow, cores, (long)(r.MemoryStats?.Usage ?? 0) - cache, (long)(r.MemoryStats?.Limit ?? 0),
             Blk("read"), Blk("write"),
             r.Networks?.Values.Sum(n => (long)n.RxBytes) ?? 0, r.Networks?.Values.Sum(n => (long)n.TxBytes) ?? 0);
     }

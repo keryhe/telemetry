@@ -6,16 +6,12 @@
   .mono { font-family: monospace; font-size: 13px; color: var(--mat-sys-on-surface-variant); }
 }
 
-.trace-time {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  font-size: 13px;
-  color: var(--mat-sys-on-surface-variant);
-  mat-icon { font-size: 16px; width: 16px; height: 16px; }
-}
-
 .view-logs { margin-left: auto; }
+
+// The shared 180px minimum is too narrow for the Started card: 32px padding + "12:59:59 PM" at
+// 24px (~138px) + 12px gap + 36px icon is ~218px, so below that the icon spilled past the card
+// edge. Wrap before then instead. `min(…, 100%)` keeps a lone column from overflowing on phones.
+.stat-grid { grid-template-columns: repeat(auto-fit, minmax(min(220px, 100%), 1fr)); }
 
 .timeline-card { overflow: hidden; }
 

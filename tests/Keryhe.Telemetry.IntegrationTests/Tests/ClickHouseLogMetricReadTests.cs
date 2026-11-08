@@ -124,10 +124,10 @@ public sealed class ClickHouseLogMetricReadTests(ClickHouseFixture fixture) : IA
         var repo = scope.ServiceProvider.GetRequiredService<ILogReadRepository>();
         var word = await repo.GetLogListAsync(new LogQuery { Start = Day, End = Day.AddDays(1), Search = "RAREWORD3", Limit = 100 });
         var part = await repo.GetLogListAsync(new LogQuery { Start = Day, End = Day.AddDays(1), Search = "areword-or-so", Limit = 100 });
-        Assert.Equal(1, word.Items.Count);               // i = 3000 in a 20,000-row day
+        Assert.Single(word.Items);                         // i = 3000 in a 20,000-row day
         Assert.Empty(part.Items);                          // not a word, not present
         var substring = await repo.GetLogListAsync(new LogQuery { Start = Day, End = Day.AddDays(1), Search = "failed with rareword1 at", Limit = 100 });
-        Assert.Equal(1, substring.Items.Count);
+        Assert.Single(substring.Items);
     }
 
     [Fact]

@@ -71,14 +71,15 @@ public class TraceInfo
     public DateTime TraceEndTime { get; set; }
 
     /// <summary>
-    /// The ANCHOR span's own duration (end - start). The anchor is the trace's earliest span in
-    /// scope: the selected service's own earliest span when a service filter produced this row, the
-    /// whole trace's earliest span otherwise (schema-simplification decisions 10-11). The row's
-    /// <see cref="ServiceName"/>, <see cref="RootOperationName"/>, <see cref="AnchorKind"/> and
-    /// <see cref="DisplaySpanIdHex"/> are the anchor's too; <see cref="HasErrors"/> is whether any span
-    /// in scope has status ERROR; <see cref="SpanCount"/> counts the spans in scope. The slow filter
-    /// and the summary charts use the same duration. <see cref="TraceStartTime"/>/<see cref="TraceEndTime"/>
-    /// span the WHOLE trace, for the trace-detail link.
+    /// The WHOLE trace's duration: <see cref="TraceEndTime"/> - <see cref="TraceStartTime"/>, the latest
+    /// span end minus the earliest span start across every span of the trace, whichever service it
+    /// belongs to (the same span the trace detail shows). The slow filter and the slowest samples use
+    /// it too; the summary charts and the slow-request alert are per request (span), not per trace.
+    /// The row's <see cref="ServiceName"/>, <see cref="RootOperationName"/>, <see cref="AnchorKind"/> and
+    /// <see cref="DisplaySpanIdHex"/> are the ANCHOR span's: the trace's earliest span in scope, the
+    /// selected service's own earliest span when a service filter produced this row, the whole trace's
+    /// earliest span otherwise (schema-simplification decisions 10-11). <see cref="HasErrors"/> is whether
+    /// any span in scope has status ERROR; <see cref="SpanCount"/> counts the spans in scope.
     /// </summary>
     public TimeSpan TraceDuration { get; set; }
     public string? ServiceName { get; set; }

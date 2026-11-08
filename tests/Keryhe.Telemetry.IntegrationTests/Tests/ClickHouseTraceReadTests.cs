@@ -104,14 +104,14 @@ public sealed class ClickHouseTraceReadTests(ClickHouseFixture fixture) : IAsync
     }
 
     [Fact]
-    public async Task Samples_Errors_AreTheNewestErrorTraces_AndSlowest_AreTheLongestAnchors()
+    public async Task Samples_Errors_AreTheNewestErrorTraces_AndSlowest_AreTheLongestTraces()
     {
         var spans = new List<SpanModel>();
         for (var t = 1; t <= 8; t++)
         {
             spans.Add(Span(t, t, "svc-a", $"op-{t}", SpanKind.SERVER, Midnight.AddSeconds(t), t * 200, status: t % 2 == 0 ? SpanStatusCode.ERROR : SpanStatusCode.OK));
         }
-        // a long span that is NOT its trace's anchor must not count as a slow anchor
+        // a short anchor with a long child: the trace as a whole is the slowest (5 ms root, 9000 ms child ending 9001 ms in)
         spans.Add(Span(9, 90, "svc-a", "short-root", SpanKind.SERVER, Midnight.AddSeconds(20), 5));
         spans.Add(Span(9, 91, "svc-a", "long-child", SpanKind.CLIENT, Midnight.AddSeconds(20).AddMilliseconds(1), 9000, parent: 90));
         await FlushAsync(spans);
@@ -124,9 +124,10 @@ public sealed class ClickHouseTraceReadTests(ClickHouseFixture fixture) : IAsync
         Assert.All(errors.Items, i => Assert.True(i.HasErrors));
 
         var slowest = await repo.GetTraceSamplesAsync(new TraceSamplesQuery { Start = Midnight.AddMinutes(-1), End = Midnight.AddMinutes(5), Kind = "slowest", Limit = 3 });
-        Assert.Equal([TraceId(8), TraceId(7), TraceId(6)], slowest.Items.Select(i => i.TraceIdHex).ToArray()); // 1600, 1400, 1200 ms (> 500 ms floor)
-        Assert.DoesNotContain(slowest.Items, i => i.TraceIdHex == TraceId(9));
-        Assert.Equal(TimeSpan.FromMilliseconds(1600), slowest.Items[0].TraceDuration);
+        Assert.Equal([TraceId(9), TraceId(8), TraceId(7)], slowest.Items.Select(i => i.TraceIdHex).ToArray()); // 9001, 1600, 1400 ms (> 500 ms floor)
+        Assert.Equal(TimeSpan.FromMilliseconds(9001), slowest.Items[0].TraceDuration);
+        Assert.Equal("short-root", slowest.Items[0].RootOperationName);
+        Assert.Equal(TimeSpan.FromMilliseconds(1600), slowest.Items[1].TraceDuration);
     }
 
     [Fact]

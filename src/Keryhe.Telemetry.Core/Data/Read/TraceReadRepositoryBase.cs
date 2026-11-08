@@ -248,7 +248,8 @@ public abstract class TraceReadRepositoryBase : DapperReadRepository, ITraceRead
     // Every list/samples/export query below anchors on this derived table: one row per
     // trace, carrying the trace's earliest span in scope (its start, end, kind, name and
     // service) plus whether any span in scope has status ERROR. Duration everywhere is the
-    // anchor's own end - start, so the row and the slow filter agree.
+    // WHOLE trace's (latest end - earliest start over all its spans, regardless of service),
+    // so the row, the slow filter and the trace detail agree; see WholeTraceDurationSql.
     // =========================================================================
 
     /// <summary>
@@ -302,6 +303,46 @@ public abstract class TraceReadRepositoryBase : DapperReadRepository, ITraceRead
             """;
     }
 
+    /// <summary>
+    /// The whole trace's duration for anchor <c>a</c>: latest span end minus earliest span start over every span of the
+    /// trace, with no time or service bound -- the same bounds the list's follow-up reads (and the trace detail shows).
+    /// A correlated aggregate through <c>(trace_id, span_id)</c>, so it costs one seek per anchor it is evaluated for.
+    /// </summary>
+    private const string WholeTraceDurationSql =
+        "(SELECT MAX(e.end_time_unix_nano) - MIN(e.start_time_unix_nano) FROM spans e WHERE e.trace_id = a.trace_id AND e.tenant_id = @tenantId)";
+
+    /// <summary>
+    /// The unscoped anchors of the window whose trace runs longer than <c>@floorNano</c>, each carrying
+    /// <c>trace_duration</c> (latest end - earliest start of the trace's spans in <c>[@anchorFrom, @tailTo]</c>) for the
+    /// slowest-samples ordering. <c>@tailTo</c> is the window's end plus the anchor look-back margin, so a trace that starts
+    /// in the window and runs on past its end is measured with the spans it has after the end too (up to that margin, the
+    /// same allowance the start side gets); traces starting after <c>@end</c> are dropped. The same hash aggregate and join-back as <see cref="AnchorsSql"/>, with the trace's end
+    /// folded into the group, so the floor drops short traces before any anchor span is read back.
+    /// </summary>
+    private static string SlowestAnchorsSql() => """
+        (
+            SELECT x.trace_id, x.anchor_span_pk, x.anchor_span_id, x.service_name, x.root_name, x.anchor_kind,
+                   x.anchor_start, x.anchor_end, 0 AS has_error, x.trace_duration
+            FROM (
+                SELECT s.trace_id AS trace_id, s.id AS anchor_span_pk, s.span_id AS anchor_span_id,
+                       s.service_name AS service_name, s.name AS root_name, s.kind AS anchor_kind,
+                       s.start_time_unix_nano AS anchor_start, s.end_time_unix_nano AS anchor_end,
+                       g.max_end - g.min_start AS trace_duration,
+                       ROW_NUMBER() OVER (PARTITION BY s.trace_id ORDER BY s.id) AS rn
+                FROM (
+                    SELECT trace_id, MIN(start_time_unix_nano) AS min_start, MAX(end_time_unix_nano) AS max_end
+                    FROM spans
+                    WHERE tenant_id = @tenantId
+                      AND start_time_unix_nano >= @anchorFrom AND start_time_unix_nano <= @tailTo
+                    GROUP BY trace_id
+                    HAVING MIN(start_time_unix_nano) >= @start AND MIN(start_time_unix_nano) <= @end AND MAX(end_time_unix_nano) - MIN(start_time_unix_nano) > @floorNano
+                ) g
+                JOIN spans s ON s.trace_id = g.trace_id AND s.start_time_unix_nano = g.min_start AND s.tenant_id = @tenantId
+            ) x
+            WHERE x.rn = 1
+        )
+        """;
+
     /// <summary>The window-function form of <see cref="AnchorsSql"/> for a selected service: rank each trace's in-scope spans and keep the first.</summary>
     private static string WindowAnchorsSql()
     {
@@ -330,7 +371,7 @@ public abstract class TraceReadRepositoryBase : DapperReadRepository, ITraceRead
     /// <c>(start, id)</c>) at or after <c>@anchorFrom</c>. Each candidate is checked with one <c>(trace_id, span_id)</c>
     /// seek, so the cost follows the number of candidate spans in the range -- not the window -- which is what lets a page
     /// read only the slice it needs (<see cref="QueryOptions.PageSliceSeconds"/>). <paramref name="candidatePredicate"/>
-    /// is extra <c>AND ...</c> terms on the candidate span <c>s</c> (the anchor's own name or duration), evaluated before
+    /// is extra <c>AND ...</c> terms on the candidate span <c>s</c> (the anchor's own name), evaluated before
     /// the seek. The error flag is not computed here (it is <c>0</c>); the list reads it for just its own rows.
     /// Parameters: <c>@tenantId</c>, <c>@anchorFrom</c>, <c>@rangeFrom</c>, <c>@rangeTo</c>, plus <c>@service</c>
     /// as for <see cref="AnchorsSql"/>.
@@ -417,34 +458,26 @@ public abstract class TraceReadRepositoryBase : DapperReadRepository, ITraceRead
     /// filters as a whole-window read, and the slices are disjoint, so their rows concatenate in the
     /// final order. A slice starts at <see cref="QueryOptions.PageSliceSeconds"/> and grows by
     /// <see cref="QueryOptions.PageSliceGrowth"/>; once the next slice would cover at least half of what is left, it takes
-    /// all of it, which bounds a sparse filter (a rare search or operation) at about one extra partial scan. Slow mode
-    /// filters on the anchor's own duration, which is selective by construction (a few percent of spans), so it reads the
-    /// whole range in one pass.
+    /// all of it, which bounds a sparse filter (a rare search, operation or slow-mode duration) at about one extra partial
+    /// scan. Slow mode filters on the whole trace's duration (<see cref="WholeTraceDurationSql"/>), which no single
+    /// candidate span carries, so it is an outer clause checked per anchor, like search.
     /// </summary>
     private async Task<List<AnchorRow>> FetchSlicedAnchorPageAsync(
         System.Data.Common.DbConnection conn, TraceQuery query, bool hasService, List<string> clauses, DynamicParameters parameters,
         int need, bool descending, long rangeFrom, long rangeTo, CancellationToken ct)
     {
         var candidate = new StringBuilder();
-        var selective = false;
         // The anchor's own name narrows the candidates before the seek, but still reads in slices: on SQL Server a
         // single whole-range pass orders every matching candidate's seek before the top-N cut, where a
         // slice only ever verifies the few hundred candidates it holds.
         if (!string.IsNullOrEmpty(query.Operation))
             candidate.Append(" AND s.name = @operation");
-        if (query.Mode == "slow")
-        {
-            candidate.Append(" AND (s.end_time_unix_nano - s.start_time_unix_nano) >= @minDurationNano");
-            if (query.MaxDurationMs.HasValue)
-                candidate.Append(" AND (s.end_time_unix_nano - s.start_time_unix_nano) <= @maxDurationNano");
-            selective = true;
-        }
 
         var anchors = SeekAnchorsSql(hasService, candidate.ToString());
         var where = clauses.Count == 0 ? "1 = 1" : string.Join(" AND ", clauses);
         var order = descending ? "DESC" : "ASC";
         var rows = new List<AnchorRow>(need);
-        var width = selective ? Math.Max(1, rangeTo - rangeFrom) : _pageSliceNanos;
+        var width = _pageSliceNanos;
         var lo = rangeFrom;
         var hi = rangeTo;
 
@@ -497,9 +530,9 @@ public abstract class TraceReadRepositoryBase : DapperReadRepository, ITraceRead
     }
 
     /// <summary>
-    /// Shapes the list's anchors into <see cref="TraceInfo"/> rows. Duration, error flag, service,
-    /// operation and kind come straight from the anchor (decisions 10-11); the follow-up query supplies
-    /// only the exact span count (decisions 14, 18) and the whole trace's start/end for the detail link.
+    /// Shapes the list's anchors into <see cref="TraceInfo"/> rows. Error flag, service, operation and kind come straight
+    /// from the anchor (decisions 10-11); the follow-up query supplies the exact span count (decisions 14, 18) and the
+    /// whole trace's start/end, which are both the detail link's hints and the row's duration.
     /// </summary>
     private async Task<List<TraceInfo>> LoadPageTraceInfosAsync(
         System.Data.Common.DbConnection conn, List<AnchorRow> anchors, string? service, CancellationToken ct, ErrorScope? errorScope = null)
@@ -551,7 +584,7 @@ public abstract class TraceReadRepositoryBase : DapperReadRepository, ITraceRead
                 SpanCount = agg?.SpanCount ?? 1,
                 TraceStartTime = TimeConversion.UnixNanoToDateTime(minStart),
                 TraceEndTime = TimeConversion.UnixNanoToDateTime(maxEnd),
-                TraceDuration = TimeSpan.FromTicks((a.AnchorEnd - a.AnchorStart) / 100),
+                TraceDuration = TimeSpan.FromTicks((maxEnd - minStart) / 100),
                 ServiceName = string.IsNullOrEmpty(a.ServiceName) ? null : a.ServiceName,
                 RootOperationName = a.RootName,
                 AnchorKind = a.AnchorKind,
@@ -644,7 +677,7 @@ public abstract class TraceReadRepositoryBase : DapperReadRepository, ITraceRead
         parameters.Add("offset", 0);
 
         // Both widgets read the unscoped anchors of the window: the newest traces with an
-        // error span, and the slowest anchors (by the anchor's own duration, above a 500 ms floor).
+        // error span, and the slowest traces (by the whole trace's duration, above a 500 ms floor).
         string anchors, filter, order;
         if (query.Kind == "errors")
         {
@@ -655,14 +688,13 @@ public abstract class TraceReadRepositoryBase : DapperReadRepository, ITraceRead
         }
         else // "slowest"
         {
-            // The anchor must itself be over the floor, so candidates are the long spans of the window, each checked for
-            // being its trace's earliest by one seek, instead of ranking every trace to find them.
-            const string floor = "(s.end_time_unix_nano - s.start_time_unix_nano) > 500000000";
-            anchors = SeekAnchorsSql(hasService: false, $" AND {floor}");
-            parameters.Add("rangeFrom", startNano);
-            parameters.Add("rangeTo", endNano + 1);
-            filter = "(a.anchor_end - a.anchor_start) > 500000000";
-            order = "(a.anchor_end - a.anchor_start) DESC, a.anchor_span_pk DESC";
+            // A short root with a long child is slow, so no single span says which traces qualify: the window's spans are
+            // grouped per trace once, the floor applied to each group, and only the survivors' anchors are read back.
+            anchors = SlowestAnchorsSql();
+            parameters.Add("floorNano", 500_000_000L);
+            parameters.Add("tailTo", endNano + _anchorLookbackNanos);
+            filter = "1 = 1";
+            order = "a.trace_duration DESC, a.anchor_span_pk DESC";
         }
 
         var sql = $"""
@@ -682,11 +714,12 @@ public abstract class TraceReadRepositoryBase : DapperReadRepository, ITraceRead
         if (timedOut || rows == null) return new TraceSamplesResult { TimedOut = true };
 
         var seekRows = query.Kind != "errors";
-        return new TraceSamplesResult
-        {
-            Items = await LoadPageTraceInfosAsync(conn, rows, null, cancellationToken,
-                errorScope: seekRows ? new ErrorScope(startNano - _anchorLookbackNanos, endNano) : null)
-        };
+        var items = await LoadPageTraceInfosAsync(conn, rows, null, cancellationToken,
+            errorScope: seekRows ? new ErrorScope(startNano - _anchorLookbackNanos, endNano) : null);
+        // The rows show the whole trace's duration (no time bound); the query ranked on the in-range one. Order by what is
+        // shown (a stable sort, so ties keep the query's order).
+        if (query.Kind != "errors") items = items.OrderByDescending(i => i.TraceDuration).ToList();
+        return new TraceSamplesResult { Items = items };
     }
 
     /// <summary>
@@ -740,7 +773,7 @@ public abstract class TraceReadRepositoryBase : DapperReadRepository, ITraceRead
     /// <list type="bullet">
     /// <item>operation filter = the anchor span's own name (decision 15), no per-trace subquery;</item>
     /// <item><c>errors</c> mode = the in-scope error flag (decision 11);</item>
-    /// <item><c>slow</c> mode = the anchor's own duration (decision 11);</item>
+    /// <item><c>slow</c> mode = the whole trace's duration (<see cref="WholeTraceDurationSql"/>);</item>
     /// <item>search = ANY span in the whole trace matches, regardless of the service filter (decision
     /// 16), as an <c>EXISTS</c> through <c>(trace_id, span_id)</c> per candidate anchor, within the
     /// search window.</item>
@@ -774,14 +807,16 @@ public abstract class TraceReadRepositoryBase : DapperReadRepository, ITraceRead
         }
         else if (mode == "slow")
         {
+            // One correlated aggregate per anchor: a BETWEEN when both bounds are set, not two subqueries.
             var minNano = (long)((minDurationMs ?? 500) * 1_000_000);
-            clauses.Add("(a.anchor_end - a.anchor_start) >= @minDurationNano");
             parameters.Add("minDurationNano", minNano);
             if (maxDurationMs.HasValue)
             {
-                clauses.Add("(a.anchor_end - a.anchor_start) <= @maxDurationNano");
+                clauses.Add($"{WholeTraceDurationSql} BETWEEN @minDurationNano AND @maxDurationNano");
                 parameters.Add("maxDurationNano", (long)(maxDurationMs.Value * 1_000_000));
             }
+            else
+                clauses.Add($"{WholeTraceDurationSql} >= @minDurationNano");
         }
 
         if (parsed.IsTraceIdSearch)

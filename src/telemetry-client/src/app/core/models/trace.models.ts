@@ -18,7 +18,7 @@ export interface TraceInfo {
   spanCount: number;
   traceStartTime: string;
   traceEndTime: string;
-  /** The anchor span's own duration (end - start). The anchor is the trace's earliest span — or, when a service filter matched, that service's own earliest span. */
+  /** The whole trace's duration: latest span end - earliest span start, across every service (traceEndTime - traceStartTime). */
   traceDuration: string;
   /** The anchor span's service. */
   serviceName?: string;

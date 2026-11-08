@@ -331,11 +331,9 @@ export class DashboardComponent {
     });
   }
 
-  protected navigateToTrace(traceId: string, spanId?: string | null, start?: string, end?: string): void {
-    const queryParams: Record<string, string> = {};
-    if (spanId) queryParams['span'] = spanId;
-    if (start && end) { queryParams['start'] = start; queryParams['end'] = end; } // lets the detail read be bounded (ClickHouse)
-    this.router.navigate(this.tenant.link('traces', traceId), Object.keys(queryParams).length ? { queryParams } : undefined);
+  /** Opens the trace like a click on the traces page: no span selected; `start`/`end` let the detail read be bounded (ClickHouse). */
+  protected navigateToTrace(traceId: string, start?: string, end?: string): void {
+    this.router.navigate(this.tenant.link('traces', traceId), start && end ? { queryParams: { start, end } } : undefined);
   }
 
   protected durationMs(trace: TraceInfo): number {

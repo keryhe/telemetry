@@ -49,9 +49,14 @@ import type { ApexOptions } from 'ng-apexcharts';
        both shrinkable (the previous behaviour) flexbox squeezed them proportionally and the
        value's text — which has no overflow rule — spilled out over the chart. */
     .stat-text { flex-shrink: 0; }
-    .value { font-size: 28px; font-weight: 500; line-height: 1.2; }
-    .subtitle { font-size: 12px; color: var(--mat-sys-on-surface-variant); margin-top: 4px; }
-    .stat-icon { font-size: 36px; width: 36px; height: 36px; opacity: 0.7; color: var(--mat-sys-primary); flex-shrink: 0; }
+    .value { font-size: 24px; font-weight: 500; line-height: 1.2; }
+    .subtitle { font-size: 14px; color: var(--mat-sys-on-surface-variant); margin-top: 4px; }
+    /* Centred on the value line, not the whole text block, so a card with a subtitle keeps its
+       icon level with its neighbours'. The negative block margins, (value line height - icon size)
+       / 2 each, shrink the icon's layout box to exactly the value line, so it overlays that line
+       and never sets the row height (which would push the value off-centre on cards without one). */
+    .stat-icon { font-size: 36px; width: 36px; height: 36px; opacity: 0.7; color: var(--mat-sys-primary); flex-shrink: 0;
+                 align-self: flex-start; margin-block: calc((24px * 1.2 - 36px) / 2); }
     /* A 100px flex-basis (rather than a fixed width) keeps the definite width ApexCharts needs
        to resolve its percentage width, while still allowing the item to shrink. */
     .sparkline { flex: 0 1 100px; min-width: 0; height: 40px; overflow: hidden; }

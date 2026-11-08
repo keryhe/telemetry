@@ -23,9 +23,11 @@ namespace Keryhe.Telemetry.ClickHouse.Services;
 /// scope according to <c>trace_index</c> (one point lookup by trace id), so a trace that began before the slice is
 /// anchored in an older slice or, if before the window, not listed. A trace that began more than a day before the slice
 /// is anchored on its earliest span inside the two days looked up (accepted). The error flag and whole-trace bounds
-/// come from <c>trace_index</c>; the span count is exact (<c>uniqExact(span_id)</c>) because a re-delivered span is stored
-/// twice. Operation, slow and search filters narrow the candidates; each is a property of the anchor or of the trace, so
-/// applying it before the confirmation is equivalent to applying it after.
+/// come from <c>trace_index</c>, and the row's duration is the whole trace's (<c>max(end_max) - min(start_min)</c>); the
+/// span count is exact (<c>uniqExact(span_id)</c>) because a re-delivered span is stored twice. Operation and search
+/// filters narrow the candidates; each is a property of the anchor or of the trace, so applying it before the
+/// confirmation is equivalent to applying it after. Slow mode's duration is the whole trace's, which no candidate span
+/// carries, so it is checked at the confirmation, against the same <c>trace_index</c> bounds.
 ///
 /// Attribute values come back as strings (README R7); ids are converted at the edges only (README R8).
 /// </summary>
@@ -289,7 +291,7 @@ public sealed class ClickHouseTraceReadRepository : DapperReadRepository, ITrace
         SpanCount = a.SpanCount,
         TraceStartTime = TimeConversion.UnixNanoToDateTime(a.TraceMin),
         TraceEndTime = TimeConversion.UnixNanoToDateTime(a.TraceMax),
-        TraceDuration = TimeSpan.FromTicks((long)(a.DurationNs / 100)),
+        TraceDuration = TimeSpan.FromTicks((a.TraceMax - a.TraceMin) / 100),
         ServiceName = string.IsNullOrEmpty(a.Service) ? null : a.Service,
         RootOperationName = a.Name,
         AnchorKind = a.Kind,
@@ -302,8 +304,8 @@ public sealed class ClickHouseTraceReadRepository : DapperReadRepository, ITrace
     {
         public readonly string? Service;
         public readonly string Mode;
-        public readonly bool Selective;          // slow mode filters on the anchor's own duration: one pass over the range
         public readonly string SpanPredicates;   // AND ... terms on the candidate span
+        public readonly DurationBounds Duration;   // slow mode, on the whole trace: checked at the confirmation
         public readonly bool ErrorsOnly;
         public readonly DynamicParameters Parameters = new();
 
@@ -318,17 +320,7 @@ public sealed class ClickHouseTraceReadRepository : DapperReadRepository, ITrace
                 sql.Append(" AND span_name = @operation");
                 Parameters.Add("operation", operation);
             }
-            if (mode == "slow")
-            {
-                sql.Append(" AND duration_ns >= @minDuration");
-                Parameters.Add("minDuration", (ulong)Math.Max(0, (long)((minDurationMs ?? 500) * 1_000_000)));
-                if (maxDurationMs.HasValue)
-                {
-                    sql.Append(" AND duration_ns <= @maxDuration");
-                    Parameters.Add("maxDuration", (ulong)Math.Max(0, (long)(maxDurationMs.Value * 1_000_000)));
-                }
-                Selective = true;
-            }
+            Duration = DurationBounds.For(mode, minDurationMs, maxDurationMs);
             ErrorsOnly = mode == "errors";
             if (parsed.IsTraceIdSearch)
             {
@@ -342,6 +334,22 @@ public sealed class ClickHouseTraceReadRepository : DapperReadRepository, ITrace
 
         /// <summary>The <c>AND trace_id IN (...)</c> clauses of the search terms.</summary>
         public string SearchSql { get; }
+    }
+
+    /// <summary>Slow mode's bounds on the whole trace's duration (none outside slow mode).</summary>
+    private readonly record struct DurationBounds(long? Min, long? Max)
+    {
+        public static DurationBounds For(string mode, double? minDurationMs, double? maxDurationMs) => mode == "slow"
+            ? new(Math.Max(0, (long)((minDurationMs ?? 500) * 1_000_000)),
+                  maxDurationMs.HasValue ? Math.Max(0, (long)(maxDurationMs.Value * 1_000_000)) : null)
+            : default;
+
+        /// <summary>Whether the anchor's whole-trace duration (its bounds, already filled) passes.</summary>
+        public bool Accepts(Anchor a)
+        {
+            var duration = a.TraceMax - a.TraceMin;
+            return (Min is not { } min || duration >= min) && (Max is not { } max || duration <= max);
+        }
     }
 
     /// <summary>
@@ -390,7 +398,7 @@ public sealed class ClickHouseTraceReadRepository : DapperReadRepository, ITrace
     {
         Bind(f, TenantId, rangeFrom, rangeTo - 1, _anchorLookbackNanos);
         var rows = new List<Anchor>(need);
-        var width = f.Selective ? Math.Max(1, rangeTo - rangeFrom) : _pageSliceNanos;
+        var width = _pageSliceNanos;
         long lo = rangeFrom, hi = rangeTo;
 
         while (rows.Count < need && lo < hi)
@@ -399,12 +407,14 @@ public sealed class ClickHouseTraceReadRepository : DapperReadRepository, ITrace
             if (descending) { sliceTo = hi; sliceFrom = Math.Max(lo, hi - width); }
             else { sliceFrom = lo; sliceTo = Math.Min(hi, lo + width); }
 
+            // Confirm in list order and stop once the page is full (as on Parquet): slow mode has no candidate-span
+            // predicate, so a widened slice can hold every trace of the range, each needing a trace_index lookup.
             var candidates = await CandidatesAsync(conn, f, sliceFrom, sliceTo, ct);
-            var confirmed = await ConfirmAsync(conn, candidates, f, sliceFrom, sliceTo, ct);
             var ordered = descending
-                ? confirmed.OrderByDescending(a => a.AnchorStart).ThenByDescending(a => a.AnchorSpanId)
-                : confirmed.OrderBy(a => a.AnchorStart).ThenBy(a => a.AnchorSpanId);
-            rows.AddRange(ordered.Take(need - rows.Count));
+                ? candidates.OrderByDescending(a => a.AnchorStart).ThenByDescending(a => a.AnchorSpanId)
+                : candidates.OrderBy(a => a.AnchorStart).ThenBy(a => a.AnchorSpanId);
+            var confirmed = await ConfirmAsync(conn, ordered.ToList(), f, sliceFrom, sliceTo, ct, stopAfter: need - rows.Count);
+            rows.AddRange(confirmed.Take(need - rows.Count));
 
             if (descending) hi = sliceFrom; else lo = sliceTo;
             var remaining = hi - lo;
@@ -443,13 +453,15 @@ public sealed class ClickHouseTraceReadRepository : DapperReadRepository, ITrace
 
     /// <summary>
     /// Keeps the candidates that are their trace's anchor (start equals the trace's earliest start in scope per
-    /// <c>trace_index</c>) and fills the whole-trace bounds and the scoped error flag.
+    /// <c>trace_index</c>) and pass slow mode's whole-trace duration, filling the whole-trace bounds and the scoped error flag,
+    /// in the candidates' order. With <paramref name="stopAfter"/>, no further chunk is read once that many are confirmed.
     /// </summary>
     private async Task<List<Anchor>> ConfirmAsync(
-        DbConnection conn, List<Anchor> candidates, CandidateFilter f, long sliceFrom, long sliceTo, CancellationToken ct)
+        DbConnection conn, List<Anchor> candidates, CandidateFilter f, long sliceFrom, long sliceTo, CancellationToken ct,
+        int stopAfter = int.MaxValue)
     {
         var confirmed = new List<Anchor>();
-        for (var offset = 0; offset < candidates.Count; offset += IdChunkSize)
+        for (var offset = 0; offset < candidates.Count && confirmed.Count < stopAfter; offset += IdChunkSize)
         {
             var chunk = candidates.Skip(offset).Take(IdChunkSize).ToList();
             var index = await TraceIndexAsync(conn, chunk.Select(c => c.TraceId).ToArray(), f.Service, sliceFrom, sliceTo, ct);
@@ -457,7 +469,7 @@ public sealed class ClickHouseTraceReadRepository : DapperReadRepository, ITrace
             {
                 if (!index.TryGetValue(c.TraceId, out var row) || row.ScopeMin != c.AnchorStart) continue;
                 c.TraceMin = row.TraceMin; c.TraceMax = row.TraceMax; c.HasError = row.ScopeError != 0;
-                confirmed.Add(c);
+                if (f.Duration.Accepts(c)) confirmed.Add(c);
             }
         }
         return confirmed;
@@ -473,7 +485,7 @@ public sealed class ClickHouseTraceReadRepository : DapperReadRepository, ITrace
                    toUnixTimestamp64Nano({scopeMin}) AS ScopeMin, {scopeError} AS ScopeError,
                    toUnixTimestamp64Nano(min(start_min)) AS TraceMin, toUnixTimestamp64Nano(max(end_max)) AS TraceMax
             FROM trace_index
-            WHERE tenant_id = @tenantId AND trace_id IN @ids AND day >= toDate({At("from")}) - 1 AND day <= toDate({At("to")})
+            WHERE tenant_id = @tenantId AND trace_id IN @ids AND day >= toDate({At("from")}) - 1 AND day <= toDate({At("to")}) + 1
             GROUP BY trace_id
             """;
         var p = new DynamicParameters();
@@ -536,36 +548,58 @@ public sealed class ClickHouseTraceReadRepository : DapperReadRepository, ITrace
     }
 
     /// <summary>
-    /// The slowest anchors above a 500 ms floor: the window's longest spans (duration skip index), each checked for being
-    /// its trace's earliest. The candidate cap doubles-and-more until enough anchors are found or the spans run out.
+    /// The slowest traces above a 500 ms floor, by the whole trace's duration: <c>trace_index</c> is aggregated per trace
+    /// over the window's days (one row per trace, service and day, so far fewer rows than spans), traces starting before
+    /// the window or over its end dropped, and the top <paramref name="limit"/> by <c>max(end_max) - min(start_min)</c>
+    /// kept. Their anchors (each trace's earliest span) are then read for just those ids.
     /// </summary>
     private async Task<List<Anchor>> SlowestAnchorsAsync(DbConnection conn, int limit, long startNano, long endNano, CancellationToken ct)
     {
-        var take = limit * 20;
-        while (true)
-        {
-            var p = new DynamicParameters();
-            p.Add("tenantId", (ulong)TenantId);
-            p.Add("start", startNano);
-            p.Add("end", endNano);
-            p.Add("floor", 500_000_000UL);
-            p.Add("take", take);
-            var spans = (await conn.QueryAsync<Anchor>(new CommandDefinition($"""
-                SELECT trace_id AS TraceId, span_id AS AnchorSpanId, toUnixTimestamp64Nano(start_time) AS AnchorStart,
-                       duration_ns AS DurationNs, span_name AS Name, toString(kind) AS Kind, service_name AS Service
-                FROM spans
-                WHERE tenant_id = @tenantId AND start_time >= {At("start")} AND start_time <= {At("end")} AND duration_ns > @floor
-                ORDER BY duration_ns DESC, span_id DESC
-                LIMIT @take
-                """, p, cancellationToken: ct))).ToList();
+        var p = new DynamicParameters();
+        p.Add("tenantId", (ulong)TenantId);
+        p.Add("start", startNano);
+        p.Add("end", endNano);
+        p.Add("floor", 500_000_000L);
+        p.Add("take", limit);
+        var traces = (await conn.QueryAsync<SlowTraceRow>(new CommandDefinition($"""
+            SELECT trace_id AS TraceId, toUnixTimestamp64Nano(min(start_min)) AS TraceMin, toUnixTimestamp64Nano(max(end_max)) AS TraceMax,
+                   max(has_error) AS HasError
+            FROM trace_index
+            WHERE tenant_id = @tenantId AND day >= toDate({At("start")}) - 1 AND day <= toDate({At("end")}) + 1
+            GROUP BY trace_id
+            HAVING min(start_min) >= {At("start")} AND min(start_min) <= {At("end")} AND TraceMax - TraceMin > @floor
+            ORDER BY TraceMax - TraceMin DESC, trace_id DESC
+            LIMIT @take
+            """, p, cancellationToken: ct))).ToList();
+        if (traces.Count == 0) return [];
 
-            // one candidate per trace (a re-delivered span appears twice)
-            var perTrace = spans.GroupBy(s => s.TraceId).Select(g => g.OrderBy(s => s.AnchorStart).ThenBy(s => s.AnchorSpanId).First()).ToList();
-            var confirmed = await ConfirmAsync(conn, perTrace, new CandidateFilter("all", null, null, null, null, ParsedSearchQuery.Empty, startNano, endNano), startNano, endNano, ct);
-            var best = confirmed.OrderByDescending(a => a.DurationNs).ThenByDescending(a => a.AnchorSpanId).Take(limit).ToList();
-            if (best.Count >= limit || spans.Count < take) return best;
-            take *= 4;
+        // Each trace's earliest span, read between the earliest and latest trace start of the page.
+        var q = new DynamicParameters();
+        q.Add("tenantId", (ulong)TenantId);
+        q.Add("ids", traces.Select(t => t.TraceId).ToArray());
+        q.Add("from", traces.Min(t => t.TraceMin));
+        q.Add("to", traces.Max(t => t.TraceMin));
+        var anchors = (await conn.QueryAsync<Anchor>(new CommandDefinition($"""
+            SELECT trace_id AS TraceId,
+                   argMin(span_id, {TieBreak}) AS AnchorSpanId,
+                   toUnixTimestamp64Nano(min(start_time)) AS AnchorStart,
+                   argMin(duration_ns, {TieBreak}) AS DurationNs,
+                   argMin(span_name, {TieBreak}) AS Name,
+                   argMin(toString(kind), {TieBreak}) AS Kind,
+                   argMin(service_name, {TieBreak}) AS Service
+            FROM spans
+            WHERE tenant_id = @tenantId AND trace_id IN @ids AND start_time >= {At("from")} AND start_time <= {At("to")}
+            GROUP BY trace_id
+            """, q, cancellationToken: ct))).ToDictionary(a => a.TraceId);
+
+        var result = new List<Anchor>(traces.Count);
+        foreach (var t in traces)
+        {
+            if (!anchors.TryGetValue(t.TraceId, out var a)) continue;
+            a.TraceMin = t.TraceMin; a.TraceMax = t.TraceMax; a.HasError = t.HasError != 0;
+            result.Add(a);
         }
+        return result;   // already in the query's order (duration, then trace id): re-sorting on another key would break ties differently
     }
 
     public async Task<SlowRequestCount> CountSlowInboundSpansAsync(
@@ -730,16 +764,8 @@ public sealed class ClickHouseTraceReadRepository : DapperReadRepository, ITrace
         var having = new StringBuilder($"min(start_time) >= {At("start")}");
         if (!string.IsNullOrEmpty(query.Operation)) { having.Append($" AND argMin(span_name, {TieBreak}) = @operation"); f.Parameters.Add("operation", query.Operation); }
         if (query.Mode == "errors") having.Append(" AND max(status_code = 'ERROR') = 1");
-        if (query.Mode == "slow")
-        {
-            having.Append($" AND argMin(duration_ns, {TieBreak}) >= @minDuration");
-            f.Parameters.Add("minDuration", (ulong)Math.Max(0, (long)((query.MinDurationMs ?? 500) * 1_000_000)));
-            if (query.MaxDurationMs.HasValue)
-            {
-                having.Append($" AND argMin(duration_ns, {TieBreak}) <= @maxDuration");
-                f.Parameters.Add("maxDuration", (ulong)Math.Max(0, (long)(query.MaxDurationMs.Value * 1_000_000)));
-            }
-        }
+        // Slow mode is on the whole trace's duration, known only once trace_index is read: CompleteAsync filters it.
+        var slow = DurationBounds.For(query.Mode, query.MinDurationMs, query.MaxDurationMs);
         var traceIdFilter = f.SpanPredicates.Contains("traceIdSearch") ? " AND trace_id = @traceIdSearch" : "";
 
         var sql = $"""
@@ -768,34 +794,76 @@ public sealed class ClickHouseTraceReadRepository : DapperReadRepository, ITrace
         {
             chunk.Add(parse(reader));
             if (chunk.Count < ExportChunkSize) continue;
-            foreach (var info in await CompleteAsync(lookupConn, chunk, service, startNano, endNano, cancellationToken)) yield return info;
+            foreach (var info in await CompleteAsync(lookupConn, chunk, service, slow, startNano, endNano, cancellationToken)) yield return info;
             chunk.Clear();
         }
         if (chunk.Count > 0)
-            foreach (var info in await CompleteAsync(lookupConn, chunk, service, startNano, endNano, cancellationToken)) yield return info;
+            foreach (var info in await CompleteAsync(lookupConn, chunk, service, slow, startNano, endNano, cancellationToken)) yield return info;
     }
 
-    private async Task<List<TraceInfo>> CompleteAsync(DbConnection conn, List<Anchor> chunk, string? service, long from, long to, CancellationToken ct)
+    private async Task<List<TraceInfo>> CompleteAsync(
+        DbConnection conn, List<Anchor> chunk, string? service, DurationBounds slow, long from, long to, CancellationToken ct)
     {
         var index = await TraceIndexAsync(conn, chunk.Select(c => c.TraceId).ToArray(), service, from - _anchorLookbackNanos, to, ct);
+        // A trace not (yet) in trace_index takes its whole-trace bounds from its spans, so slow mode still sees the whole
+        // trace's duration; only a trace its spans miss too falls back to the anchor span's own.
+        var missing = chunk.Where(a => !index.ContainsKey(a.TraceId)).Select(a => a.TraceId).ToArray();
+        var spanBounds = missing.Length == 0 ? [] : await SpanBoundsAsync(conn, missing, from - _anchorLookbackNanos, to + NanosPerDay, ct);
         foreach (var a in chunk)
         {
-            if (index.TryGetValue(a.TraceId, out var row)) { a.TraceMin = row.TraceMin; a.TraceMax = row.TraceMax; a.HasError = row.ScopeError != 0; }
-            else { a.TraceMin = a.AnchorStart; a.TraceMax = a.AnchorStart + (long)a.DurationNs; a.HasError = a.HasErrorInt != 0; }
+            if (index.TryGetValue(a.TraceId, out var row)) { a.TraceMin = row.TraceMin; a.TraceMax = row.TraceMax; a.HasError = row.ScopeError != 0; continue; }
+            a.HasError = a.HasErrorInt != 0;
+            if (spanBounds.TryGetValue(a.TraceId, out var b)) { a.TraceMin = b.TraceMin; a.TraceMax = b.TraceMax; }
+            else { a.TraceMin = a.AnchorStart; a.TraceMax = a.AnchorStart + (long)a.DurationNs; }
         }
+        chunk.RemoveAll(a => !slow.Accepts(a));
+        if (chunk.Count == 0) return [];
         await FillSpanCountsAsync(conn, chunk, service, ct);
         return chunk.Select(a => ToInfo(a)).ToList();
+    }
+
+    private const long NanosPerDay = 86_400_000_000_000L;
+
+    /// <summary>Each trace's earliest span start and latest span end among its spans starting in <c>[from, to]</c>.</summary>
+    private async Task<Dictionary<Guid, TraceBoundsRow>> SpanBoundsAsync(DbConnection conn, Guid[] ids, long from, long to, CancellationToken ct)
+    {
+        var p = new DynamicParameters();
+        p.Add("tenantId", (ulong)TenantId);
+        p.Add("ids", ids);
+        p.Add("from", from);
+        p.Add("to", to);
+        return (await conn.QueryAsync<TraceBoundsRow>(new CommandDefinition($"""
+            SELECT trace_id AS TraceId, toUnixTimestamp64Nano(min(start_time)) AS TraceMin, max(toUnixTimestamp64Nano(start_time) + toInt64(duration_ns)) AS TraceMax
+            FROM spans
+            WHERE tenant_id = @tenantId AND trace_id IN @ids AND start_time >= {At("from")} AND start_time <= {At("to")}
+            GROUP BY trace_id
+            """, p, cancellationToken: ct))).ToDictionary(r => r.TraceId);
     }
 
     // =========================================================================
     // ROW DTOs
     // =========================================================================
 
+    private sealed class SlowTraceRow
+    {
+        public Guid TraceId { get; set; }
+        public long TraceMin { get; set; }
+        public long TraceMax { get; set; }
+        public byte HasError { get; set; }
+    }
+
     private sealed class IndexRow
     {
         public Guid TraceId { get; set; }
         public long ScopeMin { get; set; }
         public byte ScopeError { get; set; }
+        public long TraceMin { get; set; }
+        public long TraceMax { get; set; }
+    }
+
+    private sealed class TraceBoundsRow
+    {
+        public Guid TraceId { get; set; }
         public long TraceMin { get; set; }
         public long TraceMax { get; set; }
     }
