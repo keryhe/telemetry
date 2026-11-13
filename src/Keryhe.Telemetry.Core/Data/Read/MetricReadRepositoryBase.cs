@@ -48,6 +48,13 @@ public abstract class MetricReadRepositoryBase : DapperReadRepository, IMetricRe
         WHERE m.tenant_id = @tenantId
         """;
 
+    /// <summary>
+    /// " AND …" keeping only metrics of one instrumentation scope (a .NET <c>Meter</c> name), bound as <c>@scope</c>;
+    /// empty when <paramref name="scope"/> is null (every scope).
+    /// </summary>
+    private static string ScopePredicate(string? scope) =>
+        scope is null ? "" : " AND m.scope_id IN (SELECT sc.id FROM instrumentation_scopes sc WHERE sc.name = @scope)";
+
     // =========================================================================
     // METRIC METADATA READS (unchanged by Phase 4)
     // =========================================================================
@@ -62,14 +69,14 @@ public abstract class MetricReadRepositoryBase : DapperReadRepository, IMetricRe
         return exists == null ? null : new MetricModel();
     }
 
-    public async Task<List<MetricInfo>> GetMetricsByNameAsync(string name, CancellationToken cancellationToken = default)
+    public async Task<List<MetricInfo>> GetMetricsByNameAsync(string name, CancellationToken cancellationToken = default, string? scope = null)
     {
         if (string.IsNullOrEmpty(name))
             throw new ArgumentException("Metric name cannot be null or empty", nameof(name));
 
         await using var conn = await OpenConnectionAsync(cancellationToken);
         var rows = (await conn.QueryAsync<MetricRow>(new CommandDefinition(
-            MetricSelect + " AND m.name = @name", new { tenantId = TenantId, name }, cancellationToken: cancellationToken))).ToList();
+            MetricSelect + " AND m.name = @name" + ScopePredicate(scope), new { tenantId = TenantId, name, scope }, cancellationToken: cancellationToken))).ToList();
 
         var stats = await GetMetricStatsAsync(conn, rows, cancellationToken);
         return rows.Select(m => ToMetricInfo(m, Svc(m.ServiceName) ?? "", stats.GetValueOrDefault(m.Id))).ToList();
@@ -183,6 +190,9 @@ public abstract class MetricReadRepositoryBase : DapperReadRepository, IMetricRe
         await using var conn = await OpenConnectionAsync(cancellationToken);
 
         var limit = Math.Max(1, query.Limit);
+        if (string.Equals(query.GroupBy, "scope", StringComparison.OrdinalIgnoreCase))
+            return await GetMetricCatalogByScopeAsync(conn, query, limit, cancellationToken);
+
         var groupByName = string.Equals(query.GroupBy, "name", StringComparison.OrdinalIgnoreCase);
 
         return groupByName
@@ -324,6 +334,97 @@ public abstract class MetricReadRepositoryBase : DapperReadRepository, IMetricRe
         };
     }
 
+    /// <summary>
+    /// <c>groupBy=scope</c>: one row per (instrumentation scope name, metric name). The (scope, name) groups are fetched in SQL,
+    /// capped at <c>limit + 1</c>; the page's own rows then come back in one narrow follow-up query for type, unit and the
+    /// service list, as in <see cref="GetMetricCatalogByNameAsync"/>. The final order is applied by
+    /// <see cref="CatalogScopeOrder.Sort"/> so case and empty-scope placement do not depend on each database's collation.
+    /// </summary>
+    private async Task<MetricCatalogPage> GetMetricCatalogByScopeAsync(DbConnection conn, MetricCatalogQuery query, int limit, CancellationToken cancellationToken)
+    {
+        var (filterClause, filterParams) = BuildCatalogFilterClauses(query);
+        var parameters = new DynamicParameters();
+        parameters.AddDynamicParams(filterParams);
+        var seenClause = SeenInRangeClause(query.Start, query.End, parameters);
+        parameters.Add("tenantId", TenantId);
+
+        var baseWhere = $"m.tenant_id = @tenantId AND {seenClause}{filterClause}";
+
+        // Every (scope, name) group that matched: one short row each, so the C# sort below sees them all and the cap is
+        // applied in that order. A tenant's distinct (scope, name) pairs are its metric catalog, not its data volume.
+        var groupSql = $"""
+            SELECT sc.name AS ScopeName, m.name AS Name, MAX(m.created_at) AS NewestCreatedAt, COUNT(*) AS InstanceCount
+            FROM metrics m
+            JOIN instrumentation_scopes sc ON sc.id = m.scope_id
+            LEFT JOIN metric_last_seen mls ON mls.metric_id = m.id
+            WHERE {baseWhere}
+            GROUP BY sc.name, m.name
+            """;
+        var groups = CatalogScopeOrder.Sort(
+            (await conn.QueryAsync<ScopeGroupRow>(new CommandDefinition(groupSql, parameters, cancellationToken: cancellationToken))).ToList(),
+            g => g.ScopeName, g => g.Name).Take(limit + 1).ToList();
+        var truncated = groups.Count > limit;
+        if (truncated) groups.RemoveAt(groups.Count - 1);
+
+        var items = new List<UniqueMetricSummary>();
+        if (groups.Count > 0)
+        {
+            var names = groups.Select(g => g.Name).Distinct(StringComparer.Ordinal).ToList();
+            var detailParams = new DynamicParameters(parameters);
+            for (var i = 0; i < names.Count; i++) detailParams.Add($"nameFilter{i}", names[i]);
+
+            var detailSql = $"""
+                SELECT sc.name AS ScopeName, m.name AS Name, m.description AS Description, m.unit AS Unit, m.type AS Type,
+                       m.created_at AS CreatedAt, m.service_name AS ServiceName
+                FROM metrics m
+                JOIN instrumentation_scopes sc ON sc.id = m.scope_id
+                LEFT JOIN metric_last_seen mls ON mls.metric_id = m.id
+                WHERE {baseWhere} AND m.name IN ({string.Join(",", names.Select((_, i) => $"@nameFilter{i}"))})
+                """;
+            var detailRows = (await conn.QueryAsync<ScopedMetricRow>(new CommandDefinition(detailSql, detailParams, cancellationToken: cancellationToken))).ToList();
+            var byKey = detailRows.GroupBy(r => (r.ScopeName ?? "", r.Name))
+                .ToDictionary(g => g.Key, g => g.OrderBy(r => r.CreatedAt).ToList());
+
+            foreach (var g in groups)
+            {
+                var rows = byKey.GetValueOrDefault((g.ScopeName ?? "", g.Name)) ?? new List<ScopedMetricRow>();
+                items.Add(new UniqueMetricSummary
+                {
+                    ScopeName = g.ScopeName ?? "",
+                    Name = g.Name,
+                    Type = rows.Count > 0 ? Enum.Parse<MetricType>(rows[0].Type) : MetricType.GAUGE,
+                    Unit = rows.Count > 0 ? rows[0].Unit : null,
+                    Description = rows.Count > 0 ? rows[0].Description : null,
+                    InstanceCount = g.InstanceCount,
+                    Services = rows.Select(r => Svc(r.ServiceName)).Where(s => !string.IsNullOrEmpty(s))
+                        .Distinct().OrderBy(s => s).Select(s => s!).ToList(),
+                    LastSeen = g.NewestCreatedAt
+                });
+            }
+        }
+
+        return new MetricCatalogPage { Names = items, Truncated = truncated };
+    }
+
+    private sealed class ScopeGroupRow
+    {
+        public string? ScopeName { get; set; }
+        public string Name { get; set; } = null!;
+        public DateTime NewestCreatedAt { get; set; }
+        public int InstanceCount { get; set; }
+    }
+
+    private sealed class ScopedMetricRow
+    {
+        public string? ScopeName { get; set; }
+        public string Name { get; set; } = null!;
+        public string? Description { get; set; }
+        public string? Unit { get; set; }
+        public string Type { get; set; } = null!;
+        public DateTime CreatedAt { get; set; }
+        public string? ServiceName { get; set; }
+    }
+
     private async Task<List<NameGroupRow>> FetchCatalogNamesAsync(
         DbConnection conn, string baseWhere, object parameters, int rowCount, CancellationToken cancellationToken)
     {
@@ -379,10 +480,10 @@ public abstract class MetricReadRepositoryBase : DapperReadRepository, IMetricRe
 
         await using var conn = await OpenConnectionAsync(cancellationToken);
 
-        var sql = MetricSelect + " AND m.name = @name";
+        var sql = MetricSelect + " AND m.name = @name" + ScopePredicate(query.Scope);
         if (query.MetricId.HasValue) sql += " AND m.id = @metricId";
         var metrics = (await conn.QueryAsync<MetricRow>(new CommandDefinition(
-            sql, new { tenantId = TenantId, name = query.MetricName, metricId = query.MetricId }, cancellationToken: cancellationToken))).ToList();
+            sql, new { tenantId = TenantId, name = query.MetricName, metricId = query.MetricId, scope = query.Scope }, cancellationToken: cancellationToken))).ToList();
 
         if (metrics.Count == 0) return null;
 
@@ -447,6 +548,7 @@ public abstract class MetricReadRepositoryBase : DapperReadRepository, IMetricRe
         {
             MetricName = query.MetricName,
             MetricId = query.MetricId,
+            Scope = query.Scope,
             Start = query.Start,
             End = query.End,
             LabelFilters = query.LabelFilters,
@@ -854,10 +956,10 @@ public abstract class MetricReadRepositoryBase : DapperReadRepository, IMetricRe
 
         await using var conn = await OpenConnectionAsync(cancellationToken);
 
-        var sql = MetricSelect + " AND m.name = @name";
+        var sql = MetricSelect + " AND m.name = @name" + ScopePredicate(query.Scope);
         if (query.MetricId.HasValue) sql += " AND m.id = @metricId";
         var metrics = (await conn.QueryAsync<MetricRow>(new CommandDefinition(
-            sql, new { tenantId = TenantId, name = query.MetricName, metricId = query.MetricId }, cancellationToken: cancellationToken))).ToList();
+            sql, new { tenantId = TenantId, name = query.MetricName, metricId = query.MetricId, scope = query.Scope }, cancellationToken: cancellationToken))).ToList();
 
         if (metrics.Count == 0) return null;
 
@@ -1047,7 +1149,7 @@ public abstract class MetricReadRepositoryBase : DapperReadRepository, IMetricRe
     private const int MaxLabelSampleRows = 1_000;
 
     public async Task<MetricLabelsResult> GetMetricLabelsAsync(string metricName, DateTime? startTime = null,
-        DateTime? endTime = null, CancellationToken cancellationToken = default)
+        DateTime? endTime = null, CancellationToken cancellationToken = default, string? scope = null)
     {
         if (string.IsNullOrEmpty(metricName))
             throw new ArgumentException("Metric name cannot be null or empty", nameof(metricName));
@@ -1062,7 +1164,7 @@ public abstract class MetricReadRepositoryBase : DapperReadRepository, IMetricRe
         // A metric name is not unique: the same name is emitted by multiple services/resources,
         // so this returns many rows. Aggregate labels across all of them (they share a type).
         var metrics = (await conn.QueryAsync<MetricRow>(new CommandDefinition(
-            MetricSelect + " AND m.name = @name", new { tenantId = TenantId, name = metricName }, cancellationToken: cancellationToken))).ToList();
+            MetricSelect + " AND m.name = @name" + ScopePredicate(scope), new { tenantId = TenantId, name = metricName, scope }, cancellationToken: cancellationToken))).ToList();
 
         if (metrics.Count == 0)
             return new MetricLabelsResult();

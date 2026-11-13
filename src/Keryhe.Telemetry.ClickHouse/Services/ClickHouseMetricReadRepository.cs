@@ -101,6 +101,23 @@ public sealed class ClickHouseMetricReadRepository : DapperReadRepository, IMetr
 
     private static string? NullIfEmpty(string? s) => string.IsNullOrEmpty(s) ? null : s;
 
+    /// <summary>
+    /// Keeps the catalog rows of <paramref name="metricName"/> whose service reported it under instrumentation scope
+    /// <paramref name="scopeName"/> (a .NET <c>Meter</c> name). <c>metric_catalog</c> has no scope, so this reads it from
+    /// <c>metric_series</c>. A null scope keeps every row.
+    /// </summary>
+    private async Task<List<CatalogRow>> FilterToScopeAsync(
+        DbConnection conn, List<CatalogRow> rows, string metricName, string? scopeName, CancellationToken ct)
+    {
+        if (scopeName is null || rows.Count == 0) return rows;
+        var services = (await conn.QueryAsync<string>(new CommandDefinition("""
+            SELECT DISTINCT service_name
+            FROM metric_series
+            WHERE tenant_id = @tenantId AND metric_name = @name AND scope_name = @scopeName
+            """, new { tenantId = (ulong)TenantId, name = metricName, scopeName }, cancellationToken: ct))).ToHashSet(StringComparer.Ordinal);
+        return rows.Where(r => services.Contains(r.ServiceName)).ToList();
+    }
+
     // =========================================================================
     // METADATA READS
     // =========================================================================
@@ -113,7 +130,7 @@ public sealed class ClickHouseMetricReadRepository : DapperReadRepository, IMetr
         return rows.Any(r => r.Id(TenantId) == id) ? new MetricModel() : null;
     }
 
-    public async Task<List<MetricInfo>> GetMetricsByNameAsync(string name, CancellationToken cancellationToken = default)
+    public async Task<List<MetricInfo>> GetMetricsByNameAsync(string name, CancellationToken cancellationToken = default, string? scope = null)
     {
         if (string.IsNullOrEmpty(name))
             throw new ArgumentException("Metric name cannot be null or empty", nameof(name));
@@ -122,6 +139,7 @@ public sealed class ClickHouseMetricReadRepository : DapperReadRepository, IMetr
         var p = new DynamicParameters();
         p.Add("name", name);
         var rows = await ReadCatalogAsync(conn, " AND metric_name = @name", p, "", NewestFirst, null, cancellationToken);
+        rows = await FilterToScopeAsync(conn, rows, name, scope, cancellationToken);
         var counts = await PointCountsAsync(conn, rows, cancellationToken);
         return rows.Select(r => ToInfo(r, counts.GetValueOrDefault((r.ServiceName, r.Name, r.Type)))).ToList();
     }
@@ -251,6 +269,11 @@ public sealed class ClickHouseMetricReadRepository : DapperReadRepository, IMetr
         if (query.Type.HasValue) { where.Append(" AND metric_type = @metricType"); p.Add("metricType", query.Type.Value.ToString()); }
 
         await using var conn = await OpenConnectionAsync(cancellationToken);
+        if (string.Equals(query.GroupBy, "scope", StringComparison.OrdinalIgnoreCase))
+        {
+            var catalog = await ReadCatalogAsync(conn, where.ToString(), p, having, NewestFirst, null, cancellationToken);
+            return await CatalogByScopeAsync(conn, catalog, query, limit, cancellationToken);
+        }
         if (!string.Equals(query.GroupBy, "name", StringComparison.OrdinalIgnoreCase))
         {
             var rows = await ReadCatalogAsync(conn, where.ToString(), p, having, NewestFirst, limit + 1, cancellationToken);
@@ -284,6 +307,67 @@ public sealed class ClickHouseMetricReadRepository : DapperReadRepository, IMetr
         };
     }
 
+    /// <summary>
+    /// <c>groupBy=scope</c>: <c>metric_catalog</c> has no scope, so each (service, metric) row is paired with the scope names
+    /// its series carry in <c>metric_series</c> (series that overlap the window), one entry per scope; a row with no series
+    /// row goes under the empty scope. Then grouped by (scope, name) and ordered by <see cref="CatalogScopeOrder"/>.
+    /// </summary>
+    private async Task<MetricCatalogPage> CatalogByScopeAsync(
+        DbConnection conn, List<CatalogRow> catalog, MetricCatalogQuery query, int limit, CancellationToken ct)
+    {
+        var scopesOf = new Dictionary<(string Service, string Name), List<string>>();
+        if (catalog.Count > 0)
+        {
+            var sp = new DynamicParameters();
+            sp.Add("tenantId", (ulong)TenantId);
+            sp.Add("names", catalog.Select(r => r.Name).Distinct(StringComparer.Ordinal).ToArray());
+            sp.Add("start", TimeConversion.DateTimeToUnixNano(query.Start));
+            sp.Add("end", TimeConversion.DateTimeToUnixNano(query.End));
+            var pairs = await conn.QueryAsync<ScopePairRow>(new CommandDefinition($"""
+                SELECT DISTINCT service_name AS ServiceName, metric_name AS Name, scope_name AS ScopeName
+                FROM metric_series
+                WHERE tenant_id = @tenantId AND metric_name IN @names AND last_seen >= {At("start")} AND first_seen <= {At("end")}
+                """, sp, cancellationToken: ct));
+            foreach (var pr in pairs)
+            {
+                if (!scopesOf.TryGetValue((pr.ServiceName, pr.Name), out var list)) scopesOf[(pr.ServiceName, pr.Name)] = list = new List<string>();
+                list.Add(pr.ScopeName ?? "");
+            }
+        }
+
+        var entries = catalog.SelectMany(r =>
+            (scopesOf.GetValueOrDefault((r.ServiceName, r.Name)) ?? [""]).Select(scope => (Scope: scope, Row: r)));
+        var groups = CatalogScopeOrder.Sort(
+                entries.GroupBy(e => (e.Scope, e.Row.Name)).Select(g => (g.Key.Scope, g.Key.Name, Rows: g.Select(e => e.Row).OrderBy(r => r.FirstNano).ToList())),
+                g => g.Scope, g => g.Name)
+            .Take(limit + 1).ToList();
+        var truncated = groups.Count > limit;
+        if (truncated) groups.RemoveAt(groups.Count - 1);
+
+        return new MetricCatalogPage
+        {
+            Truncated = truncated,
+            Names = groups.Select(g => new UniqueMetricSummary
+            {
+                ScopeName = g.Scope,
+                Name = g.Name,
+                Type = g.Rows[0].MetricType,
+                Unit = NullIfEmpty(g.Rows[0].Unit),
+                Description = NullIfEmpty(g.Rows[0].Description),
+                InstanceCount = g.Rows.Count,
+                Services = g.Rows.Select(r => r.ServiceName).Where(s => s.Length > 0).Distinct().OrderBy(s => s, StringComparer.Ordinal).ToList(),
+                LastSeen = TimeConversion.UnixNanoToDateTime(g.Rows.Max(r => r.LastNano))
+            }).ToList()
+        };
+    }
+
+    private sealed class ScopePairRow
+    {
+        public string ServiceName { get; set; } = "";
+        public string Name { get; set; } = "";
+        public string? ScopeName { get; set; }
+    }
+
     // =========================================================================
     // SERIES
     // =========================================================================
@@ -298,6 +382,7 @@ public sealed class ClickHouseMetricReadRepository : DapperReadRepository, IMetr
         p.Add("name", query.MetricName);
         var rows = await ReadCatalogAsync(conn, " AND metric_name = @name", p, "", NewestFirst, null, cancellationToken);
         if (query.MetricId.HasValue) rows = rows.Where(r => r.Id(TenantId) == query.MetricId.Value).ToList();
+        rows = await FilterToScopeAsync(conn, rows, query.MetricName, query.Scope, cancellationToken);
         if (rows.Count == 0) return null;
 
         var type = rows[0].MetricType;
@@ -330,7 +415,7 @@ public sealed class ClickHouseMetricReadRepository : DapperReadRepository, IMetr
     {
         var result = await GetMetricSeriesAsync(new MetricSeriesQuery
         {
-            MetricName = query.MetricName, MetricId = query.MetricId, Start = query.Start, End = query.End,
+            MetricName = query.MetricName, MetricId = query.MetricId, Scope = query.Scope, Start = query.Start, End = query.End,
             LabelFilters = query.LabelFilters, Points = query.Points, Top = int.MaxValue
         }, cancellationToken);
         if (result == null) yield break;
@@ -353,7 +438,7 @@ public sealed class ClickHouseMetricReadRepository : DapperReadRepository, IMetr
         DbConnection conn, MetricType type, string[] services, MetricSeriesQuery query, int points, int top, int timeoutSeconds, CancellationToken ct)
     {
         var b = ComputeBucketing(query.Start, query.End, points);
-        var scope = new Scope(this, services, query.MetricName, query.LabelFilters, b, timeoutSeconds);
+        var scope = new Scope(this, services, query.MetricName, query.Scope, query.LabelFilters, b, timeoutSeconds);
 
         var streams = type switch
         {
@@ -411,7 +496,7 @@ public sealed class ClickHouseMetricReadRepository : DapperReadRepository, IMetr
         public readonly string[] Services;
         private readonly Dictionary<long, string> _serviceBySeries = new();
 
-        public Scope(ClickHouseMetricReadRepository repo, string[] services, string name, Dictionary<string, string>? labelFilters, Bucketing b, int timeoutSeconds)
+        public Scope(ClickHouseMetricReadRepository repo, string[] services, string name, string? scopeName, Dictionary<string, string>? labelFilters, Bucketing b, int timeoutSeconds)
         {
             B = b; TimeoutSeconds = timeoutSeconds; Services = services;
             Parameters.Add("tenantId", (ulong)repo.TenantId);
@@ -423,6 +508,11 @@ public sealed class ClickHouseMetricReadRepository : DapperReadRepository, IMetr
             Parameters.Add("pointsMinus1", b.Points - 1);
 
             var where = new StringBuilder("tenant_id = @tenantId AND metric_name = @name AND service_name IN @services");
+            if (scopeName is not null)
+            {
+                Parameters.Add("scopeName", scopeName);
+                where.Append(" AND scope_name = @scopeName");
+            }
             var i = 0;
             foreach (var (k, v) in labelFilters ?? [])
             {
@@ -643,6 +733,7 @@ public sealed class ClickHouseMetricReadRepository : DapperReadRepository, IMetr
         p.Add("name", query.MetricName);
         var rows = await ReadCatalogAsync(conn, " AND metric_name = @name", p, "", NewestFirst, null, cancellationToken);
         if (query.MetricId.HasValue) rows = rows.Where(r => r.Id(TenantId) == query.MetricId.Value).ToList();
+        rows = await FilterToScopeAsync(conn, rows, query.MetricName, query.Scope, cancellationToken);
         if (rows.Count == 0) return null;
 
         var type = rows[0].MetricType;
@@ -659,6 +750,7 @@ public sealed class ClickHouseMetricReadRepository : DapperReadRepository, IMetr
         parameters.Add("name", query.MetricName);
         parameters.Add("services", services);
         var where = new StringBuilder("tenant_id = @tenantId AND metric_name = @name AND service_name IN @services AND notEmpty(exemplars.time)");
+        if (query.Scope is not null) { parameters.Add("scopeName", query.Scope); where.Append(" AND scope_name = @scopeName"); }
         where.Append($" AND time >= {At("start")} AND time <= {At("end")} AND toStartOfHour(time) >= toStartOfHour({At("start")}) AND toStartOfHour(time) <= toStartOfHour({At("end")})");
         parameters.Add("start", TimeConversion.DateTimeToUnixNano(query.Start));
         parameters.Add("end", TimeConversion.DateTimeToUnixNano(query.End));
@@ -712,7 +804,7 @@ public sealed class ClickHouseMetricReadRepository : DapperReadRepository, IMetr
     // =========================================================================
 
     public async Task<MetricLabelsResult> GetMetricLabelsAsync(string metricName, DateTime? startTime = null,
-        DateTime? endTime = null, CancellationToken cancellationToken = default)
+        DateTime? endTime = null, CancellationToken cancellationToken = default, string? scope = null)
     {
         if (string.IsNullOrEmpty(metricName))
             throw new ArgumentException("Metric name cannot be null or empty", nameof(metricName));
@@ -724,13 +816,15 @@ public sealed class ClickHouseMetricReadRepository : DapperReadRepository, IMetr
         p.Add("name", metricName);
         p.Add("start", TimeConversion.DateTimeToUnixNano(start));
         p.Add("end", TimeConversion.DateTimeToUnixNano(end));
+        p.Add("scopeName", scope);
+        var scopeWhere = scope is null ? "" : " AND scope_name = @scopeName";
 
         // One row per series that reported in the window (a series row is refreshed every CatalogRefreshSeconds while it reports).
         await using var conn = await OpenConnectionAsync(cancellationToken);
         var sets = (await conn.QueryAsync<AttributesRow>(new CommandDefinition($"""
             SELECT argMax(attributes, last_seen) AS SeriesAttributes
             FROM metric_series
-            WHERE tenant_id = @tenantId AND metric_name = @name AND last_seen >= {At("start")} AND first_seen <= {At("end")}
+            WHERE tenant_id = @tenantId AND metric_name = @name AND last_seen >= {At("start")} AND first_seen <= {At("end")}{scopeWhere}
             GROUP BY service_name, series_id
             LIMIT {MaxLabelSampleRows}
             """, p, cancellationToken: cancellationToken))).ToList();

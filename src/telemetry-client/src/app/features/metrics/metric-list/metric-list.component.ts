@@ -1,11 +1,12 @@
 import { TenantService } from '../../../core/services/tenant.service';
 import { Component, computed, effect, inject, signal, untracked, OnDestroy } from '@angular/core';
-import { DatePipe } from '@angular/common';
+import { DatePipe, NgTemplateOutlet } from '@angular/common';
 import { Router } from '@angular/router';
 import { Subscription } from 'rxjs';
 import { MatButtonToggleModule } from '@angular/material/button-toggle';
 import { MatCardModule } from '@angular/material/card';
 import { MatChipsModule } from '@angular/material/chips';
+import { MatExpansionModule } from '@angular/material/expansion';
 import { MatFormFieldModule } from '@angular/material/form-field';
 import { MatIconModule } from '@angular/material/icon';
 import { MatInputModule } from '@angular/material/input';
@@ -20,7 +21,7 @@ import { MetricsApiService } from '../../../core/services/api/metrics-api.servic
 import { ResourcesApiService } from '../../../core/services/api/resources-api.service';
 import { TimeRangeService } from '../../../core/services/time-range.service';
 import {
-  MetricCatalogGroupBy, MetricCatalogPage, MetricType, MetricsSummary,
+  MetricCatalogGroupBy, MetricCatalogPage, MetricType, MetricsSummary, UniqueMetricSummary,
   TYPE_LABELS, getTypeColor, getTypeLabel,
 } from '../../../core/models/metric.models';
 import { StatCardComponent } from '../../../shared/components/stat-card/stat-card.component';
@@ -32,14 +33,26 @@ import { formatUnitLabel } from '../../../shared/utils/chart.utils';
 import { loadPageState, savePageState } from '../../../shared/utils/page-state';
 import { UrlStateService } from '../../../shared/utils/url-state';
 
-const STATE_KEY = 'state.metrics';
+// v2: the default grouping became Scope; the old key's saved 'name' (its default) would otherwise keep every returning user off it.
+const STATE_KEY = 'state.metrics.v2';
+
+/** The page's grouping; `instance` (no longer offered) and anything unknown, from an old URL or saved state, mean `scope`. */
+function toGroupBy(value: string | null | undefined): MetricCatalogGroupBy {
+  return value === 'name' ? 'name' : 'scope';
+}
+
+/** One section of the Scope view: a scope name ('' for none) and its metrics, in the server's order. */
+interface ScopeSection {
+  scope: string;
+  metrics: UniqueMetricSummary[];
+}
 
 @Component({
   selector: 'app-metric-list',
   standalone: true,
   imports: [
-    DatePipe, FormsModule,
-    MatCardModule, MatTableModule, MatIconModule, MatButtonToggleModule,
+    DatePipe, NgTemplateOutlet, FormsModule,
+    MatCardModule, MatTableModule, MatIconModule, MatButtonToggleModule, MatExpansionModule,
     MatSelectModule, MatFormFieldModule, MatInputModule,
     MatProgressBarModule, MatChipsModule, MatButtonModule,
     MatTooltipModule,
@@ -58,7 +71,7 @@ export class MetricListComponent implements OnDestroy {
 
   private readonly saved = loadPageState(STATE_KEY, {
     searchText: '', selectedService: '', selectedType: -1 as MetricType | -1,
-    groupBy: 'name' as MetricCatalogGroupBy,
+    groupBy: 'scope' as MetricCatalogGroupBy,
   });
 
   protected summaryLoading = signal(true);
@@ -66,6 +79,8 @@ export class MetricListComponent implements OnDestroy {
   /** True (unbounded) distinct-metric-name counts per type — backs the count stat cards. */
   protected summary = signal<MetricsSummary>({ uniqueMetricCount: 0, countsByType: [] });
   protected list = signal<MetricCatalogPage | null>(null);
+  /** The grouping the loaded `list` was fetched with: the toggle can change before its rows arrive. */
+  protected listGroupBy = signal<MetricCatalogGroupBy>('scope');
   private listSub?: Subscription;
   private summarySub?: Subscription;
 
@@ -75,9 +90,7 @@ export class MetricListComponent implements OnDestroy {
   protected searchInput = signal<string>(this.searchText());
   protected selectedService = signal<string>(this.urlState.get('service') ?? this.saved.selectedService);
   protected selectedType = signal<MetricType | -1>(this.readNum('type') ?? this.saved.selectedType);
-  protected groupBy = signal<MetricCatalogGroupBy>(
-    (this.urlState.get('groupBy') as MetricCatalogGroupBy | null) ?? this.saved.groupBy,
-  );
+  protected groupBy = signal<MetricCatalogGroupBy>(toGroupBy(this.urlState.get('groupBy') ?? this.saved.groupBy));
   protected readonly capabilities = inject(CapabilitiesService).capabilities;
 
   protected readonly typeLabels = TYPE_LABELS;
@@ -88,8 +101,18 @@ export class MetricListComponent implements OnDestroy {
 
   /** More rows matched than the catalog holds, so say so above it. */
   protected truncated = computed(() => this.list()?.truncated ?? false);
-  protected items = computed(() => this.list()?.items ?? []);
   protected names = computed(() => this.list()?.names ?? []);
+  /** The Scope view's sections, in the server's order (scope name, empty last). */
+  protected scopeSections = computed<ScopeSection[]>(() => {
+    const sections: ScopeSection[] = [];
+    for (const m of this.names()) {
+      const scope = m.scopeName ?? '';
+      const last = sections[sections.length - 1];
+      if (last && last.scope === scope) last.metrics.push(m);
+      else sections.push({ scope, metrics: [m] });
+    }
+    return sections;
+  });
 
   // True distinct metric-name counts per type across the full catalog (not just the rows listed).
   private countFor(...types: MetricType[]): number {
@@ -106,8 +129,7 @@ export class MetricListComponent implements OnDestroy {
   /** Unit text for the Unit column: empty for no unit or a braced annotation like `{requests}`. */
   protected readonly unitLabel = formatUnitLabel;
 
-  protected readonly uniqueCols = ['name', 'type', 'unit', 'instances', 'services', 'lastSeen'];
-  protected readonly allCols = ['name', 'type', 'unit', 'service', 'lastSeen'];
+  protected readonly uniqueCols = ['name', 'type', 'unit', 'services', 'lastSeen'];
   protected readonly typeLabel = getTypeLabel;
   protected readonly typeColor = getTypeColor;
 
@@ -136,7 +158,7 @@ export class MetricListComponent implements OnDestroy {
         q: this.searchText() || null,
         service: this.selectedService() || null,
         type: this.selectedType() >= 0 ? this.selectedType() : null,
-        groupBy: this.groupBy() !== 'instance' ? this.groupBy() : null,
+        groupBy: this.groupBy() !== 'scope' ? this.groupBy() : null,
       });
     });
 
@@ -171,7 +193,7 @@ export class MetricListComponent implements OnDestroy {
     const q = this.urlState.get('q') ?? '';
     const service = this.urlState.get('service') ?? '';
     const type = this.readNum('type') ?? -1;
-    const groupBy = (this.urlState.get('groupBy') as MetricCatalogGroupBy | null) ?? this.saved.groupBy;
+    const groupBy = toGroupBy(this.urlState.get('groupBy') ?? this.saved.groupBy);
     if (this.searchText() !== q) { this.searchText.set(q); this.searchInput.set(q); }
     if (this.selectedService() !== service) this.selectedService.set(service);
     if (this.selectedType() !== type) this.selectedType.set(type as MetricType | -1);
@@ -201,14 +223,16 @@ export class MetricListComponent implements OnDestroy {
     });
 
     this.listSub?.unsubscribe();
-    this.listSub = this.api.getCatalog(this.currentFilter()).subscribe({
-      next: (result) => { this.list.set(result); this.listLoading.set(false); },
+    const filter = this.currentFilter();
+    this.listSub = this.api.getCatalog(filter).subscribe({
+      next: (result) => { this.list.set(result); this.listGroupBy.set(filter.groupBy); this.listLoading.set(false); },
       error: () => this.listLoading.set(false),
     });
   }
 
-  protected navigate(name: string): void {
-    this.router.navigate(this.tenant.link('metrics', encodeURIComponent(name)));
+  /** Opens a metric; from the Scope view `scope` limits the detail page to that scope (none for the empty scope). */
+  protected navigate(name: string, scope?: string | null): void {
+    this.router.navigate(this.tenant.link('metrics', encodeURIComponent(name)), scope ? { queryParams: { scope } } : undefined);
   }
 
   protected submitSearch(): void { this.searchText.set(this.searchInput().trim()); }

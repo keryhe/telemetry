@@ -22,3 +22,17 @@
   margin-top: 2px;
 }
 
+
+.scope-panel {
+  margin-bottom: 12px;
+  box-shadow: none;
+  border: 1px solid var(--mat-sys-outline-variant);
+}
+
+.scope-name {
+  font-family: monospace;
+  font-weight: 500;
+  &.no-scope { font-style: italic; font-family: inherit; }
+}
+
+.service-count { cursor: default; }

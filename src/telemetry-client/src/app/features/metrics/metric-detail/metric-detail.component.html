@@ -6,6 +6,9 @@
   <div class="breadcrumb">
     <a mat-button [routerLink]="tenant.link('metrics')"><mat-icon>arrow_back</mat-icon> Metrics</a>
     <span class="metric-name">{{ metricName() }}</span>
+    @if (scope) {
+      <span class="metric-scope">Scope: {{ scope }}</span>
+    }
     <mat-chip [style.--mat-chip-outline-color]="typeColor()">{{ typeLabel() }}</mat-chip>
     @if (unitLabel()) {
       <mat-chip>{{ unitLabel() }}</mat-chip>

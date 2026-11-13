@@ -127,6 +127,58 @@ public abstract class MetricPhase5TestsBase : IAsyncLifetime
     }
 
     [Fact]
+    public async Task Catalog_ScopeView_OneRowPerScopeAndName_InScopeOrder_AndSaysWhenTruncated()
+    {
+        // Every instance is its own service, so an instance counts the same on every provider (per resource or per service).
+        MetricModel Scoped(string name, string scope, string service, int second)
+        {
+            var m = SeededDataBuilder.CatalogMetric(_fixture.TenantId, name, MetricType.GAUGE, service, WindowStart.AddSeconds(second));
+            m.InstrumentationScope = SeededDataBuilder.Scope(scope);
+            return m;
+        }
+        await FlushAndTouchAsync(
+            Scoped("phase5.scoped.requests", "Beta.Meter", "scoped-svc-a", 0),
+            Scoped("phase5.scoped.requests", "alpha.meter", "scoped-svc-b", 1),
+            Scoped("phase5.scoped.requests", "alpha.meter", "scoped-svc-c", 2),
+            Scoped("phase5.scoped.errors", "alpha.meter", "scoped-svc-a", 3),
+            Scoped("phase5.scoped.orphan", "", "scoped-svc-d", 4));
+
+        using var readScope = Scope();
+        var repo = readScope.ServiceProvider.GetRequiredService<IMetricReadRepository>();
+
+        Task<MetricCatalogPage> Catalog(string groupBy, int limit) => repo.GetMetricCatalogPageAsync(new MetricCatalogQuery
+        {
+            Start = WindowStart.AddDays(-1), End = WindowStart.AddDays(1), GroupBy = groupBy, Q = "phase5.scoped", Limit = limit
+        });
+
+        // Scope name case-insensitively ("alpha" before "Beta"), the empty scope last, then metric name.
+        var all = await Catalog("scope", 10);
+        Assert.False(all.Truncated);
+        Assert.Equal(
+            new[] { ("alpha.meter", "phase5.scoped.errors"), ("alpha.meter", "phase5.scoped.requests"), ("Beta.Meter", "phase5.scoped.requests"), ("", "phase5.scoped.orphan") },
+            all.Names.Select(n => (n.ScopeName ?? "<null>", n.Name)).ToArray());
+
+        var alphaRequests = all.Names[1];
+        Assert.Equal(2, alphaRequests.InstanceCount);
+        Assert.Equal(new[] { "scoped-svc-b", "scoped-svc-c" }, alphaRequests.Services);
+        var betaRequests = all.Names[2];
+        Assert.Equal(1, betaRequests.InstanceCount);
+        Assert.Equal(new[] { "scoped-svc-a" }, betaRequests.Services);
+
+        var head = await Catalog("scope", 3);
+        Assert.Equal(all.Names.Take(3).Select(n => (n.ScopeName, n.Name)), head.Names.Select(n => (n.ScopeName, n.Name)));
+        Assert.True(head.Truncated);
+        Assert.False((await Catalog("scope", 4)).Truncated);
+
+        // Negative control: grouped by name, the two scopes' "requests" are one row with all three instances.
+        var byName = await Catalog("name", 10);
+        Assert.Equal(3, byName.Names.Count);
+        var requests = Assert.Single(byName.Names, n => n.Name == "phase5.scoped.requests");
+        Assert.Equal(3, requests.InstanceCount);
+        Assert.All(byName.Names, n => Assert.Null(n.ScopeName));
+    }
+
+    [Fact]
     public async Task Catalog_NameGroupView_ComputesInstanceCountAndServices()
     {
         await FlushAndTouchAsync(

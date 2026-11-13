@@ -136,6 +136,8 @@ public class UniqueMetricSummary
     public int InstanceCount { get; set; }
     public List<string> Services { get; set; } = new();
     public DateTime LastSeen { get; set; }
+    /// <summary>The instrumentation scope (a .NET <c>Meter</c>) name; set only by <c>groupBy=scope</c>, empty for no scope name.</summary>
+    public string? ScopeName { get; set; }
 }
 
 // =============================================================================
@@ -153,7 +155,10 @@ public sealed class MetricCatalogQuery
     public string? Q { get; set; }
     public string? Service { get; set; }
     public MetricType? Type { get; set; }
-    /// <summary>"instance" (default) | "name" — no other sort/group option (decision 4/28).</summary>
+    /// <summary>
+    /// "instance" (default) | "name" | "scope". <c>scope</c> returns <see cref="MetricCatalogPage.Names"/> with one row per
+    /// (scope name, metric name), ordered by scope name (case-insensitive, empty last) then metric name.
+    /// </summary>
     public string GroupBy { get; set; } = "instance";
     /// <summary>Most rows (or names) to return. The API clamps it to the configured limit.</summary>
     public int Limit { get; set; } = DefaultLimit;

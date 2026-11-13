@@ -25,7 +25,7 @@ public class MetricsController : ControllerBase
     }
 
     /// <summary>
-    /// GET /api/tenants/{tenantId}/metrics/catalog?start=&end=&q=&service=&type=&groupBy=name|instance&limit=
+    /// GET /api/tenants/{tenantId}/metrics/catalog?start=&end=&q=&service=&type=&groupBy=name|instance|scope&limit=
     /// Phase 5 (list-pages-server-side plan): replaces the former unbounded-with-a-cap
     /// <c>GET /api/metrics</c> (removed — its only caller, the metrics list page, now calls this).
     /// <c>start</c>/<c>end</c> are required — every "seen in range" check runs against them
@@ -74,30 +74,31 @@ public class MetricsController : ControllerBase
         return Ok(summary);
     }
 
-    // GET /api/tenants/{tenantId}/metrics/by-name/{name}
+    // GET /api/tenants/{tenantId}/metrics/by-name/{name}?scope=
     [TelemetryOperation(TelemetryOperation.Read)]
     [HttpGet("by-name/{name}")]
-    public async Task<ActionResult<List<MetricInfo>>> GetMetricsByName(string name, CancellationToken ct = default)
+    public async Task<ActionResult<List<MetricInfo>>> GetMetricsByName(string name, [FromQuery] string? scope, CancellationToken ct = default)
     {
-        var metrics = await _metrics.GetMetricsByNameAsync(name, ct);
+        var metrics = await _metrics.GetMetricsByNameAsync(name, ct, scope);
         return Ok(metrics);
     }
 
-    // GET /api/tenants/{tenantId}/metrics/labels/{name}?start=&end=
+    // GET /api/tenants/{tenantId}/metrics/labels/{name}?start=&end=&scope=
     [TelemetryOperation(TelemetryOperation.Read)]
     [HttpGet("labels/{name}")]
     public async Task<ActionResult<MetricLabelsResult>> GetMetricLabels(
         string name,
         [FromQuery] DateTime? start,
         [FromQuery] DateTime? end,
+        [FromQuery] string? scope,
         CancellationToken ct = default)
     {
-        var labels = await _metrics.GetMetricLabelsAsync(name, start, end, ct);
+        var labels = await _metrics.GetMetricLabelsAsync(name, start, end, ct, scope);
         return Ok(labels);
     }
 
     /// <summary>
-    /// GET /api/tenants/{tenantId}/metrics/series?metricName=&start=&end=&metricId=&labelFilter=key:value&q=&points=&top=
+    /// GET /api/tenants/{tenantId}/metrics/series?metricName=&start=&end=&metricId=&scope=&labelFilter=key:value&q=&points=&top=
     /// Phase 4 (list-pages-server-side plan): replaces the former <c>series</c>/<c>series-grouped</c>
     /// pair with one database-bucketed endpoint. <c>start</c>/<c>end</c> are required — every bucket
     /// is computed against them (decision 21).
@@ -109,6 +110,7 @@ public class MetricsController : ControllerBase
         [FromQuery] DateTime start,
         [FromQuery] DateTime end,
         [FromQuery] long? metricId,
+        [FromQuery] string? scope,
         [FromQuery(Name = "labelFilter")] List<string>? labelFilter,
         [FromQuery] string? q,
         [FromQuery] int points = 300,
@@ -123,6 +125,7 @@ public class MetricsController : ControllerBase
         {
             MetricName = metricName,
             MetricId = metricId,
+            Scope = scope,
             Start = start,
             End = end,
             LabelFilters = filters,
@@ -137,7 +140,7 @@ public class MetricsController : ControllerBase
     }
 
     /// <summary>
-    /// GET /api/tenants/{tenantId}/metrics/exemplars?metricName=&start=&end=&metricId=&labelFilter=key:value&q=&limit=
+    /// GET /api/tenants/{tenantId}/metrics/exemplars?metricName=&start=&end=&metricId=&scope=&labelFilter=key:value&q=&limit=
     /// The newest exemplars first, at most <c>limit</c> (clamped to <c>Telemetry:Query:Limits:Exemplars</c>); <c>truncated</c> says more exist.
     /// </summary>
     [TelemetryOperation(TelemetryOperation.Read)]
@@ -147,6 +150,7 @@ public class MetricsController : ControllerBase
         [FromQuery] DateTime start,
         [FromQuery] DateTime end,
         [FromQuery] long? metricId,
+        [FromQuery] string? scope,
         [FromQuery(Name = "labelFilter")] List<string>? labelFilter,
         [FromQuery] string? q,
         [FromQuery] int? limit = null,
@@ -160,6 +164,7 @@ public class MetricsController : ControllerBase
         {
             MetricName = metricName,
             MetricId = metricId,
+            Scope = scope,
             Start = start,
             End = end,
             LabelFilters = filters,
@@ -173,7 +178,7 @@ public class MetricsController : ControllerBase
     }
 
     /// <summary>
-    /// GET /api/tenants/{tenantId}/metrics/export?metricName=&start=&end=&metricId=&labelFilter=key:value&q=&points=&format=ndjson|csv
+    /// GET /api/tenants/{tenantId}/metrics/export?metricName=&start=&end=&metricId=&scope=&labelFilter=key:value&q=&points=&format=ndjson|csv
     /// Phase 8 (list-pages-server-side plan, decision 29): one row per <c>(display series,
     /// bucket)</c>, reusing <c>/series</c>'s bucketing (<c>points</c>/<c>groupBy</c> behave the
     /// same) but with every series included — no top-N/"other" split, unlike <see cref="GetMetricSeries"/>.
@@ -187,6 +192,7 @@ public class MetricsController : ControllerBase
         [FromQuery] DateTime start,
         [FromQuery] DateTime end,
         [FromQuery] long? metricId,
+        [FromQuery] string? scope,
         [FromQuery(Name = "labelFilter")] List<string>? labelFilter,
         [FromQuery] string? q,
         [FromQuery] int points = 300,
@@ -213,6 +219,7 @@ public class MetricsController : ControllerBase
         {
             MetricName = metricName,
             MetricId = metricId,
+            Scope = scope,
             Start = start,
             End = end,
             LabelFilters = filters,

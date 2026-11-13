@@ -674,6 +674,31 @@ public static class SeededDataBuilder
         };
     }
 
+    /// <summary>
+    /// One gauge name from one service under two instrumentation scopes (two .NET Meters): <c>meter.a</c>'s points carry
+    /// <c>route=/a</c>, <c>meter.b</c>'s <c>route=/b</c>, so a read can tell which scope each point came from. One point and one
+    /// exemplar per second for <paramref name="points"/> seconds, per scope.
+    /// </summary>
+    public static List<MetricModel> GaugeUnderTwoScopes(long tenantId, DateTime start, string metricName, string serviceName, int points = 10)
+    {
+        MetricModel Make(string scope, string route) => new()
+        {
+            Name = metricName,
+            Type = MetricType.GAUGE,
+            Unit = "1",
+            Resource = Resource(tenantId, serviceName),
+            InstrumentationScope = Scope(scope),
+            GaugeDataPoints = Enumerable.Range(0, points).Select(i => new GaugeDataPointModel
+            {
+                TimeUnixNano = ToUnixNano(start.AddSeconds(i)),
+                ValueDouble = i,
+                Attributes = new Dictionary<string, object> { ["route"] = route },
+                Exemplars = [new ExemplarModel { TimeUnixNano = ToUnixNano(start.AddSeconds(i)), ValueDouble = i, TraceIdHex = (i + 1).ToString("x").PadLeft(32, '0') }]
+            }).ToList()
+        };
+        return [Make("meter.a", "/a"), Make("meter.b", "/b")];
+    }
+
     // =========================================================================
     // PHASE 5: metrics catalog (list-pages-server-side plan)
     // =========================================================================

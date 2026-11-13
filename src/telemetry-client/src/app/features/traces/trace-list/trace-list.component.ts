@@ -277,7 +277,7 @@ export class TraceListComponent implements OnDestroy {
   /** Duration-vs-time latency chart, binned into count-sized bubbles (one color: the rollup carries no per-cell errors). */
   protected latencyBubbleOptions = signal<ApexOptions>({});
 
-  protected readonly displayedColumns = ['service', 'operation', 'kind', 'spans', 'status', 'duration', 'time'];
+  protected readonly displayedColumns = ['operation', 'service', 'kind', 'spans', 'status', 'duration', 'time'];
   protected readonly formatDuration = formatDuration;
   protected readonly parseDuration = parseDotnetTimespan;
 

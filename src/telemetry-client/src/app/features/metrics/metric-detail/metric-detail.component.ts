@@ -131,6 +131,8 @@ function connectAcrossEmptyBuckets(
 })
 export class MetricDetailComponent implements OnInit, AfterViewInit, OnDestroy {
   @Input() name!: string;
+  /** `?scope=`: only this instrumentation scope's (a .NET Meter name) metrics; absent means every scope. */
+  @Input() scope?: string;
 
   /** Chart card content area — its pixel width drives the requested point resolution. */
   @ViewChild('chartContainer', { read: ElementRef }) chartContainerRef?: ElementRef<HTMLElement>;
@@ -457,11 +459,12 @@ export class MetricDetailComponent implements OnInit, AfterViewInit, OnDestroy {
     const metricId = svc ? this.instances().find((i) => i.serviceName === svc)?.id : undefined;
     const labelFilters = Object.keys(this.selectedLabels()).length > 0 ? this.selectedLabels() : undefined;
     const q = this.searchText().trim() || undefined;
-    return { name, start, end, svc, metricId, labelFilters, q };
+    const scope = this.scope || undefined;
+    return { name, start, end, svc, metricId, scope, labelFilters, q };
   }
 
   private loadExemplars(): void {
-    const { name, start, end, svc, metricId, labelFilters, q } = this.currentFilter();
+    const { name, start, end, svc, metricId, scope, labelFilters, q } = this.currentFilter();
 
     if (svc && metricId === undefined) {
       this.exemplarsPage.set({ name, type: this.metricType(), exemplars: [], truncated: false });
@@ -472,7 +475,7 @@ export class MetricDetailComponent implements OnInit, AfterViewInit, OnDestroy {
     this.exemplarsLoading.set(true);
     this.exemplarSub?.unsubscribe();
     this.exemplarSub = this.api.getExemplars({
-      metricName: name, start, end, metricId, labelFilters, q,
+      metricName: name, start, end, metricId, scope, labelFilters, q,
     }).subscribe({
       next: (page) => {
         this.exemplarsPage.set(page);
@@ -605,8 +608,8 @@ export class MetricDetailComponent implements OnInit, AfterViewInit, OnDestroy {
     const name = this.metricName();
 
     forkJoin({
-      instances: this.api.getByName(name),
-      labels: this.api.getLabels(name, start, end),
+      instances: this.api.getByName(name, this.scope || undefined),
+      labels: this.api.getLabels(name, start, end, this.scope || undefined),
     }).subscribe({
       next: ({ instances, labels }) => {
         this.instances.set(instances);
@@ -620,7 +623,7 @@ export class MetricDetailComponent implements OnInit, AfterViewInit, OnDestroy {
   }
 
   protected reloadSeries(): void {
-    const { name, start, end, svc, metricId } = this.currentFilter();
+    const { name, start, end, svc, metricId, scope } = this.currentFilter();
     const labelFilters = Object.keys(this.selectedLabels()).length > 0 ? this.selectedLabels() : undefined;
     const q = this.searchText().trim() || undefined;
 
@@ -636,7 +639,7 @@ export class MetricDetailComponent implements OnInit, AfterViewInit, OnDestroy {
 
     this.seriesSub?.unsubscribe();
     this.seriesSub = this.api.getSeries({
-      metricName: name, start, end, metricId, labelFilters, q, points: this.requestedPoints(), top: 8,
+      metricName: name, start, end, metricId, scope, labelFilters, q, points: this.requestedPoints(), top: 8,
     }).subscribe((result) => {
       this.seriesResult.set(result);
       this.buildChart();
@@ -890,12 +893,12 @@ export class MetricDetailComponent implements OnInit, AfterViewInit, OnDestroy {
    */
   protected exportServerSide(format: 'ndjson' | 'csv'): void {
     if (this.serverExportPending()) return;
-    const { name, start, end, metricId } = this.currentFilter();
+    const { name, start, end, metricId, scope } = this.currentFilter();
     const labelFilters = Object.keys(this.selectedLabels()).length > 0 ? this.selectedLabels() : undefined;
     const q = this.searchText().trim() || undefined;
 
     this.serverExportPending.set(true);
-    this.api.getSeriesExport({ metricName: name, start, end, metricId, labelFilters, q, points: this.requestedPoints() }, format).subscribe({
+    this.api.getSeriesExport({ metricName: name, start, end, metricId, scope, labelFilters, q, points: this.requestedPoints() }, format).subscribe({
       next: (blob) => downloadBlob(`${this.metricName()}-export_${fileStamp()}.${format}`, blob),
       error: () => this.serverExportPending.set(false),
       complete: () => this.serverExportPending.set(false),

@@ -13,6 +13,8 @@ public sealed class MetricSeriesQuery
 {
     public string MetricName { get; set; } = "";
     public long? MetricId { get; set; }
+    /// <summary>Only metrics from this instrumentation scope (a .NET <c>Meter</c> name); null means every scope.</summary>
+    public string? Scope { get; set; }
     public DateTime Start { get; set; }
     public DateTime End { get; set; }
     /// <summary>Merged from repeated <c>labelFilter=key:value</c> and the <c>q</c> grammar's <c>key:value</c> terms (decision 30).</summary>
@@ -110,6 +112,8 @@ public sealed class MetricExemplarQuery
 {
     public string MetricName { get; set; } = "";
     public long? MetricId { get; set; }
+    /// <summary>Only metrics from this instrumentation scope (a .NET <c>Meter</c> name); null means every scope.</summary>
+    public string? Scope { get; set; }
     public DateTime Start { get; set; }
     /// <summary>The window's own end.</summary>
     public DateTime End { get; set; }

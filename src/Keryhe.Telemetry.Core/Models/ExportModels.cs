@@ -36,6 +36,8 @@ public sealed class MetricExportQuery
 {
     public string MetricName { get; set; } = "";
     public long? MetricId { get; set; }
+    /// <summary>Only metrics from this instrumentation scope (a .NET <c>Meter</c> name); null means every scope.</summary>
+    public string? Scope { get; set; }
     public DateTime Start { get; set; }
     public DateTime End { get; set; }
     public Dictionary<string, string>? LabelFilters { get; set; }

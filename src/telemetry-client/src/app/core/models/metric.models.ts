@@ -173,6 +173,8 @@ export interface MetricSeriesQueryParams {
   start: Date;
   end: Date;
   metricId?: number;
+  /** Only this instrumentation scope's (a .NET Meter name) metrics; omitted means every scope. */
+  scope?: string;
   labelFilters?: Record<string, string>;
   q?: string;
   /** Target point count per stream, derived from chart pixel width — never persisted in URL state. */
@@ -185,6 +187,8 @@ export interface MetricExemplarQueryParams {
   start: Date;
   end: Date;
   metricId?: number;
+  /** Only this instrumentation scope's (a .NET Meter name) metrics; omitted means every scope. */
+  scope?: string;
   labelFilters?: Record<string, string>;
   q?: string;
   /** Fewer exemplars than the server's limit; omitted asks for as many as it allows. */
@@ -221,7 +225,7 @@ export interface MetricExemplarPage {
 // uniqueMetrics/filteredUnique/filteredAll grouping.
 // =============================================================================
 
-/** One row of the groupBy=name view (reuses the server's UniqueMetricSummary shape). */
+/** One row of the groupBy=name and groupBy=scope views (the server's UniqueMetricSummary shape). */
 export interface UniqueMetricSummary {
   name: string;
   type: MetricType;
@@ -230,9 +234,12 @@ export interface UniqueMetricSummary {
   instanceCount: number;
   services: string[];
   lastSeen: string;
+  /** Instrumentation scope (a .NET Meter) name; set by groupBy=scope only, '' for no scope name. */
+  scopeName?: string | null;
 }
 
-export type MetricCatalogGroupBy = 'instance' | 'name';
+/** The API also serves `instance`; the metrics page no longer offers it. */
+export type MetricCatalogGroupBy = 'scope' | 'name';
 
 export interface MetricCatalogQueryParams {
   start: Date;

@@ -435,6 +435,45 @@ public abstract class MetricPhase4TestsBase : IAsyncLifetime
     }
 
     [Fact]
+    public async Task ScopeFilter_LimitsSeriesExemplarsLabelsAndInstances_ToThatScope()
+    {
+        // One service reports the same gauge from two Meters: the filter has to work on the points, not only on the service.
+        const string name = "phase4.scoped.gauge";
+        using (var writeScope = Scope())
+            await writeScope.ServiceProvider.GetRequiredService<ITelemetryBulkWriter>()
+                .FlushMetricsAsync(SeededDataBuilder.GaugeUnderTwoScopes(_fixture.TenantId, WindowStart, name, "scoped-gauge-svc"));
+
+        using var readScope = Scope();
+        var repo = readScope.ServiceProvider.GetRequiredService<IMetricReadRepository>();
+        var start = WindowStart.AddSeconds(-1);
+        var end = WindowStart.AddSeconds(11);
+
+        string[] Routes(MetricSeriesResult? r) =>
+            r!.Series.Select(s => s.Labels.GetValueOrDefault("route") ?? "").OrderBy(x => x, StringComparer.Ordinal).ToArray();
+        Task<MetricSeriesResult?> Series(string? scope) =>
+            repo.GetMetricSeriesAsync(new MetricSeriesQuery { MetricName = name, Scope = scope, Start = start, End = end, Points = 1 });
+
+        Assert.Equal(new[] { "/a" }, Routes(await Series("meter.a")));
+        Assert.Equal(new[] { "/b" }, Routes(await Series("meter.b")));
+        Assert.Equal(new[] { "/a", "/b" }, Routes(await Series(null))); // negative control: no scope, both
+
+        Task<MetricExemplarPage?> Exemplars(string? scope) =>
+            repo.GetMetricExemplarsAsync(new MetricExemplarQuery { MetricName = name, Scope = scope, Start = start, End = end, Limit = 100 });
+        var scopedExemplars = await Exemplars("meter.a");
+        Assert.Equal(10, scopedExemplars!.Exemplars.Count);
+        Assert.All(scopedExemplars.Exemplars, e => Assert.Equal("/a", e.Labels["route"]));
+        Assert.Equal(20, (await Exemplars(null))!.Exemplars.Count);
+
+        var labels = await repo.GetMetricLabelsAsync(name, start, end, default, "meter.b");
+        Assert.Equal(new[] { "/b" }, labels.Labels["route"]);
+        Assert.Equal(new[] { "/a", "/b" }, (await repo.GetMetricLabelsAsync(name, start, end)).Labels["route"]);
+
+        Assert.NotEmpty(await repo.GetMetricsByNameAsync(name, default, "meter.a"));
+        Assert.Empty(await repo.GetMetricsByNameAsync(name, default, "meter.none"));
+        Assert.Null(await Series("meter.none"));
+    }
+
+    [Fact]
     public async Task Exemplars_AreTheNewestFirst_CappedAtTheLimit_AndSayWhenTruncated()
     {
         var metric = SeededDataBuilder.GaugeWithExemplars(_fixture.TenantId, WindowStart, points: 30);

@@ -124,6 +124,33 @@ public abstract class ExportTestsBase : IAsyncLifetime
     /// single seeded timestamp).
     /// </summary>
     [Fact]
+    public async Task MetricsExport_WithAScope_HasOnlyThatScopesRows()
+    {
+        if (!_fixture.SupportsLogsAndMetrics) return; // Parquet writes logs and metrics from phase 5 (plans/parquet-duckdb)
+        const string name = "phase8.export.scoped.gauge";
+        using (var writeScope = Scope())
+            await writeScope.ServiceProvider.GetRequiredService<ITelemetryBulkWriter>()
+                .FlushMetricsAsync(SeededDataBuilder.GaugeUnderTwoScopes(_fixture.TenantId, WindowStart, name, "export-scoped-svc"));
+
+        using var readScope = Scope();
+        var repo = readScope.ServiceProvider.GetRequiredService<IMetricReadRepository>();
+
+        async Task<string[]> Routes(string? scope)
+        {
+            var routes = new SortedSet<string>(StringComparer.Ordinal);
+            await foreach (var row in repo.ExportMetricSeriesAsync(new MetricExportQuery
+            {
+                MetricName = name, Scope = scope, Start = WindowStart.AddSeconds(-1), End = WindowStart.AddSeconds(11), Points = 1
+            }))
+                routes.Add(row.Labels.GetValueOrDefault("route") ?? "");
+            return routes.ToArray();
+        }
+
+        Assert.Equal(new[] { "/a" }, await Routes("meter.a"));
+        Assert.Equal(new[] { "/a", "/b" }, await Routes(null)); // negative control: no scope, both
+    }
+
+    [Fact]
     public async Task MetricsExport_IncludesEverySeries_NoTopNTruncation()
     {
         if (!_fixture.SupportsLogsAndMetrics) return; // Parquet writes logs and metrics from phase 5 (plans/parquet-duckdb)

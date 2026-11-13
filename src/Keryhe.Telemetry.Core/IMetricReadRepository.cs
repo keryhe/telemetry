@@ -10,7 +10,8 @@ public interface IMetricReadRepository
 {
     // Retrieve operations
     Task<MetricModel?> GetMetricByIdAsync(long id, CancellationToken cancellationToken = default);
-    Task<List<MetricInfo>> GetMetricsByNameAsync(string name, CancellationToken cancellationToken = default);
+    /// <summary>Every stored instance of a metric name; <paramref name="scope"/> keeps only that instrumentation scope's (null: every scope).</summary>
+    Task<List<MetricInfo>> GetMetricsByNameAsync(string name, CancellationToken cancellationToken = default, string? scope = null);
     Task<List<MetricInfo>> GetMetricsByTypeAsync(MetricType type, CancellationToken cancellationToken = default);
 
     /// <summary>
@@ -49,7 +50,7 @@ public interface IMetricReadRepository
     /// is true when the cap was hit.
     /// </summary>
     Task<MetricLabelsResult> GetMetricLabelsAsync(string metricName, DateTime? startTime = null,
-        DateTime? endTime = null, CancellationToken cancellationToken = default);
+        DateTime? endTime = null, CancellationToken cancellationToken = default, string? scope = null);
 
     /// <summary>
     /// Streaming export (list-pages-server-side plan, Phase 8, decision 29): reuses

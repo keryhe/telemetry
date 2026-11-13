@@ -44,12 +44,15 @@ export class MetricsApiService {
     return this.http.get<MetricsSummary>(`${this.base}/summary`, { params });
   }
 
-  getByName(name: string): Observable<MetricInfo[]> {
-    return this.http.get<MetricInfo[]>(`${this.base}/by-name/${encodeURIComponent(name)}`);
+  /** Every instance of a metric name; `scope` keeps one instrumentation scope's. */
+  getByName(name: string, scope?: string): Observable<MetricInfo[]> {
+    const params = scope ? new HttpParams().set('scope', scope) : undefined;
+    return this.http.get<MetricInfo[]>(`${this.base}/by-name/${encodeURIComponent(name)}`, { params });
   }
 
-  getLabels(name: string, start: Date, end: Date): Observable<{ partial: boolean; labels: Record<string, string[]> }> {
-    const params = new HttpParams().set('start', start.toISOString()).set('end', end.toISOString());
+  getLabels(name: string, start: Date, end: Date, scope?: string): Observable<{ partial: boolean; labels: Record<string, string[]> }> {
+    let params = new HttpParams().set('start', start.toISOString()).set('end', end.toISOString());
+    if (scope) params = params.set('scope', scope);
     return this.http.get<{ partial: boolean; labels: Record<string, string[]> }>(
       `${this.base}/labels/${encodeURIComponent(name)}`,
       { params },
@@ -82,12 +85,13 @@ export class MetricsApiService {
     return this.http.get(`${this.base}/export`, { params, responseType: 'blob' });
   }
 
-  private filterParams(p: { metricName: string; start: Date; end: Date; metricId?: number; labelFilters?: Record<string, string>; q?: string }): HttpParams {
+  private filterParams(p: { metricName: string; start: Date; end: Date; metricId?: number; scope?: string; labelFilters?: Record<string, string>; q?: string }): HttpParams {
     let params = new HttpParams()
       .set('metricName', p.metricName)
       .set('start', p.start.toISOString())
       .set('end', p.end.toISOString());
     if (p.metricId != null) params = params.set('metricId', p.metricId);
+    if (p.scope) params = params.set('scope', p.scope);
     if (p.q) params = params.set('q', p.q);
     if (p.labelFilters) {
       for (const [k, v] of Object.entries(p.labelFilters)) {
