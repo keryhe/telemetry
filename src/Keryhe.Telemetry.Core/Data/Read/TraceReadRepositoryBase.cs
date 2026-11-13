@@ -824,6 +824,13 @@ public abstract class TraceReadRepositoryBase : DapperReadRepository, ITraceRead
             clauses.Add("a.trace_id = @traceIdSearch");
             parameters.Add("traceIdSearch", IdParam(parsed.TraceId, 32));
         }
+        else if (parsed.IsSpanIdSearch)
+        {
+            // The traces containing the span, through idx_spans_span (no window bound: exempt from the search window like a
+            // trace id). On trace_id, so it narrows whole traces and leaves each one's anchor as it is.
+            clauses.Add("a.trace_id IN (SELECT sx.trace_id FROM spans sx WHERE sx.tenant_id = @tenantId AND sx.span_id = @spanIdSearch)");
+            parameters.Add("spanIdSearch", IdParam(parsed.SpanId!.ToLowerInvariant(), 16)); // stored as lowercase hex
+        }
         else if (parsed.Terms.Count > 0)
         {
             var i = 0;

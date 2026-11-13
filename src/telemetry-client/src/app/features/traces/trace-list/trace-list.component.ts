@@ -149,6 +149,8 @@ export class TraceListComponent implements OnDestroy {
 
   protected parsedQuery = computed<ParsedSearchQuery>(() => parseSearchQuery(this.searchText()));
   protected isTraceIdSearch = computed(() => this.parsedQuery().isTraceIdSearch);
+  /** A span-id search lists the traces containing that span; opening one expands the span. */
+  protected isSpanIdSearch = computed(() => this.parsedQuery().isSpanIdSearch ?? false);
 
   /** The whole raw search text goes to the server now (decision 10: parsed server-side). */
   private serverQuery = computed(() => this.searchText().trim());
@@ -629,10 +631,17 @@ export class TraceListComponent implements OnDestroy {
     });
   }
 
-  /** `start` and `end` are the trace's own extent from the row, passed on so the detail read can be bounded (ClickHouse). */
+  /**
+   * `start` and `end` are the trace's own extent from the row, passed on so the detail read can be bounded (ClickHouse).
+   * After a span-id search the searched span goes along as `span`, so the detail page opens with it selected.
+   */
   protected navigate(traceId: string, start?: string, end?: string): void {
     if (this.listLoading()) return; // the grid is mid-load: its rows are about to be replaced
-    this.router.navigate(this.tenant.link('traces', traceId), start && end ? { queryParams: { start, end } } : undefined);
+    const queryParams: Record<string, string> = {};
+    if (start && end) { queryParams['start'] = start; queryParams['end'] = end; }
+    const spanId = this.parsedQuery().spanId;
+    if (spanId) queryParams['span'] = spanId.toLowerCase();
+    this.router.navigate(this.tenant.link('traces', traceId), Object.keys(queryParams).length ? { queryParams } : undefined);
   }
 
   // =========================================================================

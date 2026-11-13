@@ -24,6 +24,9 @@ public sealed class ParsedSearchQuery
 {
     public bool IsTraceIdSearch { get; init; }
     public string? TraceId { get; init; }
+    /// <summary>The whole input is a span id (exactly 16 hex chars): traces containing that span, logs of that span.</summary>
+    public bool IsSpanIdSearch { get; init; }
+    public string? SpanId { get; init; }
     public IReadOnlyList<SearchTerm> Terms { get; init; } = Array.Empty<SearchTerm>();
 
     public static readonly ParsedSearchQuery Empty = new() { Terms = Array.Empty<SearchTerm>() };
@@ -58,6 +61,12 @@ public static class SearchQueryParser
             && HexRegex.IsMatch(trimmed))
         {
             return new ParsedSearchQuery { IsTraceIdSearch = true, TraceId = trimmed, Terms = Array.Empty<SearchTerm>() };
+        }
+
+        // Span ID: exactly 16 hex chars, the same whole-input rule as a trace id.
+        if (trimmed.Length == 16 && HexRegex.IsMatch(trimmed))
+        {
+            return new ParsedSearchQuery { IsSpanIdSearch = true, SpanId = trimmed, Terms = Array.Empty<SearchTerm>() };
         }
 
         var rawTerms = trimmed

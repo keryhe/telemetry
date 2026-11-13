@@ -84,7 +84,7 @@ creating or migrating (it then only checks), for a deliberate migration with a b
 [`Keryhe.Telemetry.Sqlite`](../src/Keryhe.Telemetry.Sqlite/README.md).
 
 Or use the runner script, which skips a component whose target version (`control_plane_schema_version` /
-`telemetry_schema_version`, both 4.0.1) is already recorded:
+`telemetry_schema_version`: 4.0.1 and 4.0.2) is already recorded:
 
 ```bash
 schema/apply-schema.sh <controlplane|telemetry> <postgresql|sqlserver|mysql|clickhouse|sqlite|parquet> [database]

@@ -323,6 +323,11 @@ public abstract class LogReadRepositoryBase : DapperReadRepository, ILogReadRepo
             clauses.Add("lr.trace_id = @traceIdSearch");
             parameters.Add("traceIdSearch", IdParam(parsed.TraceId, 32));
         }
+        else if (parsed.IsSpanIdSearch)
+        {
+            clauses.Add("lr.span_id = @spanIdSearch"); // idx_log_span
+            parameters.Add("spanIdSearch", IdParam(parsed.SpanId!.ToLowerInvariant(), 16)); // stored as lowercase hex
+        }
         else if (parsed.Terms.Count > 0)
         {
             // CompileSearch returns its fragment with a leading " AND " (meant to be appended

@@ -75,6 +75,11 @@ public sealed class ParquetLogReadRepository : DapperReadRepository, ILogReadRep
             f.Parameters.Add("traceHi", hi);
             f.Parameters.Add("traceLo", lo);
         }
+        else if (parsed.IsSpanIdSearch)
+        {
+            sb.Append(" AND span_id = @spanIdSearch");
+            f.Parameters.Add("spanIdSearch", ParquetIds.TrySpanId(parsed.SpanId, out var span) ? span : 0UL);
+        }
         else
         {
             var i = 0;

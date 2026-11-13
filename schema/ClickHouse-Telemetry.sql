@@ -1,4 +1,4 @@
--- OpenTelemetry ClickHouse telemetry schema -- telemetry schema 4.0.1 (ClickHouse 25.8 LTS or later)
+-- OpenTelemetry ClickHouse telemetry schema -- telemetry schema 4.0.2 (ClickHouse 25.8 LTS or later)
 -- Fresh install only: there is no upgrade path from any earlier layout (recreate the database).
 -- ClickHouse holds telemetry data only: tenants (with their retention windows), API keys and alert rules are the
 -- control plane, which a ClickHouse deployment runs on PostgreSQL, SQL Server or MySQL
@@ -82,6 +82,7 @@ CREATE TABLE IF NOT EXISTS spans
     error_type               LowCardinality(String) MATERIALIZED attributes['error.type'],
 
     INDEX idx_trace_id    trace_id                 TYPE bloom_filter(0.001) GRANULARITY 1,
+    INDEX idx_span_id     span_id                  TYPE bloom_filter(0.001) GRANULARITY 1,  -- span-id search (4.0.2)
     INDEX idx_span_name   span_name                TYPE bloom_filter(0.01) GRANULARITY 1,
     INDEX idx_duration    duration_ns              TYPE minmax             GRANULARITY 1,
     INDEX idx_status      status_code              TYPE set(3)             GRANULARITY 1,
@@ -145,6 +146,7 @@ CREATE TABLE IF NOT EXISTS log_records
 
     INDEX idx_body        lower(body)            TYPE tokenbf_v1(32768, 3, 0) GRANULARITY 1,
     INDEX idx_trace_id    trace_id               TYPE bloom_filter(0.001)     GRANULARITY 1,
+    INDEX idx_span_id     span_id                TYPE bloom_filter(0.001)     GRANULARITY 1,  -- span-id search (4.0.2)
     INDEX idx_severity    severity_number        TYPE minmax                  GRANULARITY 1,
     INDEX idx_attr_keys   mapKeys(attributes)    TYPE bloom_filter(0.01)      GRANULARITY 1,
     INDEX idx_attr_values mapValues(attributes)  TYPE bloom_filter(0.01)      GRANULARITY 1
@@ -438,4 +440,4 @@ ORDER BY version;
 
 -- The telemetry_schema_version row is seeded LAST, so a partial/failed apply never records a version that
 -- the apply-schema.sh version gate would wrongly treat as "already applied".
-INSERT INTO telemetry_schema_version (version) VALUES ('4.0.1');
+INSERT INTO telemetry_schema_version (version) VALUES ('4.0.2');

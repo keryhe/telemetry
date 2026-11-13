@@ -68,7 +68,7 @@ dotnet test tests/Keryhe.Telemetry.TestDataGenerator.Tests                      
 
 ## Schema versioning
 
-Two components, `control-plane` and `telemetry`, each at 4.0.1 with its own version table. A change bumps only its component's third digit,
+Two components, `control-plane` (4.0.1) and `telemetry` (4.0.2), each with its own version table. A change bumps only its component's third digit,
 in one commit:
 - **Control plane:** the four `*-ControlPlane.sql` scripts (PostgreSQL, SQL Server, MySQL, SQLite), `CONTROLPLANE_TARGET_VERSION` in
   `apply-schema.sh`, `SqliteControlPlaneSchema.TargetVersion` and the Admin tool's `SqliteSchemaGate.TargetVersion`, **plus** a SQLite migration

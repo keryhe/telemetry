@@ -364,8 +364,15 @@ public sealed class ParquetTraceReadRepository : DapperReadRepository, ITraceRea
                 Parameters.Add("searchHi", ok ? id.Hi : 0UL);
                 Parameters.Add("searchLo", ok ? id.Lo : 0UL);
             }
+            else if (parsed.IsSpanIdSearch)
+            {
+                // The traces containing the span, over the list's spans view. On the trace id, so it narrows whole traces and
+                // leaves each one's anchor as it is.
+                sql.Append(" AND (trace_hi, trace_lo) IN (SELECT trace_hi, trace_lo FROM spans WHERE tenant_id = @tenantId AND span_id = @spanIdSearch)");
+                Parameters.Add("spanIdSearch", ParquetIds.TrySpanId(parsed.SpanId, out var span) ? span : 0UL);
+            }
             SpanPredicates = sql.ToString();
-            SearchSql = parsed.IsTraceIdSearch ? "" : BuildSearch(parsed, Parameters);
+            SearchSql = parsed.IsTraceIdSearch || parsed.IsSpanIdSearch ? "" : BuildSearch(parsed, Parameters);
         }
 
         /// <summary>The <c>AND (trace_hi, trace_lo) IN (...)</c> clauses of the search terms.</summary>

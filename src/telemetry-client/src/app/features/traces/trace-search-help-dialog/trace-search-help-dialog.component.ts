@@ -25,6 +25,11 @@ import { CapabilitiesService } from '../../../core/services/capabilities.service
             <td>Match a single trace by ID (32 hex chars)</td>
           </tr>
           <tr>
+            <td><strong>Span ID</strong></td>
+            <td><code>00f067aa0ba902b7</code></td>
+            <td>Traces containing this span (16 hex chars); opening one selects the span</td>
+          </tr>
+          <tr>
             <td><strong>Free Text</strong></td>
             <td><code>"database query"</code></td>
             <td>Searches span names and status messages across the whole trace</td>
@@ -55,6 +60,7 @@ import { CapabilitiesService } from '../../../core/services/capabilities.service
       <h3 class="section">Examples</h3>
       <ul class="examples">
         <li><code>a1b2c3d4e5f6...</code> — Jump to a specific trace ID</li>
+        <li><code>00f067aa0ba902b7</code> — Find the trace that contains this span</li>
         <li><code>checkout</code> — Find traces containing a span whose name or status message contains "checkout"</li>
         <li><code>http.status_code=500</code> — Traces containing a span with status code exactly 500</li>
         <li><code>http.method:POST</code> — Traces containing a span whose method contains "POST"</li>
@@ -73,7 +79,7 @@ import { CapabilitiesService } from '../../../core/services/capabilities.service
       @if (capabilities().rawSearchWindowHours) {
         <div class="note warn">
           <strong>Search window:</strong> free-text and attribute searches are limited to a
-          {{ capabilities().rawSearchWindowHours }}-hour time range. A trace ID lookup, <code>mode=errors</code>,
+          {{ capabilities().rawSearchWindowHours }}-hour time range. A trace ID or span ID lookup, <code>mode=errors</code>,
           or an unfiltered/service-filtered list can still cover a longer range.
         </div>
       }

@@ -25,6 +25,11 @@ import { CapabilitiesService } from '../../../core/services/capabilities.service
             <td>Search by trace ID (32 hex chars, date range not required)</td>
           </tr>
           <tr>
+            <td><strong>Span ID</strong></td>
+            <td><code>00f067aa0ba902b7</code></td>
+            <td>Logs written during one span (16 hex chars); not limited by the search window</td>
+          </tr>
+          <tr>
             <td><strong>Free Text</strong></td>
             <td><code>"database error"</code></td>
             <td>Searches in log message body</td>
@@ -50,6 +55,7 @@ import { CapabilitiesService } from '../../../core/services/capabilities.service
       <h3 class="section">Examples</h3>
       <ul class="examples">
         <li><code>a1b2c3d4e5f6...</code> — Find all logs for a specific trace ID</li>
+        <li><code>00f067aa0ba902b7</code> — Find the logs of a specific span</li>
         <li><code>database timeout</code> — Find logs with "database timeout" in message</li>
         <li><code>http.status_code=500</code> — Find logs with status code exactly 500</li>
         <li><code>thread.id:5</code> — Find logs where thread.id contains "5"</li>

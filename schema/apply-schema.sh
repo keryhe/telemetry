@@ -60,7 +60,7 @@ DATABASE="${3:-telemetry}"
 # Target versions must match the values written by the schema scripts. A schema change edits the
 # affected component's scripts and that component's version, in one commit.
 CONTROLPLANE_TARGET_VERSION="4.0.1"
-TELEMETRY_TARGET_VERSION="4.0.1"
+TELEMETRY_TARGET_VERSION="4.0.2"
 
 usage() {
     echo "usage: $0 <controlplane|telemetry> <provider> [database]" >&2

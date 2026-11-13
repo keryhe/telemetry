@@ -143,15 +143,15 @@ public class LogsController : ControllerBase
     }
 
     /// <summary>
-    /// Decision 39's standard-tier raw-search-window guard. A trace-id-shaped <c>q</c> is exempt
-    /// (indexed lookup); any other non-empty <c>q</c> counts as a raw search filter. <c>mode=slow</c>
+    /// Decision 39's standard-tier raw-search-window guard. A trace-id- or span-id-shaped <c>q</c> is exempt
+    /// (indexed lookups: <c>idx_log_trace</c>, <c>idx_log_span</c>); any other non-empty <c>q</c> counts as a raw search filter. <c>mode=slow</c>
     /// has no logs equivalent, so that exemption/trigger doesn't apply here.
     /// </summary>
     private RawSearchWindowGuard.Result CheckRawSearchWindow(string? q, DateTime start, DateTime end)
     {
         var parsed = SearchQueryParser.Parse(q);
         var hasRawSearchFilter = parsed.Terms.Count > 0;
-        var isExempt = parsed.IsTraceIdSearch;
+        var isExempt = parsed.IsTraceIdSearch || parsed.IsSpanIdSearch;
         return RawSearchWindowGuard.Check(_capabilities, hasRawSearchFilter, isExempt, end - start);
     }
 

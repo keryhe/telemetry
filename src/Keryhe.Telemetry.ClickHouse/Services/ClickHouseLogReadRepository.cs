@@ -80,6 +80,11 @@ public sealed class ClickHouseLogReadRepository : DapperReadRepository, ILogRead
             sb.Append(" AND trace_id = @traceIdSearch");
             f.Parameters.Add("traceIdSearch", ClickHouseIds.TryTraceIdToGuid(parsed.TraceId, out var id) ? id : Guid.Empty);
         }
+        else if (parsed.IsSpanIdSearch)
+        {
+            sb.Append(" AND span_id = @spanIdSearch"); // idx_span_id
+            f.Parameters.Add("spanIdSearch", ClickHouseIds.TrySpanIdToUInt64(parsed.SpanId, out var span) ? span : 0UL);
+        }
         else
         {
             var i = 0;

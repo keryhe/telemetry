@@ -1,4 +1,4 @@
--- OpenTelemetry PostgreSQL telemetry schema -- telemetry schema 4.0.1
+-- OpenTelemetry PostgreSQL telemetry schema -- telemetry schema 4.0.2
 -- Supports OTLP logs, metrics, and traces as defined in opentelemetry-proto
 --
 -- This script is the TELEMETRY half of the schema. Tenants (with their retention windows), API keys and
@@ -103,6 +103,8 @@ CREATE INDEX idx_spans_tenant_time ON spans ("tenant_id", "start_time_unix_nano"
 CREATE INDEX idx_spans_tenant_service_time ON spans ("tenant_id", "service_name", "start_time_unix_nano");
 -- Errors mode. Error rows are rare, so this stays small.
 CREATE INDEX idx_spans_error ON spans ("tenant_id", "start_time_unix_nano") WHERE "status_code" = 'ERROR';
+-- Span-id search (the traces containing a span; schema 4.0.2): exempt from the search window, so indexed.
+CREATE INDEX idx_spans_span ON spans ("span_id");
 
 -- =============================================================================
 -- METRICS TABLES
@@ -269,6 +271,8 @@ CREATE TABLE log_records (
 CREATE INDEX idx_log_tenant_time_id ON log_records ("tenant_id", "time_unix_nano", "id");
 -- Logs for a trace.
 CREATE INDEX idx_log_trace ON log_records ("trace_id");
+-- Span-id search: logs of a span (schema 4.0.2).
+CREATE INDEX idx_log_span ON log_records ("span_id");
 
 -- =============================================================================
 -- SUMMARY ROLLUPS (schema 3.2.0; plans/summary-rollups.md)
@@ -341,6 +345,6 @@ CREATE TABLE telemetry_schema_version (
 -- =============================================================================
 -- Only reached when every statement above succeeded, so a partial apply cannot
 -- leave a false version marker for the apply-schema.sh gate.
-INSERT INTO telemetry_schema_version ("version") VALUES ('4.0.1')
+INSERT INTO telemetry_schema_version ("version") VALUES ('4.0.2')
 ON CONFLICT ("version") DO UPDATE
 SET "applied_at" = NOW();

@@ -1067,6 +1067,8 @@ export class TraceDetailComponent implements OnInit, OnDestroy {
       const id = parsed.traceId!.toLowerCase();
       return node.spanIdHex.toLowerCase().includes(id) || node.traceIdHex.toLowerCase().includes(id);
     }
+    // A 16-hex query is a span id: the span itself.
+    if (parsed.isSpanIdSearch) return node.spanIdHex.toLowerCase() === parsed.spanId!.toLowerCase();
     if (!parsed.terms.length) return false;
     return parsed.terms.every((t) => this.termMatches(node, t));
   }

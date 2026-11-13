@@ -328,8 +328,15 @@ public sealed class ClickHouseTraceReadRepository : DapperReadRepository, ITrace
                 sql.Append(" AND trace_id = @traceIdSearch");
                 Parameters.Add("traceIdSearch", ok ? id : Guid.Empty);
             }
+            else if (parsed.IsSpanIdSearch)
+            {
+                // The traces containing the span (idx_span_id's bloom filter; no window bound, like a trace id). On trace_id,
+                // so it narrows whole traces and leaves each one's anchor as it is.
+                sql.Append(" AND trace_id IN (SELECT trace_id FROM spans WHERE tenant_id = @tenantId AND span_id = @spanIdSearch)");
+                Parameters.Add("spanIdSearch", ClickHouseIds.TrySpanIdToUInt64(parsed.SpanId, out var span) ? span : 0UL);
+            }
             SpanPredicates = sql.ToString();
-            SearchSql = parsed.IsTraceIdSearch ? "" : BuildSearch(parsed, Parameters);
+            SearchSql = parsed.IsTraceIdSearch || parsed.IsSpanIdSearch ? "" : BuildSearch(parsed, Parameters);
         }
 
         /// <summary>The <c>AND trace_id IN (...)</c> clauses of the search terms.</summary>

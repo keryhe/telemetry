@@ -171,4 +171,24 @@ public class SearchQueryParserTests
         Assert.Equal("service.name", term.Key);
         Assert.Equal("checkout", term.Value);
     }
+
+    [Fact]
+    public void ExactlySixteenHexChars_Is_SpanIdSearch()
+    {
+        var result = SearchQueryParser.Parse("  00F067aa0ba902b7 ");
+        Assert.True(result.IsSpanIdSearch);
+        Assert.False(result.IsTraceIdSearch);
+        Assert.Equal("00F067aa0ba902b7", result.SpanId);
+        Assert.Empty(result.Terms);
+    }
+
+    [Theory]
+    [InlineData("00f067aa0ba902b")]                   // 15
+    [InlineData("00f067aa0ba902b70")]                 // 17
+    [InlineData("00f067aa0ba902bg")]                  // 16, one non-hex
+    [InlineData("4bf92f3577b34da6a3ce929d0e0e4736")]  // 32: a trace id
+    public void OtherLengthsOrNonHex_Are_Not_SpanIdSearch(string input)
+    {
+        Assert.False(SearchQueryParser.Parse(input).IsSpanIdSearch);
+    }
 }

@@ -1,4 +1,4 @@
--- OpenTelemetry SQL Server Schema (SQL Server 2022), telemetry data -- telemetry schema 4.0.1
+-- OpenTelemetry SQL Server Schema (SQL Server 2022), telemetry data -- telemetry schema 4.0.2
 -- Supports OTLP logs, metrics, and traces as defined in opentelemetry-proto.
 --
 -- This script is the TELEMETRY half of the schema. Tenants (with their retention windows), API keys and
@@ -125,6 +125,8 @@ CREATE INDEX idx_spans_trace_span ON spans (trace_id, span_id);
 CREATE INDEX idx_spans_tenant_service_time ON spans (tenant_id, service_name, start_time_unix_nano);
 -- Errors mode. Filtered: error rows are rare, so this stays small.
 CREATE INDEX idx_spans_error ON spans (tenant_id, start_time_unix_nano) WHERE status_code = 'ERROR';
+-- Span-id search (the traces containing a span; schema 4.0.2): exempt from the search window, so indexed.
+CREATE INDEX idx_spans_span ON spans (span_id);
 GO
 
 -- =============================================================================
@@ -295,6 +297,8 @@ CREATE TABLE log_records (
 CREATE UNIQUE CLUSTERED INDEX cx_log_records ON log_records (tenant_id, time_unix_nano, id);
 -- Logs for a trace.
 CREATE INDEX idx_log_trace ON log_records (trace_id);
+-- Span-id search: logs of a span (schema 4.0.2).
+CREATE INDEX idx_log_span ON log_records (span_id);
 GO
 
 -- =============================================================================
@@ -372,7 +376,7 @@ GO
 -- Only reached when every statement above succeeded, so a partial apply cannot
 -- leave a false version marker for the apply-schema.sh gate.
 MERGE telemetry_schema_version AS target
-USING (VALUES (N'4.0.1')) AS src (version)
+USING (VALUES (N'4.0.2')) AS src (version)
 ON target.version = src.version
 WHEN MATCHED     THEN UPDATE SET applied_at = SYSDATETIME()
 WHEN NOT MATCHED THEN INSERT (version, applied_at) VALUES (src.version, SYSDATETIME());

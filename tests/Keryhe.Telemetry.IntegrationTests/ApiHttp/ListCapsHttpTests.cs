@@ -244,4 +244,22 @@ public class ListCapsHttpTests
         Assert.Empty(fakes.Logs.Calls);
         Assert.Empty(fakes.Traces.Calls);
     }
+
+    // ── Search window ───────────────────────────────────────────────────────
+
+    /// <summary>A span-id search, like a trace-id search, is an indexed lookup: exempt from the 24-hour search window.</summary>
+    [Theory]
+    [InlineData("traces/list")]
+    [InlineData("logs/list")]
+    public async Task SpanIdSearch_IsExemptFromTheSearchWindow(string route)
+    {
+        var (host, _) = await Start();
+        await using var disposeHost = host;
+        const string week = "start=2026-10-01T00:00:00Z&end=2026-10-08T00:00:00Z";
+
+        Assert.Equal(HttpStatusCode.OK, (await host.GetAsync($"/api/tenants/1/{route}?{week}&q=00f067aa0ba902b7")).StatusCode);
+        Assert.Equal(HttpStatusCode.OK, (await host.GetAsync($"/api/tenants/1/{route}?{week}&q=4bf92f3577b34da6a3ce929d0e0e4736")).StatusCode);
+        // Negative control: free text over the same week is refused.
+        Assert.Equal(HttpStatusCode.BadRequest, (await host.GetAsync($"/api/tenants/1/{route}?{week}&q=boom")).StatusCode);
+    }
 }

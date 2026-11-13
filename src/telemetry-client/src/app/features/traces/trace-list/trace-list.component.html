@@ -69,10 +69,14 @@
       <input matInput [ngModel]="searchInput()" (ngModelChange)="searchInput.set($event)"
              (keydown.enter)="submitSearch()"
              [ngModelOptions]="{standalone: true}"
-             placeholder='Trace ID OR "text" OR key=value OR key:value' />
+             placeholder='Trace ID OR Span ID OR "text" OR key=value OR key:value' />
       @if (isTraceIdSearch()) {
         <mat-chip-set matSuffix>
           <mat-chip highlighted color="accent"><mat-icon>link</mat-icon> Trace ID</mat-chip>
+        </mat-chip-set>
+      } @else if (isSpanIdSearch()) {
+        <mat-chip-set matSuffix>
+          <mat-chip highlighted color="accent"><mat-icon>link</mat-icon> Span ID</mat-chip>
         </mat-chip-set>
       }
     </mat-form-field>

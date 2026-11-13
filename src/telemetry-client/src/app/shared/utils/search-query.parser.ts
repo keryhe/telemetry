@@ -1,7 +1,8 @@
 // Client-side port of Blazor's SearchQueryParser.cs — shared by the Logs and Traces pages.
 // Supports: free text, exact `key=value`, contains `key:value`, `AND` between terms,
-// a leading `-` to negate/exclude a term, and trace-id detection (32 hex chars =>
-// fetch by trace, date range ignored).
+// a leading `-` to negate/exclude a term, trace-id detection (32 hex chars =>
+// fetch by trace, date range ignored) and span-id detection (16 hex chars => the traces
+// containing that span / the logs of that span).
 
 export interface SearchTerm {
   isAttributeFilter: boolean;
@@ -26,6 +27,9 @@ function quoteIfNeeded(value: string): string {
 export interface ParsedSearchQuery {
   isTraceIdSearch: boolean;
   traceId?: string;
+  /** The whole input is a span id (exactly 16 hex chars). */
+  isSpanIdSearch?: boolean;
+  spanId?: string;
   terms: SearchTerm[];
 }
 
@@ -52,6 +56,11 @@ export function parseSearchQuery(searchText: string): ParsedSearchQuery {
     HEX_RE.test(trimmed)
   ) {
     return { isTraceIdSearch: true, traceId: trimmed, terms: [] };
+  }
+
+  // Span ID: exactly 16 hex chars, the same whole-input rule as a trace id.
+  if (trimmed.length === 16 && HEX_RE.test(trimmed)) {
+    return { isTraceIdSearch: false, isSpanIdSearch: true, spanId: trimmed, terms: [] };
   }
 
   const rawTerms = trimmed

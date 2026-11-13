@@ -123,4 +123,27 @@ public abstract class SearchParityTestsBase : IAsyncLifetime
         var expected = Expected(300, i => i % 3 == 1);
         Assert.Equal(expected, actual);
     }
+
+    [Fact]
+    public async Task SpanId_MatchesThatSpansLogsOnly()
+    {
+        if (!_fixture.SupportsLogsAndMetrics) return; // Parquet writes logs and metrics from phase 5 (plans/parquet-duckdb)
+        const string span = "00f067aa0ba902b7";
+        var logs = SeededDataBuilder.BasicLogWindow(_fixture.TenantId, WindowStart, 30);
+        foreach (var i in new[] { 4, 5, 17 }) { logs[i].TraceIdHex = "4bf92f3577b34da6a3ce929d0e0e4736"; logs[i].SpanIdHex = span; }
+        logs[6].TraceIdHex = "4bf92f3577b34da6a3ce929d0e0e4736";
+        logs[6].SpanIdHex = "00f067aa0ba902b8"; // same trace, another span: not a match
+        using (var writeScope = Scope())
+            await writeScope.ServiceProvider.GetRequiredService<ITelemetryBulkWriter>().FlushLogsAsync(logs);
+
+        using var readScope = Scope();
+        var repo = readScope.ServiceProvider.GetRequiredService<ILogReadRepository>();
+        async Task<HashSet<string>> Search(string q) => (await repo.GetLogListAsync(new LogQuery
+        {
+            Start = WindowStart, End = WindowStart.AddSeconds(35), Search = q, Limit = 500
+        })).Items.Select(l => l.BodyValue!).ToHashSet();
+
+        Assert.Equal(Expected(30, i => i is 4 or 5 or 17), await Search(span.ToUpperInvariant())); // case doesn't matter
+        Assert.Empty(await Search("00f067aa0ba902b9")); // negative control: an unknown span id
+    }
 }

@@ -145,15 +145,15 @@ public class TracesController : ControllerBase
     public const string TimedOutHeader = "X-Telemetry-Timed-Out";
 
     /// <summary>
-    /// Decision 39's standard-tier raw-search-window guard. A trace-id-shaped <c>q</c> and
-    /// <c>mode=errors</c> (served by <c>idx_spans_error</c>) are exempt; <c>mode=slow</c>'s
+    /// Decision 39's standard-tier raw-search-window guard. A trace-id-shaped <c>q</c>, a span-id-shaped <c>q</c>
+    /// (served by <c>idx_spans_span</c>) and <c>mode=errors</c> (served by <c>idx_spans_error</c>) are exempt; <c>mode=slow</c>'s
     /// duration filter and any other non-empty <c>q</c> count as a raw search filter.
     /// </summary>
     private RawSearchWindowGuard.Result CheckRawSearchWindow(string? q, string mode, DateTime start, DateTime end)
     {
         var parsed = SearchQueryParser.Parse(q);
         var hasRawSearchFilter = parsed.Terms.Count > 0 || mode == "slow";
-        var isExempt = parsed.IsTraceIdSearch || mode == "errors";
+        var isExempt = parsed.IsTraceIdSearch || parsed.IsSpanIdSearch || mode == "errors";
         return RawSearchWindowGuard.Check(_capabilities, hasRawSearchFilter, isExempt, end - start);
     }
 

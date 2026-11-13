@@ -1,4 +1,4 @@
--- OpenTelemetry MySQL Schema (MySQL 8.0+), telemetry data -- telemetry schema 4.0.1
+-- OpenTelemetry MySQL Schema (MySQL 8.0+), telemetry data -- telemetry schema 4.0.2
 -- Supports OTLP logs, metrics, and traces as defined in opentelemetry-proto. MySQL 8 only: no
 -- MariaDB compatibility is maintained.
 --
@@ -115,6 +115,8 @@ CREATE INDEX idx_spans_tenant_service_time ON spans (tenant_id, service_name, st
 -- the 'ERROR' slice. It costs an index entry on every insert; Phase 4 measures it and it is
 -- dropped if material.
 CREATE INDEX idx_spans_error ON spans (tenant_id, status_code, start_time_unix_nano);
+-- Span-id search (the traces containing a span; schema 4.0.2): exempt from the search window, so indexed.
+CREATE INDEX idx_spans_span ON spans (span_id);
 
 -- =============================================================================
 -- METRICS TABLES
@@ -283,6 +285,8 @@ CREATE TABLE log_records (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 -- Logs for a trace. The service filter is a residual predicate on the primary key.
 CREATE INDEX idx_log_trace ON log_records (trace_id);
+-- Span-id search: logs of a span (schema 4.0.2).
+CREATE INDEX idx_log_span ON log_records (span_id);
 
 -- =============================================================================
 -- SUMMARY ROLLUPS (schema 3.2.0; plans/summary-rollups.md)
@@ -412,7 +416,7 @@ CREATE TABLE telemetry_schema_version (
 -- Only inserted when every statement above succeeded, so a partial apply cannot
 -- leave a false version marker for the apply-schema.sh gate.
 INSERT INTO telemetry_schema_version (version, applied_at)
-VALUES ('4.0.1', CURRENT_TIMESTAMP(6))
+VALUES ('4.0.2', CURRENT_TIMESTAMP(6))
 ON DUPLICATE KEY UPDATE applied_at = CURRENT_TIMESTAMP(6);
 
 -- =============================================================================

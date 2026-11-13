@@ -179,6 +179,8 @@ export class LogsComponent implements OnDestroy {
 
   protected parsedQuery = computed<ParsedSearchQuery>(() => parseSearchQuery(this.searchText()));
   protected isTraceIdSearch = computed(() => this.parsedQuery().isTraceIdSearch);
+  /** A span-id search: that span's logs, through the normal list (exempt from the search window like a trace id). */
+  protected isSpanIdSearch = computed(() => this.parsedQuery().isSpanIdSearch ?? false);
 
   /** The whole raw search text goes to the server now (decision 10: parsed server-side). */
   private serverQuery = computed(() => this.searchText().trim());
@@ -363,8 +365,8 @@ export class LogsComponent implements OnDestroy {
 
     effect(() => {
       savePageState(STATE_KEY, {
-        // A trace-id search is a one-off jump, not a working filter to restore on the next visit.
-        searchText: this.isTraceIdSearch() ? '' : this.searchText(),
+        // A trace- or span-id search is a one-off jump, not a working filter to restore on the next visit.
+        searchText: this.isTraceIdSearch() || this.isSpanIdSearch() ? '' : this.searchText(),
         selectedService: this.selectedService(),
         selectedSeverity: this.selectedSeverity(),
         facetsCollapsed: this.facetsCollapsed(),

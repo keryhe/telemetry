@@ -72,6 +72,41 @@ public abstract class TracePhase3TestsBase : IAsyncLifetime
     }
 
     // ---------------------------------------------------------------------------------------------
+    // Span-id search
+    // ---------------------------------------------------------------------------------------------
+
+    [Fact]
+    public async Task SpanIdSearch_ListsTheTraceContainingTheSpan_WithItsUsualAnchor()
+    {
+        var traceA = NewTraceId();
+        var traceB = NewTraceId();
+        var rootA = NewSpanId();
+        var childA = NewSpanId();
+        var childB = NewSpanId();
+        await FlushAsync(
+            Span(traceA, "spanid-svc-a", "GET /a", SpanKind.SERVER, WindowStart, 100, spanId: rootA),
+            Span(traceA, "spanid-svc-b", "db query a", SpanKind.CLIENT, WindowStart.AddMilliseconds(10), 20, parent: rootA, spanId: childA),
+            Span(traceB, "spanid-svc-a", "GET /b", SpanKind.SERVER, WindowStart.AddSeconds(1), 100),
+            Span(traceB, "spanid-svc-b", "db query b", SpanKind.CLIENT, WindowStart.AddSeconds(1).AddMilliseconds(10), 20, spanId: childB));
+
+        // A child span of another service: the trace is listed once, anchored as usual on its root. Case doesn't matter.
+        var hit = Assert.Single((await ListAsync(search: childA.ToUpperInvariant())).Items);
+        Assert.Equal(traceA, hit.TraceIdHex);
+        Assert.Equal("GET /a", hit.RootOperationName);
+        Assert.Equal(rootA, hit.DisplaySpanIdHex);
+
+        // The matching span may belong to any service, as with search.
+        Assert.Equal(traceA, Assert.Single((await ListAsync(service: "spanid-svc-a", search: childA)).Items).TraceIdHex);
+
+        // A window far wider than the search limit still finds it (the repository has no window guard; the API exempts it).
+        Assert.Equal(traceA, Assert.Single((await ListAsync(search: childA, start: WindowStart.AddDays(-20), end: WindowStart.AddDays(20))).Items).TraceIdHex);
+
+        Assert.Equal(traceB, Assert.Single((await ListAsync(search: childB)).Items).TraceIdHex);
+        Assert.Empty((await ListAsync(search: "00f067aa0ba902b7")).Items); // negative control: an unknown span id
+        Assert.Equal(2, (await ListAsync()).Items.Count);                 // and no search lists both
+    }
+
+    // ---------------------------------------------------------------------------------------------
     // Anchors
     // ---------------------------------------------------------------------------------------------
 
